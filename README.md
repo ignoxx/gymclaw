@@ -16,13 +16,18 @@ Autonomous training agent. Product source of truth: [SPEC.md](SPEC.md).
 - Google desktop OAuth, incremental calendar sync, durable managed-event write outbox.
 - User move/resize/delete reconciliation, recovery-aware repair, workout compression.
 - Persistent get-ready/leave/start jobs with cancellation/replacement after calendar edits.
+- Guarded OpenClaw CLI adapter: exact one-shot timers, cheap 60s watcher, cancellation
+  and stable declaration-key reconciliation; repo-local workspace/skill and setup guide.
+- Durable Telegram delivery outbox: commit before send, confirmed receipts, stale suppression,
+  fail-closed ambiguous sends. Synthetic runtime/provider tests; activation not performed.
 - JSON CLI, independent of OpenClaw; external providers replaceable with explicit fixtures.
 
-This is **not yet the complete MVP**. External notification delivery, crowd learning and
-OpenClaw/Telegram integration remain unimplemented. `calendar publish --allow-writes`
-can create/update/delete owned Google events; ordinary planning/sync never writes remotely.
-Notification dispatch advances local state and emits instructions; it does **not** send
-Telegram messages. Google code is fixture-tested; live OAuth/calendar validation is pending.
+This is **not yet the complete MVP**. Crowd learning, weekly runtime workflow and live
+OpenClaw/Telegram activation remain unfinished. `calendar publish --allow-writes` can
+create/update/delete owned Google events; ordinary planning/sync and runtime watcher
+never write remotely. `notifications due` is local-only debug dispatch. Activated
+`runtime fire --allow-messages` uses OpenClaw to send Telegram and persist receipts.
+Live OAuth/read-only sync verified; live calendar publication and Telegram remain untested.
 
 ## Setup
 
@@ -139,9 +144,9 @@ tombstones; exact deleted events/slots are not recreated automatically. Metadata
 updates may refresh description/revision on locked events; never their chosen times/title.
 
 Upcoming sessions commit within 48 hours; get-ready/leave/start jobs become durable.
-`notifications due` emits local instructions only. No 60-second watcher or OpenClaw job
-is installed yet; integration will invoke `calendar sync` every 60 seconds and publish
-approved queued changes. No model calls are needed for polling.
+`notifications due` emits local instructions only. Prepared OpenClaw watcher syncs every
+60 seconds without model calls and reconciles reminders, but **never publishes** queued
+calendar writes. No watcher/job is installed until explicit runtime/message approval.
 
 ### Safety and retries
 
@@ -234,7 +239,8 @@ Warm-up never counts toward volume/progression. Working logs while warm-up is pe
 fail with `WARMUP_REQUIRED`. Set parsing accepts `80x9`, `80kg x9`, `9 reps at 80`;
 ambiguous input fails with a concise question. Structured `--weight`/`--reps`/`--rir`
 are also supported. Logging early cancels stale rest jobs. `notifications due` is an
-idempotent local dispatcher; external automation IDs are reserved for later integration.
+idempotent local debug dispatcher; activated runtime callbacks use separate durable
+Telegram delivery outbox and persist actual external automation IDs.
 The final set needs no rest timer when no work remains.
 
 ETA counts remaining warm-up/working sets, rests, transitions, deferred/substituted work,
@@ -249,6 +255,25 @@ rest dispatch, equipment reordering, substitution, finish, audit, and persisted 
 ```bash
 pytest -q gymclaw/tests/test_workout_cli.py
 ```
+
+## OpenClaw / Telegram activation
+
+[Activation handoff](openclaw/README.md) covers dedicated profile, secure owner-only
+Telegram setup, NemoClaw deployment differences and approval boundaries. No runtime
+is installed/configured automatically. Current Node 25 is outside documented OpenClaw
+support; choose Node 24.16+ or 26.1+ before activation.
+
+```text
+python -m gymclaw.cli runtime plan --telegram-id OWNER_ID
+python -m gymclaw.cli runtime sync --telegram-id OWNER_ID --allow-runtime-changes --allow-messages
+python -m gymclaw.cli runtime deliveries
+```
+
+`plan` stays offline. `sync` installs executable OpenClaw callbacks and enables messages;
+inspect first and obtain approval. No calendar-write approval implied. After set logging,
+agent immediately syncs rest jobs. UNKNOWN/SENDING sends never blindly retry; owner
+must check actual DM and confirm sender stopped before `runtime resolve`. During active
+operation, do not use local-only `notifications due` to bypass delivery outbox.
 
 ## Code
 
@@ -266,7 +291,9 @@ pytest -q gymclaw/tests/test_workout_cli.py
 - `gymclaw/services/calendar.py`, `calendar_busy.py`: sync/reconciliation and recurrence.
 - `gymclaw/services/calendar_writes.py`, `replanning.py`: owned outbox and plan repair.
 - `gymclaw/services/compression.py`: deterministic workout time allocation.
-- `gymclaw/cli.py`, `calendar_cli.py`: JSON adapters.
+- `gymclaw/providers/openclaw.py`, `services/runtime.py`: scoped scheduler and durable delivery.
+- `openclaw/`: repo-local workspace, skill and activation handoff.
+- `gymclaw/cli.py`, `calendar_cli.py`, `runtime_cli.py`: JSON adapters.
 
 Services accept explicit time and typed inputs, need no agent runtime. CLI owns
 transactions; service callers must commit/rollback. Use `alembic revision --autogenerate`

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from gymclaw.db import make_engine, initialize
 from gymclaw.calendar_cli import calendar_command, publish_command
+from gymclaw.runtime_cli import register_parser as register_runtime_parser, runtime_command
 from gymclaw.services.calendar import get_week
 from gymclaw.services.replanning import replan_weeks
 from gymclaw.services.profile import get_profile, update_profile
@@ -31,6 +32,7 @@ def parser():
     root.add_argument("--db-url", default=None)
     root.add_argument("--json", action="store_true", help="JSON is always enabled")
     groups = root.add_subparsers(dest="group", required=True, parser_class=Parser)
+    register_runtime_parser(groups)
     db = groups.add_parser("db", add_help=False)
     db.add_argument("operation", choices=["init"])
     profile = groups.add_parser("profile", add_help=False)
@@ -134,6 +136,9 @@ def main(argv=None) -> int:
         if args.group == "db":
             initialize(engine)
             data = {"initialized": True}
+        elif args.group == "runtime":
+            result = runtime_command(engine, args)
+            data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         elif args.group == "calendar" and args.operation == "publish":
             result = publish_command(engine, args)
             data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]

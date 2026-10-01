@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Repo-local CLI entrypoint. Does not read secrets or install dependencies.
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+exec "$ROOT/.venv/bin/python" -m gymclaw.cli "$@"

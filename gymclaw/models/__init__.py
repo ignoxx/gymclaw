@@ -196,6 +196,22 @@ class NotificationJob(Base):
     handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
 
+class NotificationDelivery(Base):
+    """Commit domain output before delivery. Ambiguous sends require human resolution."""
+    __tablename__ = "notification_delivery"
+    __table_args__ = (CheckConstraint("status IN ('PENDING','SENDING','SENT','UNKNOWN','CANCELLED')"),)
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    notification_job_id: Mapped[str] = mapped_column(ForeignKey("notification_job.id"), unique=True)
+    recipient: Mapped[str]
+    runtime_profile: Mapped[str]
+    message: Mapped[str] = mapped_column(Text)
+    result_json: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    external_message_id: Mapped[str | None]
+
+
 class CalendarSyncState(Base):
     """One explicit calendar; replacing its ID requires a separate DB."""
     __tablename__ = "calendar_sync_state"
