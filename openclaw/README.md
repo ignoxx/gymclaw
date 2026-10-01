@@ -1,8 +1,10 @@
 # OpenClaw activation handoff
 
 Local NemoClaw sandbox installed; owner confirmed Telegram/OpenRouter chat works.
-GymClaw domain activation still pending. No autonomous workout timers or calendar
-publication enabled. Existing host DB/credential files remain untouched.
+GymClaw domain/skill connected. Private proactive delivery approved; watcher active
+and scheduled setup message verified with persisted receipt. Real workout/rest
+acceptance still pending onboarding. Calendar publication disabled. Original host
+DB/credential files remain untouched.
 
 ## Readiness
 
@@ -15,14 +17,35 @@ Verified local setup: isolated Node 26.10.0, Colima 0.10.3, NemoClaw v0.0.124,
 managed OpenClaw 2026.7.1, Python 3.13.5. Adapter uses `cron` command, supported by
 bundled release (including command argv, declaration keys and env). Newer
 `automations` command name is absent; no runtime upgrade required. Read-only cron
-listing/profile routing verified. Timer execution/delivery acceptance still pending.
+listing/profile routing verified. Scheduled watcher execution and one-shot Telegram
+delivery verified; setup tests are explicit messages, not fabricated workout logs.
 
 Code/Linux venv installed under `/sandbox/.openclaw/workspace/gymclaw`, inside
-manifest's backed-up workspace. All 134 tests pass there. Recreate venv when base
-Python changes; do not move macOS venv to VPS. Repo wrapper selects managed config
+manifest's backed-up workspace. All 145 tests pass on macOS and Linux there.
+Recreate venv when Python or CPU architecture changes; do not move macOS venv to VPS. Repo wrapper selects managed config
 path by sandbox location, without reading credentials; declared callbacks retain
 that path through `--command-env`. Secrets themselves never enter job argv/env.
-Host DB copy, workspace selection and domain activation are remaining setup steps.
+Owner-approved opaque host DB copy is now under that repo's `data/` (directory
+0700, DB 0600); app migrations succeeded, original host file unchanged. Owner key
+files were never inspected or copied. Workspace selected via NemoClaw config API,
+Gateway restart healthy, `gymclaw` skill eligible/model-visible; owner DM tool access
+confirmed. Scoped dedicated-calendar GET/OAuth-refresh policy applied and live app
+read-only sync verified. No calendar-write authority or crowd polling granted.
+
+Installed CLI may prefix JSON with startup logs and wrap job creation as
+`{created, updated, job}`; adapter handles both while rejecting trailing garbage.
+Cron child inherits `OPENCLAW_GATEWAY_URL`, which refuses implicit config auth.
+For this exact managed config path only, adapter drops inherited override and uses
+sandbox's config route. No tokens inserted into argv or timer env. Device admin
+scope was explicitly approved locally by owner. Ambiguous first test was confirmed
+by owner and marked sent, never retried; distinct second test recorded API receipt.
+No diagnostic child output remains enabled.
+
+Sandbox DB is now authoritative. Original host DB is an untouched pre-deployment
+copy, not synchronized. Run live tools through `nemoclaw gymclaw exec`, not host
+CLI against original DB. For VPS, back up active sandbox state, securely provision
+credentials and rebuild platform-specific env; stop local poller/timers before
+starting VPS instance. No automatic login-start service configured yet.
 
 Architecture: OpenClaw scheduler → exact Python CLI argv → private SQLite domain
 transaction/outbox → OpenClaw Telegram message CLI → persisted delivery receipt.

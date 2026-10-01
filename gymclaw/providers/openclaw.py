@@ -6,6 +6,7 @@ requires the locally installed version. Transport injection keeps tests offline.
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -46,17 +47,45 @@ class AutomationProvider(Protocol):
     def send(self, recipient: str, message: str) -> str: ...
 
 
+def cli_json(text: str) -> dict:
+    """Accept final JSON object after CLI startup logs; reject trailing garbage."""
+    candidates = [0] + [match.start() for match in re.finditer(r"(?m)^\s*\{", text)]
+    decoder = json.JSONDecoder()
+    for start in reversed(candidates):
+        chunk = text[start:].lstrip()
+        try:
+            value, end = decoder.raw_decode(chunk)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and not chunk[end:].strip():
+            return value
+    raise ValueError("No final CLI JSON object")
+
+
 def run_json(argv: list[str]) -> dict:
     if shutil.which(argv[0]) is None:
         raise DomainError("OPENCLAW_NOT_INSTALLED", "OpenClaw CLI unavailable; activation instructions: openclaw/README.md")
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False)
+        env = dict(os.environ)
+        if env.get("OPENCLAW_CONFIG_PATH") == "/sandbox/.openclaw/openclaw.json":
+            # Cron inherits a URL override, which intentionally disables config auth.
+            # Use this sandbox's managed config route, not the inherited override.
+            env.pop("OPENCLAW_GATEWAY_URL", None)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False, env=env)
         if result.returncode != 0:
+            # Classify known failures without exposing child output or credentials.
+            failure = "\n".join(line for line in (result.stdout + "\n" + result.stderr).lower().splitlines() if "undici-ehpa" not in line and "envhttpproxyagent is experimental" not in line)
+            if "pairing required" in failure or "scope upgrade pending approval" in failure:
+                raise DomainError("GATEWAY_PAIRING_REQUIRED", "Gateway CLI device/scope approval required")
+            if "econnrefused" in failure or "gateway timeout" in failure:
+                raise DomainError("GATEWAY_UNREACHABLE", "Gateway connection unavailable")
             raise DomainError("OPENCLAW_COMMAND_FAILED", "OpenClaw command failed; inspect local runtime status (child output withheld)")
-        value = json.loads(result.stdout)
+        value = cli_json(result.stdout)
         if not isinstance(value, dict) or value.get("ok") is False:
             raise ValueError("Unexpected CLI response")
         return value
+    except DomainError:
+        raise
     except (subprocess.TimeoutExpired, OSError, ValueError) as error:
         raise DomainError("OPENCLAW_RESPONSE_UNKNOWN", "OpenClaw response unavailable/unrecognized; operation outcome may be unknown") from error
 
@@ -90,9 +119,10 @@ class OpenClawProvider:
         else:
             args += ["--cron", spec.cron, "--tz", spec.timezone or "Europe/Berlin", "--exact"]
         value = self.call(*args)
-        if not isinstance(value.get("id"), str) or not value["id"]:
+        job = value.get("job", value)
+        if not isinstance(job, dict) or not isinstance(job.get("id"), str) or not job["id"]:
             raise DomainError("OPENCLAW_RESPONSE_UNKNOWN", "Automation creation not confirmed; next sync reconciles stable declaration key")
-        return value["id"]
+        return job["id"]
 
     def remove(self, job_id: str):
         self.call("cron", "remove", job_id)

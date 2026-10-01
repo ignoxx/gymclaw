@@ -8,5 +8,9 @@
 - Training constraints and actual performance must be read from SQLite tools.
 - No verified training weights, travel/prep durations or template choices yet.
   Defaults and demo templates are placeholders, not owner history.
-- Runtime activation, proactive Telegram messages and calendar publication have
-  not yet been approved. Do not convert this setup template into approval.
+- Permission comes from persisted runtime authority, not this setup template.
+  `runtime plan --telegram-id VERIFIED_OWNER_ID` reports configured/enabled and
+  independent calendar-write authority. If configured/enabled, private runtime
+  reminders have been explicitly activated; sync timers after actual set logging.
+  Do not grant/regrant authority, undo pause or publish calendar changes merely
+  because Telegram chat works. Calendar publication requires separate approval.

@@ -1,19 +1,70 @@
 from pathlib import Path
+import subprocess
+import pytest
 
-from gymclaw.providers.openclaw import AutomationSpec, OpenClawProvider
+from gymclaw.services.errors import DomainError
+
+from gymclaw.providers.openclaw import AutomationSpec, OpenClawProvider, run_json, cli_json
 from gymclaw.services import runtime
 from gymclaw.tests.test_runtime import FakeRuntime, NOW, engine
 
 
-def test_legacy_cron_command_and_managed_config_path():
+@pytest.mark.parametrize("prefix", ["", "[plugins] Loaded\n", "\x1b[32mStartup\x1b[0m\n"])
+def test_cli_startup_logs_do_not_hide_final_json(prefix):
+    assert cli_json(prefix + '{\n "payload": {"messageId": "test-receipt"}\n}\n') == {"payload": {"messageId": "test-receipt"}}
+
+
+@pytest.mark.parametrize("output", ['{"jobs":[]}\ntrailing garbage', '[{"jobs":[]}]', 'no JSON'])
+def test_cli_json_rejects_partial_or_unstructured_output(output):
+    with pytest.raises(ValueError):
+        cli_json(output)
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_only_managed_cli_ignores_inherited_gateway_override(monkeypatch, managed):
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", "/sandbox/.openclaw/openclaw.json" if managed else "/local/config.json")
+    monkeypatch.setenv("OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:18789")
+    monkeypatch.setattr("gymclaw.providers.openclaw.shutil.which", lambda _: "/openclaw")
+    captured = {}
+    def command(argv, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, '{"jobs":[]}', "")
+    monkeypatch.setattr("gymclaw.providers.openclaw.subprocess.run", command)
+    assert run_json(["openclaw", "cron", "list"]) == {"jobs": []}
+    assert ("OPENCLAW_GATEWAY_URL" not in captured) == managed
+    assert captured["OPENCLAW_CONFIG_PATH"]
+
+
+def test_cli_pairing_failure_is_actionable_without_child_output(monkeypatch):
+    monkeypatch.setattr("gymclaw.providers.openclaw.shutil.which", lambda _: "/openclaw")
+    monkeypatch.setattr("gymclaw.providers.openclaw.subprocess.run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "scope upgrade pending approval; private-output-sentinel"))
+    with pytest.raises(DomainError) as caught:
+        run_json(["openclaw", "cron", "add"])
+    assert caught.value.code == "GATEWAY_PAIRING_REQUIRED"
+    assert "private-output-sentinel" not in str(caught.value)
+
+
+def test_cli_failure_keeps_error_class_without_child_output(monkeypatch):
+    monkeypatch.setattr("gymclaw.providers.openclaw.shutil.which", lambda _: "/openclaw")
+    monkeypatch.setattr("gymclaw.providers.openclaw.subprocess.run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "private-output-sentinel"))
+    with pytest.raises(DomainError) as caught:
+        run_json(["openclaw", "cron", "list", "--json"])
+    assert caught.value.code == "OPENCLAW_COMMAND_FAILED"
+    assert "private-output-sentinel" not in str(caught.value)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_legacy_cron_command_and_managed_config_path(wrapped):
     calls = []
     def transport(argv):
         calls.append(argv)
+        if wrapped and "add" in argv:
+            return {"created": False, "updated": False, "job": {"id": "timer"}}
         return {"id": "timer", "jobs": []}
     provider = OpenClawProvider(transport=transport)
     provider.list_jobs()
     spec = AutomationSpec(name="test", argv=("/python", "-m", "gymclaw.cli"), cwd="/repo", every="60s", env=(("OPENCLAW_CONFIG_PATH", "/sandbox/.openclaw/openclaw.json"),))
-    provider.create(spec)
+    assert provider.create(spec) == "timer"
     assert calls[0][3:5] == ["cron", "list"]
     assert "OPENCLAW_CONFIG_PATH=/sandbox/.openclaw/openclaw.json" in calls[1]
     assert "--no-deliver" in calls[1]

@@ -29,13 +29,14 @@ Autonomous training agent. Product source of truth: [SPEC.md](SPEC.md).
   and independently revocable continuing calendar-write authority.
 - JSON CLI, independent of OpenClaw; external providers replaceable with explicit fixtures.
 
-This is **not yet the complete MVP**. Live OpenClaw/Telegram activation and real
-workout onboarding/acceptance remain unfinished. `calendar publish --allow-writes` can
+This is **not yet the complete MVP**. Local NemoClaw/Telegram tool access and
+scheduled private delivery work; real workout onboarding/rest acceptance remains. `calendar publish --allow-writes` can
 create/update/delete owned Google events; ordinary planning/sync never write remotely.
 Runtime watcher/weekly publication stays disabled unless continuing write authority is
 separately granted with `runtime sync --allow-calendar-writes`. `notifications due` is local-only debug dispatch. Activated
 `runtime fire --allow-messages` uses OpenClaw to send Telegram and persist receipts.
-Live OAuth/read-only sync verified; live calendar publication and Telegram remain untested.
+Live OAuth/read-only sync and timed Telegram delivery verified. Calendar publication
+remains unapproved/untested. Setup messages are labelled tests, not workout history.
 
 ## Setup
 
