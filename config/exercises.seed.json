@@ -1,0 +1,16 @@
+{
+  "id": "upper-a",
+  "name": "Upper A",
+  "source": "demo_fixture",
+  "set_duration_seconds": 40,
+  "transition_seconds": 60,
+  "exercises": [
+    {"id": "bench", "name": "Bench Press", "role": "chest_press", "primary": true, "working_sets": 3, "rep_min": 8, "rep_max": 10, "target_weight": 80, "warmup_weight": 50, "priority": 10},
+    {"id": "row", "name": "Seated Row", "role": "horizontal_pull", "working_sets": 3, "rep_min": 8, "rep_max": 12, "target_weight": 60, "priority": 9},
+    {"id": "pec-deck", "name": "Pec Deck", "role": "chest_fly", "working_sets": 3, "rep_min": 10, "rep_max": 12, "target_weight": 50, "substitutes": ["db-fly"], "priority": 5},
+    {"id": "lateral-raise", "name": "Lateral Raise", "role": "lateral_delts", "working_sets": 3, "rep_min": 10, "rep_max": 15, "target_weight": 10, "increment": 1, "priority": 4}
+  ],
+  "alternatives": [
+    {"id": "db-fly", "name": "Dumbbell Fly", "role": "chest_fly", "target_weight": 12, "increment": 1, "rep_min": 10, "rep_max": 12}
+  ]
+}

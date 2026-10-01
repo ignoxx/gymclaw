@@ -9,11 +9,16 @@ Autonomous training agent. Product source of truth: [SPEC.md](SPEC.md).
 - Deterministic weekly candidate planner: prep/travel conflict checks, travel blocks,
   local-date recovery across week boundaries, weekly caps, weighted scores, DST.
 - Persistent tentative plans and durable planning events; retry-safe request IDs.
+- Persisted workout templates/snapshots and guarded workout execution.
+- Explicit first-primary warm-up, set parser/logging, durable rest outbox, dynamic ETA.
+- Busy-machine reorder/defer/retry, same-role substitution, explicit skips.
+- Double progression, persisted next weights, completion audit and replan events.
 - JSON CLI, independent of OpenClaw and external APIs.
 
-This is **not yet the complete MVP**. Calendar writes/sync/reconciliation, notifications,
-workout execution, crowd learning and OpenClaw/Telegram integration remain unimplemented.
-Planning creates local tentative records, **not Google Calendar events**.
+This is **not yet the complete MVP**. Calendar writes/sync/reconciliation, external
+notification delivery, crowd learning and OpenClaw/Telegram integration remain unimplemented.
+Planning creates local tentative records, **not Google Calendar events**. Rest dispatch
+advances local state and emits instructions; it does **not** send Telegram messages.
 
 ## Setup
 
@@ -71,6 +76,69 @@ persisted calendar/provider state. No external API behavior is simulated as real
 - Successful request ID replay returns original result. Reuse with changed week/fixture
   fails. Retry after profile/calendar changes requires a new request ID.
 
+## Workout CLI
+
+Import demo template once; its weights are illustrative, not personalized training advice.
+All template/runtime/progression/job state lives in SQLite. Re-importing a template does
+not alter a workout already in progress.
+
+```bash
+python -m gymclaw.cli template import --file config/exercises.seed.json
+WORKOUT_ID=$(python -m gymclaw.cli workout start --template-id upper-a \
+  --now 2026-10-12T20:00:00+02:00 --request-id demo-start \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["data"]["workout_id"])')
+python -m gymclaw.cli workout log-set --workout-id "$WORKOUT_ID" \
+  --text '50x8' --set-type WARMUP --now 2026-10-12T20:00:40+02:00 --request-id demo-warmup
+python -m gymclaw.cli workout log-set --workout-id "$WORKOUT_ID" \
+  --text '80x9' --now 2026-10-12T20:01:20+02:00 --request-id demo-bench-1
+python -m gymclaw.cli notifications pending
+python -m gymclaw.cli notifications due --now 2026-10-12T20:03:50+02:00
+python -m gymclaw.cli workout current --workout-id "$WORKOUT_ID"
+```
+
+Continue logging sets, or use:
+
+- `workout machine-busy --workout-id ... --request-id ...`: defer current movement;
+  choose next compatible planned movement, never silently drop deferred work.
+- `workout machine-free --workout-id ... --exercise-id ... --request-id ...`: retry
+  deferred equipment. Exercise IDs here are runtime UUIDs from queue, not catalog IDs.
+- `workout substitute --workout-id ... --exercise-id ... --substitute-id db-fly
+  --request-id ...`: explicit same-role fixture alternative; only remaining volume.
+- `workout skip-exercise --workout-id ... --exercise-id ... --reason ... --request-id ...`:
+  explicit volume reduction. Dependants of skipped movements need explicit resolution.
+- `workout finish --workout-id ... --request-id ...`: requires resolved queue; save audit
+  and next working weights, mark linked planned session completed, emit replan request.
+- `audit workout --workout-id ...`: read saved audit without changing progression.
+- `events pending` / `events ack --event-id ...`: inspect/ack durable agent inbox.
+
+Mutation request IDs are mandatory. Exact retry returns original result; changed intent
+with same ID fails. Use a unique ID per user action, not per network attempt. Original
+request ID is needed to retry `finish`; new finish requests fail once audited.
+`--now` is optional for runtime, required timezone when supplied. Mutation times cannot
+move backwards. `workout start` expresses arrival intent; it does not invent prep/travel
+history. `--planned-session-id` optionally links an existing tentative/committed plan.
+Only one unfinished workout is allowed.
+
+Warm-up never counts toward volume/progression. Working logs while warm-up is pending
+fail with `WARMUP_REQUIRED`. Set parsing accepts `80x9`, `80kg x9`, `9 reps at 80`;
+ambiguous input fails with a concise question. Structured `--weight`/`--reps`/`--rir`
+are also supported. Logging early cancels stale rest jobs. `notifications due` is an
+idempotent local dispatcher; external automation IDs are reserved for later integration.
+The final set needs no rest timer when no work remains.
+
+ETA counts remaining warm-up/working sets, rests, transitions, deferred/substituted work,
+current outstanding rest and elapsed time. Configured estimates are used until completed
+sessions provide usable set durations. No equipment wait duration is invented.
+Progression requires full prescribed sets at target weight and top reps; partial or
+missed targets hold weight. Warm-up and historical logs are not changed by progression.
+
+Acceptance test runs a complete fake workout across separate CLI processes, including
+rest dispatch, equipment reordering, substitution, finish, audit, and persisted progression:
+
+```bash
+pytest -q gymclaw/tests/test_workout_cli.py
+```
+
 ## Code
 
 - `gymclaw/models/__init__.py`: SQLAlchemy schema and UTC timestamp type.
@@ -78,8 +146,17 @@ persisted calendar/provider state. No external API behavior is simulated as real
 - `gymclaw/services/profile.py`: validated profile operations.
 - `gymclaw/services/planning.py`: pure domain types and candidate/week planner.
 - `gymclaw/services/scheduling.py`: SQLite planning transaction.
+- `gymclaw/services/templates.py`: validated template definitions/import.
+- `gymclaw/services/workout.py`: state machine, logs, rest, ETA, request replay.
+- `gymclaw/services/adaptation.py`: equipment queue and substitutions.
+- `gymclaw/services/progression.py`, `audit.py`: double progression and completion audit.
+- `gymclaw/services/notifications.py`, `events.py`: durable local job/event dispatch.
 - `gymclaw/cli.py`: JSON adapter.
 
 Services accept explicit time and typed inputs, need no agent runtime. CLI owns
 transactions; service callers must commit/rollback. Use `alembic revision --autogenerate`
 for subsequent schema changes, review generated migration, then `alembic upgrade head`.
+Run `db init` again to upgrade existing DBs; migration tests preserve legacy workout logs.
+SQLite migrations pause FK enforcement only on migration connection and validate links
+before commit. Old workouts without snapshots remain intact, but are read-only for new
+execution services. Local development/tests use isolated temporary DBs.

@@ -28,6 +28,17 @@ def make_engine(url: str | None = None):
 def initialize(engine):
     config = Config()
     config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, "head")
+    with engine.connect() as connection:
+        # SQLite batch migrations rebuild referenced tables. Disable FK enforcement
+        # only on this connection, outside any transaction; verify before commit.
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.commit()
+        try:
+            with connection.begin():
+                config.attributes["connection"] = connection
+                command.upgrade(config, "head")
+                if connection.exec_driver_sql("PRAGMA foreign_key_check").first():
+                    raise ValueError("Migration produced invalid foreign keys")
+        finally:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            connection.commit()

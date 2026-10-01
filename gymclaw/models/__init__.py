@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, CheckConstraint
+from sqlalchemy import JSON, ForeignKey, String, Text, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, DateTime
 
@@ -115,7 +115,10 @@ class PlannedSession(Base):
 class WorkoutSession(Base):
     __tablename__ = "workout_session"
     id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
-    planned_session_id: Mapped[str | None] = mapped_column(ForeignKey("planned_session.id"))
+    planned_session_id: Mapped[str | None] = mapped_column(ForeignKey("planned_session.id"), unique=True)
+    template_id: Mapped[str | None] = mapped_column(ForeignKey("workout_template.id"))
+    template_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_action_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     arrived_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
@@ -143,11 +146,12 @@ class WorkoutExercise(Base):
     rest_seconds: Mapped[int]
     substituted_from_exercise_id: Mapped[str | None]
     deferred_reason: Mapped[str | None]
+    config_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class SetLog(Base):
     __tablename__ = "set_log"
-    __table_args__ = (CheckConstraint("set_type IN ('WARMUP','WORKING')"),)
+    __table_args__ = (CheckConstraint("set_type IN ('WARMUP','WORKING')"), UniqueConstraint("workout_exercise_id", "set_type", "set_number"), CheckConstraint("weight >= 0 AND reps > 0 AND set_number > 0"))
     id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
     workout_exercise_id: Mapped[str] = mapped_column(ForeignKey("workout_exercise.id"))
     set_number: Mapped[int]
@@ -158,6 +162,36 @@ class SetLog(Base):
     logged_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     rest_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     rest_due_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class WorkoutTemplate(Base):
+    __tablename__ = "workout_template"
+    id: Mapped[str] = mapped_column(primary_key=True)
+    definition_json: Mapped[dict] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class ExerciseProgression(Base):
+    __tablename__ = "exercise_progression"
+    exercise_id: Mapped[str] = mapped_column(primary_key=True)
+    next_weight: Mapped[float]
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    source_workout_id: Mapped[str] = mapped_column(ForeignKey("workout_session.id"))
+
+
+class NotificationJob(Base):
+    """Durable outbox; delivery integration is separate from domain execution."""
+    __tablename__ = "notification_job"
+    __table_args__ = (CheckConstraint("status IN ('PENDING','CANCELLED','FIRED')"),)
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    kind: Mapped[str]
+    workout_session_id: Mapped[str] = mapped_column(ForeignKey("workout_session.id"))
+    set_log_id: Mapped[str | None] = mapped_column(ForeignKey("set_log.id"), unique=True)
+    due_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    status: Mapped[str] = mapped_column(default="PENDING")
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    external_job_id: Mapped[str | None]
+    handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
 
 class CrowdObservation(Base):

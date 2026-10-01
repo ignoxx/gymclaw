@@ -12,6 +12,10 @@ from sqlalchemy.orm import Session
 from gymclaw.db import make_engine, initialize
 from gymclaw.services.profile import get_profile, update_profile
 from gymclaw.services.scheduling import PlanningFixture, schedule_week
+from gymclaw.services import adaptation, audit, events, notifications, workout
+from gymclaw.services.errors import DomainError
+from gymclaw.services.set_parser import SetInput, parse_set
+from gymclaw.services.templates import Template, get_template, import_template
 
 
 class Parser(argparse.ArgumentParser):
@@ -35,9 +39,75 @@ def parser():
     planning.add_argument("--now", type=datetime.fromisoformat)
     planning.add_argument("--fixture", type=Path, help="Explicit demo input JSON, not live data")
     planning.add_argument("--request-id")
-    for command in (db, profile, planning):
+    template = groups.add_parser("template", add_help=False)
+    template.add_argument("operation", choices=["import", "get"])
+    template.add_argument("--file", type=Path)
+    template.add_argument("--template-id")
+    training = groups.add_parser("workout", add_help=False)
+    training.add_argument("operation", choices=["start", "current", "log-set", "rest-complete", "machine-busy", "machine-free", "substitute", "skip-exercise", "finish"])
+    training.add_argument("--template-id")
+    training.add_argument("--planned-session-id")
+    training.add_argument("--workout-id")
+    training.add_argument("--exercise-id")
+    training.add_argument("--substitute-id")
+    training.add_argument("--job-id")
+    training.add_argument("--request-id")
+    training.add_argument("--now", type=datetime.fromisoformat)
+    training.add_argument("--text")
+    training.add_argument("--weight", type=float)
+    training.add_argument("--reps", type=int)
+    training.add_argument("--rir", type=float)
+    training.add_argument("--set-type", choices=["WARMUP", "WORKING"], default="WORKING")
+    training.add_argument("--reason")
+    report = groups.add_parser("audit", add_help=False)
+    report.add_argument("operation", choices=["workout"])
+    report.add_argument("--workout-id", required=True)
+    inbox = groups.add_parser("events", add_help=False)
+    inbox.add_argument("operation", choices=["pending", "ack"])
+    inbox.add_argument("--event-id")
+    inbox.add_argument("--now", type=datetime.fromisoformat)
+    jobs = groups.add_parser("notifications", add_help=False)
+    jobs.add_argument("operation", choices=["pending", "due"])
+    jobs.add_argument("--now", type=datetime.fromisoformat)
+    for command in (db, profile, planning, template, training, report, inbox, jobs):
         command.add_argument("--json", action="store_true")
     return root
+
+
+def required(value, flag):
+    if value is None:
+        raise ValueError(f"Missing required {flag}")
+    return value
+
+
+def workout_command(db, args):
+    now = args.now or datetime.now(timezone.utc)
+    if args.operation == "current":
+        return {"data": workout.current(db, required(args.workout_id, "--workout-id"), now=now), "events": [], "user_message_hint": None}
+    request_id = required(args.request_id, "--request-id")
+    if args.operation == "start":
+        return workout.start(db, required(args.template_id, "--template-id"), now=now, request_id=request_id, planned_session_id=args.planned_session_id)
+    if args.operation == "rest-complete":
+        return workout.rest_complete(db, required(args.job_id, "--job-id"), now=now, request_id=request_id)
+    workout_id = required(args.workout_id, "--workout-id")
+    if args.operation == "log-set":
+        if args.text is not None:
+            if args.weight is not None or args.reps is not None or args.rir is not None:
+                raise ValueError("Use --text OR structured set fields, not both")
+            value = parse_set(args.text, set_type=args.set_type)
+        else:
+            value = SetInput(weight=required(args.weight, "--weight"), reps=required(args.reps, "--reps"), set_type=args.set_type, rir=args.rir)
+        return workout.log_set(db, workout_id, value, now=now, request_id=request_id)
+    if args.operation == "machine-busy":
+        return adaptation.machine_busy(db, workout_id, exercise_id=args.exercise_id, now=now, request_id=request_id)
+    if args.operation == "finish":
+        return audit.finish(db, workout_id, now=now, request_id=request_id)
+    exercise_id = required(args.exercise_id, "--exercise-id")
+    if args.operation == "machine-free":
+        return adaptation.machine_free(db, workout_id, exercise_id, now=now, request_id=request_id)
+    if args.operation == "substitute":
+        return adaptation.substitute(db, workout_id, exercise_id, required(args.substitute_id, "--substitute-id"), now=now, request_id=request_id)
+    return adaptation.skip_exercise(db, workout_id, exercise_id, reason=required(args.reason, "--reason"), now=now, request_id=request_id)
 
 
 def main(argv=None) -> int:
@@ -45,6 +115,8 @@ def main(argv=None) -> int:
     try:
         args = parser().parse_args(argv)
         engine = make_engine(args.db_url)
+        emitted_events = []
+        message_hint = None
         if args.group == "db":
             initialize(engine)
             data = {"initialized": True}
@@ -60,12 +132,34 @@ def main(argv=None) -> int:
                         data = update_profile(db, changes).model_dump(mode="json")
                     else:
                         data = get_profile(db).model_dump(mode="json")
+                elif args.group == "template":
+                    if args.operation == "import":
+                        definition = Template.model_validate_json(required(args.file, "--file").read_text())
+                        data = import_template(db, definition)
+                    else:
+                        data = get_template(db, required(args.template_id, "--template-id")).model_dump(mode="json")
+                elif args.group == "workout":
+                    result = workout_command(db, args)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "audit":
+                    data = audit.get_audit(db, args.workout_id)
+                elif args.group == "events":
+                    data = events.pending(db) if args.operation == "pending" else events.ack(db, required(args.event_id, "--event-id"), now=args.now or datetime.now(timezone.utc))
+                elif args.group == "notifications":
+                    if args.operation == "pending":
+                        data = notifications.pending_jobs(db)
+                    else:
+                        result = notifications.dispatch_due(db, now=args.now or datetime.now(timezone.utc))
+                        data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 else:
                     fixture = PlanningFixture.model_validate_json(args.fixture.read_text()) if args.fixture else PlanningFixture()
                     now = args.now or datetime.now(timezone.utc)
                     data = schedule_week(db, args.week_start, now=now, fixture=fixture, request_id=args.request_id)
-        print(json.dumps({"ok": True, "data": data, "events": [], "user_message_hint": None}, allow_nan=False))
+        print(json.dumps({"ok": True, "data": data, "events": emitted_events, "user_message_hint": message_hint}, allow_nan=False))
         return 0
+    except DomainError as error:
+        print(json.dumps({"ok": False, "error": {"code": error.code, "message": str(error)}}))
+        return 1
     except (ValueError, ValidationError, OSError) as error:
         print(json.dumps({"ok": False, "error": {"code": "INVALID_INPUT", "message": str(error)}}))
         return 1
