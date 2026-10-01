@@ -9,6 +9,7 @@ user-invocable: true
 Execute `../scripts/gymclaw-tool ...` from workspace. All results are JSON:
 `ok`, `data`, `events`, `user_message_hint`. Failure exits 1. Do not proceed
 as if a failed operation succeeded. No direct SQLite/OAuth/token-file inspection.
+Activated runtime uses actual time; never supply simulated `--now` to live callbacks.
 
 ## First use / onboarding
 
@@ -17,6 +18,8 @@ as if a failed operation succeeded. No direct SQLite/OAuth/token-file inspection
    are Monday=0..Sunday=6. Times are local; all explicit timestamps need offsets.
 3. Owner/importer must supply a suitable template. `template get --template-id ID`
    reads it. Demo weights are illustrative, never actual owner training history.
+   After owner confirms template and activation, pass `--template-id ID` to runtime
+   sync once; selected template persists, Sunday job/rolling maintenance become enabled.
 4. `calendar plan-week --week-start YYYY-MM-DD --template-id ID --request-id ID`
    refreshes dedicated calendar and previews a deterministic local plan.
    Week start must be Monday. Do not ask owner to choose among valid routine slots.
@@ -61,6 +64,18 @@ exact deleted event. No other calendars or silent primary fallback.
 `events pending` reads durable work; `events ack --event-id ID` acknowledges only
 successfully handled work. Unresolved issues remain pending. No repeated plan
 reconsideration without trigger. Watcher runs every 60s, without model calls.
+
+`audit week --week-start YYYY-MM-DD` reads weekly performance. Sunday job audits,
+plans next week and sends one briefing through durable outbox. Watcher also marks
+elapsed unstarted slots missed (never completed), fills rolling horizon and handles
+crowd-label triggers by reconsidering distant tentative slots. Committed/user-locked
+sessions stay fixed for soft crowd preference changes.
+
+Calendar acknowledgement/weekly briefing delivery belongs to runtime outbox too;
+do not send them again from heartbeat. Continuing publication is separately approved
+with `runtime sync --allow-calendar-writes`; never grant merely because Telegram works.
+`runtime revoke-calendar-writes` and `runtime pause` are local authority revocation.
+Resume needs explicit approval; never undo owner pause from scheduled callback.
 
 `runtime plan --telegram-id OWNER_ID` is offline inspection. `runtime deliveries`
 shows delivery receipts; SENT is confirmed, SENDING/UNKNOWN is ambiguous. Never

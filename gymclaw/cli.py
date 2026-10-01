@@ -17,7 +17,7 @@ from gymclaw.services.calendar import get_week
 from gymclaw.services.replanning import replan_weeks
 from gymclaw.services.profile import get_profile, update_profile
 from gymclaw.services.scheduling import PlanningFixture, schedule_week
-from gymclaw.services import adaptation, audit, events, notifications, workout
+from gymclaw.services import adaptation, audit, events, notifications, weekly, workout
 from gymclaw.services.errors import DomainError
 from gymclaw.services.set_parser import SetInput, parse_set
 from gymclaw.services.templates import Template, get_template, import_template
@@ -78,8 +78,10 @@ def parser():
     training.add_argument("--set-type", choices=["WARMUP", "WORKING"], default="WORKING")
     training.add_argument("--reason")
     report = groups.add_parser("audit", add_help=False)
-    report.add_argument("operation", choices=["workout"])
-    report.add_argument("--workout-id", required=True)
+    report.add_argument("operation", choices=["workout", "week"])
+    report.add_argument("--workout-id")
+    report.add_argument("--week-start", type=date.fromisoformat)
+    report.add_argument("--now", type=datetime.fromisoformat)
     inbox = groups.add_parser("events", add_help=False)
     inbox.add_argument("operation", choices=["pending", "ack"])
     inbox.add_argument("--event-id")
@@ -172,7 +174,7 @@ def main(argv=None) -> int:
                     result = workout_command(db, args)
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "audit":
-                    data = audit.get_audit(db, args.workout_id)
+                    data = audit.get_audit(db, required(args.workout_id, "--workout-id")) if args.operation == "workout" else weekly.audit_week(db, required(args.week_start, "--week-start"), now=args.now or datetime.now(timezone.utc))
                 elif args.group == "events":
                     data = events.pending(db) if args.operation == "pending" else events.ack(db, required(args.event_id, "--event-id"), now=args.now or datetime.now(timezone.utc))
                 elif args.group == "notifications":

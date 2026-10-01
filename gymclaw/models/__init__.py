@@ -199,9 +199,10 @@ class NotificationJob(Base):
 class NotificationDelivery(Base):
     """Commit domain output before delivery. Ambiguous sends require human resolution."""
     __tablename__ = "notification_delivery"
-    __table_args__ = (CheckConstraint("status IN ('PENDING','SENDING','SENT','UNKNOWN','CANCELLED')"),)
+    __table_args__ = (CheckConstraint("status IN ('PENDING','SENDING','SENT','UNKNOWN','CANCELLED')", name="ck_delivery_status"), CheckConstraint("(notification_job_id IS NOT NULL AND agent_event_id IS NULL) OR (notification_job_id IS NULL AND agent_event_id IS NOT NULL)", name="ck_delivery_owner"))
     id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
-    notification_job_id: Mapped[str] = mapped_column(ForeignKey("notification_job.id"), unique=True)
+    notification_job_id: Mapped[str | None] = mapped_column(ForeignKey("notification_job.id"), unique=True)
+    agent_event_id: Mapped[str | None] = mapped_column(ForeignKey("agent_event.id"), unique=True)
     recipient: Mapped[str]
     runtime_profile: Mapped[str]
     message: Mapped[str] = mapped_column(Text)
@@ -210,6 +211,21 @@ class NotificationDelivery(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime)
     handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     external_message_id: Mapped[str | None]
+
+
+class RuntimeSettings(Base):
+    """Explicit local activation authority; callbacks cannot grant/re-enable it."""
+    __tablename__ = "runtime_settings"
+    __table_args__ = (CheckConstraint("id = 1"),)
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    profile: Mapped[str]
+    recipient: Mapped[str]
+    project_root: Mapped[str]
+    python_path: Mapped[str]
+    template_id: Mapped[str | None] = mapped_column(ForeignKey("workout_template.id"))
+    enabled: Mapped[bool] = mapped_column(default=True)
+    calendar_writes_enabled: Mapped[bool] = mapped_column(default=False)
+    crowd_polling_enabled: Mapped[bool] = mapped_column(default=False)
 
 
 class CalendarSyncState(Base):

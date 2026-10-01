@@ -11,9 +11,11 @@ import sys
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from gymclaw.models import NotificationDelivery, NotificationJob, PlannedSession, WorkoutSession
+from gymclaw.models import AgentEvent, NotificationDelivery, NotificationJob, PlannedSession, RuntimeSettings, WorkoutSession
 from gymclaw.providers.openclaw import AutomationProvider, AutomationSpec, validate_route
 from gymclaw.services.errors import DomainError
+from gymclaw.services.profile import get_profile
+from gymclaw.services.templates import get_template
 from gymclaw.services.workout import current, emit, rest_complete, utc
 
 
@@ -31,6 +33,37 @@ def namespace(engine) -> str:
     if not database or database == ":memory:":
         raise DomainError("DURABLE_DB_REQUIRED", "Runtime requires file-backed SQLite DB")
     return "gymclaw-" + sha256(str(Path(database).absolute()).encode()).hexdigest()[:16] + ":"
+
+
+def configure_runtime(db: Session, *, profile: str, recipient: str, project_root: Path, python: str,
+                      template_id: str | None = None, allow_calendar_writes: bool = False, crowd_polling: bool = False) -> RuntimeSettings:
+    validate_route(profile, recipient)
+    if template_id:
+        get_template(db, template_id)
+    scope = {"profile": profile, "recipient": recipient, "project_root": str(project_root.absolute()), "python_path": str(Path(python).absolute())}
+    settings = db.get(RuntimeSettings, 1)
+    if settings is None:
+        settings = RuntimeSettings(**scope)
+        db.add(settings); db.flush()
+    elif any(getattr(settings, key) != value for key, value in scope.items()):
+        raise DomainError("RUNTIME_SCOPE_MISMATCH", "Runtime DB is bound to another owner/profile/deployment path")
+    if not settings.enabled:
+        raise DomainError("RUNTIME_PAUSED", "Runtime paused; explicit resume required, callbacks cannot reactivate it")
+    if template_id:
+        settings.template_id = template_id
+    if allow_calendar_writes:
+        settings.calendar_writes_enabled = True
+    if crowd_polling:
+        settings.crowd_polling_enabled = True
+    return settings
+
+
+def runtime_authority(db: Session) -> dict:
+    settings = db.get(RuntimeSettings, 1)
+    return {"configured": settings is not None, "enabled": settings.enabled if settings else False,
+        "template_id": settings.template_id if settings else None,
+        "calendar_writes_enabled": settings.calendar_writes_enabled if settings else False,
+        "crowd_polling_enabled": settings.crowd_polling_enabled if settings else False}
 
 
 def route_args(profile: str, recipient: str) -> tuple[str, ...]:
@@ -66,9 +99,18 @@ def automation_plan(db: Session, engine, *, now: datetime, recipient: str, profi
     route = route_args(profile, recipient)
     prefix = namespace(engine)
     specs = []
+    settings = db.get(RuntimeSettings, 1)
+    if settings and (settings.profile != profile or settings.recipient != recipient):
+        raise DomainError("RUNTIME_SCOPE_MISMATCH", "Runtime belongs to another owner/profile")
     if include_watcher:
         specs.append(AutomationSpec(name=prefix + "calendar-watch", every="60s", cwd=str(project_root.absolute()),
             argv=base + ("runtime", "watch", "--allow-runtime-changes", "--allow-messages") + route))
+        if settings and settings.template_id:
+            specs.append(AutomationSpec(name=prefix + "weekly-plan", cron="0 19 * * 0", timezone=get_profile(db).timezone,
+                cwd=str(project_root.absolute()), argv=base + ("runtime", "weekly", "--allow-runtime-changes", "--allow-messages") + route))
+        if settings and settings.crowd_polling_enabled:
+            specs.append(AutomationSpec(name=prefix + "crowd-poll", every="15m", cwd=str(project_root.absolute()),
+                argv=base + ("runtime", "poll-crowd") + route))
     for job in db.scalars(select(NotificationJob).where(NotificationJob.status == "PENDING").order_by(NotificationJob.due_at, NotificationJob.id)):
         if stale_reason(db, job, now=now):
             continue
@@ -81,11 +123,20 @@ def automation_plan(db: Session, engine, *, now: datetime, recipient: str, profi
 
 def sync_automations(engine, provider: AutomationProvider, *, now: datetime, recipient: str,
                      project_root: Path, allow_runtime_changes: bool = False, allow_messages: bool = False,
-                     python: str = sys.executable, include_watcher: bool = True) -> dict:
+                     python: str = sys.executable, include_watcher: bool = True, template_id: str | None = None,
+                     allow_calendar_writes: bool = False, crowd_polling: bool = False, configure: bool = True) -> dict:
     if not allow_runtime_changes or not allow_messages:
         raise DomainError("RUNTIME_NOT_APPROVED", "Installing executable automations requires --allow-runtime-changes AND --allow-messages")
     validate_route(provider.profile, recipient)
+    if configure:
+        with Session(engine) as db, db.begin():
+            configure_runtime(db, profile=provider.profile, recipient=recipient, project_root=project_root, python=python,
+                template_id=template_id, allow_calendar_writes=allow_calendar_writes, crowd_polling=crowd_polling)
     with Session(engine) as db:
+        settings = db.get(RuntimeSettings, 1)
+        if settings and not settings.enabled:
+            raise DomainError("RUNTIME_PAUSED", "Runtime paused; callbacks cannot resume it")
+        authority = runtime_authority(db)
         specs = automation_plan(db, engine, now=now, recipient=recipient, profile=provider.profile,
             project_root=project_root, python=python, include_watcher=include_watcher)
     desired = {spec.name: spec for spec in specs}
@@ -97,7 +148,7 @@ def sync_automations(engine, provider: AutomationProvider, *, now: datetime, rec
         name = row["name"]
         spec = desired.get(name)
         # Don't manage unrelated jobs, even under this namespace.
-        if not (name == prefix + "calendar-watch" or name.startswith(prefix + "notification:")):
+        if not (name in {prefix + "calendar-watch", prefix + "weekly-plan", prefix + "crowd-poll"} or name.startswith(prefix + "notification:")):
             continue
         if spec is None:
             provider.remove(row["id"])
@@ -110,7 +161,8 @@ def sync_automations(engine, provider: AutomationProvider, *, now: datetime, rec
         if payload.get("kind") != "command" or payload.get("argv") != list(spec.argv) or payload.get("cwd") != spec.cwd or row.get("delivery", {}).get("mode") != "none":
             raise DomainError("AUTOMATION_DRIFT", "Managed automation command/route changed; explicit operator review required")
         schedule = row.get("schedule", {})
-        if (spec.every and (schedule.get("kind") != "every" or schedule.get("everyMs") != 60000)) or (spec.at and schedule.get("kind") != "at"):
+        expected_interval = {"60s": 60000, "15m": 900000}.get(spec.every)
+        if (spec.every and (schedule.get("kind") != "every" or schedule.get("everyMs") != expected_interval)) or (spec.at and schedule.get("kind") != "at") or (spec.cron and (schedule.get("kind") != "cron" or schedule.get("expr") != spec.cron or schedule.get("tz") != spec.timezone)):
             raise DomainError("AUTOMATION_DRIFT", "Managed automation schedule changed; explicit operator review required")
         if row.get("enabled") is not True:
             results.append({"action": "disabled_requires_review", "id": row["id"], "name": name})
@@ -130,7 +182,7 @@ def sync_automations(engine, provider: AutomationProvider, *, now: datetime, rec
                 job = db.get(NotificationJob, spec.name.removeprefix(prefix + "notification:"))
                 job.external_job_id = external_id
         results.append({"action": "created", "id": external_id, "name": spec.name})
-    return {"profile": provider.profile, "results": results, "delivery": "openclaw_command_callbacks", "calendar_writes_enabled": False}
+    return {"profile": provider.profile, "results": results, "delivery": "openclaw_command_callbacks", **authority}
 
 
 def prepare_notification(db: Session, job_id: str, *, now: datetime, recipient: str, profile: str) -> dict:
@@ -170,10 +222,43 @@ def prepare_notification(db: Session, job_id: str, *, now: datetime, recipient: 
     return {"delivery_id": delivery.id, "status": delivery.status, "result": result}
 
 
+def prepare_event_message(db: Session, event_id: str, *, message: str, now: datetime, recipient: str, profile: str, related_events: tuple[str, ...] = ()) -> dict:
+    """Freeze proactive calendar/weekly output; one delivery per durable event."""
+    validate_route(profile, recipient)
+    source_event = db.get(AgentEvent, event_id)
+    if source_event is None:
+        raise DomainError("EVENT_NOT_FOUND", "Unknown proactive message event")
+    existing = db.scalar(select(NotificationDelivery).where(NotificationDelivery.agent_event_id == event_id))
+    if existing:
+        if existing.recipient != recipient or existing.runtime_profile != profile:
+            raise DomainError("DELIVERY_ROUTE_MISMATCH", "Event delivery belongs to another owner/runtime")
+        return delivery_data(existing)
+    if source_event.type == "calendar.update_briefing":
+        for old in db.scalars(select(NotificationDelivery).join(AgentEvent, NotificationDelivery.agent_event_id == AgentEvent.id).where(
+            AgentEvent.type == "calendar.update_briefing", NotificationDelivery.status == "PENDING",
+            NotificationDelivery.runtime_profile == profile, NotificationDelivery.recipient == recipient)):
+            old.status, old.handled_at = "CANCELLED", utc(now)
+            acknowledge_delivery_events(db, old, utc(now))
+            emit(db, "notifications.superseded", utc(now), {"delivery_id": old.id, "new_event_id": event_id})
+    row = NotificationDelivery(agent_event_id=event_id, recipient=recipient, runtime_profile=profile, message=message,
+        result_json={"related_events": list(related_events)}, created_at=utc(now))
+    db.add(row); db.flush()
+    return delivery_data(row)
+
+
 def delivery_data(row: NotificationDelivery) -> dict:
     return {"id": row.id, "job_id": row.notification_job_id, "status": row.status,
         "created_at": row.created_at.isoformat(), "handled_at": row.handled_at.isoformat() if row.handled_at else None,
-        "external_message_id": row.external_message_id}
+        "external_message_id": row.external_message_id, "event_id": row.agent_event_id}
+
+
+def acknowledge_delivery_events(db: Session, row: NotificationDelivery, now: datetime):
+    if row.agent_event_id:
+        db.get(AgentEvent, row.agent_event_id).handled_at = now
+        for event_id in row.result_json.get("related_events", []):
+            event = db.get(AgentEvent, event_id)
+            if event:
+                event.handled_at = now
 
 
 def deliver(engine, provider: AutomationProvider, delivery_id: str, *, now: datetime, allow_messages: bool = False) -> dict:
@@ -187,12 +272,20 @@ def deliver(engine, provider: AutomationProvider, delivery_id: str, *, now: date
             raise DomainError("DELIVERY_NOT_FOUND", "Unknown notification delivery")
         if row.runtime_profile != provider.profile:
             raise DomainError("DELIVERY_ROUTE_MISMATCH", "Delivery belongs to another OpenClaw profile")
+        settings = db.get(RuntimeSettings, 1)
+        if settings and (not settings.enabled or settings.profile != provider.profile or settings.recipient != row.recipient):
+            raise DomainError("RUNTIME_PAUSED", "Delivery authority paused or owner/profile mismatch")
         if row.status != "PENDING":
             return delivery_data(row)
-        job = db.get(NotificationJob, row.notification_job_id)
-        reason = stale_reason(db, job, now=now, delivery=row)
+        if row.notification_job_id:
+            job = db.get(NotificationJob, row.notification_job_id)
+            reason = stale_reason(db, job, now=now, delivery=row)
+        else:
+            reason = "event_message_expired" if now > row.created_at + timedelta(hours=24) else None
         if reason:
             row.status, row.handled_at = "CANCELLED", now
+            if row.agent_event_id:
+                db.get(AgentEvent, row.agent_event_id).handled_at = now
             emit(db, "notifications.delivery_suppressed", now, {"delivery_id": row.id, "reason": reason})
             return delivery_data(row)
         row.status, row.handled_at = "SENDING", now
@@ -200,6 +293,8 @@ def deliver(engine, provider: AutomationProvider, delivery_id: str, *, now: date
     # Claim committed; no network I/O under SQLite write transaction.
     try:
         receipt = provider.send(recipient, message)
+        if not isinstance(receipt, str) or not receipt:
+            raise ValueError("Message receipt missing")
     except Exception:
         with Session(engine) as db, db.begin():
             db.execute(update(NotificationDelivery).where(NotificationDelivery.id == delivery_id, NotificationDelivery.status == "SENDING").values(status="UNKNOWN"))
@@ -207,8 +302,10 @@ def deliver(engine, provider: AutomationProvider, delivery_id: str, *, now: date
         raise DomainError("TELEGRAM_DELIVERY_UNKNOWN", "Delivery outcome unknown; inspect Telegram, then runtime resolve. No automatic resend.") from None
     with Session(engine) as db, db.begin():
         db.execute(update(NotificationDelivery).where(NotificationDelivery.id == delivery_id, NotificationDelivery.status == "SENDING").values(status="SENT", external_message_id=receipt))
+        row = db.get(NotificationDelivery, delivery_id)
+        acknowledge_delivery_events(db, row, now)
         emit(db, "notifications.sent", now, {"delivery_id": delivery_id, "message_id": receipt})
-        return delivery_data(db.get(NotificationDelivery, delivery_id))
+        return delivery_data(row)
 
 
 def resolve_delivery(db: Session, delivery_id: str, *, outcome: str, now: datetime) -> dict:
@@ -220,5 +317,7 @@ def resolve_delivery(db: Session, delivery_id: str, *, outcome: str, now: dateti
         raise DomainError("INVALID_DELIVERY_RESOLUTION", "Resolve only ambiguous delivery with sent or not-sent")
     row.status = "SENT" if outcome == "sent" else "PENDING"
     row.handled_at = utc(now)
+    if outcome == "sent":
+        acknowledge_delivery_events(db, row, utc(now))
     emit(db, "notifications.delivery_resolved", utc(now), {"delivery_id": row.id, "outcome": outcome, "source": "operator_confirmation"})
     return delivery_data(row)

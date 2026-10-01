@@ -38,7 +38,7 @@ class FakeRuntime:
             return old["id"]
         row = {"id": f"external-{len(self.created)}", "name": spec.name, "enabled": True,
             "payload": {"kind": "command", "argv": list(spec.argv), "cwd": spec.cwd},
-            "delivery": {"mode": "none"}, "schedule": {"kind": "at", "at": spec.at} if spec.at else {"kind": "every", "everyMs": 60000}}
+            "delivery": {"mode": "none"}, "schedule": {"kind": "at", "at": spec.at} if spec.at else {"kind": "every", "everyMs": {"60s": 60000, "15m": 900000}[spec.every]} if spec.every else {"kind": "cron", "expr": spec.cron, "tz": spec.timezone}}
         self.jobs.append(row)
         self.created.append(spec)
         if self.fail_create_after_apply:

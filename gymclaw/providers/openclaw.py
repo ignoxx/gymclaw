@@ -28,9 +28,11 @@ class AutomationSpec:
     cwd: str
     at: str | None = None
     every: str | None = None
+    cron: str | None = None
+    timezone: str | None = None
 
     def __post_init__(self):
-        if (self.at is None) == (self.every is None):
+        if sum(value is not None for value in (self.at, self.every, self.cron)) != 1:
             raise ValueError("Automation requires exactly one schedule")
 
 
@@ -80,8 +82,10 @@ class OpenClawProvider:
                 "--session", "isolated", "--no-deliver", "--timeout-seconds", "120"]
         if spec.at:
             args += ["--at", spec.at, "--delete-after-run"]
-        else:
+        elif spec.every:
             args += ["--every", spec.every]
+        else:
+            args += ["--cron", spec.cron, "--tz", spec.timezone or "Europe/Berlin", "--exact"]
         value = self.call(*args)
         if not isinstance(value.get("id"), str) or not value["id"]:
             raise DomainError("OPENCLAW_RESPONSE_UNKNOWN", "Automation creation not confirmed; next sync reconciles stable declaration key")

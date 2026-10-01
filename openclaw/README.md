@@ -21,7 +21,9 @@ No separate Python agent runtime or sleep/poll daemon. JSON callbacks use
 2. Telegram activation approval: private verified owner ID, bot token configured
    locally; proactive messages enabled only with `--allow-messages`.
 3. Calendar-write approval: separately inspect plan, then `calendar publish
-   --allow-writes`. Watcher currently **never publishes** queued calendar changes.
+   --allow-writes` for one publication. For continuing autonomy, explicitly grant
+   `runtime sync --allow-calendar-writes` with normal runtime/message flags.
+   Watcher/Sunday publication defaults off; revoke using `runtime revoke-calendar-writes`.
 
 Do not paste bot tokens, API keys or OAuth credentials into chat/Git. Bot token
 belongs to local OpenClaw config or regular private `tokenFile` (0600, not symlink).
@@ -52,8 +54,8 @@ before activation; contracts below are researched/fixture-tested, not live-teste
    Approve only owner; then replace pairing with explicit numeric allowlist:
 
    ```text
-   openclaw --profile gymclaw config set channels.telegram.dmPolicy allowlist
    openclaw --profile gymclaw config set channels.telegram.allowFrom '["OWNER_ID"]'
+   openclaw --profile gymclaw config set channels.telegram.dmPolicy allowlist
    openclaw --profile gymclaw config set channels.telegram.groupPolicy disabled
    openclaw --profile gymclaw config set channels.telegram.configWrites false
    openclaw --profile gymclaw config set commands.ownerAllowFrom '["telegram:OWNER_ID"]'
@@ -95,7 +97,11 @@ before activation; contracts below are researched/fixture-tested, not live-teste
    ```
 
    Installs cheap 60s calendar watcher and exact one-shot pending reminders/rest
-   jobs. After each logged set, agent invokes same sync immediately. Stable
+   jobs. Add confirmed `--template-id ID` to enable rolling maintenance and Sunday
+   19:00 local weekly audit/planning/briefing. Add `--with-crowd-poll` for approved
+   public readings every 15m during configured workout hours. Template/authority
+   persist in SQLite; later timer sync retains them. No model calls for these jobs.
+   After each logged set, agent invokes same sync immediately. Stable
    declaration keys + DB-path namespace recover lost creation responses. Sync
    cancels old timers without touching foreign jobs. Disabled/drifted jobs need
    operator review, not silent re-enablement. Future notifications fire at true
@@ -113,8 +119,15 @@ before activation; contracts below are researched/fixture-tested, not live-teste
    scratch includes all required tool instructions. Heartbeat is not a rest timer.
 
 Update USER.md activation line only after approvals, so agent can distinguish
-permission from setup instructions. Weekly autonomous publication/briefing and
-live Telegram acceptance still need completion; do not claim full MVP yet.
+permission from setup instructions. Weekly workflow is fixture-tested; live Telegram,
+real onboarding and publication acceptance still need verification. Do not claim full
+MVP yet. Activated callbacks use actual time; artificial `--now` is local-only.
+
+`runtime pause` disables local callback/message authority and revokes calendar writes.
+Callbacks cannot reactivate it. `runtime resume --allow-runtime-changes --allow-messages`
+requires explicit approval and does not restore calendar writes. These change only
+SQLite authority; no global config edits or remote job deletion. Stop dedicated Gateway
+when desired. In-flight external calls may already complete; pause cannot unsend them.
 
 ## NemoClaw preferred path
 
@@ -157,7 +170,10 @@ runtime resolve --delivery-id ID --outcome sent|not-sent --confirm-sender-stoppe
 ```
 
 `not-sent` makes pending again; stale plan/advanced workout suppresses delivery.
-DB commits output before sending; no network request under SQLite write lock.
+DB commits output before sending; no message request under SQLite write lock.
+Calendar consequence acknowledgements and weekly briefings use same outbox. New calendar
+ack supersedes older still-pending ack; SENT/UNKNOWN history is preserved. Local-only
+weekly previews do not enqueue Telegram sends. Quiet watcher ticks do not wake model.
 Errors withhold child output to avoid credential leakage.
 
 ## Acceptance when owner returns

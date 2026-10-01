@@ -40,7 +40,7 @@ def commit_upcoming(db: Session, *, now: datetime):
         schedule_session_jobs(db, session, now=now)
 
 
-def replan_weeks(db: Session, weeks: set[date], *, now: datetime) -> dict:
+def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_tentative: bool = False) -> dict:
     now = utc(now)
     profile = get_profile(db)
     zone = ZoneInfo(profile.timezone)
@@ -62,7 +62,8 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime) -> dict:
                 continue
             prep, home = expanded(session, profile)
             valid = within_bounds(session, profile) and not any(overlaps(prep, home, b) for b in busy) and all(recovery_ok(session.planned_start_at, session.planned_end_at, interval(other), profile) for other in kept)
-            if valid and sum(week_of(s.planned_start_at, zone) == week for s in kept) < profile.weekly_max_sessions:
+            reconsider = reconsider_tentative and session.status == "TENTATIVE" and session.planned_start_at > now + timedelta(hours=48)
+            if valid and not reconsider and sum(week_of(s.planned_start_at, zone) == week for s in kept) < profile.weekly_max_sessions:
                 kept.append(session)
             else:
                 invalid.append(session)
@@ -83,12 +84,17 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime) -> dict:
             if index < len(invalid):
                 session = invalid[index]
                 old_start = session.planned_start_at
-                cancel_session_jobs(db, session.id, now=now)
+                same_time = session.planned_start_at == slot.start and session.planned_end_at == slot.end
+                if same_time and session.crowd_prediction == slot.crowd and session.crowd_confidence == slot.confidence:
+                    continue  # Reconsidering unchanged tentative slots is not a new action.
+                if not same_time:
+                    cancel_session_jobs(db, session.id, now=now)
                 session.source_revision += 1
             else:
                 session = PlannedSession(week_id=week.isoformat(), workout_template_id=template_id)
                 db.add(session)
                 old_start = None
+                same_time = False
             session.planned_start_at, session.planned_end_at = slot.start, slot.end
             session.prep_start_at, session.leave_home_at = slot.prep_start, slot.leave_home
             session.expected_finish_at = slot.end
@@ -102,7 +108,7 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime) -> dict:
                 session.workout_plan_json |= {"crowd_source": "demo_fixture" if crowd_model.predict(slot.start)["demo"] else "local_crowd_model", "crowd_score_kind": "personal_perceived_crowd_proxy"}
             queue_session_write(db, session, now=now)
             schedule_session_jobs(db, session, now=now)
-            changed.append({"session_id": session.id, "from": old_start.isoformat() if old_start else None, "to": slot.start.isoformat(), "action": "moved" if old_start else "replacement"})
+            changed.append({"session_id": session.id, "from": old_start.isoformat() if old_start else None, "to": slot.start.isoformat(), "action": "forecast_updated" if same_time else "moved" if old_start else "replacement"})
         for session in invalid[len(planned.sessions):]:
             session.status = "CANCELLED"
             session.source_revision += 1
