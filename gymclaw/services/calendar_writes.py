@@ -44,6 +44,8 @@ def queue_session_write(db: Session, session: PlannedSession, *, now: datetime, 
         return None
     action = "DELETE" if session.status == "CANCELLED" else "UPDATE" if session.calendar_event_id else "CREATE"
     if action == "DELETE" and not session.calendar_event_id:
+        for old in db.scalars(select(CalendarWrite).where(CalendarWrite.planned_session_id == session.id, CalendarWrite.status == "PENDING")):
+            old.status, old.handled_at = "CANCELLED", now
         return None
     snapshot = db.get(CalendarEventSnapshot, session.calendar_event_id) if session.calendar_event_id else None
     if action != "CREATE" and (snapshot is None or not snapshot.etag or not snapshot.gymclaw_managed or snapshot.gymclaw_session_id != session.id):

@@ -1,4 +1,4 @@
-"""Local durable job dispatch. External automation/message delivery is not implemented."""
+"""Durable reminders and local debug dispatch; runtime handles external delivery."""
 from datetime import datetime
 
 from sqlalchemy import select
@@ -21,6 +21,10 @@ def cancel_session_jobs(db: Session, session_id: str, *, now: datetime):
 
 def schedule_session_jobs(db: Session, session: PlannedSession, *, now: datetime):
     if session.status != "COMMITTED":
+        return
+    from gymclaw.services.availability import session_blocked
+    if session_blocked(db, session):
+        cancel_session_jobs(db, session.id, now=now)
         return
     existing = list(db.scalars(select(NotificationJob).where(NotificationJob.planned_session_id == session.id)))
     desired = [("GET_READY", session.prep_start_at, "Gym soon. Start getting ready now."), ("LEAVE", session.leave_home_at, "Leave now. Gym session starts soon."), ("SESSION_START", session.planned_start_at, "Gym session begins. Start workout when you arrive.")]

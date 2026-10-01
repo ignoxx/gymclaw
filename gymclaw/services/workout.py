@@ -226,6 +226,9 @@ def start(db: Session, template_id: str, *, now: datetime, request_id: str, plan
     now = utc(now)
 
     def action():
+        from gymclaw.services.availability import blocks
+        if blocks(db, now, now + timedelta(microseconds=1)):
+            raise DomainError("WORKOUT_UNAVAILABLE", "User availability override active; remove/change it explicitly before starting")
         if db.scalar(select(WorkoutSession).where(WorkoutSession.status != "PLAN_UPDATED")):
             raise DomainError("WORKOUT_ALREADY_ACTIVE", "Finish existing workout before starting another")
         template = get_template(db, template_id)

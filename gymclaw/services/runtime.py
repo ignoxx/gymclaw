@@ -75,6 +75,9 @@ def stale_reason(db: Session, job: NotificationJob, *, now: datetime, delivery: 
     if job.status == "CANCELLED":
         return "cancelled"
     if job.kind == "REST":
+        from gymclaw.services.availability import blocks
+        if blocks(db, now, now + timedelta(microseconds=1)):
+            return "availability_override"
         workout = db.get(WorkoutSession, job.workout_session_id)
         if workout is None or workout.status in {"WORKOUT_COMPLETE", "POST_ANALYSIS", "PLAN_UPDATED"}:
             return "workout_finished"
@@ -87,6 +90,9 @@ def stale_reason(db: Session, job: NotificationJob, *, now: datetime, delivery: 
         planned = db.get(PlannedSession, job.planned_session_id)
         if planned is None or planned.status != "COMMITTED" or planned.source_revision != job.payload_json.get("revision"):
             return "plan_changed"
+        from gymclaw.services.availability import session_blocked
+        if session_blocked(db, planned):
+            return "availability_override"
         if now > job.due_at + timedelta(minutes=15):
             return "reminder_expired"
     return None

@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from gymclaw.availability_cli import register_parser as register_availability_parser, availability_command
 from gymclaw.db import make_engine, initialize
 from gymclaw.calendar_cli import calendar_command, publish_command
 from gymclaw.runtime_cli import register_parser as register_runtime_parser, runtime_command
@@ -35,6 +36,7 @@ def parser():
     groups = root.add_subparsers(dest="group", required=True, parser_class=Parser)
     register_runtime_parser(groups)
     register_crowd_parser(groups)
+    register_availability_parser(groups)
     db = groups.add_parser("db", add_help=False)
     db.add_argument("operation", choices=["init"])
     profile = groups.add_parser("profile", add_help=False)
@@ -151,7 +153,10 @@ def main(argv=None) -> int:
             data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         else:
             with Session(engine) as db, db.begin():
-                if args.group == "profile":
+                if args.group == "availability":
+                    result = availability_command(db, args)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "profile":
                     if args.operation == "update":
                         if args.data is None:
                             raise ValueError("profile update requires --data")

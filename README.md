@@ -358,6 +358,22 @@ read failure prevents rolling changes. Known labels can reconsider distant tenta
 slots; committed/user-locked slots do not move for crowd preference alone. Changed
 calendar consequences and Sunday briefings use same confirmed-delivery/unknown-send rules.
 
+### Travel / illness overrides
+
+`availability add --kind SICK --through YYYY-MM-DD --request-id ID` pauses from now
+through inclusive local date. Travel uses `--kind TRAVEL --from-date YYYY-MM-DD
+--through YYYY-MM-DD`; offset timestamps use `--start`/`--end` (exclusive end).
+Overrides persist across restarts, participate in prep/travel/recovery planning and
+expire automatically. No remote blocker events or fabricated workout logs.
+
+`availability list` inspects state; `availability remove --block-id ID --request-id ID`
+retracts early. Exact request retries replay; changed intent rejects reused ID.
+Manual calendar locks stay visible, but conflicting reminders/new starts are blocked.
+Cancel locked slots only after explicit permission using `--cancel-locked` (records
+superseding user intent). Owned calendar deletions remain queued behind publication
+approval. Active workout history is preserved; suspended rest guidance does not silently
+finish an open workout. Resolve its outstanding exercises explicitly before next start.
+
 ## Code
 
 - `gymclaw/models/__init__.py`: SQLAlchemy schema and UTC timestamp type.

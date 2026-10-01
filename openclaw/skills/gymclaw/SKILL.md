@@ -54,7 +54,19 @@ Activated runtime uses actual time; never supply simulated `--now` to live callb
 - `workout finish --workout-id ID --request-id ID` saves audit/progression only
   after queue resolves. `audit workout --workout-id ID` reads saved summary.
 
-## Calendar and agent work
+## Availability overrides
+----------------------
+For user travel/illness, persist `availability add --kind TRAVEL|SICK --through
+YYYY-MM-DD --request-id ID`; `--through` is inclusive in profile timezone. Travel
+start date uses `--from-date`; exact offsets use `--start`/exclusive `--end`.
+Clarify ambiguous dates. Never diagnose or declare recovery. Window expiry allows
+normal planning, not a medical claim. Inspect `locked_conflicts`; ask before using
+`--cancel-locked`. Override suppresses conflicting reminders/new starts and rest
+prompts; preserve actual logs and explicitly resolve any open workout. Sync runtime
+after successful changes if activated. `availability remove --block-id ID
+--request-id ID` retracts early. No remote publication permission implied.
+
+Calendar and agent work
 
 `calendar sync` detects manual moves/resizes/deletes, updates reminders and repairs
 unlocked invalid sessions. `calendar get-week --week-start YYYY-MM-DD` reads state.

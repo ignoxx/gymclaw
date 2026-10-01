@@ -73,6 +73,18 @@ class LearnedPreference(Base):
     source: Mapped[str]
 
 
+class AvailabilityBlock(Base):
+    __tablename__ = "availability_block"
+    __table_args__ = (CheckConstraint("end_at > start_at"), CheckConstraint("kind IN ('TRAVEL','SICK','UNAVAILABLE')"), CheckConstraint("status IN ('ACTIVE','RETRACTED')"))
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    start_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    end_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    kind: Mapped[str]
+    status: Mapped[str] = mapped_column(default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    retracted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
 class CalendarEventSnapshot(Base):
     __tablename__ = "calendar_event_snapshot"
     calendar_event_id: Mapped[str] = mapped_column(primary_key=True)
