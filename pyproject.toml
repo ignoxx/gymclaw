@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gymclaw"
+version = "0.1.0"
+description = "Deterministic training domain for GymClaw"
+requires-python = ">=3.12"
+dependencies = ["sqlalchemy>=2.0,<3", "alembic>=1.14,<2", "pydantic>=2.10,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["gymclaw*"]
+
+[tool.setuptools.package-data]
+gymclaw = ["migrations/script.py.mako"]
+
+[tool.pytest.ini_options]
+testpaths = ["gymclaw/tests"]
