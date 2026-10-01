@@ -3,4 +3,9 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# In managed NemoClaw, logical gymclaw profile uses this sandbox's owned Gateway.
+# Metadata check only; config/credential contents are never read by wrapper.
+if [[ "$ROOT" == /sandbox/.openclaw/workspace/* && -f /sandbox/.openclaw/openclaw.json ]]; then
+  export OPENCLAW_CONFIG_PATH=/sandbox/.openclaw/openclaw.json
+fi
 exec "$ROOT/.venv/bin/python" -m gymclaw.cli "$@"

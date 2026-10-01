@@ -3,7 +3,9 @@
 Domain changes commit before outbound sends. SENDING/UNKNOWN never auto-retry:
 Telegram has no exactly-once send key, so a lost response needs human resolution.
 """
+from dataclasses import replace
 from datetime import datetime, timedelta
+import os
 from hashlib import sha256
 from pathlib import Path
 import sys
@@ -124,6 +126,11 @@ def automation_plan(db: Session, engine, *, now: datetime, recipient: str, profi
         at = max(job.due_at, now + timedelta(seconds=2))
         specs.append(AutomationSpec(name=prefix + "notification:" + job.id, at=at.isoformat(), cwd=str(project_root.absolute()),
             argv=base + ("runtime", "fire", "--job-id", job.id, "--allow-messages") + route))
+    config = os.environ.get("OPENCLAW_CONFIG_PATH")
+    if config:
+        # Managed NemoClaw owns config; callbacks retain its path, never credentials.
+        config = str(Path(config).absolute())
+        specs = [replace(spec, env=(("OPENCLAW_CONFIG_PATH", config),)) for spec in specs]
     return specs
 
 
@@ -164,7 +171,7 @@ def sync_automations(engine, provider: AutomationProvider, *, now: datetime, rec
             raise DomainError("AUTOMATION_DUPLICATE", "Duplicate managed automation; inspect dedicated runtime before changing it")
         seen.add(name)
         payload = row.get("payload", {})
-        if payload.get("kind") != "command" or payload.get("argv") != list(spec.argv) or payload.get("cwd") != spec.cwd or row.get("delivery", {}).get("mode") != "none":
+        if payload.get("kind") != "command" or payload.get("argv") != list(spec.argv) or payload.get("cwd") != spec.cwd or (payload.get("env") or {}) != dict(spec.env) or row.get("delivery", {}).get("mode") != "none":
             raise DomainError("AUTOMATION_DRIFT", "Managed automation command/route changed; explicit operator review required")
         schedule = row.get("schedule", {})
         expected_interval = {"60s": 60000, "15m": 900000}.get(spec.every)

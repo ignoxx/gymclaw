@@ -1,14 +1,28 @@
 # OpenClaw activation handoff
 
-Prepared, **not activated**. No OpenClaw/NemoClaw install, runtime config changes,
-Telegram sends or calendar publication were performed for this phase.
+Local NemoClaw sandbox installed; owner confirmed Telegram/OpenRouter chat works.
+GymClaw domain activation still pending. No autonomous workout timers or calendar
+publication enabled. Existing host DB/credential files remain untouched.
 
 ## Readiness
 
-Read-only inspection: macOS arm64, Docker server ready, Node 25.2.1,
+Initial read-only inspection: macOS arm64, Docker server ready, Node 25.2.1,
 OpenClaw/NemoClaw absent. Current OpenClaw docs require Node **24.16+ or 26.1+**
 (recommend 26); Node 25 is outside documented support. Install/choose supported
 Node only after owner approval. Do not change another project's runtime.
+
+Verified local setup: isolated Node 26.10.0, Colima 0.10.3, NemoClaw v0.0.124,
+managed OpenClaw 2026.7.1, Python 3.13.5. Adapter uses `cron` command, supported by
+bundled release (including command argv, declaration keys and env). Newer
+`automations` command name is absent; no runtime upgrade required. Read-only cron
+listing/profile routing verified. Timer execution/delivery acceptance still pending.
+
+Code/Linux venv installed under `/sandbox/.openclaw/workspace/gymclaw`, inside
+manifest's backed-up workspace. All 134 tests pass there. Recreate venv when base
+Python changes; do not move macOS venv to VPS. Repo wrapper selects managed config
+path by sandbox location, without reading credentials; declared callbacks retain
+that path through `--command-env`. Secrets themselves never enter job argv/env.
+Host DB copy, workspace selection and domain activation are remaining setup steps.
 
 Architecture: OpenClaw scheduler → exact Python CLI argv → private SQLite domain
 transaction/outbox → OpenClaw Telegram message CLI → persisted delivery receipt.
@@ -110,10 +124,12 @@ before activation; contracts below are researched/fixture-tested, not live-teste
    longer reads HEARTBEAT.md: copy checklist to system-owned monitor scratch:
 
    ```text
-   openclaw --profile gymclaw automations list --all --json
-   openclaw --profile gymclaw automations scratch HEARTBEAT_JOB_ID --file ABSOLUTE_REPO_PATH/openclaw/HEARTBEAT.md
+   openclaw --profile gymclaw cron list --all --json
+   openclaw --profile gymclaw cron scratch HEARTBEAT_JOB_ID --file ABSOLUTE_REPO_PATH/openclaw/HEARTBEAT.md
    ```
 
+   This heartbeat contract targets newer docs. Verify `cron scratch --help` against
+   installed release before using it; bundled release heartbeat is not yet activated.
    Choose correct heartbeat job ID from listing, not a fabricated ID. With
    `lightContext: true`, full workspace/skill is absent; leave false unless
    scratch includes all required tool instructions. Heartbeat is not a rest timer.

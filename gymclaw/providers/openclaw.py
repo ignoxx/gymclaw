@@ -30,6 +30,7 @@ class AutomationSpec:
     every: str | None = None
     cron: str | None = None
     timezone: str | None = None
+    env: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         if sum(value is not None for value in (self.at, self.every, self.cron)) != 1:
@@ -70,16 +71,18 @@ class OpenClawProvider:
         return self.transport(["openclaw", "--profile", self.profile, *args, "--json"])
 
     def list_jobs(self) -> list[dict]:
-        value = self.call("automations", "list", "--all")
+        value = self.call("cron", "list", "--all")
         jobs = value.get("jobs")
         if not isinstance(jobs, list) or any(not isinstance(j, dict) or not isinstance(j.get("id"), str) or not isinstance(j.get("name"), str) for j in jobs):
             raise DomainError("OPENCLAW_RESPONSE_UNKNOWN", "Automation list schema unrecognized; nothing reconciled")
         return jobs
 
     def create(self, spec: AutomationSpec) -> str:
-        args = ["automations", "add", "--name", spec.name, "--declaration-key", spec.name,
+        args = ["cron", "add", "--name", spec.name, "--declaration-key", spec.name,
                 "--command-argv", json.dumps(spec.argv), "--command-cwd", spec.cwd,
                 "--session", "isolated", "--no-deliver", "--timeout-seconds", "120"]
+        for key, value in spec.env:
+            args += ["--command-env", f"{key}={value}"]
         if spec.at:
             args += ["--at", spec.at, "--delete-after-run"]
         elif spec.every:
@@ -92,7 +95,7 @@ class OpenClawProvider:
         return value["id"]
 
     def remove(self, job_id: str):
-        self.call("automations", "remove", job_id)
+        self.call("cron", "remove", job_id)
 
     def send(self, recipient: str, message: str) -> str:
         validate_route(self.profile, recipient)
