@@ -69,7 +69,10 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime) -> dict:
         deleted = tuple(interval(s) for s in all_rows if s.workout_plan_json.get("deleted_by_user"))
         horizon = now + timedelta(days=10)
         unavailable = deleted + ((Interval(start=horizon, end=end),) if horizon < end else ())
-        planned = plan_week(profile, week, existing=tuple(interval(s) for s in kept), busy=busy, unavailable=unavailable, now=now)
+        from gymclaw.services.crowd import CrowdModel, planning_signals
+        signals = planning_signals(db, week, now=now)
+        crowd_model = CrowdModel(db, now=now) if signals else None
+        planned = plan_week(profile, week, existing=tuple(interval(s) for s in kept), busy=busy, unavailable=unavailable, signals=signals, now=now)
         source_template = next((s for s in week_rows if s.workout_template_id), None)
         if source_template is None:
             # Existing legacy plans may still be moved, but no unknown workout is fabricated.
@@ -94,6 +97,9 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime) -> dict:
             session.week_id = week.isoformat()
             db.flush()
             allocation(db, session)
+            session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if not k.startswith("crowd_")}
+            if slot.crowd is not None:
+                session.workout_plan_json |= {"crowd_source": "demo_fixture" if crowd_model.predict(slot.start)["demo"] else "local_crowd_model", "crowd_score_kind": "personal_perceived_crowd_proxy"}
             queue_session_write(db, session, now=now)
             schedule_session_jobs(db, session, now=now)
             changed.append({"session_id": session.id, "from": old_start.isoformat() if old_start else None, "to": slot.start.isoformat(), "action": "moved" if old_start else "replacement"})

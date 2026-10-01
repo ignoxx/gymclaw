@@ -56,13 +56,12 @@ def allocation(db: Session, session: PlannedSession):
     template = Template.model_validate(snapshot) if snapshot else get_template(db, session.workout_template_id)
     template = template.model_copy(update={"set_duration_seconds": ceil(historical_set_duration(db, template.set_duration_seconds))})
     budget = int((session.planned_end_at - session.planned_start_at).total_seconds())
-    crowd_source = session.workout_plan_json.get("crowd_source")
+    crowd_metadata = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
     try:
         session.workout_plan_json = compress_template(template, get_profile(db), budget)
     except DomainError as error:
         session.workout_plan_json = {"template": template.model_dump(mode="json"), "budget_seconds": budget, "error": error.code}
-    if crowd_source:
-        session.workout_plan_json = session.workout_plan_json | {"crowd_source": crowd_source}
+    session.workout_plan_json |= crowd_metadata
 
 
 def reconcile_event(db: Session, event: CalendarEvent, *, now: datetime) -> tuple[set[date], list[dict]]:

@@ -61,15 +61,21 @@ def schedule_week(db: Session, week_start: date, *, now: datetime, fixture: Plan
     end = start + timedelta(days=9)
     busy = fixture.busy + busy_intervals(db, start, end)
     deleted = tuple(Interval(start=s.planned_start_at, end=s.planned_end_at) for s in db.scalars(select(PlannedSession).where(PlannedSession.status == "CANCELLED")) if s.workout_plan_json.get("deleted_by_user"))
-    plan = plan_week(profile, week_start, busy=busy, unavailable=fixture.unavailable + deleted, existing=existing, signals=fixture.signals, now=now, config=fixture.config)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must include timezone")
+    from gymclaw.services.crowd import CrowdModel, planning_signals
+    signals = fixture.signals or planning_signals(db, week_start, now=now, step_minutes=fixture.config.step_minutes)
+    model = CrowdModel(db, now=now) if signals and not fixture.signals else None
+    plan = plan_week(profile, week_start, busy=busy, unavailable=fixture.unavailable + deleted, existing=existing, signals=signals, now=now, config=fixture.config)
     template = get_template(db, template_id) if template_id else None
     if template:
         template = template.model_copy(update={"set_duration_seconds": ceil(historical_set_duration(db, template.set_duration_seconds))})
     created = []
     for slot in plan.sessions:
         row = PlannedSession(week_id=week_start.isoformat(), workout_template_id=template_id, workout_plan_json=compress_template(template, profile, int((slot.end - slot.start).total_seconds())) if template else {}, planned_start_at=slot.start, planned_end_at=slot.end, prep_start_at=slot.prep_start, leave_home_at=slot.leave_home, expected_finish_at=slot.end, crowd_prediction=slot.crowd, crowd_confidence=slot.confidence)
-        if slot.crowd is not None and fixture.signals:
-            row.workout_plan_json = row.workout_plan_json | {"crowd_source": "demo_fixture"}
+        if slot.crowd is not None:
+            demo = bool(fixture.signals) or model.predict(slot.start)["demo"]
+            row.workout_plan_json = row.workout_plan_json | {"crowd_source": "demo_fixture" if demo else "local_crowd_model", "crowd_score_kind": "personal_perceived_crowd_proxy"}
         db.add(row)
         db.flush()
         created.append(row)

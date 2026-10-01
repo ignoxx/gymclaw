@@ -254,9 +254,24 @@ class CrowdObservation(Base):
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime)
     source: Mapped[str]
     raw_value: Mapped[float]
-    normalized_value: Mapped[float]
-    freshness_seconds: Mapped[int]
+    normalized_value: Mapped[float | None]
+    freshness_seconds: Mapped[int | None]
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class CrowdSourceState(Base):
+    """Retrieval health is separate from unknown provider/cache freshness."""
+    __tablename__ = "crowd_source_state"
+    source: Mapped[str] = mapped_column(primary_key=True)
+    provider_id: Mapped[str]
+    last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_failure_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_error_code: Mapped[str | None]
+    last_change_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_raw_value: Mapped[float | None]
+    consecutive_failures: Mapped[int] = mapped_column(default=0)
+    reliability: Mapped[float] = mapped_column(default=0.5)
+    evidence_count: Mapped[int] = mapped_column(default=0)
 
 
 class CrowdFeedback(Base):
@@ -266,6 +281,7 @@ class CrowdFeedback(Base):
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime)
     rating: Mapped[str]
     normalized_score: Mapped[float]
+    features_json: Mapped[dict] = mapped_column(JSON, default=dict)
     waited_for_equipment_count: Mapped[int] = mapped_column(default=0)
     notes: Mapped[str | None]
 

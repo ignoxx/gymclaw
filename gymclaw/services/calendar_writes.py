@@ -24,7 +24,7 @@ def event_body(db: Session, session: PlannedSession) -> dict:
     profile = get_profile(db)
     zone = ZoneInfo(profile.timezone)
     template_name = session.workout_plan_json.get("template", {}).get("name", "Workout")
-    crowd = f"{session.crowd_prediction:.0%}" if session.crowd_prediction is not None else "Unknown"
+    crowd = f"{session.crowd_prediction:.2f}/1 personal score (heuristic)" if session.crowd_prediction is not None and session.workout_plan_json.get("crowd_score_kind") == "personal_perceived_crowd_proxy" else f"{session.crowd_prediction:.0%}" if session.crowd_prediction is not None else "Unknown"
     if session.crowd_prediction is not None and session.workout_plan_json.get("crowd_source") == "demo_fixture":
         crowd += " (demo fixture)"
     return {

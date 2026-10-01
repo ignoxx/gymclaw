@@ -67,5 +67,19 @@ shows delivery receipts; SENT is confirmed, SENDING/UNKNOWN is ambiguous. Never
 blindly retry/resolve ambiguous sends; owner must inspect Telegram and confirm
 sender process stopped first. Do not duplicate callback-owned notifications.
 
-Crowd polling/feedback tools will be added independently. Until available, do not
-claim personalized crowd predictions or actual people counts. No medical advice.
+## Crowd
+
+`crowd poll` reads public MySports reported active count; not guaranteed live occupancy.
+`crowd get-source-health` distinguishes retrieval age from unknown backend freshness.
+`crowd predict --at TIMESTAMP_WITH_OFFSET` reads label-calibrated personal 0–1 score
+and heuristic confidence. Never call score an occupancy percentage or validated accuracy.
+No labels may mean unknown score despite available raw count. Google acquisition remains
+unconfigured; don't invent Popular Times data or future MySports attendance.
+
+At arrival ask how busy it feels: Empty/Fine/Busy/Packed. Persist with
+`crowd record-feedback --workout-id ID --rating busy --request-id USER_ACTION_ID`.
+Defaults to actual recorded arrival time, pairs only prior recent observations. Can
+also ask after finish; audit then reflects feedback. Never fill feedback without user
+answer. Replan event is durable; normal future planning now uses stored labels.
+
+No medical advice.

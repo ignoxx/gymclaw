@@ -20,9 +20,12 @@ Autonomous training agent. Product source of truth: [SPEC.md](SPEC.md).
   and stable declaration-key reconciliation; repo-local workspace/skill and setup guide.
 - Durable Telegram delivery outbox: commit before send, confirmed receipts, stale suppression,
   fail-closed ambiguous sends. Synthetic runtime/provider tests; activation not performed.
+- MySports reported active counts, durable retrieval health/change windows, arrival labels,
+  conservative personalized calibration/source reliability, crowd-aware future slot selection.
+- Second-source Google busyness contract + explicit fixtures/unavailable adapter, not scraping.
 - JSON CLI, independent of OpenClaw; external providers replaceable with explicit fixtures.
 
-This is **not yet the complete MVP**. Crowd learning, weekly runtime workflow and live
+This is **not yet the complete MVP**. Weekly runtime workflow and live
 OpenClaw/Telegram activation remain unfinished. `calendar publish --allow-writes` can
 create/update/delete owned Google events; ordinary planning/sync and runtime watcher
 never write remotely. `notifications due` is local-only debug dispatch. Activated
@@ -256,6 +259,63 @@ rest dispatch, equipment reordering, substitution, finish, audit, and persisted 
 pytest -q gymclaw/tests/test_workout_cli.py
 ```
 
+## Crowd signals / learning
+
+```text
+python -m gymclaw.cli crowd poll
+python -m gymclaw.cli crowd get-source-health
+python -m gymclaw.cli crowd record-feedback --workout-id ID --rating busy --request-id UNIQUE_ID
+python -m gymclaw.cli crowd predict --at 2026-10-21T20:00:00+02:00
+```
+
+`poll` performs public GET to MySports `active-checkin` with `x-tenant`, no SESSION
+cookie or token. Observed undocumented route; no live request was performed during
+implementation. Studio/tenant defaults follow handoff and can be changed via
+`GYMCLAW_MYSPORTS_STUDIO_ID`/`GYMCLAW_MYSPORTS_TENANT` before first poll. DB binds source
+identity to prevent silent studio/provider mixing. [Evidence/limits](docs/crowd.md).
+
+Save every **reported active count** with local retrieval time. MySports has no source
+observation time/cache age: freshness stays null, never "0 seconds/live". Changed
+counts give possible change windows, not proven refresh cadence. Count and percentage
+remain distinct. `/today` dated percentages and `/historic/week` undated profiles are
+not collected or used as measured future attendance. No count-to-percentage conversion.
+
+User ratings map EMPTY/FINE/BUSY/PACKED to personal 0–1 score, not physical occupancy.
+Feedback defaults to workout arrival time; `--observed-at` can describe another time
+within that visit. Only prior readings retrieved within 30 min pair with label; future
+polls are excluded. Exact request retry replays; second distinct label for same visit
+fails. Audits reflect labels supplied after completion. Source weights use prediction
+error against later feedback, not in-sample fits. Learned discomfort summary needs
+at least three matching busy/packed visits.
+
+Before labels, reported count is shown but **not normalized**; forecast may be unknown.
+Under 10 paired labels use conservative neighbor heuristic; 10+ use small monotonic
+regression. Future slots combine same-weekday/hour locally collected count history,
+Google proxy if provided, and user slot labels. Repeated polls count as one dated-hour
+mean rather than independent days. Confidence is heuristic evidence strength, **not
+validated forecast accuracy**. Normal planner/replanner uses these signals; explicit
+planning fixtures override them. Locked sessions remain untouched.
+
+Google source has typed current/Popular Times interface but no invented acquisition
+API. `crowd poll --source GOOGLE` fails visibly and persists health unless a verified
+adapter is supplied. Source outages retain observations/model and reduce confidence.
+
+Explicit crowd fixture format:
+
+```json
+{"source":"GYM_API","metric":"reported_active_count","raw_value":7}
+```
+
+```text
+python -m gymclaw.cli --db-url sqlite:///data/crowd-demo.db crowd poll --fixture PATH.json --now TIMESTAMP_WITH_OFFSET
+```
+
+Requires initialized isolated DB. Fixtures cannot enter live Google-bound DB and stay
+marked demo in predictions/calendar descriptions. Live reads reject artificial `--now`.
+For approved OpenClaw polling, schedule command payload every 15m using exact absolute
+Python/DB argv plus `crowd poll --during-gym-hours`, `--no-deliver`; latter flag skips
+outside configured workout hours without HTTP. This job is not installed automatically.
+
 ## OpenClaw / Telegram activation
 
 [Activation handoff](openclaw/README.md) covers dedicated profile, secure owner-only
@@ -292,8 +352,10 @@ operation, do not use local-only `notifications due` to bypass delivery outbox.
 - `gymclaw/services/calendar_writes.py`, `replanning.py`: owned outbox and plan repair.
 - `gymclaw/services/compression.py`: deterministic workout time allocation.
 - `gymclaw/providers/openclaw.py`, `services/runtime.py`: scoped scheduler and durable delivery.
+- `gymclaw/providers/mysports.py`, `providers/crowd.py`, `services/crowd.py`: public signals,
+  source health, arrival labels, calibration and planner integration.
 - `openclaw/`: repo-local workspace, skill and activation handoff.
-- `gymclaw/cli.py`, `calendar_cli.py`, `runtime_cli.py`: JSON adapters.
+- `gymclaw/cli.py`, `calendar_cli.py`, `runtime_cli.py`, `crowd_cli.py`: JSON adapters.
 
 Services accept explicit time and typed inputs, need no agent runtime. CLI owns
 transactions; service callers must commit/rollback. Use `alembic revision --autogenerate`

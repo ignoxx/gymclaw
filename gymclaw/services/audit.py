@@ -11,11 +11,12 @@ from gymclaw.services.workout import UNRESOLVED, cancel_rest, emit, exercises, l
 
 
 def get_audit(db: Session, workout_id: str) -> dict:
-    load_workout(db, workout_id)
+    workout = load_workout(db, workout_id)
     for event in db.scalars(select(AgentEvent).where(AgentEvent.type == "workout.completed")):
         result = event.payload_json.get("result", {}).get("data", {})
         if result.get("workout_id") == workout_id:
-            return result
+            # Arrival label may be supplied after finish; don't return stale feedback.
+            return result | {"crowd_feedback": workout.crowd_feedback}
     raise DomainError("AUDIT_NOT_READY", "Finish workout before requesting audit")
 
 
