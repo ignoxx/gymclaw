@@ -7,7 +7,7 @@ name = "gymclaw"
 version = "0.1.0"
 description = "Deterministic training domain for GymClaw"
 requires-python = ">=3.12"
-dependencies = ["sqlalchemy>=2.0,<3", "alembic>=1.14,<2", "pydantic>=2.10,<3"]
+dependencies = ["sqlalchemy>=2.0,<3", "alembic>=1.14,<2", "pydantic>=2.10,<3", "google-auth>=2.38,<3", "google-auth-oauthlib>=1.2,<2", "requests>=2.32,<3", "python-dateutil>=2.9,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]

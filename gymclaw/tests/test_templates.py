@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from gymclaw.db import initialize, make_engine
-from gymclaw.models import WorkoutSession, WorkoutExercise, SetLog
+from gymclaw.models import NotificationJob, WorkoutSession, WorkoutExercise, SetLog
 from gymclaw.services.templates import Template, get_template, import_template
 
 
@@ -32,6 +32,25 @@ def test_template_roundtrip_and_validation(tmp_path):
             modified["alternatives"][0]["id"] = raw["exercises"][0]["id"]
         with pytest.raises(ValidationError):
             Template.model_validate(modified)
+
+
+def test_calendar_upgrade_preserves_existing_rest_jobs(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'rest.db'}")
+    config = Config("alembic.ini")
+    with engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "f546f352a874")
+        connection.exec_driver_sql("INSERT INTO workout_session (id,status,waited_for_equipment_count) VALUES ('w','RESTING',0)")
+        connection.exec_driver_sql("INSERT INTO workout_exercise (id,workout_session_id,exercise_id,position,status,planned_working_sets,rep_min,rep_max,target_weight,rest_seconds) VALUES ('e','w','bench',0,'ACTIVE',3,8,10,80,150)")
+        connection.exec_driver_sql("INSERT INTO set_log (id,workout_exercise_id,set_number,set_type,weight,reps,logged_at) VALUES ('s','e',1,'WORKING',80,9,'2026-10-01 10:00:00')")
+        connection.exec_driver_sql("INSERT INTO notification_job (id,kind,workout_session_id,set_log_id,due_at,status,payload_json) VALUES ('j','REST','w','s','2026-10-01 10:02:30','PENDING','{}')")
+    initialize(engine)
+    with Session(engine) as db:
+        job = db.get(NotificationJob, "j")
+        assert job.workout_session_id == "w" and job.planned_session_id is None
+        assert job.status == "PENDING" and job.set_log_id == "s"
+        assert not db.connection().exec_driver_sql("PRAGMA foreign_key_check").all()
+    engine.dispose()
 
 
 def test_upgrade_preserves_existing_workout_and_logs(tmp_path):

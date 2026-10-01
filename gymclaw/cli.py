@@ -10,6 +10,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from gymclaw.db import make_engine, initialize
+from gymclaw.calendar_cli import calendar_command, publish_command
+from gymclaw.services.calendar import get_week
+from gymclaw.services.replanning import replan_weeks
 from gymclaw.services.profile import get_profile, update_profile
 from gymclaw.services.scheduling import PlanningFixture, schedule_week
 from gymclaw.services import adaptation, audit, events, notifications, workout
@@ -34,11 +37,22 @@ def parser():
     profile.add_argument("operation", choices=["get", "update"])
     profile.add_argument("--data", help="JSON object with profile fields")
     planning = groups.add_parser("schedule", aliases=["planning"], add_help=False)
-    planning.add_argument("operation", choices=["plan-week"])
+    planning.add_argument("operation", choices=["plan-week", "replan"])
     planning.add_argument("--week-start", type=date.fromisoformat, required=True)
     planning.add_argument("--now", type=datetime.fromisoformat)
     planning.add_argument("--fixture", type=Path, help="Explicit demo input JSON, not live data")
     planning.add_argument("--request-id")
+    planning.add_argument("--template-id")
+    calendar = groups.add_parser("calendar", add_help=False)
+    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "pending-writes", "publish"])
+    calendar.add_argument("--calendar-id")
+    calendar.add_argument("--client-file", type=Path)
+    calendar.add_argument("--week-start", type=date.fromisoformat)
+    calendar.add_argument("--template-id")
+    calendar.add_argument("--request-id")
+    calendar.add_argument("--now", type=datetime.fromisoformat)
+    calendar.add_argument("--fixture", type=Path)
+    calendar.add_argument("--allow-writes", action="store_true")
     template = groups.add_parser("template", add_help=False)
     template.add_argument("operation", choices=["import", "get"])
     template.add_argument("--file", type=Path)
@@ -69,7 +83,7 @@ def parser():
     jobs = groups.add_parser("notifications", add_help=False)
     jobs.add_argument("operation", choices=["pending", "due"])
     jobs.add_argument("--now", type=datetime.fromisoformat)
-    for command in (db, profile, planning, template, training, report, inbox, jobs):
+    for command in (db, profile, planning, calendar, template, training, report, inbox, jobs):
         command.add_argument("--json", action="store_true")
     return root
 
@@ -120,6 +134,9 @@ def main(argv=None) -> int:
         if args.group == "db":
             initialize(engine)
             data = {"initialized": True}
+        elif args.group == "calendar" and args.operation == "publish":
+            result = publish_command(engine, args)
+            data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         else:
             with Session(engine) as db, db.begin():
                 if args.group == "profile":
@@ -132,6 +149,9 @@ def main(argv=None) -> int:
                         data = update_profile(db, changes).model_dump(mode="json")
                     else:
                         data = get_profile(db).model_dump(mode="json")
+                elif args.group == "calendar":
+                    result = calendar_command(db, args)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "template":
                     if args.operation == "import":
                         definition = Template.model_validate_json(required(args.file, "--file").read_text())
@@ -152,9 +172,14 @@ def main(argv=None) -> int:
                         result = notifications.dispatch_due(db, now=args.now or datetime.now(timezone.utc))
                         data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 else:
-                    fixture = PlanningFixture.model_validate_json(args.fixture.read_text()) if args.fixture else PlanningFixture()
                     now = args.now or datetime.now(timezone.utc)
-                    data = schedule_week(db, args.week_start, now=now, fixture=fixture, request_id=args.request_id)
+                    if args.operation == "replan":
+                        if args.fixture:
+                            raise ValueError("planning replan uses persisted calendar state; import calendar fixtures through calendar sync")
+                        data = get_week(db, args.week_start) | replan_weeks(db, {args.week_start}, now=now)
+                    else:
+                        fixture = PlanningFixture.model_validate_json(args.fixture.read_text()) if args.fixture else PlanningFixture()
+                        data = schedule_week(db, args.week_start, now=now, fixture=fixture, request_id=args.request_id, template_id=args.template_id)
         print(json.dumps({"ok": True, "data": data, "events": emitted_events, "user_message_hint": message_hint}, allow_nan=False))
         return 0
     except DomainError as error:

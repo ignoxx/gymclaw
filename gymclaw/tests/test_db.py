@@ -16,7 +16,7 @@ def test_migrations_and_restart(tmp_path):
     engine = make_engine(url)
     initialize(engine)
     initialize(engine)
-    assert len(inspect(engine).get_table_names()) == 14
+    assert len(inspect(engine).get_table_names()) == 17
     with engine.connect() as connection:
         assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
     with Session(engine) as db, db.begin():

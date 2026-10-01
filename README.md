@@ -13,12 +13,16 @@ Autonomous training agent. Product source of truth: [SPEC.md](SPEC.md).
 - Explicit first-primary warm-up, set parser/logging, durable rest outbox, dynamic ETA.
 - Busy-machine reorder/defer/retry, same-role substitution, explicit skips.
 - Double progression, persisted next weights, completion audit and replan events.
-- JSON CLI, independent of OpenClaw and external APIs.
+- Google desktop OAuth, incremental calendar sync, durable managed-event write outbox.
+- User move/resize/delete reconciliation, recovery-aware repair, workout compression.
+- Persistent get-ready/leave/start jobs with cancellation/replacement after calendar edits.
+- JSON CLI, independent of OpenClaw; external providers replaceable with explicit fixtures.
 
-This is **not yet the complete MVP**. Calendar writes/sync/reconciliation, external
-notification delivery, crowd learning and OpenClaw/Telegram integration remain unimplemented.
-Planning creates local tentative records, **not Google Calendar events**. Rest dispatch
-advances local state and emits instructions; it does **not** send Telegram messages.
+This is **not yet the complete MVP**. External notification delivery, crowd learning and
+OpenClaw/Telegram integration remain unimplemented. `calendar publish --allow-writes`
+can create/update/delete owned Google events; ordinary planning/sync never writes remotely.
+Notification dispatch advances local state and emits instructions; it does **not** send
+Telegram messages. Google code is fixture-tested; live OAuth/calendar validation is pending.
 
 ## Setup
 
@@ -33,8 +37,9 @@ pytest -q
 ```
 
 DB defaults to `data/gymclaw.db`. Override with `GYMCLAW_DB_URL` or global
-`--db-url`. SQLite only. `.env` is a template, not automatically loaded;
-export environment variables in your shell. Credentials and DB files are ignored.
+`--db-url`. SQLite only. `.env` is not automatically loaded; export variables in your
+shell (`set -a; source .env; set +a`). `.env.example` is a template; do not overwrite
+an existing configured `.env`. Credentials and DB files are ignored.
 
 ```bash
 python -m gymclaw.cli profile get
@@ -50,8 +55,8 @@ including validation errors; errors exit 1. Run `db init` before domain commands
 
 Fixtures explicitly contain demo free/busy and crowd predictions, never live observations.
 Fixture inputs and planning results are recorded in SQLite's agent event log. Fixture
-availability applies to that invocation only; real ongoing availability will come from
-persisted calendar/provider state. No external API behavior is simulated as real.
+availability applies to that invocation only. Ongoing availability comes from persisted
+calendar/provider state. No external API behavior is simulated as real.
 
 ## Planner decisions
 
@@ -75,6 +80,109 @@ persisted calendar/provider state. No external API behavior is simulated as real
   minimum is reported, never met by silently relaxing constraints.
 - Successful request ID replay returns original result. Reuse with changed week/fixture
   fails. Retry after profile/calendar changes requires a new request ID.
+
+## Google Calendar setup
+
+Use one dedicated Google calendar for both GymClaw workouts and the blockers you add.
+Other calendars are not read and cannot block scheduling. Add Google account to Apple
+Calendar and enable this calendar there; dragging/resizing/deleting then acts as user intent.
+
+1. Enable Google Calendar API in your Google Cloud project.
+2. Configure OAuth consent; add your Google account as test user while app is in testing.
+3. Create **Desktop app** OAuth client; keep downloaded JSON outside repo:
+   `~/.config/gymclaw/google-client.json` (or pass `--client-file`).
+4. Set `GOOGLE_CALENDAR_ID` in local `.env` to dedicated calendar ID, not `primary`.
+5. Run from repo root:
+
+```bash
+source .venv/bin/activate
+set -a; source .env; set +a
+python -m gymclaw.cli db init
+python -m gymclaw.cli calendar auth
+python -m gymclaw.cli calendar sync
+```
+
+Auth opens browser and waits up to 180 seconds on a loopback callback. It does not modify
+calendar events. OAuth tokens/refresh state live in SQLite, never in CLI output. DB is
+set to mode `0600`; tokens are plaintext local secrets, so keep DB/backups private. Client
+JSON stays outside repo. Reauthorize on `CALENDAR_AUTH_REQUIRED` (testing-mode tokens may
+expire). Browser/client failures return sanitized `CALENDAR_AUTH_FAILED`.
+
+**OAuth scope covers events on calendars you own, not one specific calendar.** GymClaw
+requests `calendar.events.owned`, not full calendar/ACL permissions. App pins requests
+to one explicit ID and binds DB to that ID/provider; mismatched IDs fail before API calls.
+There is no silent primary-calendar fallback. Use a separate DB for demo providers.
+
+### Preview, then explicit publication
+
+Set your real profile constraints and import an appropriate workout template first.
+Demo seed weights are illustrative, not your training history or personalized advice.
+Use a Monday date for `--week-start`:
+
+```text
+python -m gymclaw.cli calendar plan-week --week-start YYYY-MM-DD --template-id TEMPLATE_ID --request-id UNIQUE_ID
+python -m gymclaw.cli calendar pending-writes
+python -m gymclaw.cli calendar publish --allow-writes
+```
+
+`calendar plan-week` syncs first, creates local plans and queues writes. Inspect calendar
+ID/times/bodies in `pending-writes` before approving publication. `schedule plan-week`
+remains the provider-free local operation; optional `--template-id` adds compression plan.
+`calendar get-week --week-start ...` reads local state; `calendar replan --week-start ...`
+syncs then repairs it. `planning replan --week-start ...` repairs cached state without API.
+
+Sync accepts manual edits, recalculates prep/leave/finish, replaces local reminder jobs,
+locks edited sessions, compresses resized slots and repairs only invalid unlocked sessions.
+Locked recovery/blocker conflicts remain visible, not silently reverted. Slots too short
+for required movements stay edited and report explicit adjustment needed. Deletes leave
+tombstones; exact deleted events/slots are not recreated automatically. Metadata-only
+updates may refresh description/revision on locked events; never their chosen times/title.
+
+Upcoming sessions commit within 48 hours; get-ready/leave/start jobs become durable.
+`notifications due` emits local instructions only. No 60-second watcher or OpenClaw job
+is installed yet; integration will invoke `calendar sync` every 60 seconds and publish
+approved queued changes. No model calls are needed for polling.
+
+### Safety and retries
+
+- Full/incremental sync consumes all pages, persists token only after reconciliation;
+  HTTP 410 triggers a fresh full sync. Tombstones/history are retained for ownership and
+  non-recreation guarantees rather than destructively wiping domain state.
+- Busy all-day events use exclusive end date/calendar timezone. Recurring blockers and
+  moved/cancelled exceptions expand locally with DST-aware bounds; unsupported recurrence
+  fails visibly instead of scheduling over it. Transparent events do not block workouts.
+- Fetch failure leaves cached plan/token intact. Stable event IDs and persisted outbox
+  prevent duplicate creation after crashes. Lost patch responses are recognized by revision.
+- Writes require matching ownership/session ID and ETag. Concurrent edits cause conflict;
+  sync before retry, never force overwrite. Publication commits each result separately;
+  if request fails, prior applied writes remain recorded, unattempted writes stay queued.
+- OAuth, sync tokens and private calendar bodies never appear in tool results/event inbox.
+  Stored snapshots omit attendees/descriptions; generated gym write descriptions are public
+  to whoever can access that calendar, so contain only session timing/crowd summary.
+
+### Calendar fixtures
+
+Calendar fixtures are distinct from `config/demo_calendar.json` planner scoring inputs.
+Format is Google event payloads with explicit demo provider ID:
+
+```json
+{"calendar_id":"demo-calendar","events":[],"full":true}
+```
+
+```bash
+python -m gymclaw.cli --db-url sqlite:///data/calendar-demo.db db init
+python -m gymclaw.cli --db-url sqlite:///data/calendar-demo.db calendar sync --fixture PATH.json
+```
+
+Fixture commands require explicit global `--db-url`; DB cannot mix fixture and Google
+providers. `full: true` represents complete remote snapshot; absent cached events become
+cancelled. For an edit-only fixture, use `full: false`. Fixture publication is in-memory
+simulation persisted into local snapshots, never a Google call; it does not rewrite input
+fixture file. Tests inject providers/transports; live HTTP is blocked in pytest.
+
+```bash
+pytest -q gymclaw/tests/test_calendar_reconcile.py gymclaw/tests/test_calendar_cli.py
+```
 
 ## Workout CLI
 
@@ -117,7 +225,10 @@ request ID is needed to retry `finish`; new finish requests fail once audited.
 `--now` is optional for runtime, required timezone when supplied. Mutation times cannot
 move backwards. `workout start` expresses arrival intent; it does not invent prep/travel
 history. `--planned-session-id` optionally links an existing tentative/committed plan.
-Only one unfinished workout is allowed.
+Only one unfinished workout is allowed. Linked workouts use snapshotted calendar volume
+allocation; compression removes low-priority accessories first, preserves prerequisites and
+first primary warm-up, and does not lower the full-volume progression threshold.
+Compression uses configured or learned set durations, refreshed again at workout start.
 
 Warm-up never counts toward volume/progression. Working logs while warm-up is pending
 fail with `WARMUP_REQUIRED`. Set parsing accepts `80x9`, `80kg x9`, `9 reps at 80`;
@@ -151,7 +262,11 @@ pytest -q gymclaw/tests/test_workout_cli.py
 - `gymclaw/services/adaptation.py`: equipment queue and substitutions.
 - `gymclaw/services/progression.py`, `audit.py`: double progression and completion audit.
 - `gymclaw/services/notifications.py`, `events.py`: durable local job/event dispatch.
-- `gymclaw/cli.py`: JSON adapter.
+- `gymclaw/providers/`: typed calendar contract, Google REST/OAuth and demo provider.
+- `gymclaw/services/calendar.py`, `calendar_busy.py`: sync/reconciliation and recurrence.
+- `gymclaw/services/calendar_writes.py`, `replanning.py`: owned outbox and plan repair.
+- `gymclaw/services/compression.py`: deterministic workout time allocation.
+- `gymclaw/cli.py`, `calendar_cli.py`: JSON adapters.
 
 Services accept explicit time and typed inputs, need no agent runtime. CLI owns
 transactions; service callers must commit/rollback. Use `alembic revision --autogenerate`

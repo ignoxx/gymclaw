@@ -97,6 +97,7 @@ class PlannedSession(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
     week_id: Mapped[str] = mapped_column(index=True)
     workout_template_id: Mapped[str | None]
+    workout_plan_json: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(default="TENTATIVE")
     planned_start_at: Mapped[datetime] = mapped_column(UTCDateTime)
     planned_end_at: Mapped[datetime] = mapped_column(UTCDateTime)
@@ -182,15 +183,52 @@ class ExerciseProgression(Base):
 class NotificationJob(Base):
     """Durable outbox; delivery integration is separate from domain execution."""
     __tablename__ = "notification_job"
-    __table_args__ = (CheckConstraint("status IN ('PENDING','CANCELLED','FIRED')"),)
+    __table_args__ = (CheckConstraint("status IN ('PENDING','CANCELLED','FIRED')"), CheckConstraint("(kind = 'REST' AND workout_session_id IS NOT NULL AND planned_session_id IS NULL) OR (kind IN ('GET_READY','LEAVE','SESSION_START') AND planned_session_id IS NOT NULL AND workout_session_id IS NULL)", name="ck_notification_owner"))
     id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
     kind: Mapped[str]
-    workout_session_id: Mapped[str] = mapped_column(ForeignKey("workout_session.id"))
+    workout_session_id: Mapped[str | None] = mapped_column(ForeignKey("workout_session.id"))
+    planned_session_id: Mapped[str | None] = mapped_column(ForeignKey("planned_session.id"))
     set_log_id: Mapped[str | None] = mapped_column(ForeignKey("set_log.id"), unique=True)
     due_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
     status: Mapped[str] = mapped_column(default="PENDING")
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     external_job_id: Mapped[str | None]
+    handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class CalendarSyncState(Base):
+    """One explicit calendar; replacing its ID requires a separate DB."""
+    __tablename__ = "calendar_sync_state"
+    __table_args__ = (CheckConstraint("id = 1"),)
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    calendar_id: Mapped[str]
+    timezone: Mapped[str] = mapped_column(default="Europe/Berlin")
+    sync_token: Mapped[str | None]
+    last_synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    source: Mapped[str]
+
+
+class CalendarCredential(Base):
+    """OAuth tokens stay local/private and never appear in tool results."""
+    __tablename__ = "calendar_credential"
+    __table_args__ = (CheckConstraint("id = 1"),)
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    credentials_json: Mapped[dict] = mapped_column(JSON)
+
+
+class CalendarWrite(Base):
+    """Persist before network writes; stable event IDs make retries safe."""
+    __tablename__ = "calendar_write"
+    __table_args__ = (UniqueConstraint("planned_session_id", "revision", "action"), CheckConstraint("status IN ('PENDING','APPLIED','CONFLICT','CANCELLED')"), CheckConstraint("action IN ('CREATE','UPDATE','DELETE')"))
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    planned_session_id: Mapped[str] = mapped_column(ForeignKey("planned_session.id"))
+    revision: Mapped[int]
+    action: Mapped[str]
+    event_id: Mapped[str]
+    expected_etag: Mapped[str | None]
+    body_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 
 

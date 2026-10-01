@@ -7,6 +7,7 @@ not claims that an OpenClaw automation or Telegram message was sent.
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from statistics import mean
+from math import ceil
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,7 +16,7 @@ from gymclaw.models import AgentEvent, ExerciseProgression, NotificationJob, Pla
 from gymclaw.services.errors import DomainError
 from gymclaw.services.profile import get_profile
 from gymclaw.services.set_parser import SetInput
-from gymclaw.services.templates import ExerciseSpec, get_template
+from gymclaw.services.templates import ExerciseSpec, Template, get_template
 
 TRANSITIONS = {
     "SCHEDULED": {"PREPARING", "ARRIVED"},
@@ -139,7 +140,7 @@ def choose_next(db: Session, workout: WorkoutSession, now: datetime):
         transition(db, workout, "WORKOUT_COMPLETE", now)
 
 
-def set_duration(db: Session, workout: WorkoutSession) -> float:
+def historical_set_duration(db: Session, default_seconds: float) -> float:
     historical = list(db.scalars(select(SetLog).join(WorkoutExercise).join(WorkoutSession).where(WorkoutSession.status == "PLAN_UPDATED").order_by(SetLog.workout_exercise_id, SetLog.logged_at)))
     durations = []
     for previous, current in zip(historical, historical[1:]):
@@ -147,14 +148,14 @@ def set_duration(db: Session, workout: WorkoutSession) -> float:
             seconds = (current.logged_at - (previous.rest_due_at or previous.logged_at)).total_seconds()
             if 10 <= seconds <= 180:
                 durations.append(seconds)
-    return mean(durations) if durations else workout.template_snapshot["set_duration_seconds"]
+    return mean(durations) if durations else default_seconds
 
 
 def estimate_finish(db: Session, workout: WorkoutSession, now: datetime) -> datetime:
     rows = [e for e in exercises(db, workout) if e.status in UNRESOLVED]
     if not rows:
         return workout.completed_at or workout.last_action_at or now
-    duration = set_duration(db, workout)
+    duration = historical_set_duration(db, workout.template_snapshot["set_duration_seconds"])
     rest_job = pending_rest(db, workout)
     seconds = max(0, (rest_job.due_at - now).total_seconds()) if rest_job else 0
     for index, exercise in enumerate(rows):
@@ -231,17 +232,37 @@ def start(db: Session, template_id: str, *, now: datetime, request_id: str, plan
         planned = db.get(PlannedSession, planned_session_id) if planned_session_id else None
         if planned_session_id and (planned is None or planned.status not in {"TENTATIVE", "COMMITTED"}):
             raise DomainError("INVALID_PLAN", "Planned session is missing or no longer startable")
+        allocation = None
+        if planned:
+            from gymclaw.services.compression import compress_template
+            if planned.workout_plan_json.get("template", {}).get("id") == template_id:
+                allocation = planned.workout_plan_json
+                if allocation.get("error"):
+                    raise DomainError("WORKOUT_SLOT_TOO_SHORT", "Calendar slot needs explicit adjustment before starting")
+                template = Template.model_validate(allocation["template"])
+            template = template.model_copy(update={"set_duration_seconds": ceil(historical_set_duration(db, template.set_duration_seconds))})
+            allocation = compress_template(template, get_profile(db), int((planned.planned_end_at - planned.planned_start_at).total_seconds()))
+            if planned.workout_plan_json.get("crowd_source"):
+                allocation["crowd_source"] = planned.workout_plan_json["crowd_source"]
+            planned.workout_plan_json = allocation
         workout = WorkoutSession(template_id=template_id, template_snapshot=template.model_dump(mode="json"), planned_session_id=planned_session_id, started_at=now, arrived_at=now, last_action_at=now)
         db.add(workout)
         db.flush()
         first_primary = next((e.id for e in template.exercises if e.primary), None)
         for index, spec in enumerate(template.exercises):
-            make_exercise(db, workout, spec, index, warmup=spec.id == first_primary)
+            row = make_exercise(db, workout, spec, index, warmup=spec.id == first_primary)
+            if allocation:
+                row.planned_working_sets = allocation["sets"][spec.id]
+                if row.planned_working_sets == 0:
+                    row.status = "SKIPPED"
+                    row.deferred_reason = "calendar_time_budget"
         # start is explicit arrival intent, not fabricated preparation/travel history.
         transition(db, workout, "ARRIVED", now)
         transition(db, workout, "SESSION_STARTED", now)
         choose_next(db, workout, now)
         if planned:
+            from gymclaw.services.notifications import cancel_session_jobs
+            cancel_session_jobs(db, planned.id, now=now)
             planned.status = "STARTED"
             planned.workout_template_id = template_id
         workout.initial_eta = estimate_finish(db, workout, now)
