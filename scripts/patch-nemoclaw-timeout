@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Reversible deadline-only patch for GymClaw's pinned NemoClaw installation."""
+import argparse
+from pathlib import Path
+import subprocess
+
+PIN = "6f3cced4230ae9660c049cc11804daf37797c595"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--source", type=Path, required=True)
+parser.add_argument("--revert", action="store_true")
+args = parser.parse_args()
+sha = subprocess.check_output(["git", "-C", str(args.source), "rev-parse", "HEAD"], text=True).strip()
+if sha != PIN:
+    raise SystemExit("Unsupported NemoClaw revision; review upstream deadline before patching")
+old = "const OPENROUTER_RUNTIME_ADAPTER_UPSTREAM_TIMEOUT_MS = 30_000;"
+new = "const OPENROUTER_RUNTIME_ADAPTER_UPSTREAM_TIMEOUT_MS = 300_000;"
+if args.revert:
+    old, new = new, old
+paths = [args.source / f"{root}/lib/inference/openrouter-runtime-adapter-forward.{ext}" for root, ext in (("src", "ts"), ("dist", "js"))]
+changes = []
+for path in paths:
+    text = path.read_text()
+    if text.count(new) == 1 and old not in text:
+        continue
+    if text.count(old) != 1 or new in text:
+        raise SystemExit(f"Unexpected deadline declaration in {path}; no files changed")
+    changes.append((path, text.replace(old, new)))
+for path, text in changes:
+    path.write_text(text)
+print(f"Deadline-only patch {'reverted' if args.revert else 'applied'}; {len(changes)} code files changed. Restart adapter separately.")

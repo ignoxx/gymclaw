@@ -188,6 +188,13 @@ OAuth localhost callback requires operator-host flow; token state may need secur
 transfer/mount. Do not print/copy secrets through chat. Direct OpenClaw fallback
 keeps same domain/skill/outbox if container integration becomes blocker.
 
+## Inference stream failures
+
+Pinned local NemoClaw adapter's 30s total response cap caused `LLM request failed`
+after successful tools. Deadline-only 300s workaround applied; auth/network guards
+unchanged. See [`docs/inference-runtime.md`](../docs/inference-runtime.md) for
+version-guarded patch, local streaming regression and scoped adapter restart.
+
 ## Delivery recovery
 
 `runtime fire --job-id ID --telegram-id OWNER_ID` without `--allow-messages` is
