@@ -1,0 +1,16 @@
+preset:
+  name: gymclaw-crowd-read
+  description: Read-only public MySports count and current-day relative utilization
+network_policies:
+  gymclaw_crowd_read:
+    name: gymclaw-crowd-read
+    endpoints:
+      - host: www.mysports.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: {method: GET, path: "/nox/public/v1/studios/1234567890/utilization/v2/active-checkin"}
+          - allow: {method: GET, path: "/nox/public/v1/studios/1234567890/utilization/v2/today"}
+    binaries:
+      - {path: /usr/bin/python3.13}

@@ -7,7 +7,25 @@ MySports integration follows reviewed handoff/FINDINGS and captured public respo
 - Header `x-tenant: fixture-tenant`; captured response `{"value":7}`.
 - No SESSION cookie needed. Code neither accepts nor stores one.
 - Response supplies no observation time, cache age, capacity or checkout semantics.
-- Undocumented observed route, not guaranteed stable API. No live call during build.
+- Undocumented observed route, not guaranteed stable API. Unit tests use fixtures.
+
+## Local activation
+
+Owner approved live reads. Narrow MySports GET policy in
+`config/gymclaw-crowd-read-policy.yaml` applied to dedicated sandbox. Count and
+`today` live requests returned 200; no Age/Cache-Control/Last-Modified provided.
+No cache duration inferred. App stored first real count with retrieval timestamp,
+not fabricated observation time. `today` exposes 24 items with start/end/current/
+percentage; relative series is **not yet periodically collected**.
+
+Count timer enabled every 15 minutes (four reads/hour) within profile's configured
+training window. This is not verified gym opening hours. Scheduled callback tested:
+healthy, skipped outside that window; manual live acquisition succeeded. Calendar
+writes remain off. Polling depends on local Mac/VM/Gateway staying awake/running.
+
+Existing `today` date-selection probes were ignored by server, so no dated lookback
+claim. Historical weekdays are not an archive. Our persisted count samples build
+our own dated history from activation forward, subject to unknown backend lag.
 
 Reference investigation: September 30, 2026, adjacent research repo
 `clawchallenge/research/mysports/IMPLEMENTATION_HANDOFF.md` and `FINDINGS.md`.
