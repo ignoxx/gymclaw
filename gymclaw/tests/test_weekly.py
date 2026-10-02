@@ -224,3 +224,41 @@ def test_split_rotates_after_last_completed_workout_and_respects_locks(tmp_path)
             assert assign_rotation(db, now=base - timedelta(days=1)) == []
     finally:
         engine.dispose()
+
+
+def test_crowd_forecast_text_and_significant_changes():
+    from gymclaw.services.calendar_writes import describe_crowd
+    from gymclaw.services.weekly import significant
+    start = datetime(2026, 10, 9, 19, tzinfo=timezone.utc)
+    assert describe_crowd(None, start) == "not enough data yet"
+    assert describe_crowd({"count": 13, "basis": "weekday_hour", "days": 2, "feel": "Busy"}, start) == "Busy · ~13 people checked in (Fridays 19:00, 2 wk)"
+    assert describe_crowd({"count": 8, "basis": "hour", "days": 1, "feel": None}, start) == "~8 people checked in (19:00 on other days)"
+    old = {"count": 12, "feel": "Busy"}
+    assert significant(None, {"count": 5, "feel": None})
+    assert not significant(old, {"count": 14, "feel": "Busy"})  # +2: noise
+    assert significant(old, {"count": 16, "feel": "Busy"})  # +4 and +33%
+    assert significant(old, {"count": 12, "feel": "Packed"})
+    assert not significant(old, None)
+
+
+def test_refresh_crowd_fills_unknown_then_respects_window(tmp_path):
+    from gymclaw.models import CrowdObservation
+    from gymclaw.services.weekly import refresh_crowd
+    engine = make_engine(f"sqlite:///{tmp_path / 'crowd.db'}")
+    initialize(engine)
+    now = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+    try:
+        with Session(engine) as db, db.begin():
+            db.add(CrowdObservation(observed_at=now - timedelta(days=7) + timedelta(hours=6), source="GYM_API", raw_value=13, metadata_json={}))
+            soon = PlannedSession(week_id="2026-09-28", status="COMMITTED", planned_start_at=now + timedelta(hours=6), planned_end_at=now + timedelta(hours=7),
+                prep_start_at=now + timedelta(hours=5), leave_home_at=now + timedelta(hours=5), expected_finish_at=now + timedelta(hours=7))
+            imminent = PlannedSession(week_id="2026-09-28", status="COMMITTED", planned_start_at=now + timedelta(minutes=30), planned_end_at=now + timedelta(hours=1),
+                prep_start_at=now, leave_home_at=now, expected_finish_at=now + timedelta(hours=1))
+            db.add_all([soon, imminent]); db.flush()
+            changed = refresh_crowd(db, now=now)
+            assert [c["session_id"] for c in changed] == [soon.id]
+            assert soon.workout_plan_json["crowd_forecast"]["count"] == 13 and soon.source_revision == 2
+            assert "crowd_forecast" not in imminent.workout_plan_json
+            assert refresh_crowd(db, now=now + timedelta(minutes=10)) == []  # throttled
+    finally:
+        engine.dispose()

@@ -20,12 +20,23 @@ def event_id_for(session_id: str) -> str:
     return sha256(("gymclaw:" + session_id).encode()).hexdigest()
 
 
+def describe_crowd(forecast: dict | None, start: datetime) -> str:
+    """'Busy · ~13 people checked in (Fridays 18:00, 2 wk)'; honest when there is no data yet."""
+    if not forecast:
+        return "not enough data yet"
+    parts = [forecast["feel"]] if forecast.get("feel") else []
+    if forecast.get("count") is not None:
+        basis = f"{start:%A}s {start:%H}:00, {forecast['days']} wk" if forecast["basis"] == "weekday_hour" else f"{start:%H}:00 on other days"
+        parts.append(f"~{forecast['count']} people checked in ({basis})")
+    return " · ".join(parts)
+
+
 def event_body(db: Session, session: PlannedSession) -> dict:
     profile = get_profile(db)
     zone = ZoneInfo(profile.timezone)
     template_name = session.workout_plan_json.get("template", {}).get("name", "Workout")
-    crowd = f"{session.crowd_prediction:.2f}/1 personal score (heuristic)" if session.crowd_prediction is not None and session.workout_plan_json.get("crowd_score_kind") == "personal_perceived_crowd_proxy" else f"{session.crowd_prediction:.0%}" if session.crowd_prediction is not None else "Unknown"
-    if session.crowd_prediction is not None and session.workout_plan_json.get("crowd_source") == "demo_fixture":
+    crowd = describe_crowd(session.workout_plan_json.get("crowd_forecast"), session.planned_start_at.astimezone(zone))
+    if session.workout_plan_json.get("crowd_source") == "demo_fixture":
         crowd += " (demo fixture)"
     return {
         "id": session.calendar_event_id or event_id_for(session.id),

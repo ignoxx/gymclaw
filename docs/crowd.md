@@ -56,7 +56,16 @@ policy exports or runtime backups. Existing private deployment config preserved.
 4. User felt crowding: EMPTY/FINE/BUSY/PACKED labels define personal score.
 5. Google busyness: optional percentage proxy from verified adapter/explicit demo.
 
-Only (1), (4), and fixture/verified (5) enter implemented predictor. No invented gym
+Only (1), (4), and fixture/verified (5) enter implemented predictor.
+
+## Calendar "Expected crowd"
+
+Each planned session stores a forecast: typical reported check-ins for that weekday and hour (or
+the same hour on other days while history is thin) plus the owner's own Empty/Fine/Busy/Packed
+feel once labels exist, e.g. `Busy · ~13 people checked in (Fridays 19:00, 2 wk)`. The watcher
+fills missing forecasts right away, re-checks sessions in the next 24 h every 30 min, and edits the
+event only when the feel changes or the count moves by ≥3 people and ≥25%. Nothing changes within
+1 h of start, so imminent reminders stay put. No invented gym
 capacity, count↔percentage mapping, historical count archive or future attendance.
 MySports display limits 14/57 are categories, not physical occupancy conversion.
 

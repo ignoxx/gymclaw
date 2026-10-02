@@ -11,7 +11,7 @@ card: {"text", "photo", "buttons", "rest_until", "kind": "set"|"rest"|"option"}
 - ack: short line appended to the previous card before its buttons are removed
 - cleanup "delete": remove the previous card and swap options instead of keeping them
 - keep + live_buttons: swap menu; the current card's buttons change, options are sent below it
-- restore: drop the options and give the current card its buttons back ("I'll wait")
+- restore: drop the options and give the current card its buttons back ("Keep")
 - rest cards carry rest_until; the plugin counts down and replaces them with the next set card
 """
 from datetime import datetime
@@ -153,7 +153,7 @@ def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> 
         return {"handled": True, "cleanup": "delete", "cards": after_change(db, workout, now, request_id)}
     if action == "swap":
         # The card's own buttons become wait/later; options are sent below it. No extra menu message.
-        menu = [button("⏳ I'll wait", "wait", ref)]
+        menu = [button(f"↩ Keep {row.config_json['name']}", "wait", ref)]
         if row.status == "ACTIVE" and any(e.status == "PENDING" for e in exercises(db, workout)):
             menu.append(button("↪ Do it later", "later", ref))
         return {"handled": True, "keep": True, "live_buttons": [menu], "cards": swap_cards(db, workout, row)}
