@@ -27,13 +27,11 @@
         </section>
         <section class="panel attendance-panel" aria-labelledby="attendance-title">
           <div class="section-heading"><h2 id="attendance-title">Gym attendance</h2><span class="cadence"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7a9 9 0 0 0-15-2L2 8m0-5v5h5M4 17a9 9 0 0 0 15 2l3-3m0 5v-5h-5"/></svg>API every <b id="cadence">15 min</b></span></div>
-          <div class="sources" aria-label="Attendance source"><button class="source selected" id="api-source" aria-pressed="true">MySports API</button><button class="source" id="google-source" aria-pressed="false">Google Popular Times <span>Not connected</span></button></div>
           <div id="api-view">
             <div class="count"><strong id="attendance-count">14</strong><div><span>reported check-ins</span><small id="fetched-at">Fetched 17:45</small></div><span class="sample-tag">Sample history</span></div>
             <div id="attendance-chart" class="chart"></div>
             <div class="chart-footer"><span>Cache delay unknown</span><span>Comfort score needs arrival feedback</span></div>
           </div>
-          <div id="google-view" class="not-connected" hidden><span class="empty-chart" aria-hidden="true">▂ ▄ ▆ █ ▆ ▄ ▂</span><strong>Not connected</strong><span>No Google data collected</span></div>
         </section>
         <section class="activity" aria-label="Demo agent activity"><div class="section-heading"><h2>Agent activity</h2><span id="activity-mode">Demo</span></div><div class="event"><time>17:45</time><span class="event-dot"></span><span>Attendance saved</span><span class="event-detail">15 min cadence</span></div><div class="event"><time>18:00</time><span class="event-dot"></span><span>Workout started</span><span class="event-detail">State in SQLite</span></div><div class="event"><time>18:01</time><span class="event-dot lime"></span><span>Set saved. Rest queued.</span><span class="event-detail">90 seconds</span></div></section>
       </div>

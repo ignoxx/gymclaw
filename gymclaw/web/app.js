@@ -138,18 +138,6 @@ function render(data) {
   document.querySelector('.layout').hidden = false;
 }
 
-for (const source of ['api', 'google']) {
-  document.getElementById(`${source}-source`).addEventListener('click', () => {
-    for (const view of ['api', 'google']) {
-      const selected = view === source;
-      document.getElementById(`${view}-view`).hidden = !selected;
-      const button = document.getElementById(`${view}-source`);
-      button.classList.toggle('selected', selected);
-      button.setAttribute('aria-pressed', String(selected));
-    }
-  });
-}
-
 async function refresh() {
   const button = document.getElementById('refresh');
   button.disabled = true;

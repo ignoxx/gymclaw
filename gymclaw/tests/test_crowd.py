@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from gymclaw.db import initialize, make_engine
 from gymclaw.models import CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
-from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider, UnavailableGoogleBusynessProvider
+from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
 from gymclaw.providers.mysports import MySportsProvider
 from gymclaw.services import crowd
 from gymclaw.services.errors import DomainError
@@ -177,17 +177,13 @@ def test_old_signal_not_paired_and_future_labels_do_not_leak(engine):
         assert crowd.CrowdModel(db, now=NOW + timedelta(hours=1)).predict(NOW + timedelta(days=7))["score"] == pytest.approx(1 / 3)
 
 
-def test_second_source_proxy_calibration_and_discomfort_evidence(engine):
-    google = FixtureCrowdProvider(CrowdReading(source="GOOGLE", metric="busyness_percentage", raw_value=10, normalized_value=0.1))
+def test_discomfort_evidence_from_labels(engine):
     with Session(engine) as db, db.begin():
         for index in range(3):
             at = NOW - timedelta(days=(2 - index) * 7)
             crowd.poll(db, provider(60 + index), now=at)
-            crowd.poll(db, google, now=at)
             workout_id = visit(db, at)
             crowd.record_feedback(db, workout_id, rating="PACKED", now=at + timedelta(hours=1), request_id=f"label-{index}")
-        state = db.get(CrowdSourceState, "GOOGLE")
-        assert state.evidence_count == 3 and state.reliability < 0.5
         assert db.get(CrowdSourceState, "GYM_API").evidence_count == 2
         preference = db.scalar(select(LearnedPreference).where(LearnedPreference.key == "crowd_discomfort_reported_count"))
         assert preference.evidence_count == 3 and preference.value_json["median_reported_count"] == 61
@@ -245,16 +241,10 @@ def test_crowd_cli_fixture_feedback_and_health(engine, tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["data"]["sources"][0]["last_raw_value"] == 7
     assert main(["crowd", "poll", "--fixture", str(fixture)]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "FIXTURE_DB_REQUIRED"
-    assert main(args + ["poll", "--source", "GOOGLE"]) == 1
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "GOOGLE_BUSYNESS_UNAVAILABLE"
-    with Session(engine) as db:
-        assert db.get(CrowdSourceState, "GOOGLE").consecutive_failures == 1
 
 
 def test_units_never_mix_counts_with_percentages():
     with pytest.raises(ValidationError):
         CrowdReading(source="GYM_API", metric="reported_active_count", raw_value=7, normalized_value=0.07)
     with pytest.raises(ValidationError):
-        CrowdReading(source="GOOGLE", metric="busyness_percentage", raw_value=10, normalized_value=0.5)
-    with pytest.raises(DomainError):
-        UnavailableGoogleBusynessProvider().get_popular_times()
+        CrowdReading(source="GOOGLE", metric="busyness_percentage", raw_value=10, normalized_value=0.1)

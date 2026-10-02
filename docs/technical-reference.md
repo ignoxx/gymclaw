@@ -24,7 +24,6 @@ Product source of truth: [SPEC.md](../SPEC.md).
   fail-closed ambiguous sends. Synthetic runtime/provider tests; activation not performed.
 - MySports reported active counts, durable retrieval health/change windows, arrival labels,
   conservative personalized calibration/source reliability, crowd-aware future slot selection.
-- Second-source Google busyness contract + explicit fixtures/unavailable adapter, not scraping.
 - Sunday audit/briefing and rolling maintenance: mark unstarted expired slots missed,
   fill valid horizon, reconsider distant tentative slots after labels, preserve locks.
 - Proactive calendar consequence messages through durable outbox; explicit pause/resume
@@ -310,15 +309,15 @@ at least three matching busy/packed visits.
 
 Before labels, reported count is shown but **not normalized**; forecast may be unknown.
 Under 10 paired labels use conservative neighbor heuristic; 10+ use small monotonic
-regression. Future slots combine same-weekday/hour locally collected count history,
-Google proxy if provided, and user slot labels. Repeated polls count as one dated-hour
+regression. Future slots combine same-weekday/hour locally collected count history
+and user slot labels. Repeated polls count as one dated-hour
 mean rather than independent days. Confidence is heuristic evidence strength, **not
 validated forecast accuracy**. Normal planner/replanner uses these signals; explicit
 planning fixtures override them. Locked sessions remain untouched.
 
-Google source has typed current/Popular Times interface but no invented acquisition
-API. `crowd poll --source GOOGLE` fails visibly and persists health unless a verified
-adapter is supplied. Source outages retain observations/model and reduce confidence.
+The gym's own check-in counts are the only crowd source; Google Popular Times was dropped
+(no official API, and polled counts are more direct). Source outages retain observations/model
+and reduce confidence.
 
 Explicit crowd fixture format:
 

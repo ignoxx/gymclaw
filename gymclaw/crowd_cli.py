@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from gymclaw.models import CalendarSyncState
-from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider, UnavailableGoogleBusynessProvider
+from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
 from gymclaw.providers.mysports import MySportsProvider
 from gymclaw.services import crowd
 from gymclaw.services.errors import DomainError
@@ -17,7 +17,6 @@ from gymclaw.services.workout import utc
 def register_parser(groups):
     command = groups.add_parser("crowd", add_help=False)
     command.add_argument("operation", choices=["poll", "predict", "record-feedback", "get-source-health"])
-    command.add_argument("--source", choices=["GYM_API", "GOOGLE"], default="GYM_API")
     command.add_argument("--fixture", type=Path)
     command.add_argument("--during-gym-hours", action="store_true")
     command.add_argument("--now", type=datetime.fromisoformat)
@@ -58,7 +57,7 @@ def crowd_command(engine, args) -> dict:
         else:
             if args.now:
                 raise DomainError("LIVE_TIME_REQUIRED", "Live crowd reads use actual retrieval time; --now requires fixture")
-            provider = MySportsProvider.from_environment() if args.source == "GYM_API" else UnavailableGoogleBusynessProvider()
+            provider = MySportsProvider.from_environment()
         with Session(engine) as db, db.begin():
             result = crowd.poll(db, provider, now=args.now)
         # Persist failure health before returning nonzero; do not fabricate a count.

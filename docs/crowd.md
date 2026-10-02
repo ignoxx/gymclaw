@@ -54,9 +54,9 @@ policy exports or runtime backups. Existing private deployment config preserved.
 3. `/historic/week`: undated weekday percentages with no sample counts. All 168
    observed values were 5%; meaning unknown (possible floor/fallback/baseline).
 4. User felt crowding: EMPTY/FINE/BUSY/PACKED labels define personal score.
-5. Google busyness: optional percentage proxy from verified adapter/explicit demo.
 
-Only (1), (4), and fixture/verified (5) enter implemented predictor.
+Only (1) and (4) enter the predictor. Google Popular Times is intentionally not used: there is no
+official API, and our own 15-minute check-in polling is more direct for this gym.
 
 ## Calendar "Expected crowd"
 
@@ -80,7 +80,7 @@ MySports display limits 14/57 are categories, not physical occupancy conversion.
   scientific proof. No neural model or unnecessary numerical dependencies.
 - Future input uses local weekday/hour history, one mean per dated hour. Cached
   repeated polls cannot masquerade as many independent days.
-- Blend available label-calibrated count, optional Google proxy and user slot means.
+- Blend available label-calibrated count and user slot means.
   No signal → null score/zero confidence; outages preserve history/decrease confidence.
 - Source reliability uses exponential update from pre-label prediction error. Source
   prediction never trains on the label it is evaluated against.
@@ -95,5 +95,5 @@ No model calls needed for collection/scoring. Agent explains only meaningful dec
 
 ## Outstanding
 
-Real arrival labels, refresh-cadence investigation, Google acquisition and live MySports
+Real arrival labels, refresh-cadence investigation and live MySports
 verification remain operator-dependent. Do not advertise validated crowd accuracy.

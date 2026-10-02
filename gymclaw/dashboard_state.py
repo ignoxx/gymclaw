@@ -83,7 +83,7 @@ def snapshot(db: Session, *, now: datetime) -> dict:
             "polling_live": bool(settings and settings.enabled and settings.crowd_polling_enabled),
             "backend_freshness": "known" if observations and observations[-1].freshness_seconds is not None else "unknown",
             "arrival_labels": prediction["label_evidence"], "personal_score": prediction["score"],
-            "confidence": prediction["confidence"], "google_maps_connected": False},
+            "confidence": prediction["confidence"]},
         "activity": [{"time": event.created_at.astimezone(zone).strftime("%H:%M"), "text": labels[event.type]} for event in reversed(events)],
         "connections": {"calendar": {"connected": bool(calendar), "last_synced_at": calendar.last_synced_at.isoformat() if calendar and calendar.last_synced_at else None},
             "telegram": {"enabled": bool(settings and settings.enabled), "last_sent_at": sent.isoformat() if sent else None}}}
