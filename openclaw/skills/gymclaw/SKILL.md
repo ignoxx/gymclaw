@@ -46,10 +46,10 @@ Use the `gymclaw_workout` tool. It sends cards (image, target, buttons) itself; 
   (the template is on the planned session in `calendar get-week`).
 - Machine taken / wants another exercise → `swap` (same-muscle options with images, wait or later).
 - "Next" / done with this exercise → `next`. "Enough for today" → `end`.
-- Lost the card → `card`.
+- Lost the card → `card`. Need state (is one running, what's next) → `status` (sends nothing).
 
 Sets, swaps and rest timers from buttons or typed `40x10` never reach you. For questions mid-workout,
-read `workout current --workout-id ID` first. `workout alternatives` lists swap options read-only.
+use `status` first. Only these actions exist; don't invent others.
 
 ## Calendar and availability
 

@@ -96,6 +96,7 @@ def parser():
     inbox = groups.add_parser("events", add_help=False)
     inbox.add_argument("operation", choices=["pending", "ack"])
     inbox.add_argument("--event-id")
+    inbox.add_argument("--all", action="store_true", help="Include audit events the code already handled")
     inbox.add_argument("--now", type=datetime.fromisoformat)
     jobs = groups.add_parser("notifications", add_help=False)
     jobs.add_argument("operation", choices=["pending", "due"])
@@ -114,7 +115,11 @@ def required(value, flag):
 def workout_command(db, args):
     now = args.now or datetime.now(timezone.utc)
     if args.operation == "current":
-        return {"data": workout.current(db, required(args.workout_id, "--workout-id"), now=now), "events": [], "user_message_hint": None}
+        # Without --workout-id: the running workout, or null when none is running.
+        from gymclaw.services.coach import active_workout
+        workout_id = args.workout_id or getattr(active_workout(db), "id", None)
+        data = workout.current(db, workout_id, now=now) if workout_id else None
+        return {"data": data, "events": [], "user_message_hint": None if data else "No workout running."}
     if args.operation == "alternatives":
         return {"data": adaptation.alternatives(db, required(args.workout_id, "--workout-id"), args.exercise_id), "events": [], "user_message_hint": None}
     request_id = required(args.request_id, "--request-id")
@@ -211,7 +216,7 @@ def main(argv=None) -> int:
                 elif args.group == "audit":
                     data = audit.get_audit(db, required(args.workout_id, "--workout-id")) if args.operation == "workout" else weekly.audit_week(db, required(args.week_start, "--week-start"), now=args.now or datetime.now(timezone.utc))
                 elif args.group == "events":
-                    data = events.pending(db) if args.operation == "pending" else events.ack(db, required(args.event_id, "--event-id"), now=args.now or datetime.now(timezone.utc))
+                    data = events.pending(db, include_all=args.all) if args.operation == "pending" else events.ack(db, required(args.event_id, "--event-id"), now=args.now or datetime.now(timezone.utc))
                 elif args.group == "notifications":
                     if args.operation == "pending":
                         data = notifications.pending_jobs(db)

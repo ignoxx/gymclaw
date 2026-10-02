@@ -9,8 +9,16 @@ from gymclaw.services.errors import DomainError
 from gymclaw.services.workout import utc
 
 
-def pending(db: Session) -> list[dict]:
-    return [{"id": e.id, "type": e.type, "created_at": e.created_at.isoformat(), "payload": e.payload_json, "correlation_id": e.correlation_id} for e in db.scalars(select(AgentEvent).where(AgentEvent.handled_at.is_(None)).order_by(AgentEvent.created_at, AgentEvent.id))]
+# Events that need the agent. Everything else is an audit record the code already handled
+# (state changes, timers, sends, calendar writes) and would only flood the heartbeat context.
+ACTIONABLE = {"notifications.delivery_unknown", "calendar.write_blocked", "crowd.source_unavailable"}
+
+
+def pending(db: Session, *, include_all: bool = False) -> list[dict]:
+    query = select(AgentEvent).where(AgentEvent.handled_at.is_(None))
+    if not include_all:
+        query = query.where(AgentEvent.type.in_(ACTIONABLE))
+    return [{"id": e.id, "type": e.type, "created_at": e.created_at.isoformat(), "payload": e.payload_json, "correlation_id": e.correlation_id} for e in db.scalars(query.order_by(AgentEvent.created_at, AgentEvent.id))]
 
 
 def ack(db: Session, event_id: str, *, now: datetime) -> dict:

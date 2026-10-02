@@ -3,7 +3,7 @@
 This file is a setup template. Current OpenClaw reads monitor scratch, not
 HEARTBEAT.md; install its contents using the documented scratch command.
 
-- Read pending GymClaw events using ../scripts/gymclaw-tool events pending.
+- Read pending GymClaw events using ../scripts/gymclaw-tool events pending (actionable only).
 - Surface only actionable unresolved issues; stay silent with NO_REPLY otherwise.
 - Replan only when an event requests it. Never plan from a failed calendar read.
 - Respect user-locked calendar edits and recovery/travel constraints.
