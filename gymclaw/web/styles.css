@@ -56,10 +56,6 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .cadence { display: flex; align-items: center; gap: 5px; }
 .cadence b { font-weight: 500; color: var(--ink); }
 .cadence svg { width: 13px; height: 13px; fill: none; stroke: var(--ink); stroke-width: 1.5; }
-.sources { display: flex; gap: 15px; border-bottom: 1px solid var(--line); margin-top: 15px; }
-.source { border: 0; border-bottom: 2px solid transparent; padding: 9px 0; background: transparent; color: var(--muted); font-size: 10px; }
-.source.selected { border-bottom-color: var(--ink); color: var(--ink); }
-.source > span { font-size: 8px; margin-left: 4px; color: #a4a99c; }
 .count { display: flex; gap: 11px; align-items: center; margin-top: 16px; }
 .count > strong { font-family: 'Barlow Condensed', sans-serif; font-size: 47px; line-height: 1; font-weight: 600; }
 .count > div { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
@@ -74,10 +70,7 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .chart-dot.last { fill: var(--ink); stroke: var(--ink); }
 .chart-label { fill: var(--muted); font-size: 9px; font-family: 'DM Sans', sans-serif; }
 .chart-footer { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; font-size: 9px; color: var(--muted); }
-.not-connected { min-height: 226px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); }
 .empty-chart { letter-spacing: 7px; font-size: 35px; color: #e0e3d9; }
-.not-connected strong { color: var(--ink); font-size: 13px; font-weight: 500; }
-.not-connected > span:last-child { font-size: 10px; }
 .activity { padding: 0 4px; }
 .activity .section-heading { margin-bottom: 15px; }
 .activity h2 { font-size: 12px; }
@@ -124,8 +117,6 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
   .dashboard { padding: 0 24px; }
   .layout { gap: 16px; grid-template-columns: 1.25fr 1fr; }
   .panel { padding: 18px; }
-  .source > span { display: block; margin: 2px 0 0; }
-  .sources { gap: 12px; }
   .pose { min-height: 225px; }
   .pose img { width: 220px; height: 220px; }
   .chart-footer { font-size: 8px; }

@@ -115,3 +115,16 @@ def test_next_end_crowd_and_baseline_weight(db):
     assert db.query(CrowdFeedback).one().rating == "BUSY"
     # Unknown starting weight becomes the logged baseline for next time.
     assert db.get(ExerciseProgression, "incline").next_weight == 90
+
+
+def test_idle_workout_is_closed_and_keeps_logged_sets(db):
+    from gymclaw.models import WorkoutSession
+    from gymclaw.services.weekly import close_stale_workouts
+    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    assert close_stale_workouts(db, now=at(10) + timedelta(hours=2)) == []
+    workout = coach.active_workout(db)
+    assert close_stale_workouts(db, now=at(10) + timedelta(hours=3, seconds=1)) == [workout.id]
+    assert db.get(WorkoutSession, workout.id).status == "PLAN_UPDATED"
+    assert coach.active_workout(db) is None
+    # A new workout can start again.
+    start(db, "push", now=at(10) + timedelta(hours=4), request_id="again")

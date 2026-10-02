@@ -24,24 +24,21 @@ HISTORY = timedelta(days=90)
 
 
 def bind_source(db: Session, source: str, provider_id: str) -> CrowdSourceState:
-    if source not in {"GYM_API", "GOOGLE"}:
+    if source != "GYM_API":
         raise ValueError("Unknown crowd source")
     state = db.get(CrowdSourceState, source)
     if state is None:
         state = CrowdSourceState(source=source, provider_id=provider_id)
         db.add(state); db.flush()
     elif state.provider_id != provider_id:
-        if state.provider_id == "google-unconfigured" and state.last_success_at is None:
-            state.provider_id = provider_id
-        else:
-            raise DomainError("CROWD_SOURCE_MISMATCH", "DB is bound to another crowd studio/provider; use separate DB")
+        raise DomainError("CROWD_SOURCE_MISMATCH", "DB is bound to another crowd studio/provider; use separate DB")
     return state
 
 
 def poll(db: Session, provider: CrowdProvider, *, now: datetime | None = None) -> dict:
     """Caller commits even unavailable result, preserving failed-read health."""
     existing = db.get(CrowdSourceState, provider.source)
-    if existing and existing.provider_id != provider.provider_id and not (existing.provider_id == "google-unconfigured" and existing.last_success_at is None):
+    if existing and existing.provider_id != provider.provider_id:
         raise DomainError("CROWD_SOURCE_MISMATCH", "DB is bound to another crowd studio/provider; use separate DB")
     # Fetch before inserting/updating state so CLI poll holds no SQLite write lock.
     try:
@@ -98,7 +95,7 @@ def source_health(db: Session, *, now: datetime) -> dict:
             "last_error_code": state.last_error_code, "last_raw_value": state.last_raw_value,
             "last_change_at": state.last_change_at.isoformat() if state.last_change_at else None,
             "reliability": state.reliability, "reliability_evidence_count": state.evidence_count})
-    return {"sources": sources, "google_acquisition": "unconfigured unless verified adapter supplied"}
+    return {"sources": sources}
 
 
 def calibrated_count(count: float, pairs: list[tuple[float, float]]) -> tuple[float | None, float, str]:
@@ -205,18 +202,15 @@ class CrowdModel:
         reliability = state.reliability if state else 0.5
         if state and state.consecutive_failures:
             history_confidence *= 0.5
-        if source == "GYM_API":
-            score, calibration_confidence, method = calibrated_count(raw, self.count_pairs)
-            confidence = min(history_confidence, calibration_confidence)
-        else:
-            score, confidence, method = raw / 100, history_confidence, "google_busyness_proxy"
+        score, calibration_confidence, method = calibrated_count(raw, self.count_pairs)
+        confidence = min(history_confidence, calibration_confidence)
         return {"raw_value": raw, "score": score, "confidence": confidence, "reliability": reliability,
             "method": method, "evidence_days": days, "signal_kind": kind,
             "observation_id": selected[-1].id, "demo": any(row.metadata_json.get("demo", False) for row in selected)}
 
     def predict(self, at: datetime) -> dict:
         at = utc(at)
-        features = {source: feature for source in ("GYM_API", "GOOGLE") if (feature := self.signal_feature(source, at)) is not None}
+        features = {source: feature for source in ("GYM_API",) if (feature := self.signal_feature(source, at)) is not None}
         slot_labels = [f for f in self.labels if f.observed_at <= at and self.same_slot(f.observed_at, at)]
         components = [(f["score"], f["confidence"] * f["reliability"]) for f in features.values() if f["score"] is not None and f["confidence"] > 0]
         if slot_labels:
@@ -250,15 +244,12 @@ def record_feedback(db: Session, workout_id: str, *, rating: str, now: datetime,
         model = CrowdModel(db, now=at)
         prediction = model.predict(at)
         features = {}
-        for source in ("GYM_API", "GOOGLE"):
+        for source in ("GYM_API",):
             rows = [row for row in model.observations if row.source == source and at - row.observed_at + timedelta(seconds=row.freshness_seconds or 0) <= MAX_PAIR_AGE]
             if not rows:
                 continue
             row = rows[-1]
-            if source == "GYM_API":
-                score, confidence, method = calibrated_count(row.raw_value, model.count_pairs)
-            else:
-                score, confidence, method = row.normalized_value, 0.5, "google_busyness_proxy"
+            score, confidence, method = calibrated_count(row.raw_value, model.count_pairs)
             features[source] = {"raw_value": row.raw_value, "observation_id": row.id, "age_seconds": int((at - row.observed_at).total_seconds()),
                 "prediction_before_label": score, "prediction_confidence": confidence, "method": method,
                 "provider_freshness_seconds": row.freshness_seconds, "demo": row.metadata_json.get("demo", False)}

@@ -106,7 +106,7 @@ Agent setup is in [openclaw/README.md](openclaw/README.md). Copy `.env.example` 
 **In progress:**
 - Calendar writes are off while testing.
 - A full real-world workout run, including rest reminders and restart recovery, still needs a final check.
-- Check-in counts can lag and aren't occupancy percentages. Google Popular Times isn't connected yet.
+- Check-in counts can lag and aren't occupancy percentages.
 - VPS deployment and full backup/restore are unfinished.
 
 ## Docs

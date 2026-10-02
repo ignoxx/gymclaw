@@ -96,7 +96,7 @@ def build_demo_snapshot() -> dict:
                         "exercises": [e.model_dump(mode="json") | {"svg_url": for_exercise(e.name, e.guide_id)["svg_url"]} for e in plan.exercises]},
                     "crowd": {"readings": readings, "poll_every_minutes": 15, "polling_live": False,
                         "backend_freshness": "unknown", "arrival_labels": 0,
-                        "personal_score": None, "google_maps_connected": False},
+                        "personal_score": None},
                     "chat": [{"role": "owner", "text": "60 × 11"},
                         {"role": "coach", "text": "Rest 90s. Next: 60 kg × 10–12."}],
                     "evidence": ["Real planner, synthetic calendar", "Real set state machine, synthetic weights",

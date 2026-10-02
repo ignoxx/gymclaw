@@ -104,6 +104,23 @@ def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
 
 
 CROWD_RECHECK = timedelta(minutes=30)
+STALE_WORKOUT = timedelta(hours=3)
+
+
+def close_stale_workouts(db: Session, *, now: datetime) -> list[str]:
+    """A workout left open (chat reset, phone away) would block the next start forever. After 3 idle
+    hours: skip what's left as abandoned and finish it, so logged sets and progression are kept."""
+    from gymclaw.services import adaptation, audit
+    from gymclaw.services.workout import UNRESOLVED, exercises
+    closed = []
+    for workout in db.scalars(select(WorkoutSession).where(WorkoutSession.status != "PLAN_UPDATED", WorkoutSession.last_action_at < now - STALE_WORKOUT)):
+        for row in exercises(db, workout):
+            if row.status in UNRESOLVED:
+                adaptation.skip_exercise(db, workout.id, row.id, reason="abandoned", now=now, request_id=f"stale:{workout.id}:{row.id}")
+        if workout.status == "WORKOUT_COMPLETE":
+            audit.finish(db, workout.id, now=now, request_id=f"stale:{workout.id}:finish")
+            closed.append(workout.id)
+    return closed
 
 
 def significant(old: dict | None, new: dict | None) -> bool:
@@ -168,10 +185,11 @@ def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
             created.extend(s["id"] for s in data["sessions"])
     for session_id in created:
         queue_session_write(db, db.get(PlannedSession, session_id), now=now)
+    stale = close_stale_workouts(db, now=now)
     rotation = assign_rotation(db, now=now)
     crowd = refresh_crowd(db, now=now)
     commit_upcoming(db, now=now)
-    return {"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, **repaired}
+    return {"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, "closed_workouts": stale, **repaired}
 
 
 def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:
