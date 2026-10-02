@@ -36,11 +36,11 @@ GymClaw isn't a chatbot you prompt. It's an agent that stays on and acts on its 
 | **Plans** | Reads your calendar and the gym's crowd history, keeps rest days, and picks the quietest slots that fit. |
 | **Replans** | Meetings, trips and sick days move sessions to the next valid slot. You can also just say it in chat. |
 | **Watches** | Polls gym check-ins and pings you when it's time to leave. |
-| **Coaches** | Sends each exercise with an image, target weight and reps. Log a set by texting `80x10`. |
-| **Adapts** | Tap **Occupied** and it reorders the workout. Saved alternatives are one tap away. |
+| **Coaches** | Sends each exercise with an image, target and buttons. Tap `✅ 80 kg × 10` or text `80x10`; it reacts 👍 and shows the next set with a live rest countdown. No model in the loop. |
+| **Adapts** | Machine taken? Tap **Swap** for two same-muscle alternatives with images, or wait, or do it later while staying on that muscle group. |
 | **Learns** | Hit all your reps and the next target goes up. Your "how busy is it?" answers tune the crowd forecast. |
 
-Setup happens in the same chat. Tell it your goal and send a photo of your plan. It reads the photo and asks only for what's missing.
+Setup happens in the same chat: a short interview (goal, experience, days, time, equipment, injuries), then send a photo of your plan or let it build one. Every exercise gets an illustration.
 
 ## How it works
 
@@ -50,16 +50,18 @@ flowchart LR
   subgraph sandbox [NVIDIA NemoClaw sandbox]
     cron[OpenClaw scheduler<br/>watcher 60 s · crowd poll 15 min<br/>reminders · rest timers · Sunday plan] --> tools
     agent[OpenClaw agent<br/>GLM via OpenRouter] <--> tools[GymClaw tools<br/>Python, validated]
+    coach[Coach plugin<br/>buttons · typed sets · countdown] <--> tools
     tools <--> db[(SQLite<br/>plans · sets · crowd · outbox)]
     db -. events .-> agent
   end
   tg <--> agent
+  tg <--> coach
   tools -- outbox --> tg
   tools --> cal[Google Calendar]
   tools --> gym[Gym check-in API]
 ```
 
-The scheduler runs cheap, deterministic work directly. The agent wakes for conversation and for events that need judgment, like a calendar change that breaks a plan. Every action goes through a Python tool that validates it and writes to SQLite, so the agent can't log a set or move a session that doesn't exist.
+The scheduler runs cheap, deterministic work directly. During a workout, the coach plugin handles taps and typed sets without the model. The agent wakes for conversation and for events that need judgment, like a calendar change that breaks a plan. Every action goes through a Python tool that validates it and writes to SQLite, so the agent can't log a set or move a session that doesn't exist.
 
 **Built to keep running:**
 - **State lives in SQLite, not in the chat.** Restarts and chat resets don't lose plans, sets or pending reminders. Onboarding resumes where it stopped.
@@ -109,10 +111,10 @@ Agent setup is in [openclaw/README.md](openclaw/README.md). Copy `.env.example` 
 
 ## Docs
 
-[Agent setup](openclaw/README.md) · [CLI reference](docs/technical-reference.md) · [Onboarding](docs/onboarding.md) · [Crowd data](docs/crowd.md) · [Inference](docs/inference-runtime.md) · [Spec](SPEC.md) · [Security](SECURITY.md) · [Rebuild the videos](scripts/reel/README.md)
+[Agent setup](openclaw/README.md) · [Coach plugin](openclaw/plugins/coach/README.md) · [CLI reference](docs/technical-reference.md) · [Onboarding](docs/onboarding.md) · [Crowd data](docs/crowd.md) · [Inference](docs/inference-runtime.md) · [Spec](SPEC.md) · [Security](SECURITY.md) · [Rebuild the videos](scripts/reel/README.md)
 
 ## Credits
 
-Exercise art comes from [Workout Guide](https://github.com/bryllim/workout-guide) by Bryl Lim and Everkinetic, under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). GymClaw bundles all 302 first-pose SVG/PNG pairs. See the [asset notice](gymclaw/assets/workout-guide/NOTICE.md).
+Exercise art comes from [Workout Guide](https://github.com/bryllim/workout-guide) by Bryl Lim and Everkinetic, under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). GymClaw bundles all 302 first-pose SVGs and 1024 px PNG renders (dark background added). See the [asset notice](gymclaw/assets/workout-guide/NOTICE.md).
 
 GymClaw's own code is under the [MIT License](LICENSE). The exercise art keeps its CC BY-SA 4.0 license.

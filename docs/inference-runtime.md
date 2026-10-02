@@ -52,6 +52,15 @@ five focused synthetic tests pass on host and sandbox. No failed actions replaye
 or artificial Telegram errors sent. Review budget and plugin activation after a
 NemoClaw rebuild/upgrade.
 
+## Reasoning off
+
+GLM-5.3-flash reasons by default on OpenRouter even with `thinkingDefault: "off"`. A single set log
+used about 500 reasoning tokens on a 147k-token context, which made every reply slow. The Gateway
+now sends `reasoning: {"enabled": false}` via
+`agents.defaults.models["inference/z-ai/glm-5.3-flash"].params.extra_body`, and
+`agents.defaults.reasoningDefault: "off"` keeps any reasoning out of Telegram. Workout taps and typed
+sets skip the model entirely (see the [coach plugin](../openclaw/plugins/coach/README.md)).
+
 ## Apply / revert
 
 These scripts target the exact pinned installation and refuse other revisions.

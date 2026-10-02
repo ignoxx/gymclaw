@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from gymclaw.models import AgentEvent, CalendarEventSnapshot, CalendarSyncState, CalendarWrite, CrowdFeedback, LearnedPreference, PlannedSession, SetLog, WorkoutExercise, WorkoutSession
-from gymclaw.services.calendar import get_week, week_of
+from gymclaw.models import AgentEvent, CalendarEventSnapshot, CalendarSyncState, CalendarWrite, CrowdFeedback, LearnedPreference, OnboardingState, PlannedSession, SetLog, WorkoutExercise, WorkoutSession
+from gymclaw.services.calendar import allocation, get_week, week_of
 from gymclaw.services.calendar_writes import queue_session_write
 from gymclaw.services.notifications import cancel_session_jobs
 from gymclaw.services.profile import get_profile
@@ -73,6 +73,36 @@ def first_plan_key(db: Session, week: date, now: datetime, template_id: str) -> 
     return f"rolling:{week}:{sha256(material.encode()).hexdigest()[:32]}"
 
 
+def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
+    """Rotate the owner's split (e.g. Push → Pull → Legs) over upcoming sessions, continuing after the
+    last completed workout. User-locked sessions keep their template but still advance the rotation."""
+    row = db.get(OnboardingState, 1)
+    split = row.split_json if row else []
+    if len(split) < 2:
+        return []
+    last = db.scalar(select(WorkoutSession.template_id).where(WorkoutSession.status == "PLAN_UPDATED").order_by(WorkoutSession.completed_at.desc()).limit(1))
+    position = split.index(last) + 1 if last in split else 0
+    changed = []
+    for session in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"])).order_by(PlannedSession.planned_start_at, PlannedSession.id)):
+        wanted = split[position % len(split)]
+        if session.user_locked:
+            position = split.index(session.workout_template_id) + 1 if session.workout_template_id in split else position + 1
+            continue
+        position += 1
+        if session.workout_template_id == wanted:
+            continue
+        session.workout_template_id = wanted
+        # Drop the old template snapshot so allocation uses the rotated template.
+        session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
+        session.source_revision += 1
+        allocation(db, session)
+        queue_session_write(db, session, now=now)
+        changed.append({"session_id": session.id, "template_id": wanted})
+    if changed:
+        emit(db, "planning.rotation_assigned", now, {"changes": changed})
+    return changed
+
+
 def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     now = utc(now)
     get_template(db, template_id)  # Explicit selected template, never guess from demo import.
@@ -97,8 +127,9 @@ def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
             created.extend(s["id"] for s in data["sessions"])
     for session_id in created:
         queue_session_write(db, db.get(PlannedSession, session_id), now=now)
+    rotation = assign_rotation(db, now=now)
     commit_upcoming(db, now=now)
-    return {"missed": missed, "created": created, **repaired}
+    return {"missed": missed, "created": created, "rotation": rotation, **repaired}
 
 
 def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:
@@ -111,6 +142,7 @@ def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     rolling = rolling_plan(db, template_id, now=now)
     report = audit_week(db, previous, now=now, learn=True)
     schedule_week(db, next_week, now=now, template_id=template_id, request_id=f"weekly-plan:{next_week}:{template_id}")
+    assign_rotation(db, now=now)
     commit_upcoming(db, now=now)
     for session in db.scalars(select(PlannedSession).where(PlannedSession.week_id == next_week.isoformat(), PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]))):
         queue_session_write(db, session, now=now)

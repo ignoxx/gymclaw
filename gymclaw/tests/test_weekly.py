@@ -193,3 +193,34 @@ def test_new_arrival_label_reconsiders_tentative_slot_but_not_user_lock(engine):
         weekly.rolling_plan(db, "short", now=SUNDAY + timedelta(minutes=3))
         assert updated.planned_start_at == original_time
         assert event.handled_at is not None
+
+
+def test_split_rotates_after_last_completed_workout_and_respects_locks(tmp_path):
+    from gymclaw.models import OnboardingState, PlannedSession, WorkoutSession
+    from gymclaw.services.templates import ExerciseSpec, Template, import_template
+    from gymclaw.services.weekly import assign_rotation
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'rotation.db'}")
+    initialize(engine)
+    base = datetime(2026, 10, 5, 10, tzinfo=timezone.utc)
+    try:
+        with Session(engine) as db, db.begin():
+            for name in ("push", "pull", "legs"):
+                import_template(db, Template(id=name, name=name.title(), exercises=[ExerciseSpec(id=f"{name}-x", name="X", role="x", guide_id="bench-press", target_weight=0)]))
+            db.add(OnboardingState(id=1, interview_json={}, split_json=["push", "pull", "legs"]))
+            db.add(WorkoutSession(template_id="push", status="PLAN_UPDATED", template_snapshot={"x": 1}, completed_at=base - timedelta(days=3)))
+            sessions = []
+            for day in range(4):
+                start = base + timedelta(days=2 * day)
+                sessions.append(PlannedSession(week_id="2026-10-05", workout_template_id="push", status="TENTATIVE", planned_start_at=start,
+                    planned_end_at=start + timedelta(hours=1), prep_start_at=start, leave_home_at=start, expected_finish_at=start + timedelta(hours=1)))
+            sessions[1].user_locked = True  # owner pinned Push here
+            db.add_all(sessions)
+            db.flush()
+            assign_rotation(db, now=base - timedelta(days=1))
+            # Last done: Push → Pull, then the locked Push, then Pull again, then Legs.
+            assert [s.workout_template_id for s in sessions] == ["pull", "push", "pull", "legs"]
+            assert sessions[0].workout_plan_json["template"]["id"] == "pull"
+            assert assign_rotation(db, now=base - timedelta(days=1)) == []
+    finally:
+        engine.dispose()

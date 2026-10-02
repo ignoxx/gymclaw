@@ -17,7 +17,7 @@ def test_catalog_assets_and_no_fuzzy_matching():
     assert all(path.is_file() for path in public_assets().values())
     pose = for_exercise("Seated Cable Row")
     assert pose["equipment"] == "Cable" and Path(pose["telegram_png"]).is_file()
-    assert pose["license"] == "CC BY-SA 4.0"
+    assert pose["primary_muscle"] == "Back" and "license" not in pose
     assert for_exercise("some pulling machine") is None
     assert for_exercise("anything", "../../private") is None
     with pytest.raises(ValidationError):

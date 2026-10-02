@@ -1,7 +1,13 @@
-"""Workout Guide first-pose assets. Explicit catalog IDs or unique exact names only."""
+"""Workout Guide first-pose assets and catalog search.
+
+Every planned exercise carries a `guide_id`, so every exercise has an image.
+Attribution lives in the asset NOTICE and README, not in chat captions.
+"""
 from functools import lru_cache
 import json
+import math
 from pathlib import Path
+import re
 
 ASSET_ROOT = Path(__file__).resolve().parents[1] / "assets" / "workout-guide"
 
@@ -11,22 +17,76 @@ def catalog() -> dict[str, dict]:
     return {item["slug"]: item for item in json.loads((ASSET_ROOT / "manifest.json").read_text())}
 
 
+def entry(item: dict) -> dict:
+    slug = item["slug"]
+    return {"guide_id": slug, "name": item["name"], "equipment": item["equipment"], "primary_muscle": item["primaryMuscle"],
+        "svg_url": f"/illustrations/{slug}.svg", "telegram_png": str(ASSET_ROOT / slug / "frame-1.png")}
+
+
 def for_exercise(name: str, guide_id: str | None = None) -> dict | None:
+    """Explicit guide_id, else a unique exact name match. No fuzzy guessing at runtime."""
     items = catalog()
     if guide_id:
         item = items.get(guide_id)
     else:
         matches = [item for item in items.values() if item["name"].casefold() == name.strip().casefold()]
         item = matches[0] if len(matches) == 1 else None
-    if item is None:
-        return None
-    slug = item["slug"]
-    return {"guide_id": slug, "name": item["name"], "equipment": item["equipment"],
-        "svg_url": f"/illustrations/{slug}.svg", "telegram_png": str(ASSET_ROOT / slug / "frame-1.png"),
-        "credit": "Workout Guide, Bryl Lim / Everkinetic", "license": "CC BY-SA 4.0",
-        "changes": "GymClaw added a dark PNG background for Telegram. SVG files are unmodified.",
-        "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
-        "source_url": "https://github.com/bryllim/workout-guide", "attribution": item["frames"][0]["attribution"]}
+    return entry(item) if item else None
+
+
+def primary_muscle(guide_id: str | None) -> str | None:
+    item = catalog().get(guide_id) if guide_id else None
+    return item["primaryMuscle"] if item else None
+
+
+def words(text: str) -> set[str]:
+    return {w.rstrip("s") for w in re.findall(r"[a-z]+", text.casefold())}
+
+
+@lru_cache(maxsize=1)
+def rarity() -> dict[str, float]:
+    """Inverse document frequency of name words: 'incline' says more than 'machine'."""
+    counts: dict[str, int] = {}
+    for item in catalog().values():
+        for word in words(item["name"]):
+            counts[word] = counts.get(word, 0) + 1
+    return {word: math.log(len(catalog()) / count) for word, count in counts.items()}
+
+
+def search(query: str = "", *, muscle: str | None = None, equipment: str | None = None, limit: int = 8) -> list[dict]:
+    """Rank catalog entries by rarity-weighted words shared with the query; filters are case-insensitive exact matches."""
+    wanted = words(query)
+    weight = rarity()
+    results = []
+    for item in catalog().values():
+        if muscle and item["primaryMuscle"].casefold() != muscle.casefold():
+            continue
+        if equipment and item["equipment"].casefold() != equipment.casefold():
+            continue
+        name = words(item["name"])
+        score = sum(weight.get(w, 1) for w in wanted & name) + 0.5 * len(wanted & words(item["equipment"] + " " + item["primaryMuscle"])) - 0.1 * len(name - wanted)
+        if wanted and score <= 0:
+            continue
+        results.append((score, item["name"], entry(item)))
+    return [result for _, _, result in sorted(results, key=lambda r: (-r[0], r[1]))[:limit]]
+
+
+def similar(guide_id: str, *, exclude: set[str] = frozenset(), prefer: set[str] = frozenset(), limit: int = 2) -> list[dict]:
+    """Same primary muscle and exercise type, no stretches. `prefer` slugs (e.g. owner history) rank first,
+    then shared movement words (press, fly, incline), then different equipment (the original may be occupied)."""
+    original = catalog().get(guide_id)
+    if original is None:
+        return []
+    base = words(original["name"])
+    options = []
+    for item in catalog().values():
+        if item["slug"] == guide_id or item["slug"] in exclude or item["isStretch"]:
+            continue
+        if item["primaryMuscle"] != original["primaryMuscle"] or item["exerciseType"] != original["exerciseType"]:
+            continue
+        rank = (item["slug"] not in prefer, -len(base & words(item["name"])), item["equipment"] == original["equipment"], item["name"])
+        options.append((rank, entry(item)))
+    return [option for _, option in sorted(options, key=lambda o: o[0])[:limit]]
 
 
 def public_assets() -> dict[str, Path]:

@@ -46,6 +46,10 @@ def finish(db: Session, workout_id: str, *, now: datetime, request_id: str) -> d
             warmups += len(logs(db, exercise, "WARMUP"))
             completed_sets += len(working)
             decision = double_progression(exercise.exercise_id, target_weight=exercise.target_weight, rep_max=exercise.rep_max, required_sets=exercise.config_json["working_sets"], increment=exercise.config_json["increment"], performance=tuple(PerformanceSet(weight=s.weight, reps=s.reps) for s in working))
+            if not exercise.target_weight and working:
+                # Unknown starting weight: the heaviest working set becomes the baseline target.
+                baseline = max(s.weight for s in working)
+                decision = decision.model_copy(update={"next_weight": baseline, "progressed": False, "reason": "baseline_from_first_session"})
             if exercise.status == "COMPLETED":
                 target = db.get(ExerciseProgression, exercise.exercise_id)
                 if target is None:

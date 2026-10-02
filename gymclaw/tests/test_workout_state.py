@@ -80,7 +80,6 @@ def test_guardrails_rollback_and_id_conflict(engine):
     workout_id = begin(engine)
     with Session(engine) as db:
         for action in [
-            lambda: log_set(db, workout_id, SetInput(weight=80, reps=9), now=NOW, request_id="warmup-missing"),
             lambda: start(db, "short", now=NOW, request_id="duplicate-active"),
             lambda: start(db, "unknown", now=NOW, request_id="start"),
             lambda: transition(db, db.get(WorkoutSession, workout_id), "PLAN_UPDATED", NOW),
@@ -93,12 +92,27 @@ def test_guardrails_rollback_and_id_conflict(engine):
         assert db.get(WorkoutSession, workout_id).status == "SET_ACTIVE"
 
 
-@pytest.mark.parametrize("text", ["80x9", "80 x 9", "80kg x9", "9 reps at 80", "80 KG × 9", "9 reps at 80kg"])
+@pytest.mark.parametrize("text", ["80x9", "80 x 9", "80kg x9", "9 reps at 80", "80 KG × 9", "9 reps at 80kg", "9x80kg", "80kgx9 reps", "9x80"])
 def test_set_parser(text):
     assert parse_set(text) == SetInput(weight=80, reps=9)
 
 
-@pytest.mark.parametrize("text", ["80x9 then 80x10", "80", "9 reps", "-80x9", "80x9?", "80/9"])
+def test_set_parser_uses_expected_weight_when_order_is_unclear():
+    assert parse_set("12x10", expected_weight=10) == SetInput(weight=10, reps=12)
+    assert parse_set("12x10") == SetInput(weight=12, reps=10)
+    assert parse_set("8x22,5") == SetInput(weight=22.5, reps=8)
+
+
+def test_working_set_skips_pending_warmup(engine):
+    workout_id = begin(engine)
+    with Session(engine) as db, db.begin():
+        result = log_set(db, workout_id, SetInput(weight=80, reps=9), now=NOW, request_id="straight-in")["data"]
+        assert result["active_exercise"]["set_type"] == "WORKING"
+        assert result["active_exercise"]["set_number"] == 2
+        assert result["active_exercise"]["last_set"] == {"weight": 80, "reps": 9}
+
+
+@pytest.mark.parametrize("text", ["80x9 then 80x10", "80", "9 reps", "-80x9", "80x9?", "80/9", "80kg x 9kg"])
 def test_ambiguous_set_rejected(text):
     with pytest.raises(DomainError, match="What weight"):
         parse_set(text)

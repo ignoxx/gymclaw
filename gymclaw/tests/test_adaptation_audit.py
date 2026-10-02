@@ -137,7 +137,7 @@ def test_invalid_substitution_preserves_state(engine):
         workout_id = bench_done(db)
         exercise_id = current(db, workout_id, now=NOW)["active_exercise"]["id"]
     with Session(engine) as db:
-        with pytest.raises(DomainError, match="configured same-role"):
+        with pytest.raises(DomainError, match="template alternative or a catalog exercise"):
             substitute(db, workout_id, exercise_id, "bench", now=NOW + timedelta(seconds=50), request_id="bad")
         db.rollback()
         assert db.get(WorkoutExercise, exercise_id).status == "ACTIVE"
