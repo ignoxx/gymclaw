@@ -7,7 +7,7 @@ from gymclaw.services import coach, illustrations, workout
 
 def register_parser(groups):
     command = groups.add_parser("coach", add_help=False)
-    command.add_argument("operation", choices=["text", "tap", "act", "start", "card"])
+    command.add_argument("operation", choices=["text", "tap", "act", "start", "card", "rest-over"])
     command.add_argument("--text")
     command.add_argument("--data", help="Callback payload without the gc: namespace")
     command.add_argument("--action", choices=["card", "swap", "later", "next", "end"])
@@ -42,6 +42,8 @@ def coach_command(db, args):
     db.connection().exec_driver_sql("BEGIN IMMEDIATE")
     if args.operation == "card":
         result = coach.handle_action(db, "card", now=now, request_id="card")
+    elif args.operation == "rest-over":
+        result = coach.handle_rest_over(db, now=now)
     else:
         request_id = needed(args.request_id, "--request-id")
         if args.operation == "text":

@@ -35,7 +35,7 @@ const keyboard = (buttons) => buttons.map((row) => row.map((b) => ({ text: b.tex
  * Renders coach results in one owner chat. Keeps one "live" card (the current exercise, with buttons and
  * countdown) plus "extras" (swap options/menu). Old buttons are removed as soon as the workout moves on.
  */
-export function createCoach({ telegram, chatId, now = () => Date.now(), timers = globalThis, log = console }) {
+export function createCoach({ telegram, chatId, now = () => Date.now(), timers = globalThis, log = console, onRestOver }) {
   let live = null;
   let extras = [];
 
@@ -57,8 +57,16 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
   function startCountdown(entry) {
     entry.timer = timers.setInterval(async () => {
       const text = withRest(entry.card, now());
-      if (text.endsWith("Rest over")) timers.clearInterval(entry.timer);
-      await quietly((await telegram()).edit(chatId, entry.messageId, text, keyboard(entry.card.buttons)));
+      if (!text.endsWith("Rest over")) {
+        await quietly((await telegram()).edit(chatId, entry.messageId, text, keyboard(entry.card.buttons)));
+        return;
+      }
+      timers.clearInterval(entry.timer);
+      entry.timer = null;
+      // Rest is over: a fresh card with buttons notifies the phone; edits are silent.
+      const result = live === entry && onRestOver ? await onRestOver().catch(() => null) : null;
+      if (result?.cards?.length) await apply(result);
+      else await quietly((await telegram()).edit(chatId, entry.messageId, text, keyboard(entry.card.buttons)));
     }, TICK_MS);
   }
 
@@ -139,8 +147,18 @@ export function registerCoach(api, { run, telegram } = {}) {
   }
   const cli = run ?? cliRunner(config.tool);
   // Owner DM: chat ID equals the owner's Telegram user ID.
-  const coach = createCoach({ telegram, chatId: ownerId, log: api.logger });
   const sync = createSyncer(cli, ownerId, api.logger);
+  const coach = createCoach({
+    telegram,
+    chatId: ownerId,
+    log: api.logger,
+    // Closing the rest job here keeps the cron fallback ping silent; sync then removes it.
+    onRestOver: async () => {
+      const result = await cli(["coach", "rest-over"]);
+      if (result.rest_over) sync();
+      return result;
+    },
+  });
   const changed = (result) => result.handled !== false && !result.keep && (result.cards?.length || result.ack);
 
   async function report(error) {
