@@ -13,18 +13,39 @@ Activated runtime uses actual time; never supply simulated `--now` to live callb
 
 ## First use / onboarding
 
-1. `profile get`: inspect persisted constraints; ask only missing/ambiguous choices.
-2. `profile update --data '{...}'`: persist confirmed choices. Allowed weekdays
-   are Monday=0..Sunday=6. Times are local; all explicit timestamps need offsets.
-3. Owner/importer must supply a suitable template. `template get --template-id ID`
-   reads it. Demo weights are illustrative, never actual owner training history.
-   After owner confirms template and activation, pass `--template-id ID` to runtime
-   sync once; selected template persists, Sunday job/rolling maintenance become enabled.
-4. `calendar plan-week --week-start YYYY-MM-DD --template-id ID --request-id ID`
-   refreshes dedicated calendar and previews a deterministic local plan.
-   Week start must be Monday. Do not ask owner to choose among valid routine slots.
-5. Inspect `calendar pending-writes`; only publish after separate approval using
-   `calendar publish --allow-writes`. Runtime approval does not cover calendar writes.
+Start first coaching interaction with `onboarding status`. Follow its next step;
+never treat defaults as completed setup. Resume saved state, not a questionnaire
+from scratch. One question or small batch per turn; don't narrate tool operations.
+
+1. GOAL: ask training goal; save `onboarding set-goal --goal TEXT --request-id ID`.
+2. PROFILE: review saved schedule briefly: sessions/week, allowed days/time range,
+   session length, prep/travel, recovery/rest. Ask whether to keep or adjust it.
+   Apply explicit changes via `profile update --data '{...}'`, then read status
+   again. On owner's confirmation: `onboarding confirm-profile --fingerprint HASH
+   --request-id ID`. Use status's current profile fingerprint; never invent it.
+   Monday=0..Sunday=6; times local, explicit timestamps need offsets.
+3. TEMPLATE: offer saved template names from status or ask for workout-plan images.
+   Read images natively; no OCR/install loops. Extract compact exercise/sets/reps/
+   stated-weight draft, ask only unclear/missing starting or warm-up weights.
+   Save confirmed definition to private `data/` JSON and `template import --file PATH`.
+   Definitions require id/name/exercises; each exercise id/name/role/target_weight,
+   working_sets/rep_min/rep_max; first primary requires explicit warmup_weight.
+   Use `template get --template-id ID` to review; never seed/reimport blindly.
+   Ask one compact confirmation of actual plan/weights (not logged performance).
+   Then `onboarding confirm-template --template-id ID --fingerprint HASH --request-id ID`
+   using matching template fingerprint from fresh status. Demo/fixture templates
+   cannot stand in for real owner's plan.
+4. REVIEW: one short summary; on approval `onboarding finish --fingerprint HASH
+   --request-id ID` with current review fingerprint. This grants no runtime or
+   calendar authority. Changed profile/template invalidates review automatically.
+5. READY: preview with `calendar plan-week --week-start YYYY-MM-DD --template-id ID
+   --request-id ID`. Week starts Monday. Choose valid slots, don't make owner pick.
+   If runtime already enabled and reminders approved, sync selected template once;
+   Sunday/rolling maintenance becomes enabled. Don't re-ask existing permissions.
+
+Calendar publication stays OFF during testing. Only publish pending writes after
+separate explicit approval. Onboarding finish is not that approval. If user wants
+to test a workout instead, require explicit start intent; never fabricate a session.
 
 ## Workout
 

@@ -18,7 +18,7 @@ from gymclaw.services.calendar import get_week
 from gymclaw.services.replanning import replan_weeks
 from gymclaw.services.profile import get_profile, update_profile
 from gymclaw.services.scheduling import PlanningFixture, schedule_week
-from gymclaw.services import adaptation, audit, events, notifications, weekly, workout
+from gymclaw.services import adaptation, audit, events, notifications, weekly, workout, onboarding
 from gymclaw.services.errors import DomainError
 from gymclaw.services.set_parser import SetInput, parse_set
 from gymclaw.services.templates import Template, get_template, import_template
@@ -42,6 +42,12 @@ def parser():
     profile = groups.add_parser("profile", add_help=False)
     profile.add_argument("operation", choices=["get", "update"])
     profile.add_argument("--data", help="JSON object with profile fields")
+    setup = groups.add_parser("onboarding", add_help=False)
+    setup.add_argument("operation", choices=["status", "set-goal", "confirm-profile", "confirm-template", "finish"])
+    setup.add_argument("--goal")
+    setup.add_argument("--template-id")
+    setup.add_argument("--fingerprint")
+    setup.add_argument("--request-id")
     planning = groups.add_parser("schedule", aliases=["planning"], add_help=False)
     planning.add_argument("operation", choices=["plan-week", "replan"])
     planning.add_argument("--week-start", type=date.fromisoformat, required=True)
@@ -91,7 +97,7 @@ def parser():
     jobs = groups.add_parser("notifications", add_help=False)
     jobs.add_argument("operation", choices=["pending", "due"])
     jobs.add_argument("--now", type=datetime.fromisoformat)
-    for command in (db, profile, planning, calendar, template, training, report, inbox, jobs):
+    for command in (db, profile, setup, planning, calendar, template, training, report, inbox, jobs):
         command.add_argument("--json", action="store_true")
     return root
 
@@ -156,6 +162,15 @@ def main(argv=None) -> int:
                 if args.group == "availability":
                     result = availability_command(db, args)
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "onboarding":
+                    if args.operation == "status":
+                        data = onboarding.status(db)
+                        message_hint = data["instruction"]
+                    else:
+                        result = onboarding.update(db, args.operation, now=datetime.now(timezone.utc),
+                            request_id=required(args.request_id, "--request-id"), goal=args.goal,
+                            template_id=args.template_id, expected_fingerprint=args.fingerprint)
+                        data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "profile":
                     if args.operation == "update":
                         if args.data is None:

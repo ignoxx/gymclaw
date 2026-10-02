@@ -61,6 +61,17 @@ class UserProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
 
+class OnboardingState(Base):
+    __tablename__ = "onboarding_state"
+    __table_args__ = (CheckConstraint("id = 1"),)
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    goal: Mapped[str | None]
+    profile_fingerprint: Mapped[str | None]
+    template_id: Mapped[str | None] = mapped_column(ForeignKey("workout_template.id"))
+    template_fingerprint: Mapped[str | None]
+    completed_fingerprint: Mapped[str | None]
+
+
 class LearnedPreference(Base):
     __tablename__ = "learned_preference"
     id: Mapped[str] = mapped_column(primary_key=True, default=new_id)

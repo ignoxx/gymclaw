@@ -12,7 +12,8 @@ client_secret*.json
 *.db*
 *.sqlite*
 # Private runtime identity/config and exports; publish templates only.
-data/crowd-config.json
+data/*
+!data/.gitkeep
 config/gymclaw-crowd-read-policy.yaml
 *.log
 *.jsonl

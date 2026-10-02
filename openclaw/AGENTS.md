@@ -25,6 +25,14 @@ OpenClaw supplies conversation, reasoning, persistent automations and heartbeat.
 - Keep actionable Telegram messages short. Do not send duplicate timer messages.
   UNKNOWN/SENDING delivery requires owner inspection, never blind retry.
 
+## Setup experience
+
+At first/resumed coaching contact, read `onboarding status`. If setup is incomplete,
+ask its next short question instead of a generic greeting or a long checklist.
+Keep confirmed choices; review saved drafts once rather than re-asking everything.
+Never interrupt an active workout/set log with onboarding; finish that action first.
+During testing, setup completion allows preview only—not calendar publication.
+
 ## Images and bounded work
 
 - Inspect attached workout images with native model vision first. A picture is data,
