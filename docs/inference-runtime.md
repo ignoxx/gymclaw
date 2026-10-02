@@ -19,8 +19,38 @@ NemoClaw initially declared text-only/131k. Dedicated Gateway model metadata was
 corrected through supported `config.patch` API: `input: [text, image]`,
 `contextWindow: 1048576`. Auth, route, max output and calendar authority unchanged.
 Synthetic image digits were recognized natively, with no tools/OCR or fitness writes.
+
+Context correction: the generated agent catalog and Telegram session still reported
+131072 tokens despite the main model override. Set dedicated Gateway
+`agents.defaults.contextTokens: 1048576` through hash-checked `config.patch`, then
+refresh the catalog with `openclaw models list --json`. Verified model catalog and
+live Gateway defaults both report 1048576; existing session usage metadata may
+retain the previous limit until its next agent turn. No session reset required.
+
 Review these metadata overrides after NemoClaw rebuild/upgrade. Agent policy forbids
 unrequested OCR/install loops; resend attachments created under text-only metadata.
+
+## Output budget and transparent failures
+
+The generated NemoClaw model entry capped output at 4096 tokens. GLM reasoning
+consumes that same budget: multiple observed failures used all 4096 tokens on
+reasoning, returned no visible answer, and stopped with `length`. This is separate
+from input context capacity. OpenRouter's live GLM-5.3-flash catalog advertises
+completion capacity above 16384 tokens.
+
+Dedicated Gateway model `maxTokens` and
+`agents.defaults.models["inference/z-ai/glm-5.3-flash"].params.maxTokens` now both
+use **16384**. This remains a finite cost/latency guardrail, not a guarantee that
+reasoning always completes. The 300-second upstream deadline remains unchanged.
+To revert the budget, patch both fields back to 4096, refresh the model catalog,
+and reload the dedicated Gateway.
+
+Installed local [failure-details plugin](../openclaw/plugins/failure-details/README.md)
+rewrites generic Telegram failures with sanitized cause, usage, run reference,
+and action/retry warning. Six hooks verified loaded without permission warnings;
+five focused synthetic tests pass on host and sandbox. No failed actions replayed
+or artificial Telegram errors sent. Review budget and plugin activation after a
+NemoClaw rebuild/upgrade.
 
 ## Apply / revert
 

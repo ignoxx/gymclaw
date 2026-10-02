@@ -3,7 +3,7 @@
 Local NemoClaw sandbox installed; owner confirmed Telegram/OpenRouter chat works.
 GymClaw domain/skill connected. Private proactive delivery approved; watcher active
 and scheduled setup message verified with persisted receipt. Real workout/rest
-acceptance still pending onboarding. Calendar publication disabled. Original host
+acceptance still pending onboarding. Dedicated-calendar publication approved and enabled. Original host
 DB/credential files remain untouched.
 
 ## Readiness
@@ -30,7 +30,10 @@ Owner-approved opaque host DB copy is now under that repo's `data/` (directory
 files were never inspected or copied. Workspace selected via NemoClaw config API,
 Gateway restart healthy, `gymclaw` skill eligible/model-visible; owner DM tool access
 confirmed. Scoped dedicated-calendar GET/OAuth-refresh policy applied and live app
-read-only sync verified. No calendar-write authority or crowd polling granted.
+read-only sync verified. Owner subsequently granted ongoing writes to the dedicated
+GymClaw calendar: persisted runtime authority enabled, scoped event POST/PATCH/DELETE
+network preset applied, Google access role verified as owner. Other calendars remain
+outside this write preset. Crowd polling is also active.
 
 Installed CLI may prefix JSON with startup logs and wrap job creation as
 `{created, updated, job}`; adapter handles both while rejecting trailing garbage.
