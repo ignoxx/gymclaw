@@ -6,9 +6,9 @@ A Telegram agent that plans your training week and tells you what to do next at 
 
 The dashboard shows a synthetic demo. Telegram is the daily interface.
 
-[78-second walkthrough](videos/gymclaw-walkthrough.mp4) · [15-second motion reel](videos/gymclaw-motion-15s.mp4)
+[One week with GymClaw (60 s)](videos/gymclaw-story-60s.mp4) · [Feature tour (60 s)](videos/gymclaw-tour-60s.mp4) · [Motion reel (15 s)](videos/gymclaw-reel-15s.mp4)
 
-The walkthrough runs real workout transitions with simulated Telegram screens and time. See [video notes](videos/README.md).
+Telegram screens and data in the videos are simulated. See [video notes](videos/README.md).
 
 ## What runs over time
 

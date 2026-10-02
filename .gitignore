@@ -23,3 +23,5 @@ config/gymclaw-crowd-read-policy.yaml
 backups/
 snapshots/
 exports/
+
+node_modules/
