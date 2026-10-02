@@ -12,6 +12,16 @@ Our local workaround changes only upstream deadline to **300 seconds**. Body
 limits, request-body deadline, authentication, network policy and finite timeout
 remain unchanged. No inference/model fallback or automatic action replay added.
 
+## Native vision metadata
+
+Public GLM-5.3-flash catalog advertises image inputs and 1M context, but pinned
+NemoClaw initially declared text-only/131k. Dedicated Gateway model metadata was
+corrected through supported `config.patch` API: `input: [text, image]`,
+`contextWindow: 1048576`. Auth, route, max output and calendar authority unchanged.
+Synthetic image digits were recognized natively, with no tools/OCR or fitness writes.
+Review these metadata overrides after NemoClaw rebuild/upgrade. Agent policy forbids
+unrequested OCR/install loops; resend attachments created under text-only metadata.
+
 ## Apply / revert
 
 These scripts target the exact pinned installation and refuse other revisions.
