@@ -1,6 +1,5 @@
 """Crowd JSON adapter. Live reads are public; no session cookie/token needed."""
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -59,8 +58,7 @@ def crowd_command(engine, args) -> dict:
         else:
             if args.now:
                 raise DomainError("LIVE_TIME_REQUIRED", "Live crowd reads use actual retrieval time; --now requires fixture")
-            provider = MySportsProvider(studio_id=os.environ.get("GYMCLAW_MYSPORTS_STUDIO_ID", "1234567890"),
-                tenant=os.environ.get("GYMCLAW_MYSPORTS_TENANT", "fixture-tenant")) if args.source == "GYM_API" else UnavailableGoogleBusynessProvider()
+            provider = MySportsProvider.from_environment() if args.source == "GYM_API" else UnavailableGoogleBusynessProvider()
         with Session(engine) as db, db.begin():
             result = crowd.poll(db, provider, now=args.now)
         # Persist failure health before returning nonzero; do not fabricate a count.

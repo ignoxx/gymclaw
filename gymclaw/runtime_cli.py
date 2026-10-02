@@ -144,7 +144,7 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                 profile = get_profile(db)
                 local = now.astimezone(ZoneInfo(profile.timezone)).time().replace(tzinfo=None)
                 if profile.earliest_workout_start <= local < profile.latest_workout_finish:
-                    result = crowd.poll(db, MySportsProvider(studio_id=os.environ.get("GYMCLAW_MYSPORTS_STUDIO_ID", "1234567890"), tenant=os.environ.get("GYMCLAW_MYSPORTS_TENANT", "fixture-tenant")))
+                    result = crowd.poll(db, MySportsProvider.from_environment())
                 else:
                     result = {"data": {"available": True, "skipped": "outside_configured_gym_hours"}, "events": [], "user_message_hint": None}
             if not result["data"]["available"]:

@@ -2,9 +2,9 @@
 
 MySports integration follows reviewed handoff/FINDINGS and captured public response:
 
-- Studio `1234567890`, tenant `fixture-tenant`, Europe/Berlin.
-- GET `https://www.mysports.com/nox/public/v1/studios/1234567890/utilization/v2/active-checkin`
-- Header `x-tenant: fixture-tenant`; captured response `{"value":7}`.
+- Studio/tenant identifiers configured privately; no owner's gym in source.
+- GET `https://www.mysports.com/nox/public/v1/studios/{studio_id}/utilization/v2/active-checkin`
+- Header `x-tenant: {tenant}`; captured response shape `{"value":7}`.
 - No SESSION cookie needed. Code neither accepts nor stores one.
 - Response supplies no observation time, cache age, capacity or checkout semantics.
 - Undocumented observed route, not guaranteed stable API. Unit tests use fixtures.
@@ -12,7 +12,8 @@ MySports integration follows reviewed handoff/FINDINGS and captured public respo
 ## Local activation
 
 Owner approved live reads. Narrow MySports GET policy in
-`config/gymclaw-crowd-read-policy.yaml` applied to dedicated sandbox. Count and
+an ignored local policy generated from
+`config/gymclaw-crowd-read-policy.example.yaml` applied to dedicated sandbox. Count and
 `today` live requests returned 200; no Age/Cache-Control/Last-Modified provided.
 No cache duration inferred. App stored first real count with retrieval timestamp,
 not fabricated observation time. `today` exposes 24 items with start/end/current/
@@ -27,10 +28,24 @@ Existing `today` date-selection probes were ignored by server, so no dated lookb
 claim. Historical weekdays are not an archive. Our persisted count samples build
 our own dated history from activation forward, subject to unknown backend lag.
 
-Reference investigation: September 30, 2026, adjacent research repo
-`clawchallenge/research/mysports/IMPLEMENTATION_HANDOFF.md` and `FINDINGS.md`.
+Reference investigation: September 30, 2026, private endpoint research.
+Original gym-specific captures are not included in public source.
 Tests reproduce response contract synthetically; they are not fabricated historical
 live requests. Research capture timestamps are not reused as current observations.
+
+## Private gym configuration
+
+Set both `GYMCLAW_MYSPORTS_STUDIO_ID` and `GYMCLAW_MYSPORTS_TENANT`, or create
+ignored `data/crowd-config.json` (mode 0600) in active sandbox repo:
+
+```json
+{"studio_id":"YOUR_NUMERIC_STUDIO_ID","tenant":"YOUR_TENANT"}
+```
+
+Optional `GYMCLAW_CROWD_CONFIG` selects another private JSON path. There is no
+hardcoded gym fallback. Callbacks use repo cwd and load this same private config.
+Identifiers are not API credentials, but identify a gym; don't publish config,
+policy exports or runtime backups. Existing private deployment config preserved.
 
 ## Distinct quantities
 

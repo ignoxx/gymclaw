@@ -1,3 +1,4 @@
+# Replace YOUR_STUDIO_ID privately. Apply resulting ignored local policy, not this template.
 preset:
   name: gymclaw-crowd-read
   description: Read-only public MySports count and current-day relative utilization
@@ -10,7 +11,7 @@ network_policies:
         protocol: rest
         enforcement: enforce
         rules:
-          - allow: {method: GET, path: "/nox/public/v1/studios/1234567890/utilization/v2/active-checkin"}
-          - allow: {method: GET, path: "/nox/public/v1/studios/1234567890/utilization/v2/today"}
+          - allow: {method: GET, path: "/nox/public/v1/studios/YOUR_STUDIO_ID/utilization/v2/active-checkin"}
+          - allow: {method: GET, path: "/nox/public/v1/studios/YOUR_STUDIO_ID/utilization/v2/today"}
     binaries:
       - {path: /usr/bin/python3.13}

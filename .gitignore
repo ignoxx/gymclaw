@@ -11,3 +11,13 @@ google-client*.json
 client_secret*.json
 *.db*
 *.sqlite*
+# Private runtime identity/config and exports; publish templates only.
+data/crowd-config.json
+config/gymclaw-crowd-read-policy.yaml
+*.log
+*.jsonl
+*.bundle
+*.bak
+backups/
+snapshots/
+exports/

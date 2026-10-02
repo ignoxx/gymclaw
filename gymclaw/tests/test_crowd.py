@@ -57,9 +57,39 @@ class Transport:
         return Response(self.body)
 
 
+@pytest.mark.parametrize("source", ["env", "file"])
+def test_private_gym_config_without_hardcoded_fallback(tmp_path, monkeypatch, source):
+    monkeypatch.chdir(tmp_path)
+    for name in ("GYMCLAW_MYSPORTS_STUDIO_ID", "GYMCLAW_MYSPORTS_TENANT", "GYMCLAW_CROWD_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(DomainError) as error:
+        MySportsProvider.from_environment()
+    assert error.value.code == "GYM_API_NOT_CONFIGURED"
+    if source == "env":
+        monkeypatch.setenv("GYMCLAW_MYSPORTS_STUDIO_ID", "1234567890")
+        monkeypatch.setenv("GYMCLAW_MYSPORTS_TENANT", "fixture-tenant")
+    else:
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data/crowd-config.json").write_text(json.dumps({"studio_id": "1234567890", "tenant": "fixture-tenant"}))
+    transport = Transport({"value": 7})
+    assert MySportsProvider.from_environment(transport=transport).get_reading().raw_value == 7
+    assert transport.calls[0][1].endswith("/1234567890/utilization/v2/active-checkin")
+
+
+def test_invalid_private_gym_config_withholds_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("GYMCLAW_CROWD_CONFIG", str(tmp_path / "private.json"))
+    monkeypatch.delenv("GYMCLAW_MYSPORTS_STUDIO_ID", raising=False)
+    monkeypatch.delenv("GYMCLAW_MYSPORTS_TENANT", raising=False)
+    (tmp_path / "private.json").write_text('{"studio_id":"private-invalid-value","tenant":"fixture-tenant"}')
+    with pytest.raises(DomainError) as error:
+        MySportsProvider.from_environment()
+    assert error.value.code == "GYM_API_NOT_CONFIGURED"
+    assert "private-invalid-value" not in str(error.value)
+
+
 def test_mysports_observed_public_contract_no_session_cookie():
     transport = Transport({"value": 7})  # Captured public contract; not live request.
-    reading = MySportsProvider(transport=transport).get_reading()
+    reading = MySportsProvider(studio_id="1234567890", tenant="fixture-tenant", transport=transport).get_reading()
     assert reading.raw_value == 7 and reading.normalized_value is None
     assert reading.freshness_seconds is None
     method, url, kwargs = transport.calls[0]
@@ -72,7 +102,7 @@ def test_mysports_observed_public_contract_no_session_cookie():
 @pytest.mark.parametrize("body", [{}, {"value": -1}, {"value": True}, {"value": "7"}, {"value": 7.5}, {"value": None}])
 def test_invalid_count_never_stored(body):
     with pytest.raises(DomainError, match="count unavailable or invalid"):
-        MySportsProvider(transport=Transport(body)).get_reading()
+        MySportsProvider(studio_id="1234567890", tenant="fixture-tenant", transport=Transport(body)).get_reading()
 
 
 def test_unknown_freshness_change_window_and_restart(engine):
@@ -201,7 +231,7 @@ def test_fixture_source_cannot_replace_live_studio(engine):
     with Session(engine) as db, db.begin():
         crowd.poll(db, provider(7), now=NOW)
         with pytest.raises(DomainError, match="another crowd studio"):
-            crowd.poll(db, MySportsProvider(transport=Transport({"value": 7})), now=NOW)
+            crowd.poll(db, MySportsProvider(studio_id="1234567890", tenant="fixture-tenant", transport=Transport({"value": 7})), now=NOW)
 
 
 def test_crowd_cli_fixture_feedback_and_health(engine, tmp_path, capsys):
