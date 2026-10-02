@@ -334,7 +334,8 @@ def log_set(db: Session, workout_id: str, value: SetInput, *, now: datetime, req
                 transition(db, workout, "EXERCISE_COMPLETE", now)
                 transition(db, workout, "NEXT_EXERCISE", now)
                 choose_next(db, workout, now)
-            if workout.status != "WORKOUT_COMPLETE":
+            # Rest only between sets of the same exercise; a new exercise starts right away.
+            if not completed and workout.status != "WORKOUT_COMPLETE":
                 row.rest_started_at = now
                 row.rest_due_at = now + timedelta(seconds=active.rest_seconds)
                 job = NotificationJob(kind="REST", workout_session_id=workout.id, set_log_id=row.id, due_at=row.rest_due_at, payload_json={"workout_id": workout.id})
@@ -386,3 +387,18 @@ def skip_warmup(db: Session, workout_id: str, *, now: datetime, request_id: str)
         return touch(db, workout, now)
 
     return mutate(db, "workout.warmup_skipped", request_id, {"workout_id": workout_id}, now, action)
+
+
+def skip_rest(db: Session, workout_id: str, *, now: datetime, request_id: str) -> dict:
+    """Owner is ready before the timer: cancel the rest and go to the next set."""
+    now = utc(now)
+
+    def action():
+        workout = load_workout(db, workout_id, now)
+        if workout.status != "RESTING":
+            raise DomainError("NOT_RESTING", "No rest to skip")
+        cancel_rest(db, workout, now)
+        transition(db, workout, "SET_ACTIVE", now)
+        return touch(db, workout, now)
+
+    return mutate(db, "workout.rest_skipped", request_id, {"workout_id": workout_id}, now, action)

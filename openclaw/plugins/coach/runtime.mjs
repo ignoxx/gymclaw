@@ -22,18 +22,20 @@ export function cliRunner(toolPath, { timeoutMs = 20000 } = {}) {
     });
 }
 
-/** Card text with the rest on top while resting: the card shows what comes *after* the rest. */
+/** Rest cards count down in front of their text: "⏱ 1:25 until Bench set 2/2". */
 export function withRest(card, nowMs) {
   if (!card.rest_until) return card.text;
   const left = Math.max(0, Math.ceil((Date.parse(card.rest_until) - nowMs) / 1000));
-  return left ? `⏱ Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} · next up\n${card.text}` : `⏱ Rest over · go\n${card.text}`;
+  return `⏱ ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} ${card.text}`;
 }
 
 const keyboard = (buttons) => buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data })));
+// Countdowns and swap options are throwaway: deleted once replaced, so the chat stays clean.
+const throwaway = (entry) => entry.card.kind === "rest" || entry.card.kind === "option";
 
 /**
- * Renders coach results in one owner chat. Keeps one "live" card (the current exercise, with buttons and
- * countdown) plus "extras" (swap options/menu). Old buttons are removed as soon as the workout moves on.
+ * Renders coach results in one owner chat. Keeps one "live" card (current set or rest countdown) and
+ * "extras" (swap options). Old buttons disappear as soon as the workout moves on.
  */
 export function createCoach({ telegram, chatId, now = () => Date.now(), timers = globalThis, log = console, onRestOver }) {
   let live = null;
@@ -43,29 +45,38 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
     try {
       await promise;
     } catch (error) {
-      // "message is not modified" and deleted messages are expected during edits.
+      // "message is not modified" and already-deleted messages are expected.
       log.debug?.(`gymclaw-coach edit skipped: ${error?.message ?? error}`);
     }
   }
 
+  async function remove(entry) {
+    if (entry.timer) timers.clearInterval(entry.timer);
+    await quietly((await telegram()).remove(chatId, entry.messageId));
+  }
+
   async function retire(entry, ack) {
+    if (throwaway(entry)) return remove(entry);
     if (entry.timer) timers.clearInterval(entry.timer);
     await quietly((await telegram()).edit(chatId, entry.messageId, entry.card.text + (ack ? `\n${ack}` : ""), []));
   }
 
+  async function clearExtras() {
+    for (const entry of extras) await remove(entry);
+    extras = [];
+  }
+
   function startCountdown(entry) {
     entry.timer = timers.setInterval(async () => {
-      const text = withRest(entry.card, now());
-      if (!text.startsWith("⏱ Rest over")) {
-        await quietly((await telegram()).edit(chatId, entry.messageId, text, keyboard(entry.card.buttons)));
+      if (Date.parse(entry.card.rest_until) > now()) {
+        await quietly((await telegram()).edit(chatId, entry.messageId, withRest(entry.card, now()), keyboard(entry.card.buttons)));
         return;
       }
       timers.clearInterval(entry.timer);
       entry.timer = null;
-      // Rest is over: a fresh card with buttons notifies the phone; edits are silent.
+      // A fresh set card (not an edit) so the phone notifies; the countdown message is deleted.
       const result = live === entry && onRestOver ? await onRestOver().catch(() => null) : null;
       if (result?.cards?.length) await apply(result);
-      else await quietly((await telegram()).edit(chatId, entry.messageId, text, keyboard(entry.card.buttons)));
     }, TICK_MS);
   }
 
@@ -73,36 +84,36 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
   async function apply(result, { tapped, inboundMessageId } = {}) {
     const api = await telegram();
     if (inboundMessageId && result.react) await quietly(api.react(chatId, inboundMessageId, result.react));
+    if (result.live_buttons) {
+      // Swap: the current card's buttons become wait/later, options go below it.
+      if (live) await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(result.live_buttons)));
+      await clearExtras();
+      for (const card of result.cards ?? []) extras.push({ messageId: await api.send(chatId, card.text, { photo: card.photo, buttons: keyboard(card.buttons) }), card });
+      return;
+    }
+    if (result.restore) {
+      await clearExtras();
+      if (live) await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(live.card.buttons)));
+      return;
+    }
     const known = [live, ...extras].find((entry) => entry && tapped && entry.messageId === tapped.messageId);
-    if (known && result.keep && !result.ack) {
-      // Swap menu opened from the live card: that card stays usable ("I'll wait").
-    } else if (known) {
-      await retire(known, result.ack);
-      if (known === live) live = null;
-      extras = extras.filter((entry) => entry !== known);
-    } else if (tapped && result.ack) {
-      // Message from before a gateway restart: we only know its visible text.
-      const text = (tapped.text ?? "").replace(/^⏱ Rest[^\n]*\n/, "");
-      await quietly(api.edit(chatId, tapped.messageId, `${text}\n${result.ack}`, []));
-    } else if (!tapped && result.ack && live) {
-      await retire(live, result.ack);
-      live = null;
-    }
-    if (!result.cards?.length) return;
-    if (!result.keep) {
-      for (const entry of [live, ...extras]) if (entry) await retire(entry);
-      live = null;
-      extras = [];
-    }
-    for (const [index, card] of result.cards.entries()) {
-      const messageId = await api.send(chatId, withRest(card, now()), { photo: card.photo, buttons: keyboard(card.buttons) });
-      const entry = { messageId, card };
-      if (result.keep || index < result.cards.length - 1) {
-        extras.push(entry);
-      } else {
-        live = entry;
-        if (card.rest_until) startCountdown(entry);
+    if (result.cleanup === "delete") {
+      for (const entry of [live, ...extras]) if (entry) await remove(entry);
+      if (tapped && !known) await quietly(api.remove(chatId, tapped.messageId));
+    } else {
+      const target = known ?? (tapped ? null : live);
+      if (target) await retire(target, result.ack);
+      else if (tapped && result.ack) {
+        // Message from before a gateway restart: we only know its visible text.
+        await quietly(api.edit(chatId, tapped.messageId, `${tapped.text ?? ""}\n${result.ack}`, []));
       }
+      for (const entry of [live, ...extras]) if (entry && entry !== target) await retire(entry);
+    }
+    live = null;
+    extras = [];
+    for (const card of result.cards ?? []) {
+      live = { messageId: await api.send(chatId, withRest(card, now()), { photo: card.photo, buttons: keyboard(card.buttons) }), card };
+      if (card.rest_until) startCountdown(live);
     }
   }
 
@@ -181,22 +192,33 @@ export function registerCoach(api, { run, telegram } = {}) {
     },
   });
 
+  // before_dispatch has no Telegram message ID; message_received (fired just before it) does.
+  // Remember the latest ID per text so a typed set can get its 👍.
+  const recentIds = new Map();
+  api.on("message_received", (event) => {
+    if (!event.messageId || !SET_LIKE.test(String(event.content ?? ""))) return;
+    recentIds.set(String(event.content).trim(), event.messageId);
+    if (recentIds.size > 20) recentIds.delete(recentIds.keys().next().value);
+  });
+
   // before_dispatch runs for every inbound message (inbound_claim only fires for plugin-bound chats).
   api.on("before_dispatch", async (event, ctx) => {
     const sender = String(event.senderId ?? ctx?.senderId ?? "").replace(/^telegram:/, "");
     if ((event.channel ?? ctx?.channelId) !== "telegram" || event.isGroup || sender !== ownerId) return;
     const text = [event.content, event.body].map((value) => String(value ?? "").trim()).find((value) => SET_LIKE.test(value));
     if (!text) return;
+    const messageId = recentIds.get(text);
+    recentIds.delete(text);
     let result;
     try {
-      result = await cli(["coach", "text", "--text", text, "--request-id", `tg-msg:${event.timestamp ?? Date.now()}:${text}`]);
+      result = await cli(["coach", "text", "--text", text, "--request-id", `tg-msg:${messageId ?? `${event.timestamp ?? Date.now()}:${text}`}`]);
     } catch (error) {
       // Let the agent explain anything unexpected (e.g. no workout in a loggable state).
       api.logger.warn(`gymclaw-coach: typed set not handled: ${error.code ?? error.message}`);
       return;
     }
     if (!result.handled) return;
-    await coach.apply(result);
+    await coach.apply(result, { inboundMessageId: messageId });
     sync();
     return { handled: true };
   });

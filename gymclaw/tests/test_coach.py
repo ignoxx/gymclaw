@@ -36,16 +36,20 @@ def buttons(card: dict) -> dict[str, str]:
     return {b["text"]: b["data"].removeprefix("gc:") for row in card["buttons"] for b in row}
 
 
-def test_typed_set_reacts_and_next_card_offers_last_set(db):
+def test_typed_set_reacts_then_rest_card_then_fresh_set_card(db):
     first = coach.handle_action(db, "card", now=NOW, request_id="card")["cards"][0]
     assert first["photo"] and Path(first["photo"]).is_file()
     assert "Set 1/2 · 8–10 reps" in first["text"] and "Send weight × reps" in first["text"]
     assert coach.handle_text(db, "how long do I rest?", now=at(5), request_id="chat") == {"handled": False}
     result = coach.handle_text(db, "12x90kg", now=at(10), request_id="msg-1")
-    assert result["react"] == "👍"
-    card = result["cards"][0]
-    assert card["photo"] is None and card["rest_until"] == at(100).isoformat()
-    assert "Set 2/2 · 8–10 reps" in card["text"]
+    assert result["react"] == "👍" and result["ack"] == "✅ 90 kg × 12"
+    rest = result["cards"][0]
+    # Between sets: only a countdown and Skip, nothing to log yet.
+    assert rest["kind"] == "rest" and rest["rest_until"] == at(100).isoformat()
+    assert rest["text"] == "until **Machine incline press** set 2/2" and set(buttons(rest)) == {"⏭ Skip"}
+    skipped = coach.handle_tap(db, buttons(rest)["⏭ Skip"], now=at(30), request_id="cb-skip")
+    card = skipped["cards"][0]
+    assert skipped["cleanup"] == "delete" and card["kind"] == "set" and card["photo"]
     assert "✅ 90 kg × 12" in buttons(card)
     # Already on the machine: no Swap after the first set.
     assert "🔄 Swap" not in buttons(card) and "⏭ Next exercise" in buttons(card)
@@ -56,40 +60,53 @@ def test_rest_over_closes_job_once_and_returns_fresh_card(db):
     coach.handle_text(db, "90x10", now=at(10), request_id="m1")
     assert coach.handle_rest_over(db, now=at(50))["cards"] == []  # still resting
     over = coach.handle_rest_over(db, now=at(101))
-    assert over["rest_over"] and over["cards"][0]["rest_until"] is None and over["cards"][0]["buttons"]
+    assert over["rest_over"] and over["cleanup"] == "delete" and over["cards"][0]["kind"] == "set"
     assert db.query(NotificationJob).one().status == "FIRED"  # cron fallback finds nothing to send
-    assert coach.handle_rest_over(db, now=at(102))["cards"] == []
+    again = coach.handle_rest_over(db, now=at(102))
+    assert "rest_over" not in again and again["cards"][0]["kind"] == "set"
 
 
-def test_occupied_offers_same_muscle_alternatives_and_stays_on_chest(db):
-    swap = coach.handle_tap(db, buttons(coach.exercise_card(db, coach.active_workout(db), NOW))["🔄 Swap"], now=at(5), request_id="cb-1")
-    *options, menu = swap["cards"]
-    assert len(options) == 2 and all(o["photo"] for o in options)
-    assert all("sub:" in data for o in options for data in buttons(o).values())
-    assert set(buttons(menu)) == {"⏳ I'll wait", "↪ Do it later"}
-    assert coach.handle_tap(db, buttons(menu)["⏳ I'll wait"], now=at(6), request_id="cb-2")["ack"].startswith("⏳")
-    later = coach.handle_tap(db, buttons(menu)["↪ Do it later"], now=at(7), request_id="cb-3")
+def test_finishing_an_exercise_goes_straight_to_the_next(db):
+    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    coach.handle_tap(db, "skip:" + coach.exercise_card(db, coach.active_workout(db), at(11))["buttons"][0][0]["data"].split(":")[2], now=at(12), request_id="cb")
+    nxt = coach.handle_text(db, "90x10", now=at(60), request_id="m2")["cards"][0]
+    assert nxt["kind"] == "set" and nxt["text"].startswith("**Shoulder press**") and nxt["rest_until"] is None
+
+
+def test_swap_menu_on_card_wait_later_and_free(db):
+    card = coach.exercise_card(db, coach.active_workout(db), NOW)
+    swap = coach.handle_tap(db, buttons(card)["🔄 Swap"], now=at(5), request_id="cb-1")
+    assert swap["keep"] and len(swap["cards"]) == 2 and all(o["photo"] and o["kind"] == "option" for o in swap["cards"])
+    assert all("sub:" in data for o in swap["cards"] for data in buttons(o).values())
+    menu = {b["text"]: b["data"].removeprefix("gc:") for row in swap["live_buttons"] for b in row}
+    assert set(menu) == {"⏳ I'll wait", "↪ Do it later"}
+    assert coach.handle_tap(db, menu["⏳ I'll wait"], now=at(6), request_id="cb-2")["restore"]
+    later = coach.handle_tap(db, menu["↪ Do it later"], now=at(7), request_id="cb-3")
+    assert later["cleanup"] == "delete"
     card = later["cards"][0]
     # Cable fly (chest) comes before the shoulder press while the chest machine is taken.
     assert card["text"].startswith("**Cable fly** · Chest") and card["photo"]
-    freed = buttons(card)["↩ Machine incline press free?"]
-    back = coach.handle_tap(db, freed, now=at(8), request_id="cb-4")["cards"][0]
+    back = coach.handle_tap(db, buttons(card)["↩ Machine incline press free?"], now=at(8), request_id="cb-4")["cards"][0]
     assert back["text"].startswith("**Machine incline press**")
 
 
-def test_catalog_swap_then_old_buttons_expire(db):
+def test_swap_is_remembered_in_the_template(db):
+    from gymclaw.services.templates import get_template
     card = coach.exercise_card(db, coach.active_workout(db), NOW)
     option = coach.handle_tap(db, buttons(card)["🔄 Swap"], now=at(1), request_id="cb-1")["cards"][0]
+    slug = next(iter(buttons(option).values())).split(":")[2]
     swapped = coach.handle_tap(db, next(iter(buttons(option).values())), now=at(2), request_id="cb-2")
-    assert swapped["ack"] == "🔄 Swapped" and swapped["cards"][0]["photo"]
-    assert "Chest" in swapped["cards"][0]["text"]
-    stale = coach.handle_tap(db, buttons(card)["⏭ Next exercise"], now=at(3), request_id="cb-3")
-    assert stale["ack"] == "⌛ Old button."
+    assert swapped["cleanup"] == "delete" and swapped["cards"][0]["photo"] and "Chest" in swapped["cards"][0]["text"]
+    template = get_template(db, "push")
+    assert template.exercises[0].id == slug and template.exercises[0].working_sets == 2
+    assert template.exercises[0].substitutes == ["incline"] and template.alternatives[0].id == "incline"
+    assert coach.handle_tap(db, buttons(card)["⏭ Next exercise"], now=at(3), request_id="cb-3")["ack"] == "⌛ Old button."
 
 
 def test_next_end_crowd_and_baseline_weight(db):
     coach.handle_text(db, "90x10", now=at(10), request_id="m1")
-    moved = coach.handle_tap(db, buttons(coach.exercise_card(db, coach.active_workout(db), at(11)))["⏭ Next exercise"], now=at(12), request_id="cb-1")
+    coach.handle_rest_over(db, now=at(101))
+    moved = coach.handle_tap(db, buttons(coach.exercise_card(db, coach.active_workout(db), at(110)))["⏭ Next exercise"], now=at(112), request_id="cb-1")
     assert moved["cards"][0]["text"].startswith("**Shoulder press**")
     done = coach.handle_action(db, "end", now=at(600), request_id="end")["cards"][0]
     assert "🏁 **Push done** · 1 sets · 10 min" in done["text"]
