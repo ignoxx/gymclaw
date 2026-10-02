@@ -179,7 +179,9 @@ def current(db: Session, workout_id: str, *, now: datetime) -> dict:
     active_data = None
     if active:
         is_warmup = warmup_pending(db, active)
+        from gymclaw.services.illustrations import for_exercise
         active_data = {
+            "illustration": for_exercise(active.config_json["name"], active.config_json.get("guide_id")),
             "id": active.id, "exercise_id": active.exercise_id, "name": active.config_json["name"],
             "set_type": "WARMUP" if is_warmup else "WORKING",
             "set_number": 1 if is_warmup else len(logs(db, active, "WORKING")) + 1,

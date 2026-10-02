@@ -31,7 +31,7 @@ def test_demo_http_serves_only_public_assets_and_rejects_writes():
         assert response.status == 200 and json.loads(response.read())["demo"]
         client.request("GET", "/")
         response = client.getresponse()
-        assert response.status == 200 and b"synthetic data only" in response.read()
+        assert response.status == 200 and b"synthetic data" in response.read()
         assert "frame-ancestors 'none'" in response.getheader("Content-Security-Policy")
         for path in ("/../README.md", "/data/private.sqlite", "/unknown"):
             client.request("GET", path)

@@ -1,21 +1,52 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GymClaw — your week, handled.</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GymClaw</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
 <body>
-<div class="shell">
-<header class="topbar"><a class="brand" href="/" aria-label="GymClaw home"><span class="brand-mark">G</span>gymclaw<span class="brand-dot">.</span></a><div class="top-status"><span class="status-dot"></span>Offline demo <span class="divider">/</span> synthetic data only</div><span class="top-caption">BUILT WITH OPENCLAW + NEMOCLAW</span></header>
-<main>
-<section class="intro"><div><p class="eyebrow">LESS PLANNING. MORE TRAINING.</p><h1>Your week, <em>handled.</em></h1><p class="intro-copy">A coach that fits training around life. Plans your week,<br class="desktop"> guides each set, adapts when things change.</p></div><div class="week-stamp"><span class="stamp-label">EXAMPLE WEEK</span><strong id="week-label">12–18 October 2026</strong><span>Private Telegram is primary interface</span></div></section>
-<nav class="tabs" aria-label="Dashboard views"><button class="tab selected" data-tab="overview" aria-pressed="true">Overview</button><button class="tab" data-tab="week" aria-pressed="false">Week plan</button><button class="tab" data-tab="workout" aria-pressed="false">Workout</button><button class="tab" data-tab="crowd" aria-pressed="false">Crowd evidence</button></nav>
-<div id="loading-error" class="notice" hidden>Demo could not load. Restart local server; no private state was accessed.</div>
-<section class="stats"><article><span class="stat-label">Sessions planned</span><strong id="sessions-stat">—</strong><span class="stat-note">Recovery days respected</span></article><article><span class="stat-label">Current workout</span><strong class="stat-word">Full-body A</strong><span class="stat-note">Warm-up → working sets → rest</span></article><article><span class="stat-label">Calendar authority</span><strong class="stat-word">Preview only</strong><span class="stat-note">No external events published</span></article><article><span class="stat-label">Personal crowd score</span><strong class="stat-word">Not enough data</strong><span class="stat-note">Unknown ≠ empty gym</span></article></section>
-<div class="content-grid">
-<section class="card week-card" data-view="overview week"><div class="card-heading"><div><p class="eyebrow">MAKE ROOM FOR PROGRESS</p><h2>A plan, not another chore.</h2></div><span class="pill neutral">Deterministic planner</span></div><div id="week-grid" class="week-grid"></div><div class="card-foot"><span class="tiny-dot"></span>Prep + travel buffers included. Manual edits stay yours.</div></section>
-<section class="card workout-card" data-view="overview workout"><div class="card-heading"><div><p class="eyebrow">ONE SET AT A TIME</p><h2>Next up.</h2></div><span class="pill mint">Demo workout</span></div><div class="exercise-top"><span id="exercise-name">Bench press</span><span id="set-position" class="muted">Set 2 / 3</span></div><div class="prescription"><strong id="target-weight">80</strong><span>kg</span><span class="times">×</span><strong id="target-reps">8–10</strong><span>reps</span></div><div class="rest-panel"><span class="rest-icon">↳</span><div><strong>Rest 90 seconds</strong><span>Intent saved in SQLite. Demo clock paused; no timer sent.</span></div></div><div class="workout-meta"><div><span>Warm-up</span><strong>50 kg × 8</strong></div><div><span>Working set saved</span><strong>80 kg × 9</strong></div><div><span>Finish estimate</span><strong id="eta">—</strong></div></div><div id="exercise-list" class="exercise-list"></div></section>
-<section class="card crowd-card" data-view="overview crowd"><div class="card-heading"><div><p class="eyebrow">EVIDENCE, NOT GUESSWORK</p><h2>Find your quieter window.</h2></div><span class="pill neutral">Synthetic samples</span></div><div class="chart-top"><span>Reported active count</span><span class="muted">Not occupancy %</span></div><div id="crowd-chart" class="crowd-chart"></div><div class="crowd-warning"><span>i</span><p>Backend freshness is unknown. Arrival feedback calibrates your comfort score; these example readings alone don’t prove a forecast.</p></div><div class="source-row"><span>MySports count contract</span><strong>Implemented</strong></div><div class="source-row"><span>Google Maps Popular Times</span><strong class="muted">Not connected</strong></div></section>
-<section class="card chat-card" data-view="overview workout"><div class="card-heading"><div><p class="eyebrow">NO EXTRA APP TO MANAGE</p><h2>Meet your coach in Telegram.</h2></div></div><div class="chat-frame"><div class="chat-header"><span class="mini-mark">G</span><div><strong>GymClaw</strong><span>Example conversation · not live</span></div></div><div class="bubble owner">80 × 9</div><div class="bubble coach">Rest 90s.<br>Next: 80 kg × 8–10.</div><div class="chat-note">No repeated request. No rest-time chatter.</div></div><div class="card-foot">Busy machine? Reorder first, substitute second. ETA updates.</div></section>
-</div>
-<section class="system-strip"><div><p class="eyebrow">THE SPLIT THAT MAKES IT RELIABLE</p><h2>Agent thinks. Domain decides.</h2></div><div class="system-flow"><span>Telegram</span><b>→</b><span>OpenClaw / NemoClaw</span><b>→</b><span>Typed tools + SQLite</span><b>→</b><span>Calendar / durable jobs</span></div><p>This page runs real planner and workout services in a disposable demo DB. No credentials, live providers, private gym or owner history.</p></section>
-<footer><span>GymClaw · hackathon prototype</span><span>Read-only visual demo. Live workflow acceptance remains separate.</span></footer>
-</main></div>
-</body></html>
+  <main class="dashboard">
+    <header class="header">
+      <a class="brand" href="/">gymclaw<span>.</span></a>
+      <span class="demo-tag">Demo <span>synthetic data</span></span>
+      <span class="runtime">OpenClaw / NemoClaw</span>
+    </header>
+    <div class="page-heading"><h1>Training</h1><span id="week-label">October 2026</span></div>
+    <div id="load-error" role="alert" hidden>Could not load demo.</div>
+    <div class="layout">
+      <div class="planning">
+        <section class="panel week-panel" aria-labelledby="week-title">
+          <div class="section-heading"><h2 id="week-title">This week</h2><span id="session-count">3 sessions</span></div>
+          <div class="week" id="week"></div>
+          <div class="week-footer"><span>Prep + travel included</span><span class="small-tag">Calendar preview</span></div>
+        </section>
+        <section class="panel attendance-panel" aria-labelledby="attendance-title">
+          <div class="section-heading"><h2 id="attendance-title">Gym attendance</h2><span class="cadence"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7a9 9 0 0 0-15-2L2 8m0-5v5h5M4 17a9 9 0 0 0 15 2l3-3m0 5v-5h-5"/></svg>API every <b id="cadence">15 min</b></span></div>
+          <div class="sources" aria-label="Attendance source"><button class="source selected" id="api-source" aria-pressed="true">MySports API</button><button class="source" id="google-source" aria-pressed="false">Google Popular Times <span>Not connected</span></button></div>
+          <div id="api-view">
+            <div class="count"><strong id="attendance-count">14</strong><div><span>reported check-ins</span><small id="fetched-at">Fetched 17:45</small></div><span class="sample-tag">Sample history</span></div>
+            <div id="attendance-chart" class="chart"></div>
+            <div class="chart-footer"><span>Cache delay unknown</span><span>Comfort score needs arrival feedback</span></div>
+          </div>
+          <div id="google-view" class="not-connected" hidden><span class="empty-chart" aria-hidden="true">▂ ▄ ▆ █ ▆ ▄ ▂</span><strong>Not connected</strong><span>No Google data collected</span></div>
+        </section>
+        <section class="activity" aria-label="Demo agent activity"><div class="section-heading"><h2>Agent activity</h2><span>Demo</span></div><div class="event"><time>17:45</time><span class="event-dot"></span><span>Attendance saved</span><span class="event-detail">15 min cadence</span></div><div class="event"><time>18:00</time><span class="event-dot"></span><span>Workout started</span><span class="event-detail">State in SQLite</span></div><div class="event"><time>18:01</time><span class="event-dot lime"></span><span>Set saved. Rest queued.</span><span class="event-detail">90 seconds</span></div></section>
+      </div>
+      <section class="panel workout-panel" aria-labelledby="exercise-name">
+        <div class="section-heading"><span id="exercise-state">Next set</span><span id="set-position">Set 2 / 3</span></div>
+        <h2 id="exercise-name" class="exercise-name">Bench press</h2>
+        <div class="pose"><img id="exercise-image" alt="Bench press illustration" width="512" height="512"></div>
+        <div class="prescription"><strong id="weight">80</strong><span>kg</span><span class="multiply">×</span><strong id="reps">8–10</strong><span>reps</span></div>
+        <div class="rest" id="rest"><svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="16"/><path d="M20 9v11l7 4"/></svg><div><strong>Rest <span id="rest-duration">90s</span></strong><span>Demo clock paused</span></div><span class="saved">Saved</span></div>
+        <div class="workout-footer"><span>Last set <b>80 × 9</b></span><span>Finish <b id="eta">18:26</b></span></div>
+        <div class="queue" id="queue" aria-label="Exercise preview"></div>
+        <div class="telegram"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-7-4 16-6-5-4 3 1-6 10-6-8 8"/></svg><span>Next-exercise image in Telegram</span></div>
+      </section>
+    </div>
+    <footer><span>Read-only demo. Calendar writes off.</span><span>Art <a href="https://github.com/bryllim/workout-guide">Workout Guide</a> / Bryl Lim / Everkinetic · <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></span></footer>
+  </main>
+</body>
+</html>

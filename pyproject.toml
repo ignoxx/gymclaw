@@ -16,7 +16,7 @@ dev = ["pytest>=8,<10"]
 include = ["gymclaw*"]
 
 [tool.setuptools.package-data]
-gymclaw = ["migrations/script.py.mako", "web/*.html", "web/*.css", "web/*.js"]
+gymclaw = ["migrations/script.py.mako", "web/*.html", "web/*.css", "web/*.js", "web/fonts/*", "assets/workout-guide/*.json", "assets/workout-guide/LICENSE*", "assets/workout-guide/*.md", "assets/workout-guide/*/*.svg", "assets/workout-guide/*/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["gymclaw/tests"]

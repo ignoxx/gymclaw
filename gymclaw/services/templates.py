@@ -1,7 +1,7 @@
 """Validated template import. Definitions are stored in SQLite, snapshotted at start."""
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from gymclaw.models import WorkoutTemplate
@@ -16,6 +16,7 @@ class ExerciseSpec(BaseModel):
     id: Identifier
     name: Identifier
     role: Identifier
+    guide_id: Identifier | None = None
     primary: bool = False
     working_sets: PositiveInt = 3
     rep_min: PositiveInt = 8
@@ -28,6 +29,14 @@ class ExerciseSpec(BaseModel):
     priority: Annotated[int, Field(ge=0, strict=True)] = 0
     requires_completed: list[Identifier] = []
     substitutes: list[Identifier] = []
+
+    @field_validator("guide_id")
+    @classmethod
+    def known_guide(cls, value: str | None) -> str | None:
+        from gymclaw.services.illustrations import catalog
+        if value is not None and value not in catalog():
+            raise ValueError("guide_id must match Workout Guide catalog")
+        return value
 
     @model_validator(mode="after")
     def valid(self):

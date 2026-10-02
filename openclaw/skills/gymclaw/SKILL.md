@@ -47,6 +47,25 @@ Calendar publication stays OFF during testing. Only publish pending writes after
 separate explicit approval. Onboarding finish is not that approval. If user wants
 to test a workout instead, require explicit start intent; never fabricate a session.
 
+## Exercise images
+
+Workout reads and mutation results include `active_exercise.illustration`.
+When a workout starts or the exercise changes, attach its `telegram_png` through
+Telegram's message tool with the exercise, weight and reps in the same message.
+Use local PNG, not SVG. Telegram photos do not accept SVG.
+Do not resend images for every set or rest reminder. If delivery is uncertain,
+stop rather than send another copy. Reply with text for unmapped exercises.
+Do not send images outside an owner-requested workout.
+
+Definitions may set `guide_id` to a Workout Guide catalog slug. Choose it only
+when exercise and equipment match. Do not guess from role or similar names.
+Without it, only unique exact catalog names map. Unknown names have no image.
+Search matching entries in `gymclaw/assets/workout-guide/manifest.json`; do not
+dump the catalog into context. Add linked credit in the caption using returned
+source/license URLs: Workout Guide / Bryl Lim / Everkinetic, CC BY-SA 4.0.
+Mention the returned presentation change briefly, such as "dark background added".
+Images explain exercises. They do not represent logged performance.
+
 ## Workout
 
 - `workout start --template-id ID --planned-session-id ID --request-id ID`

@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from gymclaw.demo import build_demo_snapshot
+from gymclaw.services.illustrations import public_assets
 
 ASSETS = {"/": ("index.html", "text/html"), "/styles.css": ("styles.css", "text/css"), "/app.js": ("app.js", "text/javascript")}
 
@@ -13,11 +14,18 @@ ASSETS = {"/": ("index.html", "text/html"), "/styles.css": ("styles.css", "text/
 def demo_handler(snapshot: dict):
     payload = json.dumps(snapshot, allow_nan=False).encode()
     root = Path(__file__).with_name("web")
+    illustrations = public_assets()
+    fonts = {"/fonts/BarlowCondensed-SemiBold.ttf": root / "fonts/BarlowCondensed-SemiBold.ttf",
+             "/fonts/DM-Sans.ttf": root / "fonts/DM-Sans.ttf"}
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             route = urlsplit(self.path).path
             if route == "/api/demo":
                 body, mime = payload, "application/json"
+            elif route in illustrations:
+                body, mime = illustrations[route].read_bytes(), "image/svg+xml"
+            elif route in fonts:
+                body, mime = fonts[route].read_bytes(), "font/ttf"
             elif route in ASSETS:
                 filename, mime = ASSETS[route]
                 body = (root / filename).read_bytes()
@@ -29,7 +37,7 @@ def demo_handler(snapshot: dict):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(body)
 
