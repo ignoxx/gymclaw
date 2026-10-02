@@ -11,9 +11,9 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
   `⏭ Skip`, edited every 5 s. At zero (or Skip) it is deleted and a fresh set card is sent, which
   notifies the phone. A new exercise starts right away. The runtime cron ping is only a fallback 30 s
   later, e.g. after a gateway restart mid-rest.
-- **Swap:** the card's buttons become `⏳ I'll wait` / `↪ Do it later` and up to two same-muscle
+- **Swap:** the card's buttons become `↩ Keep <exercise>` / `↪ Do it later` and up to two same-muscle
   alternatives appear below it. Choosing one deletes the options and the old card, and the swap is
-  saved in the template (the old exercise stays as an alternative). Waiting restores the card.
+  saved in the template (the old exercise stays as an alternative). Keep restores the card.
 - **Agent tool:** `gymclaw_workout` (status, start, log, card, swap, later, next, end), so chat requests produce
   the same cards.
 

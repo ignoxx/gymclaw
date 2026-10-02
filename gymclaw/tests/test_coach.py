@@ -79,8 +79,8 @@ def test_swap_menu_on_card_wait_later_and_free(db):
     assert swap["keep"] and len(swap["cards"]) == 2 and all(o["photo"] and o["kind"] == "option" for o in swap["cards"])
     assert all("sub:" in data for o in swap["cards"] for data in buttons(o).values())
     menu = {b["text"]: b["data"].removeprefix("gc:") for row in swap["live_buttons"] for b in row}
-    assert set(menu) == {"⏳ I'll wait", "↪ Do it later"}
-    assert coach.handle_tap(db, menu["⏳ I'll wait"], now=at(6), request_id="cb-2")["restore"]
+    assert set(menu) == {"↩ Keep Machine incline press", "↪ Do it later"}
+    assert coach.handle_tap(db, menu["↩ Keep Machine incline press"], now=at(6), request_id="cb-2")["restore"]
     later = coach.handle_tap(db, menu["↪ Do it later"], now=at(7), request_id="cb-3")
     assert later["cleanup"] == "delete"
     card = later["cards"][0]

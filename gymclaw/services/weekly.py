@@ -103,6 +103,47 @@ def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
     return changed
 
 
+CROWD_RECHECK = timedelta(minutes=30)
+
+
+def significant(old: dict | None, new: dict | None) -> bool:
+    """Worth a calendar edit: first data, a different feel, or ≥3 people and ≥25% change."""
+    if not new:
+        return False
+    if not old:
+        return True
+    if old.get("feel") != new.get("feel"):
+        return True
+    before, after = old.get("count"), new.get("count")
+    if before is None or after is None:
+        return before != after
+    return abs(after - before) >= 3 and abs(after - before) >= 0.25 * max(before, 1)
+
+
+def refresh_crowd(db: Session, *, now: datetime) -> list[dict]:
+    """Keep 'Expected crowd' in calendar events current without churn: fill unknown forecasts, then
+    re-check sessions in the next 24 h every 30 min and update only on a significant change. Nothing
+    within 1 h of start, so imminent reminders aren't rescheduled."""
+    from gymclaw.services.crowd import CrowdModel
+    model = CrowdModel(db, now=now)
+    changed = []
+    for session in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]), PlannedSession.planned_start_at > now + timedelta(hours=1))):
+        plan = session.workout_plan_json
+        old = plan.get("crowd_forecast")
+        checked = plan.get("crowd_checked_at")
+        if old and (session.planned_start_at > now + timedelta(hours=24) or checked and now - datetime.fromisoformat(checked) < CROWD_RECHECK):
+            continue
+        new = model.forecast(session.planned_start_at)
+        update = significant(old, new)
+        session.workout_plan_json = plan | {"crowd_checked_at": now.isoformat()} | ({"crowd_forecast": new} if update else {})
+        if update:
+            session.source_revision += 1
+            # Description-only edit for published events; unpublished ones get a full create.
+            queue_session_write(db, session, now=now, metadata_only=bool(session.calendar_event_id))
+            changed.append({"session_id": session.id, "forecast": new})
+    return changed
+
+
 def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     now = utc(now)
     get_template(db, template_id)  # Explicit selected template, never guess from demo import.
@@ -128,8 +169,9 @@ def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     for session_id in created:
         queue_session_write(db, db.get(PlannedSession, session_id), now=now)
     rotation = assign_rotation(db, now=now)
+    crowd = refresh_crowd(db, now=now)
     commit_upcoming(db, now=now)
-    return {"missed": missed, "created": created, "rotation": rotation, **repaired}
+    return {"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, **repaired}
 
 
 def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:

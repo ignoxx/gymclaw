@@ -131,6 +131,14 @@ def calibrated_count(count: float, pairs: list[tuple[float, float]]) -> tuple[fl
     return score, min(0.8, len(pairs) / (len(pairs) + 10)) * extrapolation_penalty, "personalized_isotonic"
 
 
+FEELS = (("Empty", 1 / 6), ("Fine", 0.5), ("Busy", 5 / 6), ("Packed", float("inf")))
+
+
+def feel(score: float | None) -> str | None:
+    """Personal 0–1 score as the owner's own words (Empty/Fine/Busy/Packed)."""
+    return None if score is None else next(label for label, limit in FEELS if score < limit)
+
+
 class CrowdModel:
     """Load evidence once per planning pass; no per-candidate DB queries."""
     def __init__(self, db: Session, *, now: datetime):
@@ -147,6 +155,30 @@ class CrowdModel:
     def same_slot(self, left: datetime, right: datetime) -> bool:
         left, right = left.astimezone(self.zone), right.astimezone(self.zone)
         return (left.weekday(), left.hour) == (right.weekday(), right.hour)
+
+    def expected_count(self, at: datetime) -> dict | None:
+        """Typical reported check-ins: same weekday and hour, else the same hour on other days."""
+        at = utc(at)
+        rows = [row for row in self.observations if row.source == "GYM_API"]
+        local = at.astimezone(self.zone)
+        same = [row for row in rows if self.same_slot(row.observed_at, at)]
+        basis = "weekday_hour"
+        if not same:
+            same = [row for row in rows if row.observed_at.astimezone(self.zone).hour == local.hour]
+            basis = "hour"
+        if not same:
+            return None
+        daily = defaultdict(list)
+        for row in same:
+            daily[row.observed_at.astimezone(self.zone).date()].append(row.raw_value)
+        return {"count": round(mean(mean(v) for v in daily.values())), "basis": basis, "days": len(daily)}
+
+    def forecast(self, at: datetime) -> dict | None:
+        expected = self.expected_count(at)
+        score = self.predict(at)["score"]
+        if expected is None and score is None:
+            return None
+        return (expected or {}) | {"feel": feel(score), "score": score}
 
     def signal_feature(self, source: str, at: datetime) -> dict | None:
         rows = [row for row in self.observations if row.source == source and row.observed_at <= at]
