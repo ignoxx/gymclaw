@@ -13,10 +13,12 @@
       <a class="brand" href="/">gymclaw<span>.</span></a>
       <span class="demo-tag">Demo <span>synthetic data</span></span>
       <span class="runtime">OpenClaw / NemoClaw</span>
+      <button id="refresh" aria-label="Refresh saved state" title="Refresh saved state">↻</button>
+      <details class="info"><summary aria-label="About this view">i</summary><div><p id="data-notice">Read-only demo. Calendar writes off.</p><p id="connections" hidden></p><p>Art <a href="https://github.com/bryllim/workout-guide">Workout Guide</a>, Bryl Lim / Everkinetic. <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>. PNG background added, SVG display inverted.</p></div></details>
     </header>
     <div class="page-heading"><h1>Training</h1><span id="week-label">October 2026</span></div>
-    <div id="load-error" role="alert" hidden>Could not load demo.</div>
-    <div class="layout">
+    <div id="load-error" role="alert" hidden>State unavailable. Check sandbox connection.</div>
+    <div class="layout" hidden>
       <div class="planning">
         <section class="panel week-panel" aria-labelledby="week-title">
           <div class="section-heading"><h2 id="week-title">This week</h2><span id="session-count">3 sessions</span></div>
@@ -33,7 +35,7 @@
           </div>
           <div id="google-view" class="not-connected" hidden><span class="empty-chart" aria-hidden="true">▂ ▄ ▆ █ ▆ ▄ ▂</span><strong>Not connected</strong><span>No Google data collected</span></div>
         </section>
-        <section class="activity" aria-label="Demo agent activity"><div class="section-heading"><h2>Agent activity</h2><span>Demo</span></div><div class="event"><time>17:45</time><span class="event-dot"></span><span>Attendance saved</span><span class="event-detail">15 min cadence</span></div><div class="event"><time>18:00</time><span class="event-dot"></span><span>Workout started</span><span class="event-detail">State in SQLite</span></div><div class="event"><time>18:01</time><span class="event-dot lime"></span><span>Set saved. Rest queued.</span><span class="event-detail">90 seconds</span></div></section>
+        <section class="activity" aria-label="Demo agent activity"><div class="section-heading"><h2>Agent activity</h2><span id="activity-mode">Demo</span></div><div class="event"><time>17:45</time><span class="event-dot"></span><span>Attendance saved</span><span class="event-detail">15 min cadence</span></div><div class="event"><time>18:00</time><span class="event-dot"></span><span>Workout started</span><span class="event-detail">State in SQLite</span></div><div class="event"><time>18:01</time><span class="event-dot lime"></span><span>Set saved. Rest queued.</span><span class="event-detail">90 seconds</span></div></section>
       </div>
       <section class="panel workout-panel" aria-labelledby="exercise-name">
         <div class="section-heading"><span id="exercise-state">Next set</span><span id="set-position">Set 2 / 3</span></div>
@@ -46,7 +48,6 @@
         <div class="telegram"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-7-4 16-6-5-4 3 1-6 10-6-8 8"/></svg><span>Next-exercise image in Telegram</span></div>
       </section>
     </div>
-    <footer><span>Read-only demo. Calendar writes off.</span><span>Art <a href="https://github.com/bryllim/workout-guide">Workout Guide</a> / Bryl Lim / Everkinetic · <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></span></footer>
   </main>
 </body>
 </html>

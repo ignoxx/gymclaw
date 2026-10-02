@@ -6,6 +6,10 @@ A Telegram agent that plans your training week and tells you what to do next at 
 
 The dashboard shows a synthetic demo. Telegram is the daily interface.
 
+[78-second walkthrough](videos/gymclaw-walkthrough.mp4) · [15-second motion reel](videos/gymclaw-motion-15s.mp4)
+
+The walkthrough runs real workout transitions with simulated Telegram screens and time. See [video notes](videos/README.md).
+
 ## What runs over time
 
 - Plans workouts around your calendar, travel time and recovery days.
@@ -30,6 +34,14 @@ python -m gymclaw.dashboard
 Open http://127.0.0.1:8765. Click exercise thumbnails to preview poses.
 
 The demo runs real planning and workout code in a disposable DB. It opens no private DB, calls no live API and sends no messages.
+
+For your existing local NemoClaw installation:
+
+```bash
+python -m gymclaw.dashboard --live
+```
+
+Open http://127.0.0.1:8766. This reads saved calendar, attendance, workout and runtime state from the authoritative sandbox. Use the refresh button after actions in Telegram. It reads SQLite in read-only mode and starts no new poller. Private views stay on localhost.
 
 ## Current status
 

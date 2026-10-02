@@ -11,11 +11,29 @@ from gymclaw.models import PlannedSession
 from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
 from gymclaw.services import crowd, workout
 from gymclaw.services.illustrations import for_exercise
+from gymclaw.services.compression import compress_template
 from gymclaw.services.planning import Interval
 from gymclaw.services.profile import update_profile
 from gymclaw.services.scheduling import PlanningFixture, schedule_week, session_data
 from gymclaw.services.set_parser import SetInput
 from gymclaw.services.templates import Template, import_template
+
+
+def demo_templates() -> tuple[Template, ...]:
+    """PPL examples, never owner plans or weights."""
+    return (
+        Template(id="demo-push", name="Push", source="demo", exercises=[
+            {"id": "bench", "name": "Bench press", "role": "press", "guide_id": "bench-press", "primary": True, "working_sets": 3, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 90},
+            {"id": "overhead", "name": "Overhead press", "role": "press", "guide_id": "overhead-press", "target_weight": 30},
+            {"id": "triceps", "name": "Tricep pushdown", "role": "accessory", "guide_id": "tricep-pushdown", "working_sets": 2, "target_weight": 25, "rep_min": 12, "rep_max": 15}]),
+        Template(id="demo-pull", name="Pull", source="demo", exercises=[
+            {"id": "row", "name": "Seated cable row", "role": "pull", "guide_id": "seated-row", "primary": True, "target_weight": 60, "warmup_weight": 30, "rep_min": 10, "rep_max": 12, "rest_seconds": 90},
+            {"id": "pulldown", "name": "Lat pulldown", "role": "pull", "guide_id": "lat-pulldown", "target_weight": 55}]),
+        Template(id="demo-legs", name="Legs", source="demo", exercises=[
+            {"id": "leg-press", "name": "Leg press", "role": "legs", "guide_id": "leg-press", "primary": True, "target_weight": 120, "warmup_weight": 60},
+            {"id": "leg-curl", "name": "Lying leg curl", "role": "accessory", "guide_id": "lying-leg-curl", "target_weight": 40, "rep_min": 12, "rep_max": 15},
+            {"id": "leg-extension", "name": "Leg extension", "role": "accessory", "guide_id": "leg-extension", "target_weight": 45, "rep_min": 12, "rep_max": 15}]),
+    )
 
 
 def build_demo_snapshot() -> dict:
@@ -29,17 +47,20 @@ def build_demo_snapshot() -> dict:
             initialize(engine)
             with Session(engine) as db, db.begin():
                 profile = update_profile(db, {"earliest_workout_start": "18:00", "latest_workout_finish": "22:00"})
-                plan = Template(id="demo-full-body", name="Full-body A", source="demo", exercises=[
-                    {"id": "bench", "name": "Bench press", "role": "press", "guide_id": "bench-press", "primary": True, "working_sets": 3, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 90},
-                    {"id": "row", "name": "Seated cable row", "role": "pull", "guide_id": "seated-row", "working_sets": 3, "target_weight": 60, "rep_min": 10, "rep_max": 12},
-                    {"id": "leg-press", "name": "Leg press", "role": "legs", "guide_id": "leg-press", "working_sets": 3, "target_weight": 120},
-                    {"id": "leg-curl", "name": "Lying leg curl", "role": "accessory", "guide_id": "lying-leg-curl", "working_sets": 2, "target_weight": 40, "rep_min": 12, "rep_max": 15},
-                ])
-                import_template(db, plan)
+                templates = demo_templates()
+                for template in templates:
+                    import_template(db, template)
+                plan = templates[1]
                 fixture = PlanningFixture(busy=(Interval(
                     start=datetime(2026, 10, 12, 18, tzinfo=zone),
                     end=datetime(2026, 10, 12, 19, tzinfo=zone)),))
-                result = schedule_week(db, week, now=now, fixture=fixture, request_id="demo-plan", template_id=plan.id)
+                result = schedule_week(db, week, now=now, fixture=fixture, request_id="demo-plan", template_id=templates[0].id)
+                for index, item in enumerate(result["sessions"]):
+                    row = db.get(PlannedSession, item["id"])
+                    template = templates[index % len(templates)]
+                    row.workout_template_id = template.id
+                    row.workout_plan_json = compress_template(template, profile, int((row.planned_end_at-row.planned_start_at).total_seconds()))
+                db.flush()
                 planned = db.get(PlannedSession, result["sessions"][1]["id"])
                 arrival = planned.planned_start_at
                 counts = [8, 12, 17, 23, 18, 14]
@@ -50,8 +71,8 @@ def build_demo_snapshot() -> dict:
                     readings.append({"time": at.astimezone(zone).strftime("%H:%M"), "count": count})
                 started = workout.start(db, plan.id, now=arrival, request_id="demo-start", planned_session_id=planned.id)
                 workout_id = started["data"]["workout_id"]
-                workout.log_set(db, workout_id, SetInput(weight=50, reps=8, set_type="WARMUP"), now=arrival+timedelta(seconds=35), request_id="demo-warmup")
-                latest = workout.log_set(db, workout_id, SetInput(weight=80, reps=9), now=arrival+timedelta(seconds=80), request_id="demo-set")
+                workout.log_set(db, workout_id, SetInput(weight=30, reps=8, set_type="WARMUP"), now=arrival+timedelta(seconds=35), request_id="demo-warmup")
+                latest = workout.log_set(db, workout_id, SetInput(weight=60, reps=11), now=arrival+timedelta(seconds=80), request_id="demo-set")
                 active = latest["data"]
                 sessions = []
                 for row in db.scalars(select(PlannedSession).order_by(PlannedSession.planned_start_at)):
@@ -60,7 +81,7 @@ def build_demo_snapshot() -> dict:
                         "date": row.planned_start_at.astimezone(zone).strftime("%d %b"),
                         "start": row.planned_start_at.astimezone(zone).strftime("%H:%M"),
                         "end": row.planned_end_at.astimezone(zone).strftime("%H:%M"),
-                        "status": data["status"], "template": plan.name,
+                        "status": data["status"], "template": next(t.name for t in templates if t.id == row.workout_template_id),
                         "prep": row.prep_start_at.astimezone(zone).strftime("%H:%M"),
                         "leave": row.leave_home_at.astimezone(zone).strftime("%H:%M")})
                 return {"demo": True, "live_database_accessed": False, "calendar_writes_enabled": False,
@@ -69,14 +90,15 @@ def build_demo_snapshot() -> dict:
                     "minimum_met": result["minimum_met"], "goal": "Build strength · synthetic example",
                     "workout": {"name": plan.name, "status": active["status"], "active": active["active_exercise"] | {"illustration": {"svg_url": active["active_exercise"]["illustration"]["svg_url"]}},
                         "eta": datetime.fromisoformat(active["eta"]).astimezone(zone).strftime("%H:%M"),
+                        "last_set": {"weight": 60, "reps": 11},
                         "rest_seconds": 90, "rest_intent_prepared": bool(active["rest_job"]),
                         "timer_activated": False, "working_sets_logged": 1, "warmups_logged": 1,
                         "exercises": [e.model_dump(mode="json") | {"svg_url": for_exercise(e.name, e.guide_id)["svg_url"]} for e in plan.exercises]},
                     "crowd": {"readings": readings, "poll_every_minutes": 15, "polling_live": False,
                         "backend_freshness": "unknown", "arrival_labels": 0,
                         "personal_score": None, "google_maps_connected": False},
-                    "chat": [{"role": "owner", "text": "80 × 9"},
-                        {"role": "coach", "text": "Rest 90s. Next: 80 kg × 8–10."}],
+                    "chat": [{"role": "owner", "text": "60 × 11"},
+                        {"role": "coach", "text": "Rest 90s. Next: 60 kg × 10–12."}],
                     "evidence": ["Real planner, synthetic calendar", "Real set state machine, synthetic weights",
                         "Durable rest intent; demo never installs timers", "No provider requests or private state"]}
         finally:

@@ -66,6 +66,19 @@ source/license URLs: Workout Guide / Bryl Lim / Everkinetic, CC BY-SA 4.0.
 Mention the returned presentation change briefly, such as "dark background added".
 Images explain exercises. They do not represent logged performance.
 
+For a new exercise, use supported message `presentation` buttons with the image:
+`{"blocks":[{"type":"buttons","buttons":[{"label":"Occupied","value":"gymclaw:busy:EXERCISE_UUID"},{"label":"Alternative","value":"gymclaw:alts:EXERCISE_UUID"}]}]}`.
+The installed CLI supports `--presentation`, not legacy `--buttons`.
+Keep callback values under Telegram's 64-byte limit. Use actual active exercise UUID.
+On an authenticated owner tap, read current workout first. If UUID no longer matches
+active exercise, do not mutate it. Explain that the old button expired.
+`gymclaw:busy:UUID` maps to `workout machine-busy --workout-id ID --exercise-id UUID
+--request-id CALLBACK_ID`, followed by runtime sync for changed rest intent.
+`gymclaw:alts:UUID` shows approved same-role alternatives from the saved template.
+Confirm a choice before `workout substitute`; never guess available equipment/weights.
+No alternatives saved means ask owner what is available, not invent a replacement.
+Do not use these buttons to start/resume runtime or grant calendar writes.
+
 ## Workout
 
 - `workout start --template-id ID --planned-session-id ID --request-id ID`

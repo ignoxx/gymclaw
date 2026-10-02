@@ -110,8 +110,15 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .exercise span { display: block; font-size: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .telegram { display: flex; justify-content: center; gap: 6px; align-items: center; margin-top: 19px; font-size: 9px; color: var(--muted); }
 .telegram svg { width: 14px; height: 14px; fill: none; stroke: #879078; stroke-width: 1.3; }
-footer { display: flex; justify-content: space-between; gap: 20px; padding: 22px 0 28px; color: var(--muted); font-size: 9px; }
-footer a { color: inherit; text-underline-offset: 2px; }
+.dashboard { padding-bottom: 30px; }
+#refresh { background: none; border: 0; font-size: 19px; color: var(--muted); padding: 0; }
+.info { position: relative; }
+.info summary { list-style: none; width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 50%; display: grid; place-items: center; font-size: 11px; color: var(--muted); cursor: pointer; }
+.info summary::-webkit-details-marker { display: none; }
+.info > div { position: absolute; right: 0; top: 30px; width: 260px; background: var(--white); border: 1px solid var(--line); border-radius: 6px; padding: 14px; font-size: 11px; line-height: 1.6; z-index: 2; }
+.info p { margin: 0 0 9px; }
+.info p:last-child { margin: 0; color: var(--muted); }
+.info a { color: inherit; }
 #load-error { padding: 15px; color: #a24232; }
 @media (max-width: 900px) {
   .dashboard { padding: 0 24px; }
@@ -142,5 +149,4 @@ footer a { color: inherit; text-underline-offset: 2px; }
   .exercise img { height: 57px; }
   .exercise span { font-size: 9px; }
   .cadence { font-size: 9px !important; }
-  footer { flex-direction: column; gap: 8px; font-size: 8px; }
 }
