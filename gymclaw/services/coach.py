@@ -20,7 +20,7 @@ from gymclaw.services import adaptation, audit
 from gymclaw.services.crowd import record_feedback
 from gymclaw.services.errors import DomainError
 from gymclaw.services.set_parser import SetInput, parse_set
-from gymclaw.services.workout import UNRESOLVED, current, exercises, expected_weight, format_target, log_set, skip_warmup, utc
+from gymclaw.services.workout import UNRESOLVED, current, exercises, expected_weight, format_target, log_set, pending_rest, rest_complete, skip_warmup, utc
 
 RATINGS = (("Empty", "EMPTY"), ("Fine", "FINE"), ("Busy", "BUSY"), ("Packed", "PACKED"))
 
@@ -67,7 +67,8 @@ def exercise_card(db: Session, workout: WorkoutSession, now: datetime, *, photo:
         buttons = [[button(f"✅ {kg(quick[0])} × {quick[1]}", "log", ref, f"{quick[0]:g}", str(quick[1]))]] if quick else []
         if not quick:
             lines.append("Send weight × reps, e.g. 40x10.")
-        buttons.append([button("🔄 Swap", "swap", ref), button("⏭ Next exercise", "next", ref)])
+        # Swap only before the first set: once the owner is on the machine it isn't taken.
+        buttons.append(([button("🔄 Swap", "swap", ref)] if active["new_exercise"] else []) + [button("⏭ Next exercise", "next", ref)])
     if deferred:
         buttons.append([button(f"↩ {deferred[0].config_json['name']} free?", "free", deferred[0].id[:8])])
     show_photo = active["new_exercise"] if photo is None else photo
@@ -181,6 +182,18 @@ def end_workout(db: Session, workout: WorkoutSession, *, now: datetime, request_
         if row.status in UNRESOLVED:
             adaptation.skip_exercise(db, workout.id, row.id, reason="ended_early", now=now, request_id=f"{request_id}:skip:{row.id}")
     return {"handled": True, "ack": None, "cards": after_change(db, workout, now, request_id)}
+
+
+def handle_rest_over(db: Session, *, now: datetime) -> dict:
+    """Countdown reached zero: close the rest job (so the cron fallback ping stays silent) and return a
+    fresh card with buttons, which notifies the owner. Nothing to do if the rest already ended."""
+    now = utc(now)
+    workout = active_workout(db)
+    job = pending_rest(db, workout) if workout else None
+    if job is None or job.due_at > now:
+        return {"handled": True, "ack": None, "cards": []}
+    rest_complete(db, job.id, now=now, request_id=f"rest-due:{job.id}")
+    return {"handled": True, "ack": None, "rest_over": True, "cards": after_change(db, workout, now, f"rest-due:{job.id}", photo=False)}
 
 
 def handle_action(db: Session, action: str, *, now: datetime, request_id: str) -> dict:

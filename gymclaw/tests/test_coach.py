@@ -47,6 +47,18 @@ def test_typed_set_reacts_and_next_card_offers_last_set(db):
     assert card["photo"] is None and card["rest_until"] == at(100).isoformat()
     assert "Set 2/2 · 8–10 reps" in card["text"]
     assert "✅ 90 kg × 12" in buttons(card)
+    # Already on the machine: no Swap after the first set.
+    assert "🔄 Swap" not in buttons(card) and "⏭ Next exercise" in buttons(card)
+
+
+def test_rest_over_closes_job_once_and_returns_fresh_card(db):
+    from gymclaw.models import NotificationJob
+    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    assert coach.handle_rest_over(db, now=at(50))["cards"] == []  # still resting
+    over = coach.handle_rest_over(db, now=at(101))
+    assert over["rest_over"] and over["cards"][0]["rest_until"] is None and over["cards"][0]["buttons"]
+    assert db.query(NotificationJob).one().status == "FIRED"  # cron fallback finds nothing to send
+    assert coach.handle_rest_over(db, now=at(102))["cards"] == []
 
 
 def test_occupied_offers_same_muscle_alternatives_and_stays_on_chest(db):

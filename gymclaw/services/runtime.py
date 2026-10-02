@@ -131,7 +131,9 @@ def automation_plan(db: Session, engine, *, now: datetime, recipient: str, profi
         if stale_reason(db, job, now=now):
             continue
         # Catch up missed timers after restart. DB callback still validates true due_at.
-        at = max(job.due_at, now + timedelta(seconds=2))
+        # The coach plugin announces rest end in-process; the cron ping is a fallback after a restart.
+        grace = timedelta(seconds=30) if job.kind == "REST" else timedelta()
+        at = max(job.due_at + grace, now + timedelta(seconds=2))
         specs.append(AutomationSpec(name=prefix + "notification:" + job.id, at=at.isoformat(), cwd=str(project_root.absolute()),
             argv=base + ("runtime", "fire", "--job-id", job.id, "--allow-messages") + route))
     config = os.environ.get("OPENCLAW_CONFIG_PATH")

@@ -76,6 +76,21 @@ test("typed set: react, retire old card buttons, send next card with live countd
   assert.equal(timers.intervals.size, 0);
 });
 
+test("rest over: old card loses its buttons and a fresh card with buttons is sent", async () => {
+  const { calls, api } = fakeTelegram();
+  const timers = fakeTimers();
+  let now = Date.parse("2026-10-02T18:00:00Z");
+  const onRestOver = async () => ({ handled: true, rest_over: true, cards: [card("Bench · set 2")] });
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers, onRestOver });
+  await coach.apply({ cards: [card("Bench · set 2", { rest_until: "2026-10-02T18:01:30Z" })] });
+  now += 91_000;
+  await timers.tick();
+  assert.deepEqual(calls.at(-2), ["edit", OWNER, 100, "Bench · set 2\n⏱ Rest over", []]);
+  assert.equal(calls.at(-1)[0], "send");
+  assert.equal(calls.at(-1)[3].buttons.length, 1);
+  assert.equal(coach.state().live.messageId, 101);
+});
+
 test("tap acks the pressed card; swap menus stay until the workout moves on", async () => {
   const { calls, api } = fakeTelegram();
   const coach = createCoach({ telegram: async () => api, chatId: OWNER, timers: fakeTimers() });
