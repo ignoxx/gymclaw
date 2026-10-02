@@ -30,7 +30,7 @@ class Bus:
             self.l[i] += v * gl
             self.r[i] += v * gr
 
-    def write(self, path, echo=.18):
+    def write(self, path, echo=.1):
         d = int(.375 * RATE)
         for i in range(d, self.n):
             self.l[i] += echo * self.r[i - d]
@@ -65,13 +65,14 @@ def hat():
     n, prev = noise(1.0), [0.0]
     def f(t):
         x = n(); y = x - prev[0]; prev[0] = x
-        return y * math.exp(-60 * t)
+        return y * math.exp(-110 * t)
     return f
 
 
 def clap():
-    n = noise(.6)
-    return lambda t: n() * (sum(math.exp(-180 * (t - d)) for d in (0, .011, .022) if t >= d) + .5 * math.exp(-18 * t)) * .6
+    """Short, dark snap; a long noise tail reads as hiss in the mix."""
+    n = noise(.3)
+    return lambda t: n() * (sum(math.exp(-220 * (t - d)) for d in (0, .011, .022) if t >= d) + .25 * math.exp(-30 * t)) * .6
 
 
 def pluck(freq, decay=9.0, bright=3):
@@ -90,7 +91,7 @@ def pad(freqs, dur):
     return f
 
 
-def whoosh(dur, up=True, lp=.35):
+def whoosh(dur, up=True, lp=.18):
     n = noise(lp)
     def f(t):
         p = t / dur
@@ -126,7 +127,7 @@ def hook(bus, c):
     for k in range(int(claw / .2)):  # clock ticks
         bus.add(k * .2, .05, lambda t: math.sin(TAU * 1700 * t) * math.exp(-120 * t), .16, -.3 + .1 * (k % 6))
     m = noise(.04)
-    bus.add(0, flood + .04, lambda t: m() * min(1, t / .5) * 2.4, .5)
+    bus.add(0, flood + .04, lambda t: m() * min(1, t / .5) * 2.4, .15)
     bus.add(0, flood, lambda t: math.sin(TAU * (55 + 30 * t / flood * 1.4) * t) * min(1, t / .4), .18)
     for k in range(3):
         bus.add(claw - .02 + k * .05, .22, whoosh(.22, up=False, lp=.9), .36, -.5 + .5 * k)
@@ -136,7 +137,7 @@ def hook(bus, c):
 
 def impact(bus, at, chord, ring=1.6):
     bus.add(at, 2.0, boom, .9)
-    bus.add(at, 1.2, burst(5), .35)
+    bus.add(at, 1.2, burst(5, .25), .12)
     for n in chord:
         fr = note(n)
         bus.add(at, ring, lambda t, fr=fr: math.sin(TAU * fr * t) * math.exp(-2.2 * t), .07)
@@ -180,13 +181,13 @@ def music(bus, c, chapters):
                 if b in (0, 2) or (b == 3 and i % 2):
                     bus.add(bt + (beat / 2 if b == 3 else 0), .45, kick, .45)
                 if b in (1, 3):
-                    bus.add(bt + .012, .3, clap(), .2, .1)
-                bus.add(bt + beat * .58, .08, hat(), .08, .35)  # swung offbeat hat
+                    bus.add(bt + .012, .3, clap(), .1, .1)
+                bus.add(bt + beat * .58, .08, hat(), .04, .35)  # swung offbeat hat
             else:
                 bus.add(bt, .45, kick, .62)
                 if b in (1, 3) and not calm:
-                    bus.add(bt, .3, clap(), .32, .1)
-                bus.add(bt + beat / 2, .08, hat(), .11, .35)
+                    bus.add(bt, .3, clap(), .2, .1)
+                bus.add(bt + beat / 2, .08, hat(), .06, .35)
         t0 += bar; i += 1
 
 
@@ -194,7 +195,7 @@ def outro(bus, at, duration):
     bus.add(at - .4, .4, whoosh(.4), .3)
     ring = max(.6, duration - at)
     bus.add(at, ring, boom, .85)
-    bus.add(at, 1.0, burst(4), .3)
+    bus.add(at, 1.0, burst(4, .25), .1)
     for n in (48, 55, 60, 64, 67, 72):
         fr = note(n)
         bus.add(at, ring, lambda t, fr=fr: (math.sin(TAU * fr * t) + .3 * math.sin(TAU * 2 * fr * t)) * math.exp(-1.6 * t) * min(1, (ring - t) / .4), .07)
@@ -207,7 +208,7 @@ def foley(bus, c):
     if k == 'msg':
         bus.add(t, .2, blip(1046, 1568), .2, -.35)
     elif k == 'send':
-        bus.add(t, .18, blip(880, 1320, .06), .2, .3); bus.add(t - .05, .25, whoosh(.25), .14)
+        bus.add(t, .18, blip(880, 1320, .06), .2, .3); bus.add(t - .05, .25, whoosh(.25), .06)
     elif k == 'chip':
         bus.add(t, .15, blip(660, 880, .05), .08)
     elif k == 'key':
@@ -217,13 +218,13 @@ def foley(bus, c):
     elif k == 'notif':
         bus.add(t, 1.2, bell(1318.5), .16, -.2); bus.add(t + .1, 1.2, bell(1760), .13, -.2)
     elif k == 'unlock':
-        bus.add(t, .45, whoosh(.45), .22, .2)
+        bus.add(t, .45, whoosh(.45), .1, .2)
     elif k == 'stamp':
-        bus.add(t, .5, boom, .42); bus.add(t, .2, burst(25, .3), .3)
+        bus.add(t, .5, boom, .42); bus.add(t, .2, burst(25, .2), .12)
     elif k in ('swoosh', 'chapter'):
-        bus.add(t - (.3 if k == 'chapter' else 0), .4, whoosh(.4), .16 if k == 'chapter' else .2, .3)
+        bus.add(t - (.3 if k == 'chapter' else 0), .4, whoosh(.4), .08 if k == 'chapter' else .1, .3)
     elif k == 'drop':
-        bus.add(t, .35, lambda x: math.sin(TAU * (90 - 40 * x) * x) * math.exp(-10 * x), .35); bus.add(t, .12, burst(40, .4), .15)
+        bus.add(t, .35, lambda x: math.sin(TAU * (90 - 40 * x) * x) * math.exp(-10 * x), .35); bus.add(t, .12, burst(40, .25), .06)
     elif k == 'pick':
         bus.add(t, .5, pluck(note((72, 76, 79)[c['n'] % 3]), 7, 3), .12, .3)
     elif k == 'climb':
