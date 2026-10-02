@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Re-render Telegram PNGs from the bundled Workout Guide SVGs.
+# 1024 px on an opaque dark background, 32-colour palette (line art stays crisp, ~30 KB each).
+# Needs rsvg-convert (librsvg) and ImageMagick: brew install librsvg imagemagick
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/gymclaw/assets/workout-guide"
+for svg in "$ROOT"/*/frame-1.svg; do
+  png="${svg%.svg}.png"
+  rsvg-convert -w 1024 -h 1024 -b '#242824' "$svg" | magick - -colors 32 -strip "PNG8:$png"
+done
+echo "Rendered $(ls "$ROOT"/*/frame-1.png | wc -l | tr -d ' ') PNGs"

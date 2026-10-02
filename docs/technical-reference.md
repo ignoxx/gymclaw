@@ -221,14 +221,25 @@ python -m gymclaw.cli notifications due --now 2026-10-12T20:03:50+02:00
 python -m gymclaw.cli workout current --workout-id "$WORKOUT_ID"
 ```
 
+Typed sets accept either order (`80x9`, `9x80kg`, `9 reps at 80`); unclear order is resolved
+toward the last/target weight. In Telegram, the coach plugin drives the same operations through
+`coach text|tap|act|start|card`, which return a reaction and ready-to-send cards
+(see [coach plugin](../openclaw/plugins/coach/README.md)). `catalog search --query ... [--muscle ...]`
+finds illustrated exercises for `guide_id`; `template import` requires one on every exercise.
+
 Continue logging sets, or use:
 
 - `workout machine-busy --workout-id ... --request-id ...`: defer current movement;
-  choose next compatible planned movement, never silently drop deferred work.
-- `workout machine-free --workout-id ... --exercise-id ... --request-id ...`: retry
-  deferred equipment. Exercise IDs here are runtime UUIDs from queue, not catalog IDs.
+  next comes a pending movement for the same primary muscle, else plan order. Deferred work is never dropped.
+- `workout machine-free --workout-id ... --exercise-id ... --request-id ...`: deferred equipment is
+  free; it becomes active unless the current exercise already has sets. IDs are runtime UUIDs from queue.
+- `workout alternatives --workout-id ... [--exercise-id ...]`: read-only swap options, template
+  alternatives first, then same-muscle catalog exercises (owner history ranks first).
 - `workout substitute --workout-id ... --exercise-id ... --substitute-id db-fly
-  --request-id ...`: explicit same-role fixture alternative; only remaining volume.
+  --request-id ...`: template alternative or same-muscle catalog slug; only remaining volume.
+- `workout next-exercise --workout-id ... --exercise-id ... --request-id ...`: move on; completes
+  the exercise with the sets done, or skips it if none. `workout skip-warmup` skips a pending warm-up
+  (logging a working set does the same).
 - `workout skip-exercise --workout-id ... --exercise-id ... --reason ... --request-id ...`:
   explicit volume reduction. Dependants of skipped movements need explicit resolution.
 - `workout finish --workout-id ... --request-id ...`: requires resolved queue; save audit

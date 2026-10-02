@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from gymclaw.availability_cli import register_parser as register_availability_parser, availability_command
+from gymclaw.coach_cli import register_parser as register_coach_parser, catalog_command, coach_command
 from gymclaw.db import make_engine, initialize
 from gymclaw.calendar_cli import calendar_command, publish_command
 from gymclaw.runtime_cli import register_parser as register_runtime_parser, runtime_command
@@ -21,7 +22,7 @@ from gymclaw.services.scheduling import PlanningFixture, schedule_week
 from gymclaw.services import adaptation, audit, events, notifications, weekly, workout, onboarding
 from gymclaw.services.errors import DomainError
 from gymclaw.services.set_parser import SetInput, parse_set
-from gymclaw.services.templates import Template, get_template, import_template
+from gymclaw.services.templates import Template, get_template, import_template, require_illustrations
 
 
 class Parser(argparse.ArgumentParser):
@@ -37,15 +38,17 @@ def parser():
     register_runtime_parser(groups)
     register_crowd_parser(groups)
     register_availability_parser(groups)
+    register_coach_parser(groups)
     db = groups.add_parser("db", add_help=False)
     db.add_argument("operation", choices=["init"])
     profile = groups.add_parser("profile", add_help=False)
     profile.add_argument("operation", choices=["get", "update"])
     profile.add_argument("--data", help="JSON object with profile fields")
     setup = groups.add_parser("onboarding", add_help=False)
-    setup.add_argument("operation", choices=["status", "set-goal", "confirm-profile", "confirm-template", "finish"])
-    setup.add_argument("--goal")
-    setup.add_argument("--template-id")
+    setup.add_argument("operation", choices=["status", "answer", "confirm-plan", "finish"])
+    setup.add_argument("--answers", type=json.loads, help='JSON object, e.g. {"experience": "2 years"}')
+    setup.add_argument("--profile", type=json.loads, help="JSON profile fields backing those answers")
+    setup.add_argument("--template-id", action="append", help="Repeat in rotation order")
     setup.add_argument("--fingerprint")
     setup.add_argument("--request-id")
     planning = groups.add_parser("schedule", aliases=["planning"], add_help=False)
@@ -70,7 +73,7 @@ def parser():
     template.add_argument("--file", type=Path)
     template.add_argument("--template-id")
     training = groups.add_parser("workout", add_help=False)
-    training.add_argument("operation", choices=["start", "current", "log-set", "rest-complete", "machine-busy", "machine-free", "substitute", "skip-exercise", "finish"])
+    training.add_argument("operation", choices=["start", "current", "alternatives", "log-set", "rest-complete", "machine-busy", "machine-free", "substitute", "next-exercise", "skip-warmup", "skip-exercise", "finish"])
     training.add_argument("--template-id")
     training.add_argument("--planned-session-id")
     training.add_argument("--workout-id")
@@ -112,6 +115,8 @@ def workout_command(db, args):
     now = args.now or datetime.now(timezone.utc)
     if args.operation == "current":
         return {"data": workout.current(db, required(args.workout_id, "--workout-id"), now=now), "events": [], "user_message_hint": None}
+    if args.operation == "alternatives":
+        return {"data": adaptation.alternatives(db, required(args.workout_id, "--workout-id"), args.exercise_id), "events": [], "user_message_hint": None}
     request_id = required(args.request_id, "--request-id")
     if args.operation == "start":
         return workout.start(db, required(args.template_id, "--template-id"), now=now, request_id=request_id, planned_session_id=args.planned_session_id)
@@ -122,7 +127,7 @@ def workout_command(db, args):
         if args.text is not None:
             if args.weight is not None or args.reps is not None or args.rir is not None:
                 raise ValueError("Use --text OR structured set fields, not both")
-            value = parse_set(args.text, set_type=args.set_type)
+            value = parse_set(args.text, set_type=args.set_type, expected_weight=workout.expected_weight(db, workout_id))
         else:
             value = SetInput(weight=required(args.weight, "--weight"), reps=required(args.reps, "--reps"), set_type=args.set_type, rir=args.rir)
         return workout.log_set(db, workout_id, value, now=now, request_id=request_id)
@@ -130,9 +135,13 @@ def workout_command(db, args):
         return adaptation.machine_busy(db, workout_id, exercise_id=args.exercise_id, now=now, request_id=request_id)
     if args.operation == "finish":
         return audit.finish(db, workout_id, now=now, request_id=request_id)
+    if args.operation == "skip-warmup":
+        return workout.skip_warmup(db, workout_id, now=now, request_id=request_id)
     exercise_id = required(args.exercise_id, "--exercise-id")
     if args.operation == "machine-free":
         return adaptation.machine_free(db, workout_id, exercise_id, now=now, request_id=request_id)
+    if args.operation == "next-exercise":
+        return adaptation.next_exercise(db, workout_id, exercise_id, now=now, request_id=request_id)
     if args.operation == "substitute":
         return adaptation.substitute(db, workout_id, exercise_id, required(args.substitute_id, "--substitute-id"), now=now, request_id=request_id)
     return adaptation.skip_exercise(db, workout_id, exercise_id, reason=required(args.reason, "--reason"), now=now, request_id=request_id)
@@ -145,7 +154,10 @@ def main(argv=None) -> int:
         engine = make_engine(args.db_url)
         emitted_events = []
         message_hint = None
-        if args.group == "db":
+        if args.group == "catalog":
+            result = catalog_command(args)
+            data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+        elif args.group == "db":
             initialize(engine)
             data = {"initialized": True}
         elif args.group == "crowd":
@@ -159,7 +171,10 @@ def main(argv=None) -> int:
             data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         else:
             with Session(engine) as db, db.begin():
-                if args.group == "availability":
+                if args.group == "coach":
+                    result = coach_command(db, args)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "availability":
                     result = availability_command(db, args)
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "onboarding":
@@ -168,8 +183,8 @@ def main(argv=None) -> int:
                         message_hint = data["instruction"]
                     else:
                         result = onboarding.update(db, args.operation, now=datetime.now(timezone.utc),
-                            request_id=required(args.request_id, "--request-id"), goal=args.goal,
-                            template_id=args.template_id, expected_fingerprint=args.fingerprint)
+                            request_id=required(args.request_id, "--request-id"), answers=args.answers, profile=args.profile,
+                            template_ids=args.template_id, expected_fingerprint=args.fingerprint)
                         data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "profile":
                     if args.operation == "update":
@@ -186,7 +201,7 @@ def main(argv=None) -> int:
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "template":
                     if args.operation == "import":
-                        definition = Template.model_validate_json(required(args.file, "--file").read_text())
+                        definition = require_illustrations(Template.model_validate_json(required(args.file, "--file").read_text()))
                         data = import_template(db, definition)
                     else:
                         data = get_template(db, required(args.template_id, "--template-id")).model_dump(mode="json")

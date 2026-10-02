@@ -123,7 +123,7 @@ def test_rest_output_survives_restart_and_delivery_retries_do_not_duplicate(engi
     provider = FakeRuntime()
     delivered = runtime.deliver(engine, provider, result["delivery_id"], now=NOW + timedelta(seconds=100), allow_messages=True)
     assert delivered["status"] == "SENT"
-    assert "Rest complete. Bench" in provider.sent[0][1]
+    assert "Rest over · Bench" in provider.sent[0][1]
     assert len(provider.sent) == 1
     assert runtime.deliver(engine, provider, result["delivery_id"], now=NOW + timedelta(seconds=110), allow_messages=True)["status"] == "SENT"
     assert len(provider.sent) == 1

@@ -126,9 +126,13 @@ def compatible(exercise: WorkoutExercise, rows: list[WorkoutExercise]) -> bool:
     return set(exercise.config_json.get("requires_completed", [])) <= completed
 
 
-def choose_next(db: Session, workout: WorkoutSession, now: datetime):
+def choose_next(db: Session, workout: WorkoutSession, now: datetime, *, prefer_muscle: str | None = None):
+    """Activate the next pending exercise in plan order; `prefer_muscle` pulls same-muscle work forward."""
+    from gymclaw.services.illustrations import primary_muscle
     rows = exercises(db, workout)
-    next_row = next((e for e in rows if e.status == "PENDING" and compatible(e, rows)), None)
+    ready = [e for e in rows if e.status == "PENDING" and compatible(e, rows)]
+    same = [e for e in ready if prefer_muscle and primary_muscle(e.config_json.get("guide_id")) == prefer_muscle]
+    next_row = (same or ready or [None])[0]
     if next_row:
         next_row.status = "ACTIVE"
         transition(db, workout, "EXERCISE_ACTIVE", now)
@@ -169,6 +173,30 @@ def estimate_finish(db: Session, workout: WorkoutSession, now: datetime) -> date
     return now + timedelta(seconds=seconds)
 
 
+def format_target(data: dict) -> str:
+    """'80 kg × 8–10'; unknown weight (0) shows reps only."""
+    reps = f"{data['rep_min']}" if data["rep_min"] == data["rep_max"] else f"{data['rep_min']}–{data['rep_max']}"
+    return f"{data['target_weight']:g} kg × {reps}" if data["target_weight"] else f"{reps} reps"
+
+
+def last_working_set(db: Session, exercise: WorkoutExercise) -> SetLog | None:
+    """Latest working set for this exercise: this workout first, else any earlier workout."""
+    own = logs(db, exercise, "WORKING")
+    if own:
+        return own[-1]
+    return db.scalar(select(SetLog).join(WorkoutExercise).where(WorkoutExercise.exercise_id == exercise.exercise_id, SetLog.set_type == "WORKING").order_by(SetLog.logged_at.desc()).limit(1))
+
+
+def expected_weight(db: Session, workout_id: str) -> float | None:
+    """Weight the owner most likely means when a typed set's order is unclear (last set, else target)."""
+    workout = load_workout(db, workout_id)
+    active = next((e for e in exercises(db, workout) if e.status == "ACTIVE"), None)
+    if active is None:
+        return None
+    last = last_working_set(db, active)
+    return last.weight if last else active.target_weight or None
+
+
 def current(db: Session, workout_id: str, *, now: datetime) -> dict:
     now = utc(now)
     workout = load_workout(db, workout_id)
@@ -179,10 +207,14 @@ def current(db: Session, workout_id: str, *, now: datetime) -> dict:
     active_data = None
     if active:
         is_warmup = warmup_pending(db, active)
-        from gymclaw.services.illustrations import for_exercise
+        from gymclaw.services.illustrations import for_exercise, primary_muscle
+        last = last_working_set(db, active)
         active_data = {
             "illustration": for_exercise(active.config_json["name"], active.config_json.get("guide_id")),
             "id": active.id, "exercise_id": active.exercise_id, "name": active.config_json["name"],
+            "primary_muscle": primary_muscle(active.config_json.get("guide_id")),
+            "new_exercise": not logs(db, active),
+            "last_set": {"weight": last.weight, "reps": last.reps} if last else None,
             "set_type": "WARMUP" if is_warmup else "WORKING",
             "set_number": 1 if is_warmup else len(logs(db, active, "WORKING")) + 1,
             "working_sets": active.planned_working_sets,
@@ -190,7 +222,7 @@ def current(db: Session, workout_id: str, *, now: datetime) -> dict:
             "rep_min": active.config_json["warmup_reps"] if is_warmup else active.rep_min,
             "rep_max": active.config_json["warmup_reps"] if is_warmup else active.rep_max,
         }
-        instruction = f"{active_data['name']} · {active_data['set_type'].lower()} set {active_data['set_number']} · {active_data['target_weight']:g} kg · {active_data['rep_min']}–{active_data['rep_max']} reps"
+        instruction = f"{active_data['name']} · {'warm-up' if is_warmup else f'set {active_data['set_number']}/{active.planned_working_sets}'} · {format_target(active_data)}"
     elif any(e.status in UNRESOLVED for e in rows):
         instruction = "Deferred equipment unresolved. Retry, substitute, or explicitly skip."
     if rest:
@@ -285,7 +317,8 @@ def log_set(db: Session, workout_id: str, value: SetInput, *, now: datetime, req
         active = active_exercise(db, workout)
         needs_warmup = warmup_pending(db, active)
         if value.set_type == "WORKING" and needs_warmup:
-            raise DomainError("WARMUP_REQUIRED", "Log first primary warm-up explicitly before working sets")
+            # Going straight to working sets skips the warm-up; it is a suggestion, not a gate.
+            active.config_json = active.config_json | {"warmup_required": False}
         if value.set_type == "WARMUP" and not needs_warmup:
             raise DomainError("UNEXPECTED_WARMUP", "No warm-up is pending for this exercise")
         cancel_rest(db, workout, now)
@@ -335,7 +368,21 @@ def rest_complete(db: Session, job_id: str, *, now: datetime, request_id: str) -
         if workout.status == "RESTING":
             transition(db, workout, "SET_ACTIVE", now)
         result = touch(db, workout, now)
-        result["instruction"] = "Rest complete. " + result["instruction"]
+        result["instruction"] = "⏱ Rest over · " + result["instruction"]
         return result
 
     return mutate(db, "workout.rest_completed", request_id, {"job_id": job_id}, now, action)
+
+
+def skip_warmup(db: Session, workout_id: str, *, now: datetime, request_id: str) -> dict:
+    now = utc(now)
+
+    def action():
+        workout = load_workout(db, workout_id, now)
+        active = active_exercise(db, workout)
+        if not warmup_pending(db, active):
+            raise DomainError("UNEXPECTED_WARMUP", "No warm-up is pending for this exercise")
+        active.config_json = active.config_json | {"warmup_required": False}
+        return touch(db, workout, now)
+
+    return mutate(db, "workout.warmup_skipped", request_id, {"workout_id": workout_id}, now, action)

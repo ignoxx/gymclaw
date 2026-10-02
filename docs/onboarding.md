@@ -1,29 +1,36 @@
-# Short, resumable setup
+# Onboarding
 
-Telegram flow: goal → schedule review → workout-plan/weights review → final confirmation.
-One question or small batch at a time. Images use native vision; unreadable values
-stay unknown. No OCR/install loop, demo weights, invented sets or publication consent.
+Setup is a short interview in Telegram, one question at a time. Nothing is assumed: defaults never
+count as answers, and GymClaw works for any owner, schedule and gym.
 
-`onboarding status` returns next step, saved profile draft, template choices and review
-fingerprints. Defaults are never automatically confirmed. Existing choices are reused.
+1. **Interview:** goal, training experience, days per week and which days, session length, time
+   window, prep and travel time, equipment (full gym / basic / home), injuries or exercises to avoid.
+   Answers that shape scheduling also write the matching profile fields.
+2. **Plan:** the owner sends a photo of their plan, or GymClaw builds one from the interview. Every
+   exercise is mapped to an illustrated catalog entry (`catalog search`). Unknown weights start at 0
+   and are learned from the first session. Several templates form a split that rotates over
+   sessions in order (e.g. Push → Pull → Legs).
+3. **Review:** one short summary; the owner confirms.
+4. **Ready:** later profile or plan edits don't restart setup.
 
-JSON CLI operations:
-- `set-goal --goal TEXT --request-id ID`
-- `confirm-profile --fingerprint HASH --request-id ID`
-- `confirm-template --template-id ID --fingerprint HASH --request-id ID`
-- `finish --fingerprint HASH --request-id ID`
+```text
+onboarding status
+onboarding answer --answers '{"experience":"2 years"}' --request-id ID
+onboarding answer --answers '{"schedule":"3x Mon/Wed/Fri"}' \
+  --profile '{"weekly_target_sessions":3,"weekdays_allowed":[0,2,4]}' --request-id ID
+onboarding confirm-plan --template-id push --template-id pull --template-id legs --request-id ID
+onboarding finish --fingerprint REVIEW_FINGERPRINT --request-id ID
+```
 
-Read profile/status, show concise review, wait for owner confirmation. Apply requested
-profile changes with `profile update`, then refresh fingerprint. Read `template get`
-before reviewing exercises, sets, reps and starting/warm-up weights. Matching template
-fingerprint comes from status's template choices. Finish uses review fingerprint.
-Never expose hashes to owner as questionnaire answers; agent handles them.
+Profile-backed questions and their fields:
 
-Mutations are request-idempotent; retries use same authenticated user-action ID.
-Changed profile/template invalidates confirmation; setup survives chat resets/restarts.
-Completion grants no calendar/runtime authority and creates no workout logs. Calendar
-writes stay off during testing. Use active sandbox tools, not original host DB.
+| Question | Profile fields |
+| --- | --- |
+| schedule | `weekly_target_sessions`, `weekdays_allowed` (Monday=0) |
+| session_length | `preferred_workout_minutes` |
+| time_window | `earliest_workout_start`, `latest_workout_finish` (local "HH:MM") |
+| travel | `prep_minutes`, `commute_to_gym_minutes` |
 
-Migration adds one metadata table without replacing saved profiles/templates/workouts.
-Opaque SQLite backup created before local activation. Nemo snapshot currently rejects
-venv symlinks in backed-up workspace; packaging fix remains separate deployment work.
+Mutations are request-idempotent and survive chat resets. Finishing setup grants no runtime or
+calendar authority. Template import fails with `ILLUSTRATION_REQUIRED` until every exercise has a
+`guide_id`. Migration `7b3e9d2c4f10` keeps an existing goal and template, and asks for the rest.

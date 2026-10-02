@@ -13,7 +13,7 @@ import sys
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from gymclaw.models import AgentEvent, NotificationDelivery, NotificationJob, PlannedSession, RuntimeSettings, WorkoutSession
+from gymclaw.models import AgentEvent, NotificationDelivery, NotificationJob, OnboardingState, PlannedSession, RuntimeSettings, WorkoutSession
 from gymclaw.providers.openclaw import AutomationProvider, AutomationSpec, validate_route
 from gymclaw.services.errors import DomainError
 from gymclaw.services.profile import get_profile
@@ -60,10 +60,18 @@ def configure_runtime(db: Session, *, profile: str, recipient: str, project_root
     return settings
 
 
+def planning_template(db: Session, settings: RuntimeSettings | None) -> str | None:
+    """Explicitly activated template, else the first template of the owner's confirmed split."""
+    if settings and settings.template_id:
+        return settings.template_id
+    row = db.get(OnboardingState, 1)
+    return row.split_json[0] if row and row.split_json else None
+
+
 def runtime_authority(db: Session) -> dict:
     settings = db.get(RuntimeSettings, 1)
     return {"configured": settings is not None, "enabled": settings.enabled if settings else False,
-        "template_id": settings.template_id if settings else None,
+        "template_id": planning_template(db, settings) if settings else None,
         "calendar_writes_enabled": settings.calendar_writes_enabled if settings else False,
         "crowd_polling_enabled": settings.crowd_polling_enabled if settings else False}
 
@@ -113,7 +121,7 @@ def automation_plan(db: Session, engine, *, now: datetime, recipient: str, profi
     if include_watcher:
         specs.append(AutomationSpec(name=prefix + "calendar-watch", every="60s", cwd=str(project_root.absolute()),
             argv=base + ("runtime", "watch", "--allow-runtime-changes", "--allow-messages") + route))
-        if settings and settings.template_id:
+        if settings and planning_template(db, settings):
             specs.append(AutomationSpec(name=prefix + "weekly-plan", cron="0 19 * * 0", timezone=get_profile(db).timezone,
                 cwd=str(project_root.absolute()), argv=base + ("runtime", "weekly", "--allow-runtime-changes", "--allow-messages") + route))
         if settings and settings.crowd_polling_enabled:

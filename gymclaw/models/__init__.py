@@ -70,6 +70,9 @@ class OnboardingState(Base):
     template_id: Mapped[str | None] = mapped_column(ForeignKey("workout_template.id"))
     template_fingerprint: Mapped[str | None]
     completed_fingerprint: Mapped[str | None]
+    interview_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Ordered template IDs; planned sessions rotate through them.
+    split_json: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class LearnedPreference(Base):

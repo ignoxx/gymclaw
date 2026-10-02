@@ -1,0 +1,16 @@
+{
+  "id": "gymclaw-coach",
+  "name": "GymClaw coach",
+  "description": "Model-free workout cards in Telegram: quick-log buttons, typed sets, swaps and a live rest countdown.",
+  "activation": { "onStartup": true },
+  "contracts": { "tools": ["gymclaw_workout"] },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["ownerId", "tool"],
+    "properties": {
+      "ownerId": { "type": "string", "description": "Verified owner Telegram user ID (private DM only)" },
+      "tool": { "type": "string", "description": "Absolute path to scripts/gymclaw-tool" }
+    }
+  }
+}

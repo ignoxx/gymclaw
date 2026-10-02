@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy.orm import Session
 
 from gymclaw.models import WorkoutTemplate
+from gymclaw.services.errors import DomainError
 
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
 Weight = Annotated[float, Field(ge=0, allow_inf_nan=False)]
@@ -79,6 +80,14 @@ class Template(BaseModel):
         if first_primary and first_primary.warmup_weight is None:
             raise ValueError("First primary exercise requires explicit warmup_weight")
         return self
+
+
+def require_illustrations(template: Template) -> Template:
+    """Owner templates (CLI import) need a catalog guide_id on every exercise, so every card has an image."""
+    missing = [spec.name for spec in template.exercises + template.alternatives if spec.guide_id is None]
+    if missing:
+        raise DomainError("ILLUSTRATION_REQUIRED", "Set guide_id (closest match from `catalog search`) for: " + ", ".join(missing))
+    return template
 
 
 def import_template(db: Session, template: Template) -> dict:
