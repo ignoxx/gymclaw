@@ -104,7 +104,8 @@ def handle_text(db: Session, text: str, *, now: datetime, request_id: str) -> di
     except DomainError:
         return {"handled": False}
     log_set(db, workout.id, value, now=now, request_id=request_id)
-    return {"handled": True, "react": "👍", "ack": None, "cards": after_change(db, workout, now, request_id)}
+    # The ack lands on the previous card; Telegram doesn't give the plugin the typed message to react to.
+    return {"handled": True, "react": "👍", "ack": f"✅ {kg(value.weight)} × {value.reps}", "cards": after_change(db, workout, now, request_id)}
 
 
 def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> dict:

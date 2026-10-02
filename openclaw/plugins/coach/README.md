@@ -4,15 +4,15 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
 
 - **Cards:** each exercise gets an illustration (first set only), the target, and buttons:
   `✅ 40 kg × 10` (repeat last set), `🔄 Swap`, `⏭ Next exercise`.
-- **Typed sets:** `40x10`, `12x40kg`, `9 reps at 80` are claimed before the agent sees them. The plugin
-  reacts 👍 and sends the next card. Order is guessed from units, then from the expected weight.
+- **Typed sets:** `40x10`, `12x40kg`, `9 reps at 80` are claimed in `before_dispatch`, before the agent
+  sees them (`inbound_claim` only fires for plugin-bound chats). The previous card gets `✅ 40 kg × 10`
+  and the next card follows. Order is guessed from units, then from the expected weight.
 - **Rest:** the next card arrives right away with `⏱ Rest 1:25 · next up` on top, edited every 5 s.
   At zero the plugin closes the rest and sends a fresh card with buttons (edits don't notify). The
   runtime cron ping is only a fallback 30 s later, e.g. after a gateway restart mid-rest.
-- **Swap** is offered only before the first set of an exercise.
-- **Swap:** shows up to two same-muscle alternatives with images, plus `⏳ I'll wait` and
-  `↪ Do it later`. "Later" keeps the workout on the same muscle group.
-- **Agent tool:** `gymclaw_workout` (start, card, swap, later, next, end), so chat requests produce
+- **Swap** (only before the first set of an exercise): up to two same-muscle alternatives with
+  images, plus `⏳ I'll wait` and `↪ Do it later`. "Later" keeps the workout on the same muscle group.
+- **Agent tool:** `gymclaw_workout` (status, start, log, card, swap, later, next, end), so chat requests produce
   the same cards.
 
 All workout logic lives in Python (`gymclaw/services/coach.py`, `gymclaw-tool coach …`). This plugin
