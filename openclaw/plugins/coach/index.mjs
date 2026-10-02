@@ -7,6 +7,14 @@ export default definePluginEntry({
   name: "GymClaw coach",
   register(api) {
     let telegram;
-    registerCoach(api, { telegram: () => (telegram ??= loadTelegram(() => api.config)) });
+    const getTelegram = () => (telegram ??= loadTelegram(() => api.config));
+    registerCoach(api, { telegram: getTelegram });
+    // Fail at startup, not on the owner's first tap.
+    api.on("gateway_start", () =>
+      getTelegram().then(
+        () => api.logger.info("gymclaw-coach: Telegram runtime ready"),
+        (error) => api.logger.error(`gymclaw-coach: ${error.message}`),
+      ),
+    );
   },
 });
