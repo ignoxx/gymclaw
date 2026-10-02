@@ -22,11 +22,11 @@ export function cliRunner(toolPath, { timeoutMs = 20000 } = {}) {
     });
 }
 
-/** Card text plus the live rest line, e.g. "⏱ Rest 1:25". */
+/** Card text with the rest on top while resting: the card shows what comes *after* the rest. */
 export function withRest(card, nowMs) {
   if (!card.rest_until) return card.text;
   const left = Math.max(0, Math.ceil((Date.parse(card.rest_until) - nowMs) / 1000));
-  return left ? `${card.text}\n⏱ Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : `${card.text}\n⏱ Rest over`;
+  return left ? `⏱ Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} · next up\n${card.text}` : `⏱ Rest over · go\n${card.text}`;
 }
 
 const keyboard = (buttons) => buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data })));
@@ -50,14 +50,13 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
 
   async function retire(entry, ack) {
     if (entry.timer) timers.clearInterval(entry.timer);
-    const restLine = entry.card.rest_until && Date.parse(entry.card.rest_until) <= now() ? "\n⏱ Rest over" : "";
-    await quietly((await telegram()).edit(chatId, entry.messageId, entry.card.text + restLine + (ack ? `\n${ack}` : ""), []));
+    await quietly((await telegram()).edit(chatId, entry.messageId, entry.card.text + (ack ? `\n${ack}` : ""), []));
   }
 
   function startCountdown(entry) {
     entry.timer = timers.setInterval(async () => {
       const text = withRest(entry.card, now());
-      if (!text.endsWith("Rest over")) {
+      if (!text.startsWith("⏱ Rest over")) {
         await quietly((await telegram()).edit(chatId, entry.messageId, text, keyboard(entry.card.buttons)));
         return;
       }
@@ -83,7 +82,7 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
       extras = extras.filter((entry) => entry !== known);
     } else if (tapped && result.ack) {
       // Message from before a gateway restart: we only know its visible text.
-      const text = (tapped.text ?? "").replace(/\n⏱ Rest[^\n]*$/, "");
+      const text = (tapped.text ?? "").replace(/^⏱ Rest[^\n]*\n/, "");
       await quietly(api.edit(chatId, tapped.messageId, `${text}\n${result.ack}`, []));
     } else if (!tapped && result.ack && live) {
       await retire(live, result.ack);
