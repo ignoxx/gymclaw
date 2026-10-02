@@ -2,9 +2,9 @@
 
 **A long-running Telegram agent that runs your training week on its own. It books workouts into the quietest gym hours, tells you when to leave, and coaches you set by set.**
 
-[![Watch: one week with GymClaw (60 s)](assets/story-poster.jpg)](videos/gymclaw-story-60s.mp4)
+[![Watch: one week with GymClaw (60 s)](assets/story-poster.jpg)](https://ignoxx.github.io/gymclaw/)
 
-▶ [One week with GymClaw (60 s)](videos/gymclaw-story-60s.mp4) · [Feature tour (60 s)](videos/gymclaw-tour-60s.mp4) · [Motion reel (15 s)](videos/gymclaw-reel-15s.mp4)
+▶ **[Watch the videos](https://ignoxx.github.io/gymclaw/)**: one week with GymClaw (60 s), feature tour (60 s), motion reel (15 s)
 
 <sub>Telegram screens, times and data in the videos are simulated. See [video notes](videos/README.md).</sub>
 
@@ -115,4 +115,4 @@ Agent setup is in [openclaw/README.md](openclaw/README.md). Copy `.env.example` 
 
 Exercise art comes from [Workout Guide](https://github.com/bryllim/workout-guide) by Bryl Lim and Everkinetic, under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). GymClaw bundles all 302 first-pose SVG/PNG pairs. See the [asset notice](gymclaw/assets/workout-guide/NOTICE.md).
 
-A license for GymClaw's own code is not yet selected.
+GymClaw's own code is under the [MIT License](LICENSE). The exercise art keeps its CC BY-SA 4.0 license.

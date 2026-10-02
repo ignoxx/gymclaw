@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- GitHub Pages watch page: GitHub's README can't play repo videos, Pages can. -->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GymClaw Videos</title>
+<style>
+@font-face{font-family:Cond;src:url(gymclaw/web/fonts/BarlowCondensed-SemiBold.ttf)}
+@font-face{font-family:DM;src:url(gymclaw/web/fonts/DM-Sans.ttf);font-weight:100 1000}
+:root{--ink:#0f120e;--lime:#d7f580;--paper:#f1f1eb;--muted:#9aa293}
+*{box-sizing:border-box;margin:0}
+body{background:var(--ink);color:var(--paper);font:400 18px/1.5 DM,system-ui,sans-serif;padding:48px 16px 64px}
+main{max-width:1100px;margin:0 auto}
+h1{font:600 clamp(56px,10vw,120px)/.9 Cond;color:var(--lime);letter-spacing:-2px}
+.lead{margin:16px 0 32px;max-width:720px;color:#c6ccbf;font-size:20px}
+video{width:100%;border-radius:16px;background:#000;display:block}
+h2{font:600 34px/1 Cond;text-transform:uppercase;margin:48px 0 14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px}
+.grid h2{margin-top:32px}
+a{color:var(--lime)}
+.note{margin-top:40px;color:var(--muted);font-size:15px}
+</style></head><body><main>
+<h1>gymclaw.</h1>
+<p class="lead">A long-running Telegram agent that runs your training week on its own. It books workouts into the quietest gym hours, tells you when to leave, and coaches you set by set.</p>
+<video src="videos/gymclaw-story-60s.mp4" poster="assets/story-poster.jpg" controls playsinline preload="metadata"></video>
+<div class="grid">
+  <div><h2>Feature tour · 60 s</h2><video src="videos/gymclaw-tour-60s.mp4" controls playsinline preload="metadata"></video></div>
+  <div><h2>Motion reel · 15 s</h2><video src="videos/gymclaw-reel-15s.mp4" controls playsinline preload="metadata"></video></div>
+</div>
+<p class="note">Code, setup and status: <a href="https://github.com/ignoxx/gymclaw">github.com/ignoxx/gymclaw</a>. Telegram screens, times and data in the videos are simulated. Exercise art: Workout Guide / Bryl Lim / Everkinetic, CC BY-SA 4.0.</p>
+</main></body></html>
