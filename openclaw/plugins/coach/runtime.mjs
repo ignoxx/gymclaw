@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 // Cheap pre-check so ordinary chat never pays for a Python start-up.
 export const SET_LIKE = /^\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*[x×*]\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*$|^\s*\d+\s*reps?\s*(?:at|@)\s*\d+(?:[.,]\d+)?\s*(?:kg)?\s*$/i;
 export const TICK_MS = 5000;
-const ACTIONS = ["status", "start", "card", "swap", "later", "next", "end"];
+const ACTIONS = ["status", "start", "log", "card", "swap", "later", "next", "end"];
 
 /** Run `gymclaw-tool coach ...`; resolves the JSON `data` or rejects with the CLI error code. */
 export function cliRunner(toolPath, { timeoutMs = 20000 } = {}) {
@@ -181,20 +181,22 @@ export function registerCoach(api, { run, telegram } = {}) {
     },
   });
 
-  api.on("inbound_claim", async (event) => {
-    if (event.channel !== "telegram" || event.isGroup || String(event.senderId) !== ownerId) return;
-    const text = String(event.body ?? event.content ?? "");
-    if (!SET_LIKE.test(text)) return;
+  // before_dispatch runs for every inbound message (inbound_claim only fires for plugin-bound chats).
+  api.on("before_dispatch", async (event, ctx) => {
+    const sender = String(event.senderId ?? ctx?.senderId ?? "").replace(/^telegram:/, "");
+    if ((event.channel ?? ctx?.channelId) !== "telegram" || event.isGroup || sender !== ownerId) return;
+    const text = [event.content, event.body].map((value) => String(value ?? "").trim()).find((value) => SET_LIKE.test(value));
+    if (!text) return;
     let result;
     try {
-      result = await cli(["coach", "text", "--text", text.trim(), "--request-id", `tg-msg:${event.messageId}`]);
+      result = await cli(["coach", "text", "--text", text, "--request-id", `tg-msg:${event.timestamp ?? Date.now()}:${text}`]);
     } catch (error) {
       // Let the agent explain anything unexpected (e.g. no workout in a loggable state).
       api.logger.warn(`gymclaw-coach: typed set not handled: ${error.code ?? error.message}`);
       return;
     }
     if (!result.handled) return;
-    await coach.apply(result, { inboundMessageId: event.messageId });
+    await coach.apply(result);
     sync();
     return { handled: true };
   });
@@ -204,7 +206,7 @@ export function registerCoach(api, { run, telegram } = {}) {
     description:
       "Drive the live workout in Telegram. Sends exercise cards (image, target, quick buttons) to the owner directly, " +
       "so after calling reply NO_REPLY unless the owner asked a question. Actions: status (read the running workout, sends " +
-      "nothing), start (template_id, optional " +
+      "nothing), log (text like \"40x10\": logs a set), start (template_id, optional " +
       "planned_session_id), card (resend current card), swap (equipment taken: show same-muscle alternatives), " +
       "later (do current exercise later), next (move on to the next exercise), end (end early, save, show summary).",
     parameters: {
@@ -214,6 +216,7 @@ export function registerCoach(api, { run, telegram } = {}) {
       properties: {
         action: { type: "string", enum: ACTIONS },
         template_id: { type: "string" },
+        text: { type: "string", description: "Set for action log, e.g. 40x10" },
         planned_session_id: { type: "string" },
       },
     },
@@ -222,7 +225,9 @@ export function registerCoach(api, { run, telegram } = {}) {
       const args =
         params.action === "status"
           ? ["workout", "current"]
-          : params.action === "start"
+          : params.action === "log"
+            ? ["coach", "text", "--text", params.text ?? "", "--request-id", requestId]
+            : params.action === "start"
           ? ["coach", "start", "--template-id", params.template_id ?? "", ...(params.planned_session_id ? ["--planned-session-id", params.planned_session_id] : []), "--request-id", requestId]
           : params.action === "card"
             ? ["coach", "card"]

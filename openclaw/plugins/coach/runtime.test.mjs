@@ -107,21 +107,21 @@ test("tap acks the pressed card; swap menus stay until the workout moves on", as
 test("hooks ignore non-owners and non-set chat; owner sets and taps go to the CLI", async () => {
   const seen = [];
   const { calls, registered } = plugin(async (args) => (seen.push(args), { handled: true, react: "👍", cards: [card("Next")] }));
-  const claim = registered.hooks.get("inbound_claim");
-  assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: "1", body: "80x9", messageId: "5" }), undefined);
-  assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: OWNER, body: "it's occupied", messageId: "6" }), undefined);
-  assert.deepEqual(await claim({ channel: "telegram", isGroup: false, senderId: OWNER, body: "12x40kg", messageId: "7" }), { handled: true });
-  assert.deepEqual(seen[0], ["coach", "text", "--text", "12x40kg", "--request-id", "tg-msg:7"]);
+  const claim = registered.hooks.get("before_dispatch");
+  assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: "1", content: "80x9", timestamp: 5 }), undefined);
+  assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: OWNER, content: "it's occupied", timestamp: 6 }), undefined);
+  assert.deepEqual(await claim({ channel: "telegram", isGroup: false, senderId: `telegram:${OWNER}`, content: "12x40kg", timestamp: 7 }), { handled: true });
+  assert.deepEqual(seen[0], ["coach", "text", "--text", "12x40kg", "--request-id", "tg-msg:7:12x40kg"]);
   const ctx = { auth: { isAuthorizedSender: true }, isGroup: false, senderId: OWNER, callbackId: "cb1", callback: { payload: "next:abcd1234", messageId: 100 } };
   assert.deepEqual(await registered.callback.handler(ctx), { handled: true });
   assert.ok(seen.some((args) => args[0] === "runtime" && args[1] === "sync"), "rest timers are synced after a logged set");
   assert.ok(seen.some((args) => args.join(" ") === "coach tap --data next:abcd1234 --request-id tg-cb:cb1"));
-  assert.ok(calls.some((c) => c[0] === "react"));
+  assert.ok(calls.some((c) => c[0] === "send"));
 });
 
 test("unhandled CLI result falls through to the agent", async () => {
   const { registered } = plugin(async () => ({ handled: false }));
-  assert.equal(await registered.hooks.get("inbound_claim")({ channel: "telegram", isGroup: false, senderId: OWNER, body: "80x9", messageId: "8" }), undefined);
+  assert.equal(await registered.hooks.get("before_dispatch")({ channel: "telegram", isGroup: false, senderId: OWNER, content: "80x9", timestamp: 8 }), undefined);
 });
 
 test("overlapping syncs collapse into one follow-up run", async () => {
