@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 // Cheap pre-check so ordinary chat never pays for a Python start-up.
 export const SET_LIKE = /^\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*[x×*]\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*$|^\s*\d+\s*reps?\s*(?:at|@)\s*\d+(?:[.,]\d+)?\s*(?:kg)?\s*$/i;
 export const TICK_MS = 5000;
-const ACTIONS = ["start", "card", "swap", "later", "next", "end"];
+const ACTIONS = ["status", "start", "card", "swap", "later", "next", "end"];
 
 /** Run `gymclaw-tool coach ...`; resolves the JSON `data` or rejects with the CLI error code. */
 export function cliRunner(toolPath, { timeoutMs = 20000 } = {}) {
@@ -186,7 +186,8 @@ export function registerCoach(api, { run, telegram } = {}) {
     name: "gymclaw_workout",
     description:
       "Drive the live workout in Telegram. Sends exercise cards (image, target, quick buttons) to the owner directly, " +
-      "so after calling reply NO_REPLY unless the owner asked a question. Actions: start (template_id, optional " +
+      "so after calling reply NO_REPLY unless the owner asked a question. Actions: status (read the running workout, sends " +
+      "nothing), start (template_id, optional " +
       "planned_session_id), card (resend current card), swap (equipment taken: show same-muscle alternatives), " +
       "later (do current exercise later), next (move on to the next exercise), end (end early, save, show summary).",
     parameters: {
@@ -202,13 +203,16 @@ export function registerCoach(api, { run, telegram } = {}) {
     async execute(toolCallId, params) {
       const requestId = `tool:${toolCallId}`;
       const args =
-        params.action === "start"
+        params.action === "status"
+          ? ["workout", "current"]
+          : params.action === "start"
           ? ["coach", "start", "--template-id", params.template_id ?? "", ...(params.planned_session_id ? ["--planned-session-id", params.planned_session_id] : []), "--request-id", requestId]
           : params.action === "card"
             ? ["coach", "card"]
             : ["coach", "act", "--action", params.action, "--request-id", requestId];
       try {
         const result = await cli(args);
+        if (params.action === "status") return { content: [{ type: "text", text: JSON.stringify({ ok: true, workout: result }) }] };
         await coach.apply(result);
         if (changed(result)) sync();
         return { content: [{ type: "text", text: JSON.stringify({ ok: true, cards_sent: result.cards?.length ?? 0, ack: result.ack ?? null }) }] };

@@ -62,10 +62,12 @@ def test_cli_full_fake_workout_and_restart(tmp_path):
     assert final == command("finish", 390, "finish")
     assert run(tmp_path, "audit", "workout", "--workout-id", workout_id)[1]["data"] == final["data"]
     assert run(tmp_path, "workout", "current", "--workout-id", workout_id, "--now", (NOW + timedelta(seconds=400)).isoformat())[1]["data"]["status"] == "PLAN_UPDATED"
-    inbox = run(tmp_path, "events", "pending")[1]["data"]
+    # Planner-owned events stay out of the agent's inbox; --all still shows them.
+    assert run(tmp_path, "events", "pending")[1]["data"] == []
+    inbox = run(tmp_path, "events", "pending", "--all")[1]["data"]
     actionable = next(e for e in inbox if e["type"] == "planning.replan_required")
     assert run(tmp_path, "events", "ack", "--event-id", actionable["id"], "--now", (NOW + timedelta(seconds=400)).isoformat())[1]["ok"]
-    assert all(e["id"] != actionable["id"] for e in run(tmp_path, "events", "pending")[1]["data"])
+    assert all(e["id"] != actionable["id"] for e in run(tmp_path, "events", "pending", "--all")[1]["data"])
     engine = make_engine(f"sqlite:///{tmp_path / 'state.db'}")
     with Session(engine) as db:
         assert db.get(PlannedSession, planned_id).status == "COMPLETED"
