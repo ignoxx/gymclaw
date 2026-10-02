@@ -7,7 +7,6 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["ownerId", "tool"],
     "properties": {
       "ownerId": { "type": "string", "description": "Verified owner Telegram user ID (private DM only)" },
       "tool": { "type": "string", "description": "Absolute path to scripts/gymclaw-tool" }
