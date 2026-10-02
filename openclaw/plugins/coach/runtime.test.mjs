@@ -52,8 +52,8 @@ test("set pre-check only matches whole set messages", () => {
 
 test("rest line counts down and ends", () => {
   const due = Date.parse("2026-10-02T18:00:00Z");
-  assert.equal(withRest(card("Bench", { rest_until: "2026-10-02T18:00:00Z" }), due - 85_000), "Bench\n⏱ Rest 1:25");
-  assert.equal(withRest(card("Bench", { rest_until: "2026-10-02T18:00:00Z" }), due + 1), "Bench\n⏱ Rest over");
+  assert.equal(withRest(card("Bench", { rest_until: "2026-10-02T18:00:00Z" }), due - 85_000), "⏱ Rest 1:25 · next up\nBench");
+  assert.equal(withRest(card("Bench", { rest_until: "2026-10-02T18:00:00Z" }), due + 1), "⏱ Rest over · go\nBench");
 });
 
 test("typed set: react, retire old card buttons, send next card with live countdown", async () => {
@@ -65,14 +65,14 @@ test("typed set: react, retire old card buttons, send next card with live countd
   await coach.apply({ react: "👍", cards: [card("Bench · set 2", { rest_until: "2026-10-02T18:01:30Z" })] }, { inboundMessageId: 7 });
   assert.deepEqual(calls[1], ["react", OWNER, 7, "👍"]);
   assert.deepEqual(calls[2], ["edit", OWNER, 100, "Bench · set 1", []]);
-  assert.equal(calls[3][2], "Bench · set 2\n⏱ Rest 1:30");
+  assert.equal(calls[3][2], "⏱ Rest 1:30 · next up\nBench · set 2");
   now += 5000;
   await timers.tick();
-  assert.equal(calls.at(-1)[3], "Bench · set 2\n⏱ Rest 1:25");
+  assert.equal(calls.at(-1)[3], "⏱ Rest 1:25 · next up\nBench · set 2");
   assert.equal(calls.at(-1)[4].length, 1, "countdown edits keep the buttons");
   now += 90_000;
   await timers.tick();
-  assert.equal(calls.at(-1)[3], "Bench · set 2\n⏱ Rest over");
+  assert.equal(calls.at(-1)[3], "⏱ Rest over · go\nBench · set 2");
   assert.equal(timers.intervals.size, 0);
 });
 
@@ -85,7 +85,7 @@ test("rest over: old card loses its buttons and a fresh card with buttons is sen
   await coach.apply({ cards: [card("Bench · set 2", { rest_until: "2026-10-02T18:01:30Z" })] });
   now += 91_000;
   await timers.tick();
-  assert.deepEqual(calls.at(-2), ["edit", OWNER, 100, "Bench · set 2\n⏱ Rest over", []]);
+  assert.deepEqual(calls.at(-2), ["edit", OWNER, 100, "Bench · set 2", []]);
   assert.equal(calls.at(-1)[0], "send");
   assert.equal(calls.at(-1)[3].buttons.length, 1);
   assert.equal(coach.state().live.messageId, 101);
