@@ -45,7 +45,8 @@ def test_reorder_retry_deferred_and_audit(engine):
         assert result["data"]["active_exercise"]["exercise_id"] == "raise"
         assert result["data"]["substitution_options"] == ["db-fly"]
         assert db.get(WorkoutExercise, deferred_id).status == "DEFERRED"
-        assert db.scalar(select(NotificationJob).where(NotificationJob.status == "CANCELLED"))
+        # Finishing an exercise starts the next one without a rest timer.
+        assert not db.scalar(select(NotificationJob).where(NotificationJob.status == "PENDING"))
         log_set(db, workout_id, SetInput(weight=10, reps=10), now=NOW + timedelta(seconds=100), request_id="raise")
     with Session(engine) as db:
         with pytest.raises(DomainError, match="Resolve deferred"):

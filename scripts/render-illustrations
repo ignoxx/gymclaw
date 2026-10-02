@@ -8,6 +8,6 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/gymclaw/assets/workout-guide"
 for svg in "$ROOT"/*/frame-1.svg; do
   png="${svg%.svg}.png"
-  rsvg-convert -w 820 -h 820 -b '#242824' "$svg" | magick - -background '#242824' -gravity center -extent 1024x1024 -colors 32 -strip "PNG8:$png"
+  rsvg-convert -w 820 -h 820 -b '#000000' "$svg" | magick - -background '#000000' -gravity center -extent 1024x1024 -colors 32 -strip "PNG8:$png"
 done
 echo "Rendered $(ls "$ROOT"/*/frame-1.png | wc -l | tr -d ' ') PNGs"

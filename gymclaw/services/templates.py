@@ -100,6 +100,32 @@ def import_template(db: Session, template: Template) -> dict:
     return row.definition_json
 
 
+def remember_swap(db: Session, template_id: str, original_id: str, replacement: ExerciseSpec) -> bool:
+    """Owner swapped an exercise mid-workout: the replacement takes its place in the saved template, and
+    the original stays as an alternative so it's one swap away. False if the template can't take it."""
+    row = db.get(WorkoutTemplate, template_id)
+    if row is None:
+        return False
+    definition = row.definition_json
+    index = next((i for i, e in enumerate(definition["exercises"]) if e["id"] == original_id), None)
+    if index is None:
+        return False
+    original = definition["exercises"][index]
+    keep = {k: original[k] for k in ("role", "primary", "working_sets", "rep_min", "rep_max", "rest_seconds", "priority", "requires_completed")}
+    new = replacement.model_dump(mode="json") | keep | {"substitutes": [original_id]}
+    alternatives = [a for a in definition.get("alternatives", []) if a["id"] not in {replacement.id, original_id}]
+    alternatives.append(original | {"substitutes": [], "requires_completed": []})
+    exercises = [e | {"requires_completed": [replacement.id if r == original_id else r for r in e["requires_completed"]],
+        "substitutes": [s for s in e["substitutes"] if s != replacement.id]} for e in definition["exercises"]]
+    exercises[index] = new
+    try:
+        template = Template.model_validate(definition | {"exercises": exercises, "alternatives": alternatives})
+    except ValueError:
+        return False
+    import_template(db, template)
+    return True
+
+
 def get_template(db: Session, template_id: str) -> Template:
     row = db.get(WorkoutTemplate, template_id)
     if row is None:

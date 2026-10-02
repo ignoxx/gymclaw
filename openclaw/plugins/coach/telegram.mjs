@@ -2,7 +2,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const NEEDED = ["sendMessageTelegram", "editMessageTelegram", "reactMessageTelegram"];
+const NEEDED = ["sendMessageTelegram", "editMessageTelegram", "reactMessageTelegram", "deleteMessageTelegram"];
 
 /** The Gateway's own OpenClaw install: SDK resolution when the loader supports it, else the running CLI. */
 function runtimeApiPath() {
@@ -40,6 +40,9 @@ export async function loadTelegram(getConfig) {
     },
     edit(chatId, messageId, text, buttons) {
       return mod.editMessageTelegram(String(chatId), messageId, text, { cfg: getConfig(), textMode: "markdown", buttons, editMode: "auto" });
+    },
+    remove(chatId, messageId) {
+      return mod.deleteMessageTelegram(String(chatId), messageId, { cfg: getConfig() });
     },
     react(chatId, messageId, emoji) {
       return mod.reactMessageTelegram(String(chatId), messageId, emoji, { cfg: getConfig() });
