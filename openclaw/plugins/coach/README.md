@@ -7,7 +7,9 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
 - **Typed sets:** `40x10`, `12x40kg`, `9 reps at 80` are claimed before the agent sees them. The plugin
   reacts 👍 and sends the next card. Order is guessed from units, then from the expected weight.
 - **Rest:** the next card arrives right away with `⏱ Rest 1:25 · next up` on top, edited every 5 s.
-  from the runtime cron job; the plugin runs `runtime sync` in the background after each change.
+  At zero the plugin closes the rest and sends a fresh card with buttons (edits don't notify). The
+  runtime cron ping is only a fallback 30 s later, e.g. after a gateway restart mid-rest.
+- **Swap** is offered only before the first set of an exercise.
 - **Swap:** shows up to two same-muscle alternatives with images, plus `⏳ I'll wait` and
   `↪ Do it later`. "Later" keeps the workout on the same muscle group.
 - **Agent tool:** `gymclaw_workout` (start, card, swap, later, next, end), so chat requests produce
