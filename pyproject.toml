@@ -16,7 +16,7 @@ dev = ["pytest>=8,<10"]
 include = ["gymclaw*"]
 
 [tool.setuptools.package-data]
-gymclaw = ["migrations/script.py.mako"]
+gymclaw = ["migrations/script.py.mako", "web/*.html", "web/*.css", "web/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["gymclaw/tests"]
