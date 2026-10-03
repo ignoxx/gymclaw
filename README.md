@@ -80,7 +80,7 @@ pip install -e '.[dev]'
 python -m gymclaw.dashboard
 ```
 
-Open http://127.0.0.1:8765. The dashboard runs the real planning and workout code against a throwaway database. Click exercise thumbnails to preview poses.
+Open http://127.0.0.1:8765. The dashboard runs the real planning and workout code against a throwaway database: the next seven days with expected crowd, today's check-ins against a typical day, and the live workout (or your next session's plan).
 
 ![GymClaw dashboard](assets/dashboard-demo.png)
 
@@ -93,7 +93,7 @@ Run the tests with `pytest -q`.
 python -m gymclaw.dashboard --live
 ```
 
-Open http://127.0.0.1:8766. This reads saved calendar, crowd, workout and runtime state from your NemoClaw sandbox in read-only mode and starts no new poller. Use the refresh button after acting in Telegram. Private views stay on localhost.
+Open http://127.0.0.1:8766. This reads saved calendar, crowd, workout and runtime state from your NemoClaw sandbox in read-only mode and starts no new poller. It refreshes every minute; private views stay on localhost.
 
 Agent setup is in [openclaw/README.md](openclaw/README.md). Copy `.env.example` to `.env` and fill in your calendar, gym and Telegram IDs.
 

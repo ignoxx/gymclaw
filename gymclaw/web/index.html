@@ -11,40 +11,28 @@
   <main class="dashboard">
     <header class="header">
       <a class="brand" href="/">gymclaw<span>.</span></a>
-      <span class="demo-tag">Demo <span>synthetic data</span></span>
-      <span class="runtime">OpenClaw / NemoClaw</span>
-      <button id="refresh" aria-label="Refresh saved state" title="Refresh saved state">↻</button>
-      <details class="info"><summary aria-label="About this view">i</summary><div><p id="data-notice">Read-only demo. Calendar writes off.</p><p id="connections" hidden></p><p>Art <a href="https://github.com/bryllim/workout-guide">Workout Guide</a>, Bryl Lim / Everkinetic. <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>. PNG background added, SVG display inverted.</p></div></details>
+      <span class="mode" id="mode">Demo</span>
+      <span class="updated" id="updated"></span>
+      <button id="refresh" aria-label="Refresh" title="Refresh">↻</button>
+      <details class="info"><summary aria-label="About">i</summary><div><p id="data-notice">Synthetic demo data.</p><p>Exercise art: <a href="https://github.com/bryllim/workout-guide">Workout Guide</a>, Bryl Lim / Everkinetic, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p></div></details>
     </header>
-    <div class="page-heading"><h1>Training</h1><span id="week-label">October 2026</span></div>
-    <div id="load-error" role="alert" hidden>State unavailable. Check sandbox connection.</div>
+    <div class="page-heading"><h1>Training</h1><span id="range"></span></div>
+    <div id="load-error" role="alert" hidden>Can't reach GymClaw right now.</div>
     <div class="layout" hidden>
-      <div class="planning">
-        <section class="panel week-panel" aria-labelledby="week-title">
-          <div class="section-heading"><h2 id="week-title">This week</h2><span id="session-count">3 sessions</span></div>
+      <div class="column">
+        <section class="panel" aria-labelledby="week-title">
+          <div class="section-heading"><h2 id="week-title">Next 7 days</h2><span id="session-count"></span></div>
           <div class="week" id="week"></div>
-          <div class="week-footer"><span>Prep + travel included</span><span class="small-tag">Calendar preview</span></div>
         </section>
-        <section class="panel attendance-panel" aria-labelledby="attendance-title">
-          <div class="section-heading"><h2 id="attendance-title">Gym attendance</h2><span class="cadence"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7a9 9 0 0 0-15-2L2 8m0-5v5h5M4 17a9 9 0 0 0 15 2l3-3m0 5v-5h-5"/></svg>API every <b id="cadence">15 min</b></span></div>
-          <div id="api-view">
-            <div class="count"><strong id="attendance-count">14</strong><div><span>reported check-ins</span><small id="fetched-at">Fetched 17:45</small></div><span class="sample-tag">Sample history</span></div>
-            <div id="attendance-chart" class="chart"></div>
-            <div class="chart-footer"><span>Cache delay unknown</span><span>Comfort score needs arrival feedback</span></div>
-          </div>
+        <section class="panel" aria-labelledby="gym-title">
+          <div class="section-heading"><h2 id="gym-title">Gym</h2><span id="polling"></span></div>
+          <div class="count"><strong id="count">—</strong><div><span>checked in</span><small id="count-time"></small></div>
+            <div class="legend"><span class="key today" id="legend-day">Today</span><span class="key typical" id="legend-typical"></span></div></div>
+          <div id="chart" class="chart"></div>
         </section>
-        <section class="activity" aria-label="Demo agent activity"><div class="section-heading"><h2>Agent activity</h2><span id="activity-mode">Demo</span></div><div class="event"><time>17:45</time><span class="event-dot"></span><span>Attendance saved</span><span class="event-detail">15 min cadence</span></div><div class="event"><time>18:00</time><span class="event-dot"></span><span>Workout started</span><span class="event-detail">State in SQLite</span></div><div class="event"><time>18:01</time><span class="event-dot lime"></span><span>Set saved. Rest queued.</span><span class="event-detail">90 seconds</span></div></section>
+        <section class="activity" aria-labelledby="activity-title"><h2 id="activity-title">Activity</h2><div id="events"></div></section>
       </div>
-      <section class="panel workout-panel" aria-labelledby="exercise-name">
-        <div class="section-heading"><span id="exercise-state">Next set</span><span id="set-position">Set 2 / 3</span></div>
-        <h2 id="exercise-name" class="exercise-name">Bench press</h2>
-        <div class="pose"><img id="exercise-image" alt="Bench press illustration" width="512" height="512"></div>
-        <div class="prescription"><strong id="weight">80</strong><span>kg</span><span class="multiply">×</span><strong id="reps">8–10</strong><span>reps</span></div>
-        <div class="rest" id="rest"><svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="16"/><path d="M20 9v11l7 4"/></svg><div><strong>Rest <span id="rest-duration">90s</span></strong><span>Demo clock paused</span></div><span class="saved">Saved</span></div>
-        <div class="workout-footer"><span>Last set <b>80 × 9</b></span><span>Finish <b id="eta">18:26</b></span></div>
-        <div class="queue" id="queue" aria-label="Exercise preview"></div>
-        <div class="telegram"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-7-4 16-6-5-4 3 1-6 10-6-8 8"/></svg><span>Next-exercise image in Telegram</span></div>
-      </section>
+      <section class="panel focus" id="focus" aria-live="polite"></section>
     </div>
   </main>
 </body>
