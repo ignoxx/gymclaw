@@ -10,13 +10,13 @@ from gymclaw.demo import build_demo_snapshot
 def test_demo_uses_real_domain_with_explicit_isolation():
     data = build_demo_snapshot()
     assert data["demo"] and data["live_database_accessed"] is False
-    assert data["calendar_writes_enabled"] is False
-    assert len(data["sessions"]) == data["target_sessions"] == 3
-    assert data["workout"]["status"] == "RESTING"
-    assert data["workout"]["warmups_logged"] == data["workout"]["working_sets_logged"] == 1
-    assert data["workout"]["rest_intent_prepared"] and not data["workout"]["timer_activated"]
-    assert data["crowd"]["personal_score"] is None
-    assert data["crowd"]["backend_freshness"] == "unknown"
+    assert len(data["days"]) == 7 and data["days"][0]["today"]
+    assert data["days"][0]["session"]["status"] == "STARTED"
+    workout = data["workout"]
+    assert workout["active"]["set_number"] == 2 and workout["rest_until"] and workout["last_set"] == "60 × 11"
+    assert all(e["svg_url"] for e in workout["exercises"])
+    assert data["next"]["template"] == "Legs" and all(e["svg_url"] for e in data["next"]["exercises"])
+    assert data["crowd"]["readings"] and len(data["crowd"]["typical"]) >= 2
 
 
 def test_demo_http_serves_only_public_assets_and_rejects_writes():
@@ -31,7 +31,7 @@ def test_demo_http_serves_only_public_assets_and_rejects_writes():
         assert response.status == 200 and json.loads(response.read())["demo"]
         client.request("GET", "/")
         response = client.getresponse()
-        assert response.status == 200 and b"synthetic data" in response.read()
+        assert response.status == 200 and b"gymclaw" in response.read()
         assert "frame-ancestors 'none'" in response.getheader("Content-Security-Policy")
         for path in ("/../README.md", "/data/private.sqlite", "/unknown"):
             client.request("GET", path)
