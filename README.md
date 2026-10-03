@@ -2,7 +2,7 @@
 
 **A long-running Telegram agent that runs your training week on its own. It books workouts into the quietest gym hours, tells you when to leave, and coaches you set by set.**
 
-[![Watch: one week with GymClaw (60 s)](assets/story-poster.jpg)](https://ignoxx.github.io/gymclaw/)
+[![GymClaw: your training week, run for you](assets/hero.png)](https://ignoxx.github.io/gymclaw/)
 
 ▶ **[Watch the videos](https://ignoxx.github.io/gymclaw/)**: one week with GymClaw (60 s), feature tour (60 s), motion reel (15 s)
 

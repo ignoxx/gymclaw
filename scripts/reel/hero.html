@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<!-- README hero banner (2:1). Render: node hero.mjs ../../assets/hero.png -->
+<style>
+@font-face{font-family:Cond;src:url(../../gymclaw/web/fonts/BarlowCondensed-SemiBold.ttf)}
+@font-face{font-family:DM;src:url(../../gymclaw/web/fonts/DM-Sans.ttf);font-weight:100 1000}
+:root{--ink:#0f120e;--lime:#d7f580;--paper:#f1f1eb;--muted:#7d8577}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1280px;height:640px;overflow:hidden;background:var(--ink);color:var(--paper);font-family:DM,sans-serif}
+body{position:relative;background:radial-gradient(700px 500px at 85% 0%,#2a3a18 0%,transparent 70%),var(--ink)}
+.logo{position:absolute;left:72px;top:70px;font:96px/1 Cond;letter-spacing:-1px}
+.logo i{color:var(--lime);font-style:normal}
+h1{position:absolute;left:72px;top:190px;width:520px;font:600 34px/1.2 DM;letter-spacing:-.5px}
+h1 b{color:var(--lime);font-weight:650}
+.sub{position:absolute;left:72px;top:262px;width:470px;font:400 19px/1.5 DM;color:#aab2a3}
+.tags{position:absolute;left:72px;top:412px;display:flex;gap:10px;font:600 14px DM}
+.tags span{padding:8px 14px;border-radius:99px;border:1px solid #2f362b;color:#c9d1c2}
+.card{position:absolute;background:#171c15;border:1px solid #262d22;border-radius:22px;padding:22px 24px;box-shadow:0 30px 60px rgba(0,0,0,.45)}
+.lbl{font:600 12px DM;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:14px}
+/* week */
+#week{left:640px;top:56px;width:568px}
+.days{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+.d{border-radius:12px;background:#10140e;padding:10px 0;text-align:center;font:500 13px DM;color:var(--muted)}
+.d b{display:block;font:600 22px Cond;margin-top:4px;color:#5d6558;height:26px}
+.d.on{background:var(--paper);color:#555}
+.d.on b{color:var(--ink)}
+.d.now{background:var(--lime);color:#4a5a1d}
+.d.now b{color:var(--ink)}
+.d small{display:block;font:500 11px DM;margin-top:2px;opacity:.75}
+/* crowd */
+#crowd{left:640px;top:268px;width:276px;height:316px}
+.bars{display:flex;align-items:flex-end;gap:7px;height:130px}
+.bars i{flex:1;border-radius:6px 6px 2px 2px;background:#2c3427}
+.bars i.q{background:var(--lime)}
+.ax{display:flex;justify-content:space-between;font:500 11px DM;color:var(--muted);margin-top:8px}
+.big{font:64px/1 Cond;margin-top:14px}
+.big span{font:500 14px DM;color:var(--muted);margin-left:6px}
+/* telegram */
+#tg{left:932px;top:268px;width:276px;height:316px;background:#0e1621;border-color:#1b2736;padding:0;overflow:hidden}
+#tg .head{background:#17212b;padding:14px 18px;display:flex;gap:10px;align-items:center;border-bottom:1px solid #0b1118}
+#tg .av{width:34px;height:34px;border-radius:50%;background:var(--lime);display:grid;place-items:center;font:700 15px Cond;color:var(--ink)}
+#tg .nm{font:650 15px DM;color:#fff}#tg .bt{font:400 12px DM;color:#7f91a4}
+#tg .msgs{padding:14px 12px;display:grid;gap:8px}
+.m{background:#1f2c3a;border-radius:16px 16px 16px 5px;padding:9px 12px;font:400 14px/1.35 DM;color:#f3f6f9}
+.m b{font-weight:650}
+.m.u{background:#2b5278;justify-self:end;border-radius:16px 16px 5px 16px}
+.kb{display:flex;gap:5px;margin-top:6px}
+.kb div{flex:1;text-align:center;padding:7px 0;border-radius:10px;background:rgba(38,56,76,.95);font:600 12.5px DM}
+</style>
+
+<div class="logo">GymClaw<i>.</i></div>
+<h1>Your training week, <b>run for you.</b></h1>
+<p class="sub">A long-running Telegram agent that books workouts into the quietest gym hours, tells you when to leave, and coaches you set by set.</p>
+<div class="tags"><span>Telegram</span><span>Crowd-aware</span><span>Always on</span></div>
+
+<div class="card" id="week">
+  <div class="lbl">This week · planned into quiet slots</div>
+  <div class="days">
+    <div class="d on">Mon<b>19:45</b><small>Push</small></div>
+    <div class="d">Tue<b>·</b><small>&nbsp;</small></div>
+    <div class="d now">Wed<b>18:00</b><small>Pull</small></div>
+    <div class="d">Thu<b>·</b><small>&nbsp;</small></div>
+    <div class="d on">Fri<b>18:00</b><small>Legs</small></div>
+    <div class="d">Sat<b>·</b><small>&nbsp;</small></div>
+    <div class="d">Sun<b>·</b><small>&nbsp;</small></div>
+  </div>
+</div>
+
+<div class="card" id="crowd">
+  <div class="lbl">Gym check-ins</div>
+  <div class="bars" id="bars"></div>
+  <div class="ax"><span>16:00</span><span>18:00</span><span>20:00</span><span>22:00</span></div>
+  <div class="big">14<span>now · quiet</span></div>
+</div>
+
+<div class="card" id="tg">
+  <div class="head"><div class="av">G</div><div><div class="nm">GymClaw</div><div class="bt">bot</div></div></div>
+  <div class="msgs">
+    <div class="m">🚶 <b>Leave at 17:35.</b> Gym has 14 people, a quiet window until 19:00.</div>
+    <div class="m u">On my way</div>
+    <div class="m"><b>Bench press</b> · set 1 of 3<br>60 kg × 8–10
+      <div class="kb"><div>Done</div><div>Occupied</div></div></div>
+  </div>
+</div>
+
+<script>
+const v=[9,12,18,26,34,38,36,30,22,16,13,10];
+const q=new Set([0,1,2,9,10,11]);
+bars.innerHTML=v.map((h,i)=>`<i class="${q.has(i)?'q':''}" style="height:${h*3.4}px"></i>`).join('');
+</script>
