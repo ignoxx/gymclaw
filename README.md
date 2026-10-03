@@ -33,7 +33,7 @@ GymClaw isn't a chatbot you prompt. It's an agent that stays on and acts on its 
 
 | | |
 | --- | --- |
-| **Plans** | Reads your calendar and the gym's crowd history, keeps rest days, and picks the quietest slots that fit. |
+| **Plans** | Reads your calendar (and, read-only, your personal one) and the gym's crowd history, keeps rest days, and picks the quietest slots that fit. |
 | **Replans** | Meetings, trips and sick days move sessions to the next valid slot. You can also just say it in chat. |
 | **Watches** | Polls gym check-ins and pings you when it's time to leave. |
 | **Coaches** | Sends each exercise with an image, target and buttons. Tap `✅ 80 kg × 10` or text `80x10`; it reacts 👍 and shows the next set with a live rest countdown. No model in the loop. |

@@ -59,6 +59,8 @@ use `status` first. Only these actions exist; don't invent others.
 ## Calendar and availability
 
 - `calendar sync`, `calendar get-week --week-start YYYY-MM-DD`. Week starts Monday.
+- Personal calendar is read-only busy time, refreshed by the watcher. `calendar personal-status`
+  shows health; `calendar personal-sync` forces a refresh. Never connect/disconnect it unless the owner asks.
 - Travel/illness: `availability add --kind TRAVEL|SICK --through YYYY-MM-DD` (inclusive); ask before
   `--cancel-locked`. `availability remove --block-id ID`.
 - Keep owner-locked events. Publication (`calendar publish --allow-writes`) and
