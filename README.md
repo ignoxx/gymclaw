@@ -80,7 +80,7 @@ pip install -e '.[dev]'
 python -m gymclaw.dashboard
 ```
 
-Open http://127.0.0.1:8765. The dashboard runs the real planning and workout code against a throwaway database: the next seven days with expected crowd, today's check-ins against a typical day, and the live workout (or your next session's plan).
+Open http://127.0.0.1:8765. The dashboard runs the real planning and workout code against a throwaway database: the next seven days with expected crowd, today's check-ins against a typical day, and the live workout (or your next session's plan). **Progress** shows consistency, top-set progression, volume by muscle and when the gym is quiet; **History** lists every workout with its sets.
 
 ![GymClaw dashboard](assets/dashboard-demo.png)
 

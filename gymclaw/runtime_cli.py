@@ -140,13 +140,9 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                 raise DomainError("CROWD_POLLING_NOT_APPROVED", "Periodic crowd reads not activated")
             if args.now:
                 raise DomainError("LIVE_TIME_REQUIRED", "Runtime crowd polling uses actual retrieval time")
+            # Around the clock: the whole day's curve matters, not just training hours.
             with Session(engine) as db, db.begin():
-                profile = get_profile(db)
-                local = now.astimezone(ZoneInfo(profile.timezone)).time().replace(tzinfo=None)
-                if profile.earliest_workout_start <= local < profile.latest_workout_finish:
-                    result = crowd.poll(db, MySportsProvider.from_environment())
-                else:
-                    result = {"data": {"available": True, "skipped": "outside_configured_gym_hours"}, "events": [], "user_message_hint": None}
+                result = crowd.poll(db, MySportsProvider.from_environment())
             if not result["data"]["available"]:
                 raise DomainError(result["data"]["error_code"], "Crowd source unavailable; failure health recorded")
             return result
@@ -191,6 +187,10 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                         raise DomainError("LIVE_CALENDAR_REQUIRED", "Watcher requires dedicated Google calendar auth")
                     synced = sync_calendar(db, google_provider(db, state.calendar_id), now=now)
                     rolling = weekly.rolling_plan(db, authority["template_id"], now=now) if authority.get("template_id") else {}
+                    if authority["crowd_polling_enabled"]:
+                        alert = crowd.polling_alert(db, now=now)
+                        if alert:
+                            runtime.prepare_event_message(db, alert["event_id"], message=alert["message"], now=now, recipient=recipient, profile=provider.profile)
                     hint = synced["user_message_hint"]
                     if not hint and any(rolling.get(key) for key in ("changed", "created", "missed")):
                         hint = "Training plan updated. Recovery/calendar constraints kept."

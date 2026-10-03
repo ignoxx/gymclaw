@@ -248,3 +248,16 @@ def test_units_never_mix_counts_with_percentages():
         CrowdReading(source="GYM_API", metric="reported_active_count", raw_value=7, normalized_value=0.07)
     with pytest.raises(ValidationError):
         CrowdReading(source="GOOGLE", metric="busyness_percentage", raw_value=10, normalized_value=0.1)
+
+
+def test_polling_alert_once_when_stale_and_once_when_back(engine):
+    with Session(engine) as db, db.begin():
+        crowd.poll(db, provider(7), now=NOW)
+        assert crowd.polling_health(db, now=NOW + timedelta(minutes=30))["status"] == "ok"
+        assert crowd.polling_alert(db, now=NOW + timedelta(minutes=30)) is None
+        alert = crowd.polling_alert(db, now=NOW + timedelta(hours=1))
+        assert alert["message"].startswith("⚠️ No gym check-in data since")
+        assert crowd.polling_alert(db, now=NOW + timedelta(hours=2)) is None  # no repeats
+        crowd.poll(db, provider(9), now=NOW + timedelta(hours=3))
+        assert crowd.polling_alert(db, now=NOW + timedelta(hours=3, minutes=1))["message"].startswith("✅")
+        assert crowd.polling_alert(db, now=NOW + timedelta(hours=3, minutes=2)) is None

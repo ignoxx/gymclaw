@@ -9,7 +9,7 @@ from gymclaw.dashboard_state import snapshot
 from gymclaw.db import initialize, make_engine
 from gymclaw.models import OnboardingState, PlannedSession
 from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
-from gymclaw.services import crowd, workout
+from gymclaw.services import audit, crowd, workout
 from gymclaw.services.planning import Interval
 from gymclaw.services.profile import update_profile
 from gymclaw.services.scheduling import PlanningFixture, schedule_week
@@ -39,6 +39,35 @@ def demo_templates() -> tuple[Template, ...]:
     )
 
 
+def demo_history(db: Session, templates: tuple[Template, ...], first_monday: date, weeks: int, zone: ZoneInfo):
+    """Weeks of finished workouts (Mon/Wed/Fri rotation, one missed session) with slow progression,
+    plus a month of evening check-ins so the insight charts have something real to show."""
+    session = 0
+    for week in range(weeks):
+        for weekday in (0, 2, 4):
+            day = first_monday + timedelta(weeks=week, days=weekday)
+            for index, count in enumerate(EVENING):
+                at = datetime(day.year, day.month, day.day, 16, tzinfo=zone) + timedelta(minutes=15 * index)
+                crowd.poll(db, FixtureCrowdProvider(CrowdReading(source="GYM_API", metric="reported_active_count", raw_value=round(count * (0.8 + 0.1 * weekday)))), now=at)
+            if (week, weekday) == (2, 4):
+                continue  # one missed session keeps the consistency chart honest
+            template = templates[session % len(templates)]
+            start = datetime(day.year, day.month, day.day, 18, 30, tzinfo=zone)
+            result = workout.start(db, template.id, now=start, request_id=f"demo-history-{session}")
+            workout_id, clock = result["data"]["workout_id"], start
+            while (active := workout.current(db, workout_id, now=clock)["active_exercise"]) is not None:
+                clock += timedelta(minutes=2)
+                if active["set_type"] == "WARMUP":
+                    value = SetInput(weight=active["target_weight"], reps=active["rep_max"], set_type="WARMUP")
+                else:
+                    value = SetInput(weight=active["target_weight"] or 20, reps=active["rep_max"] if week % 2 else active["rep_min"])
+                workout.log_set(db, workout_id, value, now=clock, request_id=f"demo-history-{session}-{clock.isoformat()}")
+            audit.finish(db, workout_id, now=clock + timedelta(minutes=3), request_id=f"demo-history-{session}-finish")
+            if session % 3 == 1:
+                crowd.record_feedback(db, workout_id, rating="BUSY" if weekday == 4 else "FINE", now=clock + timedelta(minutes=4), request_id=f"demo-history-{session}-crowd")
+            session += 1
+
+
 def build_demo_snapshot() -> dict:
     """Never opens the default DB or contacts providers; all inputs are synthetic."""
     zone = ZoneInfo("Europe/Berlin")
@@ -54,17 +83,17 @@ def build_demo_snapshot() -> dict:
                 for template in templates:
                     import_template(db, template)
                 db.add(OnboardingState(id=1, interview_json={}, split_json=[t.id for t in templates]))
+                demo_history(db, templates, week - timedelta(weeks=6), 6, zone)
                 busy = PlanningFixture(busy=(Interval(start=datetime(2026, 10, 12, 18, tzinfo=zone), end=datetime(2026, 10, 12, 19, tzinfo=zone)),))
                 result = schedule_week(db, week, now=planned_at, fixture=busy, request_id="demo-plan", template_id=templates[0].id)
-                # Crowd history: last week's Tuesday shapes the "typical" line; today's readings lead up to the workout.
+                # Today's readings lead up to the workout; history above shapes the "typical" line.
                 arrival = db.get(PlannedSession, result["sessions"][1]["id"]).planned_start_at
-                for days_back, scale in ((7, 1.0), (0, 0.9)):
-                    first = arrival.replace(hour=14, minute=0) - timedelta(days=days_back)
-                    for index, count in enumerate(EVENING):
-                        at = first + timedelta(minutes=15 * index)
-                        if days_back == 0 and at > arrival:
-                            break
-                        crowd.poll(db, FixtureCrowdProvider(CrowdReading(source="GYM_API", metric="reported_active_count", raw_value=round(count * scale))), now=at)
+                first = arrival.replace(hour=14, minute=0)
+                for index, count in enumerate(EVENING):
+                    at = first + timedelta(minutes=15 * index)
+                    if at > arrival:
+                        break
+                    crowd.poll(db, FixtureCrowdProvider(CrowdReading(source="GYM_API", metric="reported_active_count", raw_value=round(count * 0.9))), now=at)
                 assign_rotation(db, now=planned_at)
                 refresh_crowd(db, now=planned_at)
                 pull = db.get(PlannedSession, result["sessions"][1]["id"])

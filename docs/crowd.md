@@ -19,8 +19,9 @@ No cache duration inferred. App stored first real count with retrieval timestamp
 not fabricated observation time. `today` exposes 24 items with start/end/current/
 percentage; relative series is **not yet periodically collected**.
 
-Count timer enabled every 15 minutes (four reads/hour) within profile's configured
-training window. This is not verified gym opening hours. Scheduled callback tested:
+Count timer runs every 15 minutes around the clock (the full daily curve matters, not just
+training hours). The watcher sends one Telegram alert when no reading arrives for 45 minutes,
+and one when data flows again; the dashboard shows the same health. Scheduled callback tested:
 healthy, skipped outside that window; manual live acquisition succeeded. Calendar
 writes remain off. Polling depends on local Mac/VM/Gateway staying awake/running.
 

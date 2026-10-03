@@ -14,8 +14,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from gymclaw.models import AgentEvent, CrowdObservation, PlannedSession, RuntimeSettings, SetLog, UserProfile, WorkoutExercise, WorkoutSession
-from gymclaw.services.illustrations import for_exercise
+from gymclaw.models import AgentEvent, CrowdFeedback, CrowdObservation, PlannedSession, RuntimeSettings, SetLog, UserProfile, WorkoutExercise, WorkoutSession, WorkoutTemplate
+from gymclaw.services.crowd import polling_health
+from gymclaw.services.illustrations import for_exercise, primary_muscle, search
 from gymclaw.services.preview import last_set
 from gymclaw.services.profile import Profile
 from gymclaw.services.templates import get_template
@@ -115,6 +116,93 @@ def crowd(db: Session, zone: ZoneInfo, now: datetime, polling: bool) -> dict:
         "readings": readings, "typical": typical, "polling": polling}
 
 
+def closest_muscle(name: str) -> str | None:
+    """Last resort for renamed/unmapped exercises: the best catalog match by name."""
+    match = search(name, limit=1)
+    return match[0]["primary_muscle"] if match else None
+
+
+def history(db: Session, zone: ZoneInfo, now: datetime) -> list[dict]:
+    """Finished workouts, newest first, with every working set. PRs: a heavier top set than any
+    earlier session of that exercise."""
+    workouts = list(db.scalars(select(WorkoutSession).where(WorkoutSession.status == "PLAN_UPDATED", WorkoutSession.completed_at.is_not(None))
+        .order_by(WorkoutSession.completed_at)))
+    ratings = {f.workout_session_id: f.rating.title() for f in db.scalars(select(CrowdFeedback))}
+    # Early workouts predate guide_ids; current templates know each exercise's illustration/muscle.
+    guides = {spec["id"]: spec.get("guide_id") for row in db.scalars(select(WorkoutTemplate))
+        for spec in row.definition_json["exercises"] + row.definition_json.get("alternatives", [])}
+    best: dict[str, float] = {}
+    result = []
+    for workout in workouts:
+        exercises, volume, sets, prs, last_log, abandoned = [], 0.0, 0, [], None, False
+        for row in db.scalars(select(WorkoutExercise).where(WorkoutExercise.workout_session_id == workout.id).order_by(WorkoutExercise.position)):
+            abandoned |= row.deferred_reason == "abandoned"
+            done = logs(db, row, "WORKING")
+            if done:
+                last_log = max(last_log or done[-1].logged_at, done[-1].logged_at)
+            if not done:
+                continue
+            top = max(s.weight for s in done)
+            if row.exercise_id in best and top > best[row.exercise_id]:
+                prs.append(row.config_json["name"])
+            best[row.exercise_id] = max(best.get(row.exercise_id, 0), top)
+            volume += sum(s.weight * s.reps for s in done)
+            sets += len(done)
+            exercises.append({"id": row.exercise_id, "name": row.config_json["name"],
+                "muscle": primary_muscle(row.config_json.get("guide_id") or guides.get(row.exercise_id) or row.exercise_id) or closest_muscle(row.config_json["name"]),
+                "sets": [{"weight": s.weight, "reps": s.reps} for s in done]})
+        started = workout.started_at.astimezone(zone)
+        seconds = workout.actual_duration_seconds or 0
+        if abandoned and last_log:
+            # Closed automatically hours later: count only the time actually training.
+            seconds = int((last_log - workout.started_at).total_seconds())
+        result.append({"id": workout.id, "date": started.date().isoformat(), "label": f"{started:%a %-d %b}", "time": f"{started:%H:%M}",
+            "template": workout.template_snapshot.get("name", "Workout"), "minutes": seconds // 60,
+            "sets": sets, "volume": round(volume), "prs": prs, "crowd": ratings.get(workout.id), "exercises": exercises})
+    return list(reversed(result))
+
+
+def insights(db: Session, zone: ZoneInfo, now: datetime, profile: Profile, done: list[dict]) -> dict:
+    """Numbers that answer: am I consistent, am I progressing, what am I training, when is it quiet."""
+    today = now.astimezone(zone).date()
+    monday = today - timedelta(days=today.weekday())
+    weeks = []
+    for back in range(7, -1, -1):
+        start = monday - timedelta(weeks=back)
+        weeks.append({"label": f"{start:%-d %b}", "start": start.isoformat(), "count": sum(1 for w in done if start <= date.fromisoformat(w["date"]) < start + timedelta(days=7))})
+    def volume_between(start: date, end: date) -> int:
+        return sum(w["volume"] for w in done if start <= date.fromisoformat(w["date"]) < end)
+    progress: dict[str, dict] = {}
+    for workout in reversed(done):
+        for exercise in workout["exercises"]:
+            top = max(exercise["sets"], key=lambda s: (s["weight"], s["reps"]))
+            entry = progress.setdefault(exercise["id"], {"name": exercise["name"], "points": []})
+            entry["points"].append({"date": workout["date"], "label": workout["label"], "weight": top["weight"], "reps": top["reps"]})
+    muscles: dict[str, dict] = defaultdict(lambda: {"volume": 0.0, "sets": 0})
+    for workout in done:
+        if date.fromisoformat(workout["date"]) >= today - timedelta(days=28):
+            for exercise in workout["exercises"]:
+                key = exercise["muscle"] or "Other"
+                muscles[key]["volume"] += sum(s["weight"] * s["reps"] for s in exercise["sets"])
+                muscles[key]["sets"] += len(exercise["sets"])
+    # Gym crowd by weekday × hour: mean of daily means, so busy days don't count twice.
+    cells = defaultdict(lambda: defaultdict(list))
+    for row in db.scalars(select(CrowdObservation).where(CrowdObservation.source == "GYM_API", CrowdObservation.observed_at >= now - timedelta(days=90))):
+        local = row.observed_at.astimezone(zone)
+        cells[(local.weekday(), local.hour)][local.date()].append(row.raw_value)
+    heatmap = [{"weekday": d, "hour": h, "count": round(mean(mean(v) for v in dates.values()), 1), "days": len(dates)} for (d, h), dates in sorted(cells.items())]
+    recent = [w for w in done if date.fromisoformat(w["date"]) >= today - timedelta(days=30)]
+    return {"target": profile.weekly_target_sessions, "weeks": weeks,
+        "kpis": {"workouts_30d": len(recent), "this_week": weeks[-1]["count"],
+            # Rolling windows: a Monday morning shouldn't read as "-100% vs last week".
+            "volume_7d": volume_between(today - timedelta(days=6), today + timedelta(days=1)),
+            "volume_prev_7d": volume_between(today - timedelta(days=13), today - timedelta(days=6)),
+            "prs_30d": sum(len(w["prs"]) for w in recent)},
+        "progress": [{"id": key, **value} for key, value in progress.items()],
+        "muscles": sorted(({"muscle": key, "volume": round(v["volume"]), "sets": v["sets"]} for key, v in muscles.items()), key=lambda m: -m["volume"]),
+        "heatmap": heatmap}
+
+
 def snapshot(db: Session, *, now: datetime, demo: bool = False) -> dict:
     row = db.get(UserProfile, 1)
     profile = Profile.model_validate(row) if row else Profile()
@@ -126,7 +214,8 @@ def snapshot(db: Session, *, now: datetime, demo: bool = False) -> dict:
     return {"demo": demo, "live_database_accessed": not demo, "captured_at": now.isoformat(), "timezone": profile.timezone,
         "range": f"{today:%-d %b} – {today + timedelta(days=6):%-d %b}", "days": days(db, zone, today),
         "next": next_session(db, zone, now), "workout": active_workout(db, zone, now),
-        "crowd": crowd(db, zone, now, bool(settings and settings.enabled and settings.crowd_polling_enabled)),
+        "crowd": crowd(db, zone, now, bool(settings and settings.enabled and settings.crowd_polling_enabled)) | {"health": polling_health(db, now=now)},
+        "history": (done := history(db, zone, now)), "insights": insights(db, zone, now, profile, done),
         "activity": [{"time": hhmm(e.created_at, zone), "day": e.created_at.astimezone(zone).strftime("%a"), "text": ACTIVITY[e.type]} for e in events]}
 
 

@@ -16,12 +16,14 @@
       <button id="refresh" aria-label="Refresh" title="Refresh">↻</button>
       <details class="info"><summary aria-label="About">i</summary><div><p id="data-notice">Synthetic demo data.</p><p>Exercise art: <a href="https://github.com/bryllim/workout-guide">Workout Guide</a>, Bryl Lim / Everkinetic, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p></div></details>
     </header>
-    <div class="page-heading"><h1>Training</h1><span id="range"></span></div>
+    <div class="page-heading"><h1>Training</h1>
+      <nav class="tabs" aria-label="Views"><button data-tab="today" aria-current="page">Today</button><button data-tab="progress">Progress</button><button data-tab="history">History</button></nav></div>
     <div id="load-error" role="alert" hidden>Can't reach GymClaw right now.</div>
-    <div class="layout" hidden>
+    <div id="polling-alert" class="alert" role="alert" hidden></div>
+    <div class="layout tab" id="tab-today" hidden>
       <div class="column">
         <section class="panel" aria-labelledby="week-title">
-          <div class="section-heading"><h2 id="week-title">Next 7 days</h2><span id="session-count"></span></div>
+          <div class="section-heading"><h2 id="week-title">Next 7 days</h2><span><span id="range"></span> · <span id="session-count"></span></span></div>
           <div class="week" id="week"></div>
         </section>
         <section class="panel" aria-labelledby="gym-title">
@@ -34,6 +36,19 @@
       </div>
       <section class="panel focus" id="focus" aria-live="polite"></section>
     </div>
+    <div class="tab" id="tab-progress" hidden>
+      <div class="kpis" id="kpis"></div>
+      <div class="grid-2">
+        <section class="panel"><div class="section-heading"><h2>Sessions per week</h2><span id="target-label"></span></div><div class="chart" id="weeks-chart"></div></section>
+        <section class="panel"><div class="section-heading"><h2>Top set</h2><select id="exercise-select" aria-label="Exercise"></select></div><div class="chart" id="progress-chart"></div></section>
+        <section class="panel"><div class="section-heading"><h2>Volume by muscle</h2><span>Last 4 weeks</span></div><div id="muscle-chart" class="bars"></div></section>
+        <section class="panel"><div class="section-heading"><h2>When the gym is quiet</h2><span id="quiet-label"></span></div><div id="heatmap" class="heatmap"></div></section>
+      </div>
+    </div>
+    <div class="tab" id="tab-history" hidden>
+      <section class="panel"><div class="section-heading"><h2>Workouts</h2><span id="history-count"></span></div><div id="history"></div></section>
+    </div>
+    <div class="tooltip" id="tooltip" role="status" hidden></div>
   </main>
 </body>
 </html>
