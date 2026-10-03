@@ -18,8 +18,8 @@ def busy_intervals(db: Session, start: datetime, end: datetime) -> tuple[Interva
     snapshots = list(db.scalars(select(CalendarEventSnapshot)))
     own_ids = {s.calendar_event_id for s in db.scalars(select(PlannedSession)) if s.calendar_event_id}
     excluded = {(e.raw_json.get("recurringEventId"), parse_time(e.raw_json["originalStartTime"], calendar_zone)) for e in snapshots if e.raw_json.get("recurringEventId") and e.raw_json.get("originalStartTime")}
-    from gymclaw.services.availability import blocks
-    result = list(blocks(db, start, end))
+    from gymclaw.services import availability, personal_calendar
+    result = [*availability.blocks(db, start, end), *personal_calendar.blocks(db, start, end)]
     for event in snapshots:
         raw = event.raw_json
         if event.status == "cancelled" or event.calendar_event_id in own_ids or raw.get("transparency") == "transparent":

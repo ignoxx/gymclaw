@@ -240,6 +240,26 @@ class NotificationDelivery(Base):
     external_message_id: Mapped[str | None]
 
 
+class PersonalCalendarState(Base):
+    """Read-only personal ICS feed. URL is a capability secret and never leaves the DB."""
+    __tablename__ = "personal_calendar_state"
+    __table_args__ = (CheckConstraint("id = 1"),)
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    url: Mapped[str]
+    fetched_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_success_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_error_code: Mapped[str | None]
+
+
+class PersonalBusyInterval(Base):
+    """Busy times expanded from the personal feed. Times only, no titles."""
+    __tablename__ = "personal_busy_interval"
+    __table_args__ = (CheckConstraint("end_at > start_at"),)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    start_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    end_at: Mapped[datetime] = mapped_column(UTCDateTime)
+
+
 class RuntimeSettings(Base):
     """Explicit local activation authority; callbacks cannot grant/re-enable it."""
     __tablename__ = "runtime_settings"
