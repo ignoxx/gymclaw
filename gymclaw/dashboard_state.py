@@ -69,7 +69,7 @@ def next_session(db: Session, zone: ZoneInfo, now: datetime) -> dict | None:
         last = last_set(db, spec.id)
         exercises.append({"name": spec.name, "svg_url": svg(spec.name, spec.guide_id), "sets": sets.get(spec.id, spec.working_sets),
             "reps": f"{spec.rep_min}" if spec.rep_min == spec.rep_max else f"{spec.rep_min}–{spec.rep_max}",
-            "last": f"{last.weight:g} × {last.reps}" if last else None})
+            "last": f"{last.reps} × {last.weight:g} kg" if last else None})
     start = row.planned_start_at.astimezone(zone)
     return {"template": template.name, "when": f"{start:%a} {start:%H:%M}", "leave": hhmm(row.leave_home_at, zone),
         "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}
@@ -92,7 +92,7 @@ def active_workout(db: Session, zone: ZoneInfo, now: datetime) -> dict | None:
         "active": {"id": active["id"], "name": active["name"], "set_type": active["set_type"], "set_number": active["set_number"],
             "sets": active["working_sets"], "weight": active["target_weight"], "rep_min": active["rep_min"], "rep_max": active["rep_max"]} if active else None,
         "rest_until": data["rest_job"]["due_at"] if data["rest_job"] else None,
-        "last_set": f"{latest.weight:g} × {latest.reps}" if latest else None, "exercises": exercises}
+        "last_set": f"{latest.reps} × {latest.weight:g} kg" if latest else None, "exercises": exercises}
 
 
 def crowd(db: Session, zone: ZoneInfo, now: datetime, polling: bool) -> dict:

@@ -220,8 +220,8 @@ python -m gymclaw.cli notifications due --now 2026-10-12T20:03:50+02:00
 python -m gymclaw.cli workout current --workout-id "$WORKOUT_ID"
 ```
 
-Typed sets accept either order (`80x9`, `9x80kg`, `9 reps at 80`); unclear order is resolved
-toward the last/target weight. In Telegram, the coach plugin drives the same operations through
+Typed sets accept either order (`9x80`, `80kgx9`, `9 reps at 80`); unclear order is resolved
+toward the last/target weight, then reps-first. Sets display reps first: `9 × 80 kg`. In Telegram, the coach plugin drives the same operations through
 `coach text|tap|act|start|card`, which return a reaction and ready-to-send cards
 (see [coach plugin](../openclaw/plugins/coach/README.md)). `catalog search --query ... [--muscle ...]`
 finds illustrated exercises for `guide_id`; `template import` requires one on every exercise.

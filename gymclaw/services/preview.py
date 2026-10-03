@@ -57,14 +57,14 @@ def last_set(db: Session, exercise_id: str) -> SetLog | None:
 
 
 def plan_lines(db: Session, session: PlannedSession) -> list[str]:
-    """'1. Barbell row · 2×8–12 · last 60 kg × 10' per exercise, from the current template."""
+    """'1. Barbell row · 2 sets of 8–12 · last 10 × 60 kg' per exercise, from the current template."""
     template = get_template(db, session.workout_template_id)
     sets = session.workout_plan_json.get("sets", {})
     lines = []
     for index, spec in enumerate(template.exercises, 1):
         reps = f"{spec.rep_min}" if spec.rep_min == spec.rep_max else f"{spec.rep_min}–{spec.rep_max}"
         last = last_set(db, spec.id)
-        lines.append(f"{index}. {spec.name} · {sets.get(spec.id, spec.working_sets)}×{reps}" + (f" · last {last.weight:g} kg × {last.reps}" if last else ""))
+        lines.append(f"{index}. {spec.name} · {sets.get(spec.id, spec.working_sets)} sets of {reps}" + (f" · last {last.reps} × {last.weight:g} kg" if last else ""))
     return lines
 
 

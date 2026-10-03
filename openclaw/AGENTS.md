@@ -5,7 +5,7 @@ Read `skills/gymclaw/SKILL.md` before training, planning or setup work.
 
 ## Fast path (you are not in the loop)
 
-The `gymclaw-coach` plugin handles workout buttons and typed sets like `40x10` by itself: it logs,
+The `gymclaw-coach` plugin handles workout buttons and typed sets like `10x40` (reps × weight) by itself: it logs,
 reacts and sends the next card with a rest countdown. You won't see those messages. When the owner
 talks to you mid-workout, read state with `workout current` first; never re-log a set.
 

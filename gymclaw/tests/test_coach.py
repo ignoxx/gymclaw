@@ -39,10 +39,10 @@ def buttons(card: dict) -> dict[str, str]:
 def test_typed_set_reacts_then_rest_card_then_fresh_set_card(db):
     first = coach.handle_action(db, "card", now=NOW, request_id="card")["cards"][0]
     assert first["photo"] and Path(first["photo"]).is_file()
-    assert "Set 1/2 · 8–10 reps" in first["text"] and "Send weight × reps" in first["text"]
+    assert "Set 1/2 · 8–10 × **? kg**" in first["text"] and "✍️ **Reply reps × weight:** `8x40`" in first["text"]
     assert coach.handle_text(db, "how long do I rest?", now=at(5), request_id="chat") == {"handled": False}
     result = coach.handle_text(db, "12x90kg", now=at(10), request_id="msg-1")
-    assert result["react"] == "👍" and result["ack"] == "✅ 90 kg × 12"
+    assert result["react"] == "👍" and result["ack"] == "✅ 12 × 90 kg"
     rest = result["cards"][0]
     # Between sets: only a countdown and Skip, nothing to log yet.
     assert rest["kind"] == "rest" and rest["rest_until"] == at(100).isoformat()
@@ -50,7 +50,7 @@ def test_typed_set_reacts_then_rest_card_then_fresh_set_card(db):
     skipped = coach.handle_tap(db, buttons(rest)["⏭ Skip"], now=at(30), request_id="cb-skip")
     card = skipped["cards"][0]
     assert skipped["cleanup"] == "delete" and card["kind"] == "set" and card["photo"]
-    assert "✅ 90 kg × 12" in buttons(card)
+    assert "✅ 12 × 90 kg" in buttons(card)
     # Already on the machine: no Swap after the first set.
     assert "🔄 Swap" not in buttons(card) and "⏭ Next exercise" in buttons(card)
 
@@ -100,7 +100,8 @@ def test_swap_is_remembered_in_the_template(db):
     template = get_template(db, "push")
     assert template.exercises[0].id == slug and template.exercises[0].working_sets == 2
     assert template.exercises[0].substitutes == ["incline"] and template.alternatives[0].id == "incline"
-    assert coach.handle_tap(db, buttons(card)["⏭ Next exercise"], now=at(3), request_id="cb-3")["ack"] == "⌛ Old button."
+    # Nothing logged yet: moving on is a skip, and the button says so.
+    assert coach.handle_tap(db, buttons(card)["⏭ Skip"], now=at(3), request_id="cb-3")["ack"] == "⌛ Old button."
 
 
 def test_next_end_crowd_and_baseline_weight(db):
@@ -140,6 +141,18 @@ def test_session_preview_uses_current_plan_local_time_and_one_image(db, tmp_path
     db.flush()
     card = preview.session_preview(db, now=NOW)
     assert card["text"].splitlines()[0] == "**Push** · Mon 10:30"  # Europe/Berlin, not UTC
-    assert "1. Machine incline press · 2×8–10" in card["text"] and "3. Cable fly · 2×8–10" in card["text"]
+    assert "1. Machine incline press · 2 sets of 8–10" in card["text"] and "3. Cable fly · 2 sets of 8–10" in card["text"]
     assert Path(card["photo"]).is_file() and card["photo"].startswith(str(tmp_path))
     assert preview.session_preview(db, now=NOW)["photo"] == card["photo"]  # cached
+
+
+def test_unknown_weight_offers_a_guess_from_the_same_movement(db):
+    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    coach.handle_action(db, "end", now=at(60), request_id="end")
+    # Renamed in the template (same illustration/movement), so no direct history.
+    import_template(db, Template(id="push2", name="Push", exercises=[
+        ExerciseSpec(id="incline-v2", name="Incline press", role="press", guide_id="incline-bench-press", working_sets=2, target_weight=0)]))
+    start(db, "push2", now=at(120), request_id="start-2")
+    card = coach.exercise_card(db, coach.active_workout(db), at(121))
+    assert "💡 Guess from Machine incline press" in card["text"] and "`8x90`" in card["text"]
+    assert "✅ 8 × 90 kg?" in buttons(card)

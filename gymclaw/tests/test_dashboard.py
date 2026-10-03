@@ -13,7 +13,7 @@ def test_demo_uses_real_domain_with_explicit_isolation():
     assert len(data["days"]) == 7 and data["days"][0]["today"]
     assert data["days"][0]["session"]["status"] == "STARTED"
     workout = data["workout"]
-    assert workout["active"]["set_number"] == 2 and workout["rest_until"] and workout["last_set"] == "60 × 11"
+    assert workout["active"]["set_number"] == 2 and workout["rest_until"] and workout["last_set"] == "11 × 60 kg"
     assert all(e["svg_url"] for e in workout["exercises"])
     assert data["next"]["template"] and all(e["svg_url"] for e in data["next"]["exercises"])
     assert data["crowd"]["readings"] and len(data["crowd"]["typical"]) >= 2

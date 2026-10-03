@@ -86,7 +86,15 @@ def similar(guide_id: str, *, exclude: set[str] = frozenset(), prefer: set[str] 
             continue
         rank = (item["slug"] not in prefer, -len(base & words(item["name"])), item["equipment"] == original["equipment"], item["name"])
         options.append((rank, entry(item)))
-    return [option for _, option in sorted(options, key=lambda o: o[0])[:limit]]
+    ranked = [option for _, option in sorted(options, key=lambda o: o[0])]
+    # The catalog has near-duplicates (e.g. "Rear Delt Fly" vs "Bent-Over Rear Delt Raise"): pick
+    # options on different equipment first, so the choices are real alternatives.
+    picked = []
+    for option in ranked:
+        if len(picked) < limit and option["equipment"] not in {p["equipment"] for p in picked}:
+            picked.append(option)
+    picked += [option for option in ranked if option not in picked][:limit - len(picked)]
+    return picked
 
 
 def public_assets() -> dict[str, Path]:

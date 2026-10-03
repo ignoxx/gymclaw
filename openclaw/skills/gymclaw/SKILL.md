@@ -53,7 +53,7 @@ Use the `gymclaw_workout` tool. It sends cards (image, target, buttons) itself; 
 - Owner typed a set to you (e.g. "37x10") → `{"action":"log","text":"37x10"}`.
 - Lost the card → `card`. Need state (is one running, what's next) → `status` (sends nothing).
 
-Sets, swaps and rest timers from buttons or typed `40x10` never reach you. For questions mid-workout,
+Sets, swaps and rest timers from buttons or typed `10x40` (reps × weight) never reach you. For questions mid-workout,
 use `status` first. Only these actions exist; don't invent others.
 
 ## Calendar and availability
