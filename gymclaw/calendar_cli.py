@@ -8,6 +8,7 @@ from gymclaw.models import CalendarSyncState, PlannedSession
 from gymclaw.providers.fixture_calendar import CalendarFixture, FixtureCalendarProvider
 from gymclaw.providers.google_auth import DEFAULT_CLIENT, authenticate, bind_calendar
 from gymclaw.providers.google_calendar import google_provider
+from gymclaw.services import personal_calendar
 from gymclaw.services.calendar import get_week, sync_calendar
 from gymclaw.services.calendar_writes import apply_write, pending_writes, queue_session_write
 from gymclaw.services.errors import DomainError
@@ -43,6 +44,19 @@ def calendar_command(db: Session, args) -> dict:
         calendar_id = args.calendar_id or os.environ.get("GOOGLE_CALENDAR_ID") or (state.calendar_id if state else None)
         data = authenticate(db, needed(calendar_id, "--calendar-id or GOOGLE_CALENDAR_ID"), client_path=args.client_file or DEFAULT_CLIENT)
         return {"data": data, "events": [], "user_message_hint": None}
+    if args.operation.startswith("personal-"):
+        # Read-only feed; replanning may queue GymClaw writes but never publishes them.
+        if args.operation == "personal-connect":
+            url = args.url_file.read_text() if args.url_file else args.url
+            data = personal_calendar.connect(db, needed(url, "--url or --url-file"), now=now)
+        elif args.operation == "personal-sync":
+            data = personal_calendar.refresh(db, now=now, force=True, strict=True)
+        elif args.operation == "personal-disconnect":
+            data = personal_calendar.disconnect(db, now=now)
+        else:
+            data = {}
+        events, hint = data.pop("events", []), data.pop("user_message_hint", None)
+        return {"data": data | {"personal_calendar": personal_calendar.status(db)}, "events": events, "user_message_hint": hint}
     if args.operation == "get-week":
         return {"data": get_week(db, needed(args.week_start, "--week-start")), "events": [], "user_message_hint": None}
     if args.operation == "pending-writes":

@@ -25,3 +25,4 @@ snapshots/
 exports/
 
 node_modules/
+config/gymclaw-personal-calendar-policy.yaml

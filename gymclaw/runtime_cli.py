@@ -13,7 +13,7 @@ from gymclaw.models import CalendarSyncState, NotificationDelivery, RuntimeSetti
 from gymclaw.providers.google_calendar import google_provider
 from gymclaw.providers.mysports import MySportsProvider
 from gymclaw.providers.openclaw import OpenClawProvider, validate_route
-from gymclaw.services import crowd, runtime, weekly
+from gymclaw.services import crowd, personal_calendar, runtime, weekly
 from gymclaw.services.calendar import sync_calendar
 from gymclaw.services.errors import DomainError
 from gymclaw.services.profile import get_profile
@@ -159,6 +159,8 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
             with Session(engine) as db, db.begin():
                 calendar = provider_for(db, args)
                 sync_calendar(db, calendar, now=now)
+                if calendar.source == "google":
+                    personal_calendar.refresh(db, now=now, force=True)
                 data = weekly.weekly_plan(db, required(template_id, "--template-id or activated template"), now=now)
             publication = publish_if_enabled(engine, args, authority, now=now) if live_activation else {"published": False}
             with Session(engine) as db, db.begin():
@@ -186,20 +188,21 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                     if state is None or state.source != "google":
                         raise DomainError("LIVE_CALENDAR_REQUIRED", "Watcher requires dedicated Google calendar auth")
                     synced = sync_calendar(db, google_provider(db, state.calendar_id), now=now)
+                    personal = personal_calendar.refresh(db, now=now)
                     rolling = weekly.rolling_plan(db, authority["template_id"], now=now) if authority.get("template_id") else {}
                     if authority["crowd_polling_enabled"]:
                         alert = crowd.polling_alert(db, now=now)
                         if alert:
                             runtime.prepare_event_message(db, alert["event_id"], message=alert["message"], now=now, recipient=recipient, profile=provider.profile)
-                    hint = synced["user_message_hint"]
+                    hint = " ".join(h for h in (synced["user_message_hint"], personal["user_message_hint"]) if h) or None
                     if not hint and any(rolling.get(key) for key in ("changed", "created", "missed")):
                         hint = "Training plan updated. Recovery/calendar constraints kept."
                     if hint:
                         if not authority["calendar_writes_enabled"]:
                             hint += " Local plan; calendar publication pending approval."
-                        event = emit(db, "calendar.update_briefing", now, {"related_events": [e["id"] for e in synced["events"]]})
+                        event = emit(db, "calendar.update_briefing", now, {"related_events": [e["id"] for e in synced["events"] + personal["events"]]})
                         runtime.prepare_event_message(db, event.id, message=hint, now=now, recipient=recipient, profile=provider.profile,
-                            related_events=tuple(e["id"] for e in synced["events"]))
+                            related_events=tuple(e["id"] for e in synced["events"] + personal["events"]))
                 publication = publish_if_enabled(engine, args, authority, now=now)
                 data = runtime.sync_automations(engine, provider, now=now, recipient=recipient, project_root=args.project_root,
                     allow_runtime_changes=True, allow_messages=True, include_watcher=not args.no_watcher, configure=False)
