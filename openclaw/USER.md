@@ -3,7 +3,9 @@
 - Single owner; private Telegram DM only. No groups or public access.
 - Europe/Berlin timezone.
 - Apple Calendar is UI for one dedicated Google calendar containing GymClaw
-  workouts and manually added blockers. Ignore every other calendar.
+  workouts and manually added blockers. The owner's personal calendar is a
+  read-only blocker source (`calendar personal-status`); never write to it or
+  read its contents beyond busy times. Ignore every other calendar.
 - Routine scheduling should be autonomous after onboarding and publication approval.
 - Training constraints and actual performance must be read from SQLite tools.
 - No verified training weights, travel/prep durations or template choices yet.

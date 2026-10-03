@@ -98,8 +98,8 @@ calendar/provider state. No external API behavior is simulated as real.
 
 ## Google Calendar setup
 
-Use one dedicated Google calendar for both GymClaw workouts and the blockers you add.
-Other calendars are not read and cannot block scheduling. Add Google account to Apple
+Use one dedicated Google calendar for GymClaw workouts. Blockers you add there count, and so
+does an optional read-only personal calendar (see below). Add Google account to Apple
 Calendar and enable this calendar there; dragging/resizing/deleting then acts as user intent.
 
 1. Enable Google Calendar API in your Google Cloud project.
@@ -127,6 +127,32 @@ expire). Browser/client failures return sanitized `CALENDAR_AUTH_FAILED`.
 requests `calendar.events.owned`, not full calendar/ACL permissions. App pins requests
 to one explicit ID and binds DB to that ID/provider; mismatched IDs fail before API calls.
 There is no silent primary-calendar fallback. Use a separate DB for demo providers.
+
+### Personal calendar (read-only)
+
+Your everyday calendar can block workout slots without GymClaw getting write access.
+It is read as an ICS feed. GymClaw only ever GETs it and keeps just busy start/end
+times, no titles or notes.
+
+1. In Apple Calendar: right-click the calendar → **Share Calendar…** → tick
+   **Public Calendar** → copy the `webcal://pNN-caldav.icloud.com/published/2/…` link.
+2. From the repo root on the host, run `scripts/connect-personal-calendar` and paste the
+   link at the hidden prompt. It resolves iCloud's redirect, applies a GET-only policy for
+   that one host (`config/gymclaw-personal-calendar-policy.example.yaml`), hands the link
+   to the sandbox as a temp file (never argv), then fetches once and replans.
+   `calendar personal-status` shows health afterwards.
+
+Google's **Secret address in iCal format** also works with `calendar personal-connect
+--url-file PATH`. The host helper and its `/published/**` network policy are for iCloud;
+for Google, configure a GET-only policy for the feed's host and path separately.
+
+The 60 s watcher refreshes the feed at most every 5 minutes and the Sunday plan
+always does. Busy events block slots; events marked **Free** (`TRANSP:TRANSPARENT`)
+and cancelled events don't. A failed fetch records `last_error_code` and keeps the
+last known blockers. The link is unauthenticated, so anyone holding it can read the
+calendar. It lives only in the DB and is never printed (status shows the host only).
+To stop: `calendar personal-disconnect` here, then turn off **Public Calendar** in
+Apple Calendar to revoke the link.
 
 ### Preview, then explicit publication
 
