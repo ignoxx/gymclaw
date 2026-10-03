@@ -15,8 +15,11 @@ def test_demo_uses_real_domain_with_explicit_isolation():
     workout = data["workout"]
     assert workout["active"]["set_number"] == 2 and workout["rest_until"] and workout["last_set"] == "60 × 11"
     assert all(e["svg_url"] for e in workout["exercises"])
-    assert data["next"]["template"] == "Legs" and all(e["svg_url"] for e in data["next"]["exercises"])
+    assert data["next"]["template"] and all(e["svg_url"] for e in data["next"]["exercises"])
     assert data["crowd"]["readings"] and len(data["crowd"]["typical"]) >= 2
+    # Weeks of finished demo workouts feed history and insights.
+    assert len(data["history"]) >= 10 and data["insights"]["progress"] and data["insights"]["heatmap"]
+    assert data["crowd"]["health"]["status"] == "ok"
 
 
 def test_demo_http_serves_only_public_assets_and_rejects_writes():

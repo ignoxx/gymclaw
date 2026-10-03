@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from gymclaw.models import CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
+from gymclaw.models import AgentEvent, CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
 from gymclaw.providers.crowd import CrowdProvider
 from gymclaw.services.errors import DomainError
 from gymclaw.services.planning import SlotSignal
@@ -284,6 +284,38 @@ def record_feedback(db: Session, workout_id: str, *, rating: str, now: datetime,
 
     return mutate(db, "crowd.feedback_received", request_id, {"workout_id": workout_id, "rating": rating,
         "observed_at": utc(observed_at).isoformat() if observed_at else None, "waited_count": waited_count, "notes": notes}, now, action)
+
+
+STALE_AFTER = timedelta(minutes=45)
+
+
+def polling_health(db: Session, *, now: datetime) -> dict:
+    """ok: a reading in the last 45 min; failing: the gym API errors; stale: no reading, no error."""
+    state = db.get(CrowdSourceState, "GYM_API")
+    if state is None or state.last_success_at is None:
+        return {"status": "unknown", "last_success_at": None, "consecutive_failures": 0, "error": None}
+    status = "ok"
+    if now - state.last_success_at > STALE_AFTER:
+        status = "failing" if state.consecutive_failures else "stale"
+    return {"status": status, "last_success_at": state.last_success_at.isoformat(),
+        "consecutive_failures": state.consecutive_failures, "error": state.last_error_code if status == "failing" else None}
+
+
+def polling_alert(db: Session, *, now: datetime) -> dict | None:
+    """One Telegram message when check-ins stop arriving, one when they're back. Never repeats."""
+    health = polling_health(db, now=now)
+    open_alert = db.scalar(select(AgentEvent).where(AgentEvent.type == "crowd.polling_stale", AgentEvent.handled_at.is_(None)))
+    zone = ZoneInfo(get_profile(db).timezone)
+    if health["status"] in {"stale", "failing"} and open_alert is None:
+        since = datetime.fromisoformat(health["last_success_at"]).astimezone(zone)
+        event = emit(db, "crowd.polling_stale", now, health)
+        reason = f" (gym API: {health['error']})" if health["error"] else ""
+        return {"event_id": event.id, "message": f"⚠️ No gym check-in data since {since:%a %H:%M}{reason}. Crowd forecasts are going stale."}
+    if health["status"] == "ok" and open_alert is not None:
+        open_alert.handled_at = now
+        event = emit(db, "crowd.polling_recovered", now, health)
+        return {"event_id": event.id, "message": "✅ Gym check-in data is flowing again."}
+    return None
 
 
 def planning_signals(db: Session, week_start: date, *, now: datetime, step_minutes: int = 15) -> tuple[SlotSignal, ...]:

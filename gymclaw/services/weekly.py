@@ -114,11 +114,13 @@ def close_stale_workouts(db: Session, *, now: datetime) -> list[str]:
     from gymclaw.services.workout import UNRESOLVED, exercises
     closed = []
     for workout in db.scalars(select(WorkoutSession).where(WorkoutSession.status != "PLAN_UPDATED", WorkoutSession.last_action_at < now - STALE_WORKOUT)):
+        # Close at the last action, so duration means training time, not time until we noticed.
+        ended = workout.last_action_at
         for row in exercises(db, workout):
             if row.status in UNRESOLVED:
-                adaptation.skip_exercise(db, workout.id, row.id, reason="abandoned", now=now, request_id=f"stale:{workout.id}:{row.id}")
+                adaptation.skip_exercise(db, workout.id, row.id, reason="abandoned", now=ended, request_id=f"stale:{workout.id}:{row.id}")
         if workout.status == "WORKOUT_COMPLETE":
-            audit.finish(db, workout.id, now=now, request_id=f"stale:{workout.id}:finish")
+            audit.finish(db, workout.id, now=ended, request_id=f"stale:{workout.id}:finish")
             closed.append(workout.id)
     return closed
 
