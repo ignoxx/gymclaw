@@ -96,7 +96,7 @@ def test_move_kept_reminders_replaced_other_sessions_replanned(setup):
         assert not result["events"]  # Own echo must not produce another edit/replan.
     remote = provider.get_event(wed_id)
     assert remote.start == at(15)
-    assert "Get ready: 18:25" in provider.events[wed_id]["description"]
+    assert "Get ready 18:25" in provider.events[wed_id]["description"] and "1. Bench" in provider.events[wed_id]["description"]
     assert provider.get_event(event_id_for(ids[2])).status == "cancelled"
 
 

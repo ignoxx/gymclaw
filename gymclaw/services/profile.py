@@ -34,6 +34,8 @@ class Profile(BaseModel):
     crowd_preference_weight: Weight = 1
     calendar_preference_weight: Weight = 1
     recovery_weight: Weight = 1
+    # Calendar event location: calendar apps derive travel time / time-to-leave from it.
+    gym_address: Annotated[str, Field(min_length=3, max_length=200)] | None = None
 
     @field_validator("timezone")
     @classmethod

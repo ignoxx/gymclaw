@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 // Cheap pre-check so ordinary chat never pays for a Python start-up.
 export const SET_LIKE = /^\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*[x×*]\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*$|^\s*\d+\s*reps?\s*(?:at|@)\s*\d+(?:[.,]\d+)?\s*(?:kg)?\s*$/i;
 export const TICK_MS = 5000;
-const ACTIONS = ["status", "start", "log", "card", "swap", "later", "next", "end"];
+const ACTIONS = ["status", "preview", "start", "log", "card", "swap", "later", "next", "end"];
 
 /** Run `gymclaw-tool coach ...`; resolves the JSON `data` or rejects with the CLI error code. */
 export function cliRunner(toolPath, { timeoutMs = 20000 } = {}) {
@@ -84,6 +84,11 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
   async function apply(result, { tapped, inboundMessageId } = {}) {
     const api = await telegram();
     if (inboundMessageId && result.react) await quietly(api.react(chatId, inboundMessageId, result.react));
+    if (result.standalone) {
+      // Previews etc. are their own messages; the live workout card stays as it is.
+      for (const card of result.cards ?? []) await api.send(chatId, card.text, { photo: card.photo, buttons: keyboard(card.buttons) });
+      return;
+    }
     if (result.live_buttons) {
       // Swap: the current card's buttons become wait/later, options go below it.
       if (live) await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(result.live_buttons)));
@@ -228,7 +233,8 @@ export function registerCoach(api, { run, telegram } = {}) {
     description:
       "Drive the live workout in Telegram. Sends exercise cards (image, target, quick buttons) to the owner directly, " +
       "so after calling reply NO_REPLY unless the owner asked a question. Actions: status (read the running workout, sends " +
-      "nothing), log (text like \"40x10\": logs a set), start (template_id, optional " +
+      "nothing), preview (next or given planned session: one image with every exercise + plan; use for \"what's on today\"), " +
+      "log (text like \"40x10\": logs a set), start (template_id, optional " +
       "planned_session_id), card (resend current card), swap (equipment taken: show same-muscle alternatives), " +
       "later (do current exercise later), next (move on to the next exercise), end (end early, save, show summary).",
     parameters: {
@@ -247,7 +253,9 @@ export function registerCoach(api, { run, telegram } = {}) {
       const args =
         params.action === "status"
           ? ["workout", "current"]
-          : params.action === "log"
+          : params.action === "preview"
+            ? ["coach", "preview", ...(params.planned_session_id ? ["--planned-session-id", params.planned_session_id] : [])]
+            : params.action === "log"
             ? ["coach", "text", "--text", params.text ?? "", "--request-id", requestId]
             : params.action === "start"
           ? ["coach", "start", "--template-id", params.template_id ?? "", ...(params.planned_session_id ? ["--planned-session-id", params.planned_session_id] : []), "--request-id", requestId]

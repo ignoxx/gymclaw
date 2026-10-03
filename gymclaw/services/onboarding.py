@@ -24,7 +24,7 @@ QUESTIONS = {
     "schedule": ("How many days a week do you want to train, and which days work?", ("weekly_target_sessions", "weekdays_allowed")),
     "session_length": ("How long can one gym session be?", ("preferred_workout_minutes",)),
     "time_window": ("When can you train: earliest start and latest finish?", ("earliest_workout_start", "latest_workout_finish")),
-    "travel": ("How long do you need to get ready, and how long is the trip to the gym?", ("prep_minutes", "commute_to_gym_minutes")),
+    "travel": ("Which gym (address), and how long do you need to get ready and to get there?", ("gym_address", "prep_minutes", "commute_to_gym_minutes")),
     "equipment": ("Where do you train: full gym, basic gym, or at home?", ()),
     "limitations": ("Any injuries or exercises you want to avoid?", ()),
 }

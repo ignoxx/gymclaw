@@ -101,6 +101,15 @@ test("swap: menu on the card, wait restores it, choosing deletes options and the
   assert.equal(coach.state().extras.length, 0);
 });
 
+test("standalone preview is sent without touching the live card", async () => {
+  const { calls, api } = fakeTelegram();
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, timers: fakeTimers() });
+  await coach.apply({ cards: [card("Bench · set 1")] });
+  await coach.apply({ standalone: true, cards: [card("Pull · Mon 10:30", { kind: "preview", buttons: [] })] });
+  assert.deepEqual(calls.map((c) => c[0]), ["send", "send"]);
+  assert.equal(coach.state().live.card.text, "Bench · set 1");
+});
+
 test("hooks ignore non-owners and non-set chat; owner sets and taps go to the CLI", async () => {
   const seen = [];
   const { calls, registered } = plugin(async (args) => (seen.push(args), { handled: true, react: "👍", cards: [card("Next")] }));

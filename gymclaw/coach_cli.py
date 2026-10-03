@@ -7,7 +7,7 @@ from gymclaw.services import coach, illustrations, workout
 
 def register_parser(groups):
     command = groups.add_parser("coach", add_help=False)
-    command.add_argument("operation", choices=["text", "tap", "act", "start", "card", "rest-over"])
+    command.add_argument("operation", choices=["text", "tap", "act", "start", "card", "rest-over", "preview"])
     command.add_argument("--text")
     command.add_argument("--data", help="Callback payload without the gc: namespace")
     command.add_argument("--action", choices=["card", "swap", "later", "next", "end"])
@@ -44,6 +44,10 @@ def coach_command(db, args):
         result = coach.handle_action(db, "card", now=now, request_id="card")
     elif args.operation == "rest-over":
         result = coach.handle_rest_over(db, now=now)
+    elif args.operation == "preview":
+        from gymclaw.services.preview import session_preview
+        # Standalone: sent as its own message, never replaces the live workout card.
+        result = {"handled": True, "standalone": True, "cards": [session_preview(db, now=now, planned_session_id=args.planned_session_id)]}
     else:
         request_id = needed(args.request_id, "--request-id")
         if args.operation == "text":

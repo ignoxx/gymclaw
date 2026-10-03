@@ -161,6 +161,28 @@ def refresh_crowd(db: Session, *, now: datetime) -> list[dict]:
     return changed
 
 
+def refresh_plans(db: Session, *, now: datetime) -> list[str]:
+    """Planned sessions store a copy of their template. After template edits or swaps, re-allocate
+    from the current template so the calendar and the workout use today's plan."""
+    from gymclaw.models import WorkoutTemplate
+    changed = []
+    for session in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]), PlannedSession.workout_template_id.is_not(None))):
+        row = db.get(WorkoutTemplate, session.workout_template_id)
+        if row is None:
+            continue
+        current = get_template(db, row.id).model_dump(mode="json")
+        stored = session.workout_plan_json.get("template") or {}
+        # Allocation tunes set duration from history; only the plan itself matters here.
+        if all(stored.get(key) == current[key] for key in ("name", "exercises", "alternatives")):
+            continue
+        session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
+        allocation(db, session)
+        session.source_revision += 1
+        queue_session_write(db, session, now=now, metadata_only=bool(session.calendar_event_id))
+        changed.append(session.id)
+    return changed
+
+
 def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     now = utc(now)
     get_template(db, template_id)  # Explicit selected template, never guess from demo import.
@@ -187,9 +209,10 @@ def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
         queue_session_write(db, db.get(PlannedSession, session_id), now=now)
     stale = close_stale_workouts(db, now=now)
     rotation = assign_rotation(db, now=now)
+    plans = refresh_plans(db, now=now)
     crowd = refresh_crowd(db, now=now)
     commit_upcoming(db, now=now)
-    return {"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, "closed_workouts": stale, **repaired}
+    return {"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, "closed_workouts": stale, "refreshed_plans": plans, **repaired}
 
 
 def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:

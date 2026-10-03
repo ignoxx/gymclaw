@@ -128,3 +128,18 @@ def test_idle_workout_is_closed_and_keeps_logged_sets(db):
     assert coach.active_workout(db) is None
     # A new workout can start again.
     start(db, "push", now=at(10) + timedelta(hours=4), request_id="again")
+
+
+def test_session_preview_uses_current_plan_local_time_and_one_image(db, tmp_path, monkeypatch):
+    from gymclaw.models import PlannedSession
+    from gymclaw.services import preview
+    monkeypatch.setattr(preview, "PREVIEW_ROOT", tmp_path)
+    start_at = datetime(2026, 10, 19, 8, 30, tzinfo=timezone.utc)
+    db.add(PlannedSession(week_id="2026-10-19", workout_template_id="push", status="TENTATIVE", planned_start_at=start_at,
+        planned_end_at=start_at + timedelta(hours=1), prep_start_at=start_at, leave_home_at=start_at, expected_finish_at=start_at + timedelta(hours=1)))
+    db.flush()
+    card = preview.session_preview(db, now=NOW)
+    assert card["text"].splitlines()[0] == "**Push** · Mon 10:30"  # Europe/Berlin, not UTC
+    assert "1. Machine incline press · 2×8–10" in card["text"] and "3. Cable fly · 2×8–10" in card["text"]
+    assert Path(card["photo"]).is_file() and card["photo"].startswith(str(tmp_path))
+    assert preview.session_preview(db, now=NOW)["photo"] == card["photo"]  # cached

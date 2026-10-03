@@ -262,3 +262,52 @@ def test_refresh_crowd_fills_unknown_then_respects_window(tmp_path):
             assert refresh_crowd(db, now=now + timedelta(minutes=10)) == []  # throttled
     finally:
         engine.dispose()
+
+
+def test_refresh_plans_replaces_stale_copy_once(tmp_path):
+    from gymclaw.models import PlannedSession
+    from gymclaw.services.calendar import allocation
+    from gymclaw.services.weekly import refresh_plans
+    engine = make_engine(f"sqlite:///{tmp_path / 'plans.db'}")
+    initialize(engine)
+    now = datetime(2026, 10, 3, 8, tzinfo=timezone.utc)
+    spec = dict(id="row", name="Row", role="pull", guide_id="seated-row", target_weight=0)
+    try:
+        with Session(engine) as db, db.begin():
+            import_template(db, Template(id="pull", name="Pull", exercises=[ExerciseSpec(**spec, working_sets=3)]))
+            start = now + timedelta(days=2)
+            session = PlannedSession(week_id="2026-10-05", workout_template_id="pull", status="TENTATIVE", planned_start_at=start,
+                planned_end_at=start + timedelta(hours=1), prep_start_at=start, leave_home_at=start, expected_finish_at=start + timedelta(hours=1))
+            db.add(session); db.flush()
+            allocation(db, session)
+            import_template(db, Template(id="pull", name="Pull", exercises=[ExerciseSpec(**spec, working_sets=2)]))
+            assert refresh_plans(db, now=now) == [session.id]
+            assert session.workout_plan_json["template"]["exercises"][0]["working_sets"] == 2
+            assert refresh_plans(db, now=now) == []  # no churn on the next tick
+    finally:
+        engine.dispose()
+
+
+def test_event_body_has_plan_location_and_split_colour(tmp_path):
+    from gymclaw.models import OnboardingState
+    from gymclaw.services.calendar import allocation
+    from gymclaw.services.calendar_writes import event_body
+    engine = make_engine(f"sqlite:///{tmp_path / 'event.db'}")
+    initialize(engine)
+    start = datetime(2026, 10, 5, 8, 30, tzinfo=timezone.utc)
+    try:
+        with Session(engine) as db, db.begin():
+            for name in ("push", "pull"):
+                import_template(db, Template(id=name, name=name.title(), exercises=[ExerciseSpec(id=f"{name}-row", name="Row", role="x", guide_id="seated-row", working_sets=2, rep_min=8, rep_max=12, target_weight=0)]))
+            db.add(OnboardingState(id=1, interview_json={}, split_json=["push", "pull"]))
+            update_profile(db, {"gym_address": "Example Str. 1, Berlin"})
+            session = PlannedSession(week_id="2026-10-05", workout_template_id="pull", status="COMMITTED", planned_start_at=start,
+                planned_end_at=start + timedelta(hours=1), prep_start_at=start - timedelta(minutes=35), leave_home_at=start - timedelta(minutes=20), expected_finish_at=start + timedelta(hours=1))
+            db.add(session); db.flush()
+            allocation(db, session)
+            body = event_body(db, session)
+            assert body["summary"] == "🏋️ Pull" and body["location"] == "Example Str. 1, Berlin" and body["colorId"] == "6"
+            assert "Get ready 09:55 · Leave 10:10 · Home ~11:50" in body["description"]
+            assert "1. Row · 2×8–12" in body["description"]
+    finally:
+        engine.dispose()

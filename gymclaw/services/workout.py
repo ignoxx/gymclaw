@@ -272,11 +272,7 @@ def start(db: Session, template_id: str, *, now: datetime, request_id: str, plan
         allocation = None
         if planned:
             from gymclaw.services.compression import compress_template
-            if planned.workout_plan_json.get("template", {}).get("id") == template_id:
-                allocation = planned.workout_plan_json
-                if allocation.get("error"):
-                    raise DomainError("WORKOUT_SLOT_TOO_SHORT", "Calendar slot needs explicit adjustment before starting")
-                template = Template.model_validate(allocation["template"])
+            # Always the current template: the session's stored copy may predate edits and swaps.
             template = template.model_copy(update={"set_duration_seconds": ceil(historical_set_duration(db, template.set_duration_seconds))})
             allocation = compress_template(template, get_profile(db), int((planned.planned_end_at - planned.planned_start_at).total_seconds()))
             allocation |= {k: v for k, v in planned.workout_plan_json.items() if k.startswith("crowd_")}
