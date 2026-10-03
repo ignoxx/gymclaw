@@ -236,8 +236,8 @@ function renderWorkout(focus, workout) {
     pose.append(thumb(workout.exercises.find(e => e.id === active.id)?.svg_url));
     focus.append(pose);
     const target = el('div', 'target');
-    if (active.weight) target.append(el('strong', '', active.weight), el('span', '', 'kg'), el('span', 'times', '×'));
     target.append(el('strong', '', active.rep_min === active.rep_max ? active.rep_min : `${active.rep_min}–${active.rep_max}`), el('span', '', 'reps'));
+    if (active.weight) target.append(el('span', 'times', '×'), el('strong', '', active.weight), el('span', '', 'kg'));
     focus.append(target);
     const status = el('div', 'status');
     const label = el('strong', '', active.set_type === 'WARMUP' ? 'Warm-up' : `Set ${active.set_number} of ${active.sets}`);
@@ -267,7 +267,7 @@ function renderNext(focus, next) {
   for (const exercise of next.exercises) {
     const row = el('li');
     const text = el('div');
-    text.append(el('strong', '', exercise.name), el('span', '', `${exercise.sets} × ${exercise.reps}`));
+    text.append(el('strong', '', exercise.name), el('span', '', `${exercise.sets} sets of ${exercise.reps}`));
     row.append(thumb(exercise.svg_url), text, el('em', '', exercise.last ? `Last ${exercise.last}` : ''));
     list.append(row);
   }
@@ -361,7 +361,7 @@ function renderProgress(insights) {
   points.forEach((p, i) => chart.svg.append(svgEl('circle', { cx: xs[i], cy: y(p.weight), r: 4, class: 'point' })));
   const every = Math.ceil(points.length / (chart.W < 420 ? 4 : 7));
   points.forEach((p, i) => { if (i % every === 0 || i === points.length - 1) chart.svg.append(svgText(xs[i], chart.H - 6, p.label.replace(/^\w+ /, ''), { 'text-anchor': 'middle' })); });
-  crosshair(chart, xs, i => ({ title: points[i].label, rows: [[`${kgs(points[i].weight)} × ${points[i].reps}`, 'top set']], y: y(points[i].weight) }));
+  crosshair(chart, xs, i => ({ title: points[i].label, rows: [[`${points[i].reps} × ${kgs(points[i].weight)}`, 'top set']], y: y(points[i].weight) }));
 }
 
 function renderMuscles(insights) {
@@ -456,7 +456,7 @@ function renderHistory(history) {
       const row = el('div', 'set-row');
       const name = el('span', 'set-name', exercise.name);
       if (workout.prs.includes(exercise.name)) name.append(el('em', 'tag pr', 'PR'));
-      row.append(name, el('span', 'set-list', exercise.sets.map(s => `${s.weight}×${s.reps}`).join('   ')));
+      row.append(name, el('span', 'set-list', exercise.sets.map(s => `${s.reps}×${s.weight}`).join('   ')));
       table.append(row);
     }
     item.append(summary, table);

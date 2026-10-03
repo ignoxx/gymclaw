@@ -45,6 +45,11 @@ def kg(weight: float) -> str:
     return f"{weight:g} kg"
 
 
+def done(reps: int, weight: float) -> str:
+    """A set the way the owner says it: reps first, '10 × 40 kg'."""
+    return f"{reps} × {kg(weight)}"
+
+
 def card(text: str, buttons: list[list[dict]] | None = None, *, photo: str | None = None, rest_until: str | None = None, kind: str = "set") -> dict:
     """kind 'rest' is a countdown the plugin deletes when the next set card arrives."""
     return {"text": text, "photo": photo, "buttons": buttons or [], "rest_until": rest_until, "kind": kind}
@@ -71,18 +76,51 @@ def exercise_card(db: Session, workout: WorkoutSession, now: datetime) -> dict:
         lines = [head, f"Warm-up · {format_target(active)}"]
         buttons = [[button("✅ Warm-up done", "warm", ref), button("Skip warm-up", "nowarm", ref)], [button("🔄 Swap", "swap", ref)]]
     else:
-        lines = [head, f"Set {active['set_number']}/{active['working_sets']} · {format_target(active)}"]
         last = active["last_set"]
         quick = (last["weight"], last["reps"]) if last else (active["target_weight"], active["rep_min"]) if active["target_weight"] else None
-        buttons = [[button(f"✅ {kg(quick[0])} × {quick[1]}", "log", ref, f"{quick[0]:g}", str(quick[1]))]] if quick else []
-        if not quick:
-            lines.append("Send weight × reps, e.g. 40x10.")
+        reps = format_target(active | {"target_weight": 0}).removesuffix(" reps")
+        if quick:
+            lines = [head, f"Set {active['set_number']}/{active['working_sets']} · {format_target(active)}"]
+            buttons = [[button(f"✅ {done(quick[1], quick[0])}", "log", ref, f"{quick[0]:g}", str(quick[1]))]]
+        else:
+            # Unknown weight: the gap is the headline and the reply format is impossible to miss.
+            guess = guess_set(db, next(e for e in rows if e.id == active["id"]), active["rep_min"])
+            example = f"{guess['reps']}x{guess['weight']:g}" if guess else f"{active['rep_min']}x40"
+            lines = [head, f"Set {active['set_number']}/{active['working_sets']} · {reps} × **? kg**", f"✍️ **Reply reps × weight:** `{example}`"]
+            buttons = []
+            if guess:
+                lines.append(f"💡 Guess from {guess['source']}")
+                buttons.append([button(f"✅ {done(guess['reps'], guess['weight'])}?", "log", ref, f"{guess['weight']:g}", str(guess["reps"]))])
         # Swap only before the first set: once the owner is on the machine it isn't taken.
-        buttons.append(([button("🔄 Swap", "swap", ref)] if active["new_exercise"] else []) + [button("⏭ Next exercise", "next", ref)])
+        # Nothing logged yet means moving on skips the exercise; say so.
+        buttons.append(([button("🔄 Swap", "swap", ref)] if active["new_exercise"] else [])
+            + [button("⏭ Skip" if active["new_exercise"] else "⏭ Next exercise", "next", ref)])
     if deferred:
         buttons.append([button(f"↩ {deferred[0].config_json['name']} free?", "free", deferred[0].id[:8])])
     picture = active["illustration"]["telegram_png"] if active["illustration"] else None
     return card("\n".join(lines), buttons, photo=picture)
+
+
+def guess_set(db: Session, row: WorkoutExercise, reps: int) -> dict | None:
+    """Starting weight for an exercise with no history: the same movement under another name first
+    (renamed/swapped template entries), else your latest similar exercise (same muscle and equipment)."""
+    from gymclaw.models import SetLog
+    from gymclaw.services.illustrations import catalog
+    guide = row.config_json.get("guide_id")
+    item = catalog().get(guide) if guide else None
+    if item is None:
+        return None
+    recent = db.execute(select(SetLog, WorkoutExercise).join(WorkoutExercise).where(SetLog.set_type == "WORKING",
+        WorkoutExercise.exercise_id != row.exercise_id).order_by(SetLog.logged_at.desc()).limit(300)).all()
+    for match in ("same", "similar"):
+        for log, other in recent:
+            other_item = catalog().get(other.config_json.get("guide_id") or "")
+            if other_item is None:
+                continue
+            if (match == "same" and other_item["slug"] == item["slug"]) or (match == "similar" and
+                    other_item["primaryMuscle"] == item["primaryMuscle"] and other_item["equipment"] == item["equipment"]):
+                return {"weight": log.weight, "reps": reps, "source": other.config_json["name"]}
+    return None
 
 
 def summary_card(result: dict) -> dict:
@@ -112,7 +150,7 @@ def handle_text(db: Session, text: str, *, now: datetime, request_id: str) -> di
     except DomainError:
         return {"handled": False}
     log_set(db, workout.id, value, now=now, request_id=request_id)
-    return {"handled": True, "react": "👍", "ack": f"✅ {kg(value.weight)} × {value.reps}", "cards": after_change(db, workout, now, request_id)}
+    return {"handled": True, "react": "👍", "ack": f"✅ {done(value.reps, value.weight)}", "cards": after_change(db, workout, now, request_id)}
 
 
 def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> dict:
@@ -140,7 +178,7 @@ def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> 
     if action == "log":
         weight, reps = float(args[1]), int(args[2])
         log_set(db, workout.id, SetInput(weight=weight, reps=reps), now=now, request_id=request_id)
-        return {"handled": True, "ack": f"✅ {kg(weight)} × {reps}", "cards": after_change(db, workout, now, request_id)}
+        return {"handled": True, "ack": f"✅ {done(reps, weight)}", "cards": after_change(db, workout, now, request_id)}
     if action == "warm":
         target = current(db, workout.id, now=now)["active_exercise"]
         log_set(db, workout.id, SetInput(weight=target["target_weight"], reps=target["rep_max"], set_type="WARMUP"), now=now, request_id=request_id)

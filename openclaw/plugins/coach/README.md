@@ -3,10 +3,12 @@
 Model-free workout flow in Telegram. Logging a set takes about a second and never wakes the agent.
 
 - **Cards:** every set card has the illustration, the target and buttons:
-  `✅ 40 kg × 10` (repeat last set), `🔄 Swap` (before the first set only), `⏭ Next exercise`.
-- **Typed sets:** `40x10`, `12x40kg`, `9 reps at 80` are claimed in `before_dispatch`, before the agent
+  `✅ 10 × 40 kg` (repeat last set, reps first), `🔄 Swap` (before the first set only), `⏭ Skip` before the
+  first set / `⏭ Next exercise` after it. With no weight known: `✍️ Reply reps × weight` plus, when history
+  has the same movement or a similar exercise (same muscle and equipment), a one-tap guess `✅ 8 × 40 kg?`.
+- **Typed sets:** `10x40`, `12x40kg`, `9 reps at 80` are claimed in `before_dispatch`, before the agent
   sees them (`inbound_claim` only fires for plugin-bound chats). The message gets 👍 (its ID comes from
-  `message_received`), the set card gets `✅ 40 kg × 10`. Order is guessed from units, then the expected weight.
+  `message_received`), the set card gets `✅ 10 × 40 kg`. Order comes from units, then the expected weight, then reps-first.
 - **Rest** (between sets of one exercise only): a small `⏱ 1:25 until Bench set 2/2` message with
   `⏭ Skip`, edited every 5 s. At zero (or Skip) it is deleted and a fresh set card is sent, which
   notifies the phone. A new exercise starts right away. The runtime cron ping is only a fallback 30 s

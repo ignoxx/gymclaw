@@ -308,6 +308,6 @@ def test_event_body_has_plan_location_and_split_colour(tmp_path):
             body = event_body(db, session)
             assert body["summary"] == "🏋️ Pull" and body["location"] == "Example Str. 1, Berlin" and body["colorId"] == "6"
             assert "Get ready 09:55 · Leave 10:10 · Home ~11:50" in body["description"]
-            assert "1. Row · 2×8–12" in body["description"]
+            assert "1. Row · 2 sets of 8–12" in body["description"]
     finally:
         engine.dispose()

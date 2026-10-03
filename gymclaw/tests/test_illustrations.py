@@ -40,3 +40,10 @@ def test_pose_follows_active_exercise_not_previous_set(tmp_path):
             assert after["active_exercise"]["target_weight"] == 60
     finally:
         engine.dispose()
+
+
+def test_swap_alternatives_differ_in_equipment():
+    from gymclaw.services.illustrations import similar
+    # "Rear Delt Fly" and "Bent-Over Rear Delt Raise" are the same dumbbell movement; offer one of them.
+    options = similar("cable-rear-delt-fly")
+    assert len({o["equipment"] for o in options}) == len(options) == 2

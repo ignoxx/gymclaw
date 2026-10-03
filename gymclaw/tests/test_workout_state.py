@@ -99,7 +99,7 @@ def test_set_parser(text):
 
 def test_set_parser_uses_expected_weight_when_order_is_unclear():
     assert parse_set("12x10", expected_weight=10) == SetInput(weight=10, reps=12)
-    assert parse_set("12x10") == SetInput(weight=12, reps=10)
+    assert parse_set("12x10") == SetInput(weight=10, reps=12)  # reps first by default
     assert parse_set("8x22,5") == SetInput(weight=22.5, reps=8)
 
 
@@ -114,7 +114,7 @@ def test_working_set_skips_pending_warmup(engine):
 
 @pytest.mark.parametrize("text", ["80x9 then 80x10", "80", "9 reps", "-80x9", "80x9?", "80/9", "80kg x 9kg"])
 def test_ambiguous_set_rejected(text):
-    with pytest.raises(DomainError, match="What weight"):
+    with pytest.raises(DomainError, match="How many reps"):
         parse_set(text)
 
 

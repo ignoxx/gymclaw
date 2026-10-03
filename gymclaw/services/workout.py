@@ -174,9 +174,9 @@ def estimate_finish(db: Session, workout: WorkoutSession, now: datetime) -> date
 
 
 def format_target(data: dict) -> str:
-    """'80 kg × 8–10'; unknown weight (0) shows reps only."""
+    """'8–10 × 80 kg' (reps first, how the owner says it); unknown weight (0) shows reps only."""
     reps = f"{data['rep_min']}" if data["rep_min"] == data["rep_max"] else f"{data['rep_min']}–{data['rep_max']}"
-    return f"{data['target_weight']:g} kg × {reps}" if data["target_weight"] else f"{reps} reps"
+    return f"{reps} × {data['target_weight']:g} kg" if data["target_weight"] else f"{reps} reps"
 
 
 def last_working_set(db: Session, exercise: WorkoutExercise) -> SetLog | None:
