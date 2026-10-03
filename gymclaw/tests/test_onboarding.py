@@ -17,7 +17,8 @@ NOW = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
 PROFILE_ANSWERS = (
     {"schedule": "3x, Mon/Wed/Fri", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"},
     {"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60,
-     "earliest_workout_start": "10:30", "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15},
+     "earliest_workout_start": "10:30", "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15,
+     "gym_address": "Example Str. 1, Berlin"},
 )
 
 

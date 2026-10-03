@@ -57,6 +57,7 @@ class UserProfile(Base):
     crowd_preference_weight: Mapped[float] = mapped_column(default=1.0)
     calendar_preference_weight: Mapped[float] = mapped_column(default=1.0)
     recovery_weight: Mapped[float] = mapped_column(default=1.0)
+    gym_address: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 

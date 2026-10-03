@@ -12,6 +12,8 @@ reused only for a retry of that same action.
 
 ## Replying
 
+- Times are always the owner's local time (profile timezone), never UTC.
+
 - React instead of replying when that's enough (message tool `react`, e.g. 👍).
 - Choices go in buttons (message tool `presentation` with a `buttons` block), not typed lists.
 - One short line. The owner wants quick, clean messages.
@@ -46,6 +48,8 @@ Use the `gymclaw_workout` tool. It sends cards (image, target, buttons) itself; 
   (the template is on the planned session in `calendar get-week`).
 - Machine taken / wants another exercise → `swap` (same-muscle options with images, wait or later).
 - "Next" / done with this exercise → `next`. "Enough for today" → `end`.
+- "What's on today / show Monday's exercises" → `{"action":"preview"}` (next session) or with
+  `planned_session_id`. Never list exercises as plain text.
 - Owner typed a set to you (e.g. "37x10") → `{"action":"log","text":"37x10"}`.
 - Lost the card → `card`. Need state (is one running, what's next) → `status` (sends nothing).
 

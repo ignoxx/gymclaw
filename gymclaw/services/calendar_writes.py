@@ -1,5 +1,5 @@
 """Durable calendar write outbox. Only owned events; explicit live-write opt-in."""
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 
@@ -31,17 +31,37 @@ def describe_crowd(forecast: dict | None, start: datetime) -> str:
     return " · ".join(parts)
 
 
+# Google Calendar event colours (peacock, tangerine, basil, grape, banana, tomato, blueberry),
+# one per template in the owner's split so Push/Pull/Legs are recognisable at a glance.
+TEMPLATE_COLORS = ("7", "6", "10", "3", "5", "11", "9")
+
+
 def event_body(db: Session, session: PlannedSession) -> dict:
+    """Everything the owner needs without asking: plan, crowd, timings, gym location (calendar apps
+    use it for travel time / time to leave) and a colour per workout type."""
+    from gymclaw.models import OnboardingState
+    from gymclaw.services.preview import plan_lines
     profile = get_profile(db)
     zone = ZoneInfo(profile.timezone)
     template_name = session.workout_plan_json.get("template", {}).get("name", "Workout")
     crowd = describe_crowd(session.workout_plan_json.get("crowd_forecast"), session.planned_start_at.astimezone(zone))
     if session.workout_plan_json.get("crowd_source") == "demo_fixture":
         crowd += " (demo fixture)"
+    home = session.expected_finish_at + timedelta(minutes=profile.commute_home_minutes)
+    lines = [f"Expected crowd: {crowd}",
+        f"Get ready {session.prep_start_at.astimezone(zone):%H:%M} · Leave {session.leave_home_at.astimezone(zone):%H:%M} · Home ~{home.astimezone(zone):%H:%M}"]
+    if session.workout_template_id:
+        lines += ["", "Plan:", *plan_lines(db, session)]
+    lines += ["", "Managed by GymClaw. Move or resize freely; it adapts."]
+    onboarding = db.get(OnboardingState, 1)
+    split = onboarding.split_json if onboarding else []
+    color = TEMPLATE_COLORS[split.index(session.workout_template_id) % len(TEMPLATE_COLORS)] if session.workout_template_id in split else None
     return {
         "id": session.calendar_event_id or event_id_for(session.id),
-        "summary": f"🏋️ Gym — {template_name}",
-        "description": f"GymClaw managed session\nExpected crowd: {crowd}\nGet ready: {session.prep_start_at.astimezone(zone):%H:%M}\nLeave: {session.leave_home_at.astimezone(zone):%H:%M}\nWorkout: {session.planned_start_at.astimezone(zone):%H:%M}–{session.planned_end_at.astimezone(zone):%H:%M}",
+        "summary": f"🏋️ {template_name}",
+        "description": "\n".join(lines),
+        **({"location": profile.gym_address} if profile.gym_address else {}),
+        **({"colorId": color} if color else {}),
         "start": {"dateTime": session.planned_start_at.astimezone(zone).isoformat(), "timeZone": profile.timezone},
         "end": {"dateTime": session.planned_end_at.astimezone(zone).isoformat(), "timeZone": profile.timezone},
         "status": "confirmed" if session.status == "COMMITTED" else "tentative",
@@ -64,7 +84,7 @@ def queue_session_write(db: Session, session: PlannedSession, *, now: datetime, 
         return None
     body = event_body(db, session) if action != "DELETE" else {}
     if metadata_only:
-        body = {k: body[k] for k in ("description", "extendedProperties")}
+        body = {k: body[k] for k in ("summary", "description", "location", "colorId", "extendedProperties") if k in body}
     existing = db.scalar(select(CalendarWrite).where(CalendarWrite.planned_session_id == session.id, CalendarWrite.revision == session.source_revision, CalendarWrite.action == action))
     if existing:
         return existing

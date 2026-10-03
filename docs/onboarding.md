@@ -4,7 +4,7 @@ Setup is a short interview in Telegram, one question at a time. Nothing is assum
 count as answers, and GymClaw works for any owner, schedule and gym.
 
 1. **Interview:** goal, training experience, days per week and which days, session length, time
-   window, prep and travel time, equipment (full gym / basic / home), injuries or exercises to avoid.
+   window, gym address with prep and travel time, equipment (full gym / basic / home), injuries or exercises to avoid.
    Answers that shape scheduling also write the matching profile fields.
 2. **Plan:** the owner sends a photo of their plan, or GymClaw builds one from the interview. Every
    exercise is mapped to an illustrated catalog entry (`catalog search`). Unknown weights start at 0
@@ -29,7 +29,7 @@ Profile-backed questions and their fields:
 | schedule | `weekly_target_sessions`, `weekdays_allowed` (Monday=0) |
 | session_length | `preferred_workout_minutes` |
 | time_window | `earliest_workout_start`, `latest_workout_finish` (local "HH:MM") |
-| travel | `prep_minutes`, `commute_to_gym_minutes` |
+| travel | `gym_address`, `prep_minutes`, `commute_to_gym_minutes` |
 
 Mutations are request-idempotent and survive chat resets. Finishing setup grants no runtime or
 calendar authority. Template import fails with `ILLUSTRATION_REQUIRED` until every exercise has a
