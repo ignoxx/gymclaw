@@ -59,8 +59,11 @@ def parser():
     planning.add_argument("--request-id")
     planning.add_argument("--template-id")
     calendar = groups.add_parser("calendar", add_help=False)
-    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "pending-writes", "publish"])
+    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "pending-writes", "publish",
+        "personal-connect", "personal-sync", "personal-status", "personal-disconnect"])
     calendar.add_argument("--calendar-id")
+    calendar.add_argument("--url", help="Read-only personal ICS feed (webcal:// or https://)")
+    calendar.add_argument("--url-file", type=Path, help="File holding the feed link; keeps it out of argv/history")
     calendar.add_argument("--client-file", type=Path)
     calendar.add_argument("--week-start", type=date.fromisoformat)
     calendar.add_argument("--template-id")

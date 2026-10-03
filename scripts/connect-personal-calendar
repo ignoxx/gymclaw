@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Host-side: connect your read-only personal calendar feed to the GymClaw sandbox.
+#
+#   scripts/connect-personal-calendar          # paste the webcal:// link at the prompt
+#
+# The link is read from a hidden prompt (never argv or shell history). Redirects are
+# resolved on the host, a GET-only policy for that one feed host is applied, then the
+# sandbox fetches once and replans. Safe to re-run, e.g. after re-sharing the calendar.
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+SANDBOX="${GYMCLAW_SANDBOX:-gymclaw}"
+REPO=/sandbox/.openclaw/workspace/gymclaw
+POLICY="$ROOT/config/gymclaw-personal-calendar-policy.yaml"
+
+read -rsp "Paste your personal calendar link (webcal://…): " LINK; echo
+LINK="${LINK//[[:space:]]/}"
+case "$LINK" in
+  webcal://*) URL="https://${LINK#webcal://}" ;;
+  https://*) URL="$LINK" ;;
+  *) echo "Expected a webcal:// or https:// link" >&2; exit 1 ;;
+esac
+
+# Follow iCloud's partition redirect so the policy pins the host the sandbox will hit.
+# URL goes through curl's stdin config, not argv.
+FINAL="$(printf 'url = "%s"\n' "$URL" | curl -fsSL --proto '=https' --proto-redir '=https' --max-time 60 -o /dev/null -w '%{url_effective}' -K -)" \
+  || { echo "Feed not reachable. Is Public Calendar still enabled?" >&2; exit 1; }
+HOST="${FINAL#https://}"; HOST="${HOST%%/*}"
+echo "Feed host: $HOST"
+
+umask 077
+sed "s/YOUR_FEED_HOST/$HOST/" "$ROOT/config/gymclaw-personal-calendar-policy.example.yaml" > "$POLICY"
+nemoclaw "$SANDBOX" policy add --from-file "$POLICY" --yes
+
+TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
+printf '%s' "$FINAL" > "$TMP"
+nemoclaw "$SANDBOX" upload "$TMP" "$REPO/data/.personal-calendar-url" >/dev/null
+nemoclaw "$SANDBOX" exec -- sh -c "cd $REPO && chmod 600 data/.personal-calendar-url && \
+  scripts/gymclaw-tool calendar personal-connect --url-file data/.personal-calendar-url; rc=\$?; \
+  rm -f data/.personal-calendar-url; exit \$rc"
