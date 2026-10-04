@@ -2,6 +2,7 @@
 from dataclasses import asdict
 from datetime import datetime, timezone
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 def register_parser(groups):
     command = groups.add_parser("runtime", add_help=False)
-    command.add_argument("operation", choices=["plan", "sync", "fire", "watch", "weekly", "poll-crowd", "deliveries", "deliver", "resolve", "pause", "resume", "revoke-calendar-writes"])
+    command.add_argument("operation", choices=["plan", "sync", "fire", "watch", "weekly", "poll-crowd", "deliveries", "deliver", "resolve", "pause", "resume", "revoke-calendar-writes", "relocate"])
     command.add_argument("--now", type=datetime.fromisoformat)
     command.add_argument("--telegram-id", default=os.environ.get("GYMCLAW_TELEGRAM_USER_ID"))
     command.add_argument("--openclaw-profile", default=os.environ.get("GYMCLAW_OPENCLAW_PROFILE", "gymclaw"))
@@ -110,6 +111,18 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                 if not settings.enabled:
                     settings.calendar_writes_enabled = False
             data = runtime.runtime_authority(db)
+    elif args.operation == "relocate":
+        # Moving the DB to another host/path: rebind its deployment scope to this
+        # checkout and interpreter. Only while paused, so no old callback can run.
+        with Session(engine) as db, db.begin():
+            settings = db.get(RuntimeSettings, 1)
+            if settings is None:
+                raise DomainError("RUNTIME_NOT_CONFIGURED", "No local runtime authority configured")
+            if settings.enabled:
+                raise DomainError("RUNTIME_NOT_PAUSED", "Pause the runtime on the old host before relocating its DB")
+            settings.project_root = str(args.project_root.absolute())
+            settings.python_path = str(Path(sys.executable).absolute())
+            data = {"project_root": settings.project_root, "python_path": settings.python_path, **runtime.runtime_authority(db)}
     elif args.operation == "resolve":
         if not args.confirm_sender_stopped:
             raise DomainError("SENDER_STOP_REQUIRED", "Verify original sender process stopped; then pass --confirm-sender-stopped")
