@@ -50,3 +50,26 @@ def test_demo_http_serves_only_public_assets_and_rejects_writes():
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def test_db_live_mode_serves_state_only_to_allowed_hosts(tmp_path):
+    from gymclaw.db import initialize, make_engine
+    url = f"sqlite:///{tmp_path / 'live.db'}"
+    engine = make_engine(url)
+    initialize(engine)
+    engine.dispose()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), demo_handler(None, live=True, db_url=url, allowed_hosts=frozenset({"gym.example"})))
+    Thread(target=server.serve_forever, daemon=True).start()
+    client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+    try:
+        client.request("GET", "/api/state", headers={"Host": "gym.example"})
+        response = client.getresponse()
+        assert response.status == 200 and json.loads(response.read())["live_database_accessed"] is True
+        client.request("GET", "/api/state", headers={"Host": "evil.example"})
+        response = client.getresponse()
+        assert response.status == 403
+        response.read()
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()

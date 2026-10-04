@@ -31,6 +31,38 @@ services:
     mem_limit: 1536m
     pids_limit: 512
 
+  # Read-only dashboard. No internet and no published port: only the reverse proxy
+  # reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
+  dashboard:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    entrypoint: ["tini", "-s", "--"]
+    command: [".venv/bin/python", "-m", "gymclaw.dashboard", "--db-url", "sqlite:////opt/gymclaw/data/gymclaw.db",
+      "--host", "0.0.0.0", "--port", "8766", "--allowed-host", "${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}"]
+    volumes:
+      - gymclaw-data:/opt/gymclaw/data:ro
+    networks: [internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.gymclaw-dashboard.rule=Host(`${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}`)
+      - traefik.http.routers.gymclaw-dashboard.entrypoints=https
+      - traefik.http.routers.gymclaw-dashboard.tls=true
+      - traefik.http.routers.gymclaw-dashboard.tls.certresolver=letsencrypt
+      - traefik.http.routers.gymclaw-dashboard.middlewares=gymclaw-tailnet
+      - traefik.http.routers.gymclaw-dashboard-http.rule=Host(`${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}`)
+      - traefik.http.routers.gymclaw-dashboard-http.entrypoints=http
+      - traefik.http.routers.gymclaw-dashboard-http.middlewares=gymclaw-tailnet,gymclaw-https
+      - traefik.http.middlewares.gymclaw-tailnet.ipallowlist.sourcerange=100.64.0.0/10,fd7a:115c:a1e0::/48
+      - traefik.http.middlewares.gymclaw-https.redirectscheme.scheme=https
+      - traefik.http.services.gymclaw-dashboard.loadbalancer.server.port=8766
+
   egress:
     build: deploy/egress
     restart: unless-stopped
