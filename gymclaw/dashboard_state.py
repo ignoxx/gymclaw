@@ -95,25 +95,20 @@ def active_workout(db: Session, zone: ZoneInfo, now: datetime) -> dict | None:
         "last_set": f"{latest.reps} × {latest.weight:g} kg" if latest else None, "exercises": exercises}
 
 
+def local_minutes(at: datetime, zone: ZoneInfo) -> int:
+    """Wall-clock minutes since 1970-01-01 in `zone`; lets the browser slice days/weeks without timezone math."""
+    return int((at.astimezone(zone).replace(tzinfo=None) - datetime(1970, 1, 1)).total_seconds() // 60)
+
+
 def crowd(db: Session, zone: ZoneInfo, now: datetime, polling: bool) -> dict:
-    """Latest count, the most recent day's readings, and a typical curve for that weekday."""
-    rows = [row for row in db.scalars(select(CrowdObservation).where(CrowdObservation.source == "GYM_API", CrowdObservation.observed_at <= now,
-        CrowdObservation.observed_at >= now - timedelta(days=90)).order_by(CrowdObservation.observed_at))]
-    if not rows:
-        return {"now": None, "day": None, "readings": [], "typical": [], "polling": polling}
-    latest = rows[-1]
-    day = latest.observed_at.astimezone(zone).date()
-    readings = [{"time": hhmm(row.observed_at, zone), "count": row.raw_value} for row in rows if row.observed_at.astimezone(zone).date() == day]
-    # Typical: per hour, mean of daily means on the same weekday (other dates only).
-    hourly = defaultdict(lambda: defaultdict(list))
-    for row in rows:
-        local = row.observed_at.astimezone(zone)
-        if local.date() != day and local.weekday() == day.weekday():
-            hourly[local.hour][local.date()].append(row.raw_value)
-    typical = [{"hour": hour, "count": round(mean(mean(v) for v in dates.values()), 1)} for hour, dates in sorted(hourly.items())]
-    return {"now": {"count": latest.raw_value, "at": latest.observed_at.isoformat(), "time": hhmm(latest.observed_at, zone)},
-        "day": "Today" if day == now.astimezone(zone).date() else day.strftime("%a %d %b"), "weekday": day.strftime("%A"),
-        "readings": readings, "typical": typical, "polling": polling}
+    """Latest count plus the full reading history (last ~13 months) as compact [local minute, count] pairs.
+    The dashboard derives day/24h/week/month windows and the typical-weekday curve from `series`."""
+    rows = list(db.scalars(select(CrowdObservation).where(CrowdObservation.source == "GYM_API", CrowdObservation.observed_at <= now,
+        CrowdObservation.observed_at >= now - timedelta(days=400)).order_by(CrowdObservation.observed_at)))
+    latest = rows[-1] if rows else None
+    return {"now": {"count": latest.raw_value, "at": latest.observed_at.isoformat(), "time": hhmm(latest.observed_at, zone)} if latest else None,
+        "local_now": local_minutes(now, zone), "series": [[local_minutes(row.observed_at, zone), row.raw_value] for row in rows],
+        "polling": polling}
 
 
 def closest_muscle(name: str) -> str | None:

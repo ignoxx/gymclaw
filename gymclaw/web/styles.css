@@ -87,6 +87,15 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .key::before { content: ''; display: inline-block; width: 14px; height: 0; margin-right: 6px; vertical-align: 3px; border-top: 2px solid #424e30; }
 .key.typical::before { border-top: 2px dashed #a9b39a; }
 .chart { margin-top: 8px; }
+.crowd-nav { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.segmented { display: flex; gap: 2px; padding: 2px; background: #eef0e5; border-radius: 99px; }
+.segmented button { border: 0; background: none; padding: 4px 11px; border-radius: 99px; font: inherit; font-size: 11px; color: var(--muted); cursor: pointer; }
+.segmented button[aria-pressed="true"] { background: var(--white); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(36, 40, 36, .08); }
+.pager { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+.pager button { width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 50%; background: var(--white); color: var(--ink); font-size: 15px; line-height: 1; cursor: pointer; }
+.pager button:disabled { opacity: .35; cursor: default; }
+#crowd-title { min-width: 120px; text-align: center; font-variant-numeric: tabular-nums; }
+.crowd-stats { margin: 8px 0 0; min-height: 15px; font-size: 11px; color: var(--muted); }
 .chart > svg { display: block; width: 100%; height: auto; overflow: visible; }
 .grid { stroke: #e7e9df; }
 .label { fill: var(--muted); font-size: 9px; font-family: 'DM Sans', sans-serif; }
@@ -201,7 +210,12 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 @media (max-width: 900px) {
   .dashboard { padding: 0 22px 32px; }
   .layout { grid-template-columns: 1fr; }
-  .focus { order: -1; }
+  /* Single column: calendar, gym, training, then activity. */
+  .layout > .column { display: contents; }
+  .layout > .column > :nth-child(1) { order: 1; }
+  .layout > .column > :nth-child(2) { order: 2; }
+  .focus { order: 3; }
+  .activity { order: 4; }
 }
 @media (max-width: 760px) {
   .kpis { grid-template-columns: 1fr 1fr; }
@@ -225,5 +239,6 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
   .slot > span { font-size: 9px; }
   .crowd { font-size: 8px; padding: 2px 4px; }
   .legend { display: none !important; }
+  .pager { width: 100%; justify-content: space-between; }
   .title { font-size: 32px; }
 }

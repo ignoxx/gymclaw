@@ -30,6 +30,11 @@
           <div class="section-heading"><h2 id="gym-title">Gym</h2><span id="polling"></span></div>
           <div class="count"><strong id="count">—</strong><div><span>checked in</span><small id="count-time"></small></div>
             <div class="legend"><span class="key today" id="legend-day">Today</span><span class="key typical" id="legend-typical"></span></div></div>
+          <div class="crowd-nav">
+            <div class="segmented" role="group" aria-label="Range"><button data-view="today" aria-pressed="true">Day</button><button data-view="24h" aria-pressed="false">24h</button><button data-view="week" aria-pressed="false">Week</button><button data-view="month" aria-pressed="false">Month</button></div>
+            <div class="pager"><button id="crowd-prev" aria-label="Earlier">‹</button><span id="crowd-title"></span><button id="crowd-next" aria-label="Later">›</button></div>
+          </div>
+          <p class="crowd-stats" id="crowd-stats"></p>
           <div id="chart" class="chart"></div>
         </section>
         <section class="activity" aria-labelledby="activity-title"><h2 id="activity-title">Activity</h2><div id="events"></div></section>
