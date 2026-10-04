@@ -219,23 +219,26 @@ def snapshot(db: Session, *, now: datetime, demo: bool = False) -> dict:
         "activity": [{"time": hhmm(e.created_at, zone), "day": e.created_at.astimezone(zone).strftime("%a"), "text": ACTIVITY[e.type]} for e in events]}
 
 
-def main():
-    engine = None
+def read_snapshot(url: str | None = None) -> dict:
+    """Live snapshot of a persistent SQLite DB (default: GYMCLAW_DB_URL), opened read-only."""
+    url = make_url(url or os.environ.get("GYMCLAW_DB_URL", "sqlite:///data/gymclaw.db"))
+    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
+        raise ValueError("Persistent SQLite required")
+    # SQLite URI mode=ro prevents creation, migration and accidental writes.
+    engine = create_engine(f"sqlite:///file:{quote(url.database, safe='/')}?mode=ro&uri=true")
     try:
-        url = make_url(os.environ.get("GYMCLAW_DB_URL", "sqlite:///data/gymclaw.db"))
-        if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
-            raise ValueError("Persistent SQLite required")
-        # SQLite URI mode=ro prevents creation, migration and accidental writes.
-        engine = create_engine(f"sqlite:///file:{quote(url.database, safe='/')}?mode=ro&uri=true")
         with Session(engine) as db:
-            value = snapshot(db, now=datetime.now(timezone.utc))
-        print(json.dumps(value, allow_nan=False))
+            return snapshot(db, now=datetime.now(timezone.utc))
+    finally:
+        engine.dispose()
+
+
+def main():
+    try:
+        print(json.dumps(read_snapshot(), allow_nan=False))
     except Exception:
         print(json.dumps({"ok": False, "error": "LIVE_STATE_UNAVAILABLE"}))
         return 1
-    finally:
-        if engine:
-            engine.dispose()
     return 0
 
 

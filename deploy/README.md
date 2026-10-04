@@ -8,6 +8,9 @@ One Docker Compose stack, built from this repo:
 - **egress**: a Squid proxy that allows HTTPS `CONNECT` to an allowlist only
   (Telegram, OpenRouter, Google Calendar/OAuth, MySports, plus `EGRESS_EXTRA_HOSTS`).
 
+- **dashboard**: the read-only web dashboard. It reads the DB through a read-only
+  mount and has no internet access and no published port.
+
 `gymclaw` sits only on an internal network, so the proxy is its single way out. It
 refuses to start if a direct connection to the internet works. The container runs
 as a non-root user with a read-only root filesystem, no capabilities and
@@ -41,14 +44,29 @@ the agent.
    Without this, `gymclaw` would have direct internet access, and it refuses to
    start.
 3. Set the environment variables: `GYMCLAW_TELEGRAM_USER_ID`, `TELEGRAM_BOT_TOKEN`,
-   `OPENROUTER_API_KEY`, optionally `GYMCLAW_MODEL` and `EGRESS_EXTRA_HOSTS` (for
-   example the personal calendar feed host).
+   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL` and
+   `EGRESS_EXTRA_HOSTS` (for example the personal calendar feed host).
 4. Add a scheduled task on the `gymclaw` service: `backup.sh`, daily (for example
    `30 3 * * *`).
 5. Set a spending limit on the OpenRouter key.
 
 Plain Docker works the same way: `docker compose up -d --build` with an `.env`
 file. Compose creates the internal network itself.
+
+## Dashboard on your tailnet
+
+Traefik serves the dashboard at `GYMCLAW_DASHBOARD_HOST` with a normal Let's Encrypt
+certificate, but only to Tailscale source addresses (`100.64.0.0/10`); everyone else
+gets a 403. The name resolves publicly to the server's public IP, which keeps the
+certificate's HTTP challenge working. Tailnet devices reach that IP through
+Tailscale, by having the server advertise its own public IP as a subnet route:
+
+```bash
+tailscale set --advertise-routes=<public-ip>/32 --advertise-exit-node   # keep existing flags
+```
+
+Approve the route in the Tailscale admin console. Linux clients also need
+`--accept-routes`; macOS, iOS and Android accept routes by default.
 
 ## Moving from a NemoClaw sandbox (or another host)
 
