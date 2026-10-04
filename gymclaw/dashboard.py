@@ -13,8 +13,12 @@ from gymclaw.services.illustrations import public_assets
 ASSETS = {"/": ("index.html", "text/html"), "/styles.css": ("styles.css", "text/css"), "/app.js": ("app.js", "text/javascript")}
 
 
-def live_snapshot() -> dict:
-    """Consume private app output in memory, never inspect/copy host or sandbox DB files."""
+def live_snapshot(db_url: str | None = None) -> dict:
+    """Live state: read-only from `db_url` (same host/container), else via the NemoClaw
+    sandbox. The sandbox route consumes app output in memory, never copying DB files."""
+    if db_url:
+        from gymclaw.dashboard_state import read_snapshot
+        return read_snapshot(db_url)
     from gymclaw.providers.openclaw import cli_json
     launcher = Path.home() / ".local/bin/nemoclaw"
     binary = str(launcher) if launcher.is_file() else shutil.which("nemoclaw")
@@ -31,7 +35,9 @@ def live_snapshot() -> dict:
     return value
 
 
-def demo_handler(snapshot: dict | None, *, live: bool = False):
+def demo_handler(snapshot: dict | None, *, live: bool = False, db_url: str | None = None,
+                 allowed_hosts: frozenset[str] = frozenset()):
+    """Live mode only answers loopback or `allowed_hosts` Host headers (DNS-rebinding guard)."""
     payload = json.dumps(snapshot, allow_nan=False).encode() if snapshot is not None else None
     root = Path(__file__).with_name("web")
     illustrations = public_assets()
@@ -40,14 +46,14 @@ def demo_handler(snapshot: dict | None, *, live: bool = False):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             route = urlsplit(self.path).path
-            if live and (self.headers.get("Host") not in {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+            if live and (self.headers.get("Host") not in {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}", *allowed_hosts}
                          or self.headers.get("Sec-Fetch-Site") == "cross-site"):
                 self.send_error(403)
                 return
             if route == "/api/state" or (route == "/api/demo" and not live):
                 if live:
                     try:
-                        body = json.dumps(live_snapshot(), allow_nan=False).encode()
+                        body = json.dumps(live_snapshot(db_url), allow_nan=False).encode()
                     except Exception:
                         self.send_error(503, "Live state unavailable")
                         return
@@ -86,11 +92,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int)
     parser.add_argument("--live", action="store_true", help="Read authoritative sandbox state, no writes or additional poller")
+    parser.add_argument("--db-url", help="Live state from this SQLite DB (read-only) instead of the NemoClaw sandbox; implies --live")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address; only widen it behind a private network/proxy")
+    parser.add_argument("--allowed-host", action="append", default=[], help="Extra accepted Host header in live mode (repeatable)")
     args = parser.parse_args()
-    port = args.port or (8766 if args.live else 8765)
-    server = ThreadingHTTPServer(("127.0.0.1", port), demo_handler(None if args.live else build_demo_snapshot(), live=args.live))
-    mode = "read-only sandbox state" if args.live else "synthetic demo"
-    print(f"GymClaw: http://127.0.0.1:{port}, {mode}", flush=True)
+    live = args.live or bool(args.db_url)
+    port = args.port or (8766 if live else 8765)
+    handler = demo_handler(None if live else build_demo_snapshot(), live=live, db_url=args.db_url, allowed_hosts=frozenset(args.allowed_host))
+    server = ThreadingHTTPServer((args.host, port), handler)
+    mode = ("read-only DB state" if args.db_url else "read-only sandbox state") if live else "synthetic demo"
+    print(f"GymClaw: http://{args.host}:{port}, {mode}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
