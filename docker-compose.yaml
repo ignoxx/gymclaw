@@ -1,0 +1,55 @@
+# GymClaw on a single host (Coolify "Docker Compose" build pack, or plain `docker compose up`).
+# gymclaw sits on an internal network with no internet route; `egress` is its only way out.
+# Setup and migration: deploy/README.md
+services:
+  gymclaw:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on: [egress]
+    environment:
+      GYMCLAW_TELEGRAM_USER_ID: ${GYMCLAW_TELEGRAM_USER_ID:?}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?}
+      GYMCLAW_MODEL: ${GYMCLAW_MODEL:-z-ai/glm-5.3-flash}
+      TZ: ${TZ:-Europe/Berlin}
+      HTTP_PROXY: http://egress:3128
+      HTTPS_PROXY: http://egress:3128
+      http_proxy: http://egress:3128
+      https_proxy: http://egress:3128
+    volumes:
+      - gymclaw-data:/opt/gymclaw/data
+      - gymclaw-workspace:/opt/gymclaw/openclaw
+      - openclaw-state:/home/node/.openclaw-gymclaw
+      - gymclaw-backups:/backups
+    networks: [internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m
+    pids_limit: 512
+
+  egress:
+    build: deploy/egress
+    restart: unless-stopped
+    environment:
+      EGRESS_EXTRA_HOSTS: ${EGRESS_EXTRA_HOSTS:-}
+    networks: [internal, egress]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+
+volumes:
+  gymclaw-data:
+  gymclaw-workspace:
+  openclaw-state:
+  gymclaw-backups:
+
+networks:
+  internal:
+    internal: true
+  egress:
