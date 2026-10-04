@@ -16,7 +16,9 @@ def test_demo_uses_real_domain_with_explicit_isolation():
     assert workout["active"]["set_number"] == 2 and workout["rest_until"] and workout["last_set"] == "11 × 60 kg"
     assert all(e["svg_url"] for e in workout["exercises"])
     assert data["next"]["template"] and all(e["svg_url"] for e in data["next"]["exercises"])
-    assert data["crowd"]["readings"] and len(data["crowd"]["typical"]) >= 2
+    # Weeks of history plus today, as local-minute pairs ending at the snapshot clock.
+    series = data["crowd"]["series"]
+    assert len(series) > 50 and series[-1][0] <= data["crowd"]["local_now"]
     # Weeks of finished demo workouts feed history and insights.
     assert len(data["history"]) >= 10 and data["insights"]["progress"] and data["insights"]["heatmap"]
     assert data["crowd"]["health"]["status"] == "ok"

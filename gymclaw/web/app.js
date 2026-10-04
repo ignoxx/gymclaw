@@ -132,47 +132,129 @@ function renderWeek(days, range) {
   document.getElementById('session-count').textContent = `${count} session${count === 1 ? '' : 's'}`;
 }
 
+/* ---------- Gym attendance ----------
+   Times are local wall-clock minutes since 1970 (server-side, profile timezone), so a
+   Date read with getUTC* gives local calendar fields without any timezone math. */
+const DAY = 1440;
+const crowdView = { view: 'today', back: 0 };
+const local = minutes => new Date(minutes * 60000);
+const dayStart = minutes => Math.floor(minutes / DAY) * DAY;
+const weekStart = minutes => dayStart(minutes) - ((local(minutes).getUTCDay() + 6) % 7) * DAY;
+const monthStart = (minutes, back) => { const d = local(minutes); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - back, 1) / 60000; };
+const dateLabel = (minutes, options) => local(minutes).toLocaleDateString('en-GB', { timeZone: 'UTC', ...options });
+const dayLabel = minutes => dateLabel(minutes, { weekday: 'short', day: 'numeric', month: 'short' });
+
+/* [start, end) of the selected window; `until` clips the axis (Today runs 0:00 → now). */
+function crowdWindow(view, back, now) {
+  if (view === '24h') return { start: now - (back + 1) * DAY, end: now - back * DAY };
+  if (view === 'week') { const start = weekStart(now) - back * 7 * DAY; return { start, end: start + 7 * DAY }; }
+  if (view === 'month') return { start: monthStart(now, back), end: monthStart(now, back - 1) };
+  const start = dayStart(now) - back * DAY;
+  return { start, end: back ? start + DAY : now };
+}
+
+function crowdTitle(view, back, { start, end }) {
+  if (view === '24h') return back ? `24 h to ${dayLabel(end)} ${clock(end % DAY)}` : 'Last 24 h';
+  if (view === 'week') return `${dateLabel(start, { day: 'numeric', month: 'short' })} – ${dateLabel(end - DAY, { day: 'numeric', month: 'short' })}`;
+  if (view === 'month') return dateLabel(start, { month: 'long', year: 'numeric' });
+  return back === 0 ? 'Today' : back === 1 ? 'Yesterday' : dayLabel(start);
+}
+
+/* Typical day for `day`'s weekday: per hour, mean of each earlier same-weekday's mean (13 weeks). */
+function typicalDay(series, day) {
+  const hours = new Map();
+  for (const [m, count] of series) {
+    const back = day - dayStart(m);
+    if (back <= 0 || back > 91 * DAY || back % (7 * DAY)) continue;
+    const hour = Math.floor((m % DAY) / 60);
+    const dates = hours.get(hour) || new Map();
+    dates.set(back, [...(dates.get(back) || []), count]);
+    hours.set(hour, dates);
+  }
+  const avg = values => values.reduce((a, b) => a + b, 0) / values.length;
+  return [...hours.entries()].sort((a, b) => a[0] - b[0])
+    .map(([hour, dates]) => [day + hour * 60 + 30, Math.round(avg([...dates.values()].map(avg)) * 10) / 10]);
+}
+
+/* Month view averages readings per hour to keep the line readable. */
+function hourlyMeans(points) {
+  const hours = new Map();
+  for (const [m, count] of points) { const h = Math.floor(m / 60) * 60; hours.set(h, [...(hours.get(h) || []), count]); }
+  return [...hours.entries()].map(([h, values]) => [h + 30, Math.round(values.reduce((a, b) => a + b, 0) / values.length * 10) / 10]);
+}
+
+function axisTicks(view, start, end, width) {
+  // Week labels sit mid-day; renderAttendance draws the midnight separators.
+  if (view === 'week') return Array.from({ length: 7 }, (_, i) => [start + i * DAY + DAY / 2, dateLabel(start + i * DAY, { weekday: 'short', day: 'numeric' })]);
+  if (view === 'month') {
+    const ticks = [];
+    for (let m = start; m < end; m += 7 * DAY) ticks.push([m, dateLabel(m, { day: 'numeric', month: 'short' })]);
+    return ticks;
+  }
+  const hours = (end - start) / 60;
+  const step = [1, 2, 3, 4, 6, 12].find(s => hours / s <= width / 55) || 12;
+  const ticks = [];
+  for (let m = Math.ceil(start / (step * 60)) * step * 60; m <= end; m += step * 60) ticks.push([m, clock(m % DAY)]);
+  return ticks;
+}
+
 function renderAttendance(crowd) {
   const box = document.getElementById('chart');
-  const readings = crowd.readings.map(r => [minutesOf(r.time), r.count]);
-  // At most the last 16 hours, so a stray overnight reading doesn't stretch the axis.
-  const today = readings.filter(([m]) => m >= (readings.at(-1)?.[0] ?? 0) - 16 * 60);
-  const typical = crowd.typical.map(t => [t.hour * 60 + 30, t.count]);
-  const all = [...today, ...typical];
-  if (!all.length) {
-    box.replaceChildren(el('p', 'empty', 'No readings yet.'));
+  const series = crowd.series || [];
+  const now = crowd.local_now;
+  const { view, back } = crowdView;
+  const window_ = crowdWindow(view, back, now);
+  const { start, end } = window_;
+  document.querySelectorAll('.segmented button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
+  document.getElementById('crowd-title').textContent = crowdTitle(view, back, window_);
+  document.getElementById('crowd-prev').disabled = !series.length || series[0][0] >= start;
+  document.getElementById('crowd-next').disabled = back === 0;
+  const raw = series.filter(([m]) => m >= start && m < end);
+  const points = view === 'month' ? hourlyMeans(raw) : raw;
+  const typical = view === 'today' ? typicalDay(series, start).filter(([m]) => m < end) : [];
+  document.getElementById('legend-day').textContent = view === 'today' ? crowdTitle(view, back, window_) : 'Check-ins';
+  const typicalKey = document.getElementById('legend-typical');
+  typicalKey.hidden = typical.length < 2;
+  typicalKey.textContent = `Typical ${dateLabel(start, { weekday: 'long' })}`;
+  const stats = document.getElementById('crowd-stats');
+  if (raw.length) {
+    const peak = raw.reduce((best, point) => point[1] > best[1] ? point : best);
+    const when = view === 'today' ? clock(peak[0] % DAY) : `${dayLabel(peak[0])} ${clock(peak[0] % DAY)}`;
+    stats.textContent = `Peak ${peak[1]} at ${when} · ${raw.length} readings${view === 'month' ? ' · hourly averages' : ''}`;
+  } else stats.textContent = '';
+  if (!points.length && typical.length < 2) {
+    box.replaceChildren(el('p', 'empty', 'No readings in this period.'));
     return;
   }
-  const start = Math.floor(Math.min(...all.map(p => p[0])) / 60) * 60;
-  const end = Math.max(start + 120, Math.ceil(Math.max(...all.map(p => p[0])) / 60) * 60);
-  const chart = frame(box, niceTop(Math.max(...all.map(p => p[1]))), { label: 'Reported check-ins over the day' });
-  const x = m => chart.L + (m - start) / (end - start) * (chart.W - chart.L - chart.R);
-  const step = (end - start) / 60 > (chart.W < 420 ? 4 : 8) ? 120 : 60;
-  for (let m = start; m <= end; m += step) chart.svg.append(svgText(x(m), chart.H - 6, clock(m), { 'text-anchor': 'middle' }));
-  // A gap of more than an hour between readings breaks the line instead of bridging it.
-  const path = points => points.map(([m, v], i) => `${i && m - points[i - 1][0] <= 60 ? 'L' : 'M'}${x(m).toFixed(1)},${chart.y(v).toFixed(1)}`).join(' ');
-  if (typical.length > 1) chart.svg.append(svgEl('path', { d: path(typical), class: 'typical' }));
-  if (today.length) {
-    let run = [];
-    for (const point of [...today, null]) {
-      if (run.length && (!point || point[0] - run.at(-1)[0] > 60)) {
-        chart.svg.append(svgEl('path', { d: `${path(run)} L${x(run.at(-1)[0])},${chart.y(0)} L${x(run[0][0])},${chart.y(0)} Z`, class: 'area' }));
-        run = [];
-      }
-      if (point) run.push(point);
-    }
-    chart.svg.append(svgEl('path', { d: path(today), class: 'line' }));
-    const [m, v] = today.at(-1);
+  const all = [...points, ...typical];
+  const chart = frame(box, niceTop(Math.max(...all.map(p => p[1]))), { label: `Reported check-ins, ${crowdTitle(view, back, window_)}` });
+  const axisEnd = Math.max(end, start + 60);
+  const x = m => chart.L + (m - start) / (axisEnd - start) * (chart.W - chart.L - chart.R);
+  for (const [m, label] of axisTicks(view, start, axisEnd, chart.W)) chart.svg.append(svgText(x(m), chart.H - 6, label, { 'text-anchor': 'middle' }));
+  if (view === 'week') for (let m = start + DAY; m < end; m += DAY) chart.svg.append(svgEl('line', { x1: x(m), x2: x(m), y1: chart.T, y2: chart.H - chart.B, class: 'grid' }));
+  // Gaps longer than an hour (or two buckets) break the line instead of bridging it.
+  const gap = view === 'month' ? 120 : 60;
+  const runs = list => list.reduce((acc, point, i) => { if (!i || point[0] - list[i - 1][0] > gap) acc.push([]); acc.at(-1).push(point); return acc; }, []);
+  const path = run => run.map(([m, v], i) => `${i ? 'L' : 'M'}${x(m).toFixed(1)},${chart.y(v).toFixed(1)}`).join(' ');
+  for (const run of runs(typical)) if (run.length > 1) chart.svg.append(svgEl('path', { d: path(run), class: 'typical' }));
+  for (const run of runs(points)) {
+    chart.svg.append(svgEl('path', { d: `${path(run)} L${x(run.at(-1)[0])},${chart.y(0)} L${x(run[0][0])},${chart.y(0)} Z`, class: 'area' }));
+    chart.svg.append(svgEl('path', { d: path(run), class: 'line' }));
+  }
+  if (points.length && back === 0 && view !== 'month') {
+    const [m, v] = points.at(-1);
     chart.svg.append(svgEl('circle', { cx: x(m), cy: chart.y(v), r: 4, class: 'dot' }));
   }
-  const typicalAt = minutes => typical.find(([m]) => Math.floor(m / 60) === Math.floor(minutes / 60))?.[1];
-  const points = today.length ? today : typical;
-  crosshair(chart, points.map(([m]) => x(m)), index => {
-    const [m, v] = points[index];
+  const typicalAt = m => typical.find(([t]) => Math.floor(t / 60) === Math.floor(m / 60))?.[1];
+  const hover = points.length ? points : typical;
+  crosshair(chart, hover.map(([m]) => x(m)), index => {
+    const [m, v] = hover[index];
+    const time = view === 'month' ? `${clock(m % DAY - 30)}–${clock(m % DAY + 30)}` : clock(m % DAY);
+    const title = view === 'today' ? (points.length ? time : `${clock(m % DAY - 30)}–${clock(m % DAY + 30)}`) : `${dayLabel(m)} ${time}`;
+    const rows = points.length ? [[v, view === 'month' ? 'avg checked in' : 'checked in', 'today']] : [];
     const usual = typicalAt(m);
-    const rows = today.length ? [[v, 'checked in', 'today']] : [];
-    if (usual !== undefined) rows.push([usual, `typical ${crowd.weekday || ''}`.trim(), 'typical']);
-    return { title: today.length ? clock(m) : `${clock(m - 30)}–${clock(m + 30)}`, rows, y: chart.y(v) };
+    if (usual !== undefined) rows.push([usual, `typical ${dateLabel(start, { weekday: 'long' })}`, 'typical']);
+    return { title, rows, y: chart.y(v) };
   });
 }
 
@@ -187,10 +269,6 @@ function renderGym(crowd) {
   const alert = document.getElementById('polling-alert');
   alert.hidden = !broken;
   if (broken) alert.textContent = `Gym check-ins stopped updating ${ago(health.last_success_at)}${health.error ? ` (gym API: ${health.error})` : ''}. Crowd forecasts are going stale.`;
-  document.getElementById('legend-day').textContent = crowd.day || 'Today';
-  const typical = document.getElementById('legend-typical');
-  typical.hidden = crowd.typical.length < 2;
-  typical.textContent = `Typical ${crowd.weekday || ''}`.trim();
   renderAttendance(crowd);
 }
 
@@ -521,6 +599,11 @@ window.addEventListener('hashchange', showTab);
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(showTab, 150); });
 document.getElementById('refresh').addEventListener('click', refresh);
+document.querySelectorAll('.segmented button').forEach(button => button.addEventListener('click', () => {
+  crowdView.view = button.dataset.view; crowdView.back = 0; renderAttendance(state.crowd);
+}));
+document.getElementById('crowd-prev').addEventListener('click', () => { crowdView.back += 1; renderAttendance(state.crowd); });
+document.getElementById('crowd-next').addEventListener('click', () => { crowdView.back = Math.max(0, crowdView.back - 1); renderAttendance(state.crowd); });
 refresh();
 // Live state refreshes itself; the demo is static.
 setInterval(() => live && !document.hidden && refresh(), 60000);
