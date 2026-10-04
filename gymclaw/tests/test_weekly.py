@@ -120,6 +120,27 @@ def test_separate_calendar_write_authority_and_pause_cannot_be_undone_by_callbac
     assert value["enabled"] and not value["calendar_writes_enabled"]
 
 
+
+def test_relocate_rebinds_paused_runtime_to_new_deployment(engine, capsys, tmp_path):
+    provider = FakeRuntime()
+    runtime.sync_automations(engine, provider, now=SUNDAY, recipient="123", project_root=Path("/old/gymclaw"), python="/old/python",
+        allow_runtime_changes=True, allow_messages=True, template_id="short")
+    args = ["--db-url", str(engine.url), "runtime"]
+    assert main(args + ["relocate"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "RUNTIME_NOT_PAUSED"
+    assert main(args + ["pause"]) == 0
+    assert main(args + ["relocate", "--project-root", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert main(args + ["resume", "--allow-runtime-changes", "--allow-messages"]) == 0
+    capsys.readouterr()
+    # New host starts with an empty scheduler; old-host jobs stay behind.
+    moved = FakeRuntime()
+    runtime.sync_automations(engine, moved, now=SUNDAY, recipient="123", project_root=tmp_path,
+        allow_runtime_changes=True, allow_messages=True)
+    assert all(spec.cwd == str(tmp_path) for spec in moved.created)
+    with Session(engine) as db:
+        assert db.get(RuntimeSettings, 1).project_root == str(tmp_path)
+
 def test_generic_outbox_dedup_and_pending_calendar_ack_superseded(engine):
     with Session(engine) as db, db.begin():
         first = AgentEvent(type="calendar.update_briefing", created_at=SUNDAY)
