@@ -34,10 +34,10 @@ def test_cli_full_fake_workout_and_restart(tmp_path):
         assert code == 0, response
         return response
 
-    command("log-set", 30, "warmup", "--text", "50x8", "--set-type", "WARMUP")
-    first = command("log-set", 60, "bench-1", "--text", "80x10")
+    command("log-set", 30, "warmup", "--text", "8x50", "--set-type", "WARMUP")
+    first = command("log-set", 60, "bench-1", "--text", "10x80")
     assert first["data"]["status"] == "RESTING"
-    assert first == command("log-set", 61, "bench-1", "--text", "80x10")
+    assert first == command("log-set", 61, "bench-1", "--text", "10x80")
     assert run(tmp_path, "notifications", "pending")[1]["data"][0]["id"] == first["data"]["rest_job"]["id"]
     due = run(tmp_path, "notifications", "due", "--now", (NOW + timedelta(seconds=210)).isoformat())[1]
     assert due["data"]["processed"] == 1
@@ -54,7 +54,7 @@ def test_cli_full_fake_workout_and_restart(tmp_path):
     assert retry["data"]["substitution_options"] == ["db-fly"]
     swapped = command("substitute", 320, "swap", "--exercise-id", fly_id, "--substitute-id", "db-fly")
     assert swapped["data"]["active_exercise"]["exercise_id"] == "db-fly"
-    command("log-set", 360, "db-fly", "--text", "12x10")
+    command("log-set", 360, "db-fly", "--text", "10x12")
     final = command("finish", 380, "finish")
     assert final["data"]["completed_sets"] == final["data"]["planned_sets"] == 4
     assert final["data"]["substitutions"] == 1
@@ -82,8 +82,8 @@ def test_cli_workout_errors_are_json(tmp_path):
     for args, expected in [
         (("workout", "start", "--template-id", "missing", "--request-id", "start"), "INVALID_INPUT"),
         (("workout", "current", "--workout-id", "missing"), "WORKOUT_NOT_FOUND"),
-        (("workout", "log-set", "--workout-id", "missing", "--text", "80x9", "--weight", "80", "--request-id", "log"), "INVALID_INPUT"),
-        (("workout", "log-set", "--workout-id", "missing", "--text", "80x9 maybe 10", "--request-id", "log"), "WORKOUT_NOT_FOUND"),
+        (("workout", "log-set", "--workout-id", "missing", "--text", "9x80", "--weight", "80", "--request-id", "log"), "INVALID_INPUT"),
+        (("workout", "log-set", "--workout-id", "missing", "--text", "9x80 maybe 10", "--request-id", "log"), "WORKOUT_NOT_FOUND"),
         (("workout", "finish", "--workout-id", "missing"), "INVALID_INPUT"),
     ]:
         code, response = run(tmp_path, *args)

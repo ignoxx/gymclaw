@@ -238,9 +238,9 @@ WORKOUT_ID=$(python -m gymclaw.cli workout start --template-id upper-a \
   --now 2026-10-12T20:00:00+02:00 --request-id demo-start \
   | python -c 'import json,sys; print(json.load(sys.stdin)["data"]["workout_id"])')
 python -m gymclaw.cli workout log-set --workout-id "$WORKOUT_ID" \
-  --text '50x8' --set-type WARMUP --now 2026-10-12T20:00:40+02:00 --request-id demo-warmup
+  --text '8x50' --set-type WARMUP --now 2026-10-12T20:00:40+02:00 --request-id demo-warmup
 python -m gymclaw.cli workout log-set --workout-id "$WORKOUT_ID" \
-  --text '80x9' --now 2026-10-12T20:01:20+02:00 --request-id demo-bench-1
+  --text '9x80' --now 2026-10-12T20:01:20+02:00 --request-id demo-bench-1
 python -m gymclaw.cli notifications pending
 python -m gymclaw.cli notifications due --now 2026-10-12T20:03:50+02:00
 python -m gymclaw.cli workout current --workout-id "$WORKOUT_ID"
@@ -284,7 +284,7 @@ first primary warm-up, and does not lower the full-volume progression threshold.
 Compression uses configured or learned set durations, refreshed again at workout start.
 
 Warm-up never counts toward volume/progression. Working logs while warm-up is pending
-fail with `WARMUP_REQUIRED`. Set parsing accepts `80x9`, `80kg x9`, `9 reps at 80`;
+fail with `WARMUP_REQUIRED`. Set parsing accepts `9x80`, `9x80kg`, `9 reps at 80`;
 ambiguous input fails with a concise question. Structured `--weight`/`--reps`/`--rir`
 are also supported. Logging early cancels stale rest jobs. `notifications due` is an
 idempotent local debug dispatcher; activated runtime callbacks use separate durable

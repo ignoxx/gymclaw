@@ -140,7 +140,7 @@ def after_change(db: Session, workout: WorkoutSession, now: datetime, request_id
 
 
 def handle_text(db: Session, text: str, *, now: datetime, request_id: str) -> dict:
-    """Typed '40x10' during a workout logs a working set. Anything else goes to the agent."""
+    """Typed '10x40' during a workout logs a working set. Anything else goes to the agent."""
     now = utc(now)
     workout = active_workout(db)
     if workout is None or workout.status not in {"SET_ACTIVE", "RESTING"}:

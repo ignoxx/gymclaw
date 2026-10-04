@@ -234,7 +234,7 @@ export function registerCoach(api, { run, telegram } = {}) {
       "Drive the live workout in Telegram. Sends exercise cards (image, target, quick buttons) to the owner directly, " +
       "so after calling reply NO_REPLY unless the owner asked a question. Actions: status (read the running workout, sends " +
       "nothing), preview (next or given planned session: one image with every exercise + plan; use for \"what's on today\"), " +
-      "log (text like \"40x10\": logs a set), start (template_id, optional " +
+      "log (text like \"10x40\" = 10 reps at 40 kg: logs a set), start (template_id, optional " +
       "planned_session_id), card (resend current card), swap (equipment taken: show same-muscle alternatives), " +
       "later (do current exercise later), next (move on to the next exercise), end (end early, save, show summary).",
     parameters: {
@@ -244,7 +244,7 @@ export function registerCoach(api, { run, telegram } = {}) {
       properties: {
         action: { type: "string", enum: ACTIONS },
         template_id: { type: "string" },
-        text: { type: "string", description: "Set for action log, e.g. 40x10" },
+        text: { type: "string", description: "Set for action log, reps first, e.g. 10x40" },
         planned_session_id: { type: "string" },
       },
     },

@@ -3,7 +3,7 @@ import test from "node:test";
 import { SET_LIKE, createCoach, createSyncer, registerCoach, withRest } from "./runtime.mjs";
 
 const OWNER = "123456789";
-const card = (text, extra = {}) => ({ text, photo: null, buttons: [[{ text: "✅ 40 kg × 10", data: "gc:log:abcd1234:40:10" }]], rest_until: null, ...extra });
+const card = (text, extra = {}) => ({ text, photo: null, buttons: [[{ text: "✅ 10 × 40 kg", data: "gc:log:abcd1234:40:10" }]], rest_until: null, ...extra });
 
 function fakeTelegram() {
   const calls = [];
@@ -66,9 +66,9 @@ test("typed set: react, ack on the set card, countdown, then countdown deleted a
   const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers, onRestOver });
   await coach.apply({ cards: [card("Bench · set 1", { kind: "set" })] });
   const rest = card("until Bench set 2/2", { rest_until: "2026-10-02T18:01:30Z", kind: "rest", buttons: [[{ text: "⏭ Skip", data: "gc:skip:abcd1234" }]] });
-  await coach.apply({ react: "👍", ack: "✅ 40 kg × 10", cards: [rest] }, { inboundMessageId: 7 });
+  await coach.apply({ react: "👍", ack: "✅ 10 × 40 kg", cards: [rest] }, { inboundMessageId: 7 });
   assert.deepEqual(calls[1], ["react", OWNER, 7, "👍"]);
-  assert.deepEqual(calls[2], ["edit", OWNER, 100, "Bench · set 1\n✅ 40 kg × 10", []]);
+  assert.deepEqual(calls[2], ["edit", OWNER, 100, "Bench · set 1\n✅ 10 × 40 kg", []]);
   assert.equal(calls[3][2], "⏱ 1:30 until Bench set 2/2");
   now += 5000;
   await timers.tick();
@@ -115,7 +115,7 @@ test("hooks ignore non-owners and non-set chat; owner sets and taps go to the CL
   const { calls, registered } = plugin(async (args) => (seen.push(args), { handled: true, react: "👍", cards: [card("Next")] }));
   registered.hooks.get("message_received")({ content: "12x40kg", messageId: "77" });
   const claim = registered.hooks.get("before_dispatch");
-  assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: "1", content: "80x9", timestamp: 5 }), undefined);
+  assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: "1", content: "9x80", timestamp: 5 }), undefined);
   assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: OWNER, content: "it's occupied", timestamp: 6 }), undefined);
   assert.deepEqual(await claim({ channel: "telegram", isGroup: false, senderId: `telegram:${OWNER}`, content: "12x40kg", timestamp: 7 }), { handled: true });
   assert.deepEqual(seen[0], ["coach", "text", "--text", "12x40kg", "--request-id", "tg-msg:77"]);
@@ -128,7 +128,7 @@ test("hooks ignore non-owners and non-set chat; owner sets and taps go to the CL
 
 test("unhandled CLI result falls through to the agent", async () => {
   const { registered } = plugin(async () => ({ handled: false }));
-  assert.equal(await registered.hooks.get("before_dispatch")({ channel: "telegram", isGroup: false, senderId: OWNER, content: "80x9", timestamp: 8 }), undefined);
+  assert.equal(await registered.hooks.get("before_dispatch")({ channel: "telegram", isGroup: false, senderId: OWNER, content: "9x80", timestamp: 8 }), undefined);
 });
 
 test("overlapping syncs collapse into one follow-up run", async () => {
