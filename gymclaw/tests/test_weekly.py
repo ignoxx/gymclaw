@@ -40,7 +40,7 @@ def test_weekly_plan_retry_one_briefing_and_no_duplicate_calendar_intent(engine)
         assert result["audit"]["completed_workouts"] == 0
         assert len(pending_writes(db)) == 3
         text = weekly.briefing(db, datetime(2026, 10, 12).date(), result["audit"], published=False)
-        assert "Local plan only" in text and "Mon" in text and "Last week: 0/3" in text
+        assert "Local plan only" in text and "Mon" in text and "Last week 0/3" in text
         event_id = result["event_id"]
     with Session(engine) as db, db.begin():
         retry = weekly.weekly_plan(db, "short", now=SUNDAY + timedelta(minutes=1))
@@ -48,6 +48,22 @@ def test_weekly_plan_retry_one_briefing_and_no_duplicate_calendar_intent(engine)
         assert len(db.scalars(select(PlannedSession)).all()) == 3
         assert len(pending_writes(db)) == 3
         assert len(db.scalars(select(AgentEvent).where(AgentEvent.type == "planning.weekly_briefing")).all()) == 1
+
+
+def test_briefing_hides_uncertain_crowd_and_lists_new_targets(engine):
+    with Session(engine) as db, db.begin():
+        result = weekly.weekly_plan(db, "short", now=SUNDAY)
+        sure, unsure, _ = db.scalars(select(PlannedSession).order_by(PlannedSession.planned_start_at)).all()
+        sure.crowd_prediction, sure.crowd_confidence = 0.9, 0.7
+        unsure.crowd_prediction, unsure.crowd_confidence = 0.1, 0.3
+        db.add(AgentEvent(type="progression.updated", created_at=SUNDAY - timedelta(days=2),
+            payload_json={"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"}))
+        db.flush()
+        text = weekly.briefing(db, datetime(2026, 10, 12).date(), result["audit"], published=True)
+    assert text.startswith("🏋️ Your week · Oct 12–18")
+    assert "🔴 Packed" in text and "Empty" not in text and "score" not in text
+    assert "can still move if your calendar changes" in text
+    assert text.endswith("🎯 New targets: bench 82.5 kg (+2.5)")
 
 
 def test_rolling_watch_marks_elapsed_unstarted_session_missed_not_completed(engine):

@@ -239,24 +239,74 @@ def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     return {"week_start": next_week.isoformat(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week), "event_id": event.id}
 
 
+CROWD_EMOJI = {"Empty": "🟢", "Fine": "🟡", "Busy": "🟠", "Packed": "🔴"}
+# Below this the crowd model is mostly guessing; the briefing leaves crowd out instead.
+CROWD_MIN_CONFIDENCE = 0.5
+
+
+def streak(db: Session, week_start: date, target: int, zone: ZoneInfo) -> int:
+    """Consecutive weeks, ending with week_start, that hit the weekly session target."""
+    counts: dict[date, int] = {}
+    for started in db.scalars(select(WorkoutSession.started_at).where(WorkoutSession.status == "PLAN_UPDATED", WorkoutSession.started_at.is_not(None))):
+        week = week_of(started, zone)
+        counts[week] = counts.get(week, 0) + 1
+    weeks = 0
+    while target and counts.get(week_start - timedelta(days=7 * weeks), 0) >= target:
+        weeks += 1
+    return weeks
+
+
+def new_targets(db: Session, week_start: date, zone: ZoneInfo) -> list[str]:
+    """'Bench 82.5 kg (+2.5)' for every exercise that progressed during week_start's week."""
+    latest: dict[str, dict] = {}
+    for event in db.scalars(select(AgentEvent).where(AgentEvent.type == "progression.updated").order_by(AgentEvent.created_at)):
+        if week_of(event.created_at, zone) == week_start:
+            latest[event.payload_json["exercise_id"]] = event.payload_json
+    targets = []
+    for decision in latest.values():
+        row = db.scalar(select(WorkoutExercise).where(WorkoutExercise.workout_session_id == decision["workout_id"], WorkoutExercise.exercise_id == decision["exercise_id"]).limit(1))
+        name = row.config_json["name"] if row else decision["exercise_id"]
+        targets.append(f"{name} {decision['next_weight']:g} kg (+{decision['next_weight'] - decision['previous_weight']:g})")
+    return targets
+
+
 def briefing(db: Session, week_start: date, report: dict, *, published: bool) -> str:
+    """Sunday Telegram message: last week's result, next week's sessions and new progression targets.
+    Plain text plus emoji (no markdown) so it renders the same on every delivery path."""
+    from gymclaw.services.crowd import feel
     zone = ZoneInfo(get_profile(db).timezone)
     plan = get_week(db, week_start)
     state = db.get(CalendarSyncState, 1)
     demo = report.get("demo") or state is not None and state.source == "fixture" or any(s["workout_plan"].get("crowd_source") == "demo_fixture" for s in plan["sessions"])
-    lines = ["GYMCLAW · NEXT WEEK" + (" · DEMO" if demo else "")]
+    end = week_start + timedelta(days=6)
+    span = f"{week_start:%b} {week_start.day}–{end.day}" if week_start.month == end.month else f"{week_start:%b} {week_start.day} – {end:%b} {end.day}"
+    lines = [f"🏋️ Your week · {span}" + (" · DEMO" if demo else "")]
     if not published:
-        lines.append("Local plan only — calendar publication not confirmed.")
+        lines.append("⚠️ Local plan only — calendar publication not confirmed.")
+    previous = date.fromisoformat(report["week_start"])
+    done, target = report["completed_workouts"], report["target_sessions"]
+    weeks = streak(db, previous, target, zone)
+    recap = f"Last week {done}/{target}" + (" ✅" if target and done >= target else "") + (f" · {weeks} weeks in a row 🔥" if weeks >= 2 else "")
+    lines += ["", recap, ""]
+    sessions, flexible = [], []
     for session in plan["sessions"]:
         if session["status"] not in {"TENTATIVE", "COMMITTED"}:
             continue
-        at = datetime.fromisoformat(session["start"]).astimezone(zone)
-        name = session["workout_plan"].get("template", {}).get("name", "Workout")
-        tentative = " · tentative" if session["status"] == "TENTATIVE" else ""
-        lines.append(f"{at:%a %H:%M} · {name}{tentative}")
-        if session["crowd"] is not None:
-            lines.append(f"Crowd personal score: {session['crowd']:.2f}/1 · heuristic confidence {session['confidence'] or 0:.0%}")
-    if len(lines) <= (1 if published else 2):
-        lines.append("No valid sessions. Recovery/calendar constraints kept.")
-    lines.append(f"Last week: {report['completed_workouts']}/{report['target_sessions']} completed.")
+        start = datetime.fromisoformat(session["start"])
+        at = start.astimezone(zone)
+        minutes = round((datetime.fromisoformat(session["expected_finish"]) - start).total_seconds() / 60)
+        parts = [f"{at:%a %H:%M}", session["workout_plan"].get("template", {}).get("name", "Workout"), f"~{minutes} min"]
+        label = feel(session["crowd"]) if (session["confidence"] or 0) >= CROWD_MIN_CONFIDENCE else None
+        if label:
+            parts.append(f"{CROWD_EMOJI[label]} {label}")
+        sessions.append(" · ".join(parts))
+        if session["status"] == "TENTATIVE":
+            flexible.append(f"{at:%a}")
+    lines += sessions or ["No sessions fit this week — calendar/recovery constraints kept."]
+    if flexible:
+        # commit_upcoming locks sessions 48 h ahead; until then replanning may still move them.
+        days = flexible[0] if len(flexible) == 1 else ", ".join(flexible[:-1]) + " & " + flexible[-1]
+        lines += ["", f"{days} can still move if your calendar changes."]
+    if targets := new_targets(db, previous, zone):
+        lines += ["", "🎯 New targets: " + ", ".join(targets)]
     return "\n".join(lines)
