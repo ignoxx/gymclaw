@@ -41,6 +41,11 @@ services:
     entrypoint: ["tini", "-s", "--"]
     command: [".venv/bin/python", "-m", "gymclaw.dashboard", "--db-url", "sqlite:////opt/gymclaw/data/gymclaw.db",
       "--host", "0.0.0.0", "--port", "8766", "--allowed-host", "${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}"]
+    # Base image's check pings the OpenClaw gateway, which this service doesn't run.
+    healthcheck:
+      test: [CMD, .venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/', timeout=5)"]
+      interval: 60s
+      timeout: 10s
     volumes:
       - gymclaw-data:/opt/gymclaw/data:ro
     networks: [internal]

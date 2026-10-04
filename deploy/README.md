@@ -46,9 +46,11 @@ the agent.
 3. Set the environment variables: `GYMCLAW_TELEGRAM_USER_ID`, `TELEGRAM_BOT_TOKEN`,
    `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL` and
    `EGRESS_EXTRA_HOSTS` (for example the personal calendar feed host).
-4. Add a scheduled task on the `gymclaw` service: `backup.sh`, daily (for example
+4. Turn off **Escape special characters in labels** (Advanced settings) so the
+   dashboard's Traefik labels get `GYMCLAW_DASHBOARD_HOST` filled in.
+5. Add a scheduled task on the `gymclaw` service: `backup.sh`, daily (for example
    `30 3 * * *`).
-5. Set a spending limit on the OpenRouter key.
+6. Set a spending limit on the OpenRouter key.
 
 Plain Docker works the same way: `docker compose up -d --build` with an `.env`
 file. Compose creates the internal network itself.
