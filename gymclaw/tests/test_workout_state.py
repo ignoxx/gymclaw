@@ -35,14 +35,14 @@ def test_persistent_state_warmup_and_early_set_cancel(engine):
         initial = current(db, workout_id, now=NOW)
         assert initial["active_exercise"]["set_type"] == "WARMUP"
         assert initial["eta"] == (NOW + timedelta(seconds=220)).isoformat()
-        log_set(db, workout_id, parse_set("50x8", set_type="WARMUP"), now=NOW + timedelta(seconds=30), request_id="warmup")
-        first = log_set(db, workout_id, parse_set("80x9"), now=NOW + timedelta(seconds=60), request_id="set-1")
+        log_set(db, workout_id, parse_set("8x50", set_type="WARMUP"), now=NOW + timedelta(seconds=30), request_id="warmup")
+        first = log_set(db, workout_id, parse_set("9x80"), now=NOW + timedelta(seconds=60), request_id="set-1")
         job_id = first["data"]["rest_job"]["id"]
         assert first["data"]["status"] == "RESTING"
         assert first["data"]["active_exercise"]["set_number"] == 2
     with Session(engine) as db, db.begin():
         assert current(db, workout_id, now=NOW + timedelta(seconds=65))["rest_job"]["id"] == job_id
-        result = log_set(db, workout_id, parse_set("80x10"), now=NOW + timedelta(seconds=80), request_id="set-2")
+        result = log_set(db, workout_id, parse_set("10x80"), now=NOW + timedelta(seconds=80), request_id="set-2")
         assert result["data"]["status"] == "WORKOUT_COMPLETE"
         assert db.get(NotificationJob, job_id).status == "CANCELLED"
         assert result["data"]["rest_job"] is None

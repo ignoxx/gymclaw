@@ -1261,7 +1261,7 @@ Example:
 Bench Press
 
 Warm-up
-50 kg × 8
+8 × 50 kg
 
 This does not count toward working volume.
 ```
@@ -1319,7 +1319,7 @@ Estimated finish: 20:47
 BENCH PRESS
 
 Warm-up
-50 kg × 8
+8 × 50 kg
 
 Last working session:
 80 × 10
@@ -1343,7 +1343,7 @@ Preserve the repository/assets' required attribution/license obligations.
 User:
 
 ```text
-80x9
+9x80
 ```
 
 Parse as:
@@ -1358,8 +1358,8 @@ Parse as:
 Also allow:
 
 ```text
-80 x 9
-80kg x9
+9 x 80
+9x80kg
 9 reps at 80
 ```
 
@@ -1379,7 +1379,7 @@ When a working set is logged:
 6. reply immediately:
 
 ```text
-✓ 80 kg × 9 logged.
+✓ 9 × 80 kg logged.
 
 Rest.
 ```
@@ -2195,7 +2195,7 @@ Warm-up 50 × 8
 Log:
 
 ```text
-80x9
+9x80
 ```
 
 GymClaw:
@@ -2428,7 +2428,7 @@ then workout is compressed to <=45 minutes.
 
 ```text
 Given active bench exercise
-when user sends "80x9"
+when user sends "9x80"
 then working set is stored correctly
 and rest timer starts.
 ```
@@ -2625,7 +2625,7 @@ These should not be reopened during the hackathon unless technically impossible:
 ✓ OpenClaw is the agent runtime.
 ✓ NemoClaw is preferred as the NVIDIA deployment wrapper.
 ✓ Warm-up = one warm-up set before first primary movement by default.
-✓ Sets are logged as weight × reps.
+✓ Sets are logged as reps × weight.
 ✓ Logging a set starts an autonomous rest timer.
 ✓ Rest completion proactively triggers the next-set prompt.
 ✓ Machine-busy behavior first reorders, then substitutes.

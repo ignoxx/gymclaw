@@ -57,7 +57,7 @@ def test_typed_set_reacts_then_rest_card_then_fresh_set_card(db):
 
 def test_rest_over_closes_job_once_and_returns_fresh_card(db):
     from gymclaw.models import NotificationJob
-    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    coach.handle_text(db, "10x90", now=at(10), request_id="m1")
     assert coach.handle_rest_over(db, now=at(50))["cards"] == []  # still resting
     over = coach.handle_rest_over(db, now=at(101))
     assert over["rest_over"] and over["cleanup"] == "delete" and over["cards"][0]["kind"] == "set"
@@ -67,9 +67,9 @@ def test_rest_over_closes_job_once_and_returns_fresh_card(db):
 
 
 def test_finishing_an_exercise_goes_straight_to_the_next(db):
-    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    coach.handle_text(db, "10x90", now=at(10), request_id="m1")
     coach.handle_tap(db, "skip:" + coach.exercise_card(db, coach.active_workout(db), at(11))["buttons"][0][0]["data"].split(":")[2], now=at(12), request_id="cb")
-    nxt = coach.handle_text(db, "90x10", now=at(60), request_id="m2")["cards"][0]
+    nxt = coach.handle_text(db, "10x90", now=at(60), request_id="m2")["cards"][0]
     assert nxt["kind"] == "set" and nxt["text"].startswith("**Shoulder press**") and nxt["rest_until"] is None
 
 
@@ -105,7 +105,7 @@ def test_swap_is_remembered_in_the_template(db):
 
 
 def test_next_end_crowd_and_baseline_weight(db):
-    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    coach.handle_text(db, "10x90", now=at(10), request_id="m1")
     coach.handle_rest_over(db, now=at(101))
     moved = coach.handle_tap(db, buttons(coach.exercise_card(db, coach.active_workout(db), at(110)))["⏭ Next exercise"], now=at(112), request_id="cb-1")
     assert moved["cards"][0]["text"].startswith("**Shoulder press**")
@@ -121,7 +121,7 @@ def test_next_end_crowd_and_baseline_weight(db):
 def test_idle_workout_is_closed_and_keeps_logged_sets(db):
     from gymclaw.models import WorkoutSession
     from gymclaw.services.weekly import close_stale_workouts
-    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    coach.handle_text(db, "10x90", now=at(10), request_id="m1")
     assert close_stale_workouts(db, now=at(10) + timedelta(hours=2)) == []
     workout = coach.active_workout(db)
     assert close_stale_workouts(db, now=at(10) + timedelta(hours=3, seconds=1)) == [workout.id]
@@ -147,7 +147,7 @@ def test_session_preview_uses_current_plan_local_time_and_one_image(db, tmp_path
 
 
 def test_unknown_weight_offers_a_guess_from_the_same_movement(db):
-    coach.handle_text(db, "90x10", now=at(10), request_id="m1")
+    coach.handle_text(db, "10x90", now=at(10), request_id="m1")
     coach.handle_action(db, "end", now=at(60), request_id="end")
     # Renamed in the template (same illustration/movement), so no direct history.
     import_template(db, Template(id="push2", name="Push", exercises=[

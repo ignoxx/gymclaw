@@ -50,7 +50,7 @@ Use the `gymclaw_workout` tool. It sends cards (image, target, buttons) itself; 
 - "Next" / done with this exercise → `next`. "Enough for today" → `end`.
 - "What's on today / show Monday's exercises" → `{"action":"preview"}` (next session) or with
   `planned_session_id`. Never list exercises as plain text.
-- Owner typed a set to you (e.g. "37x10") → `{"action":"log","text":"37x10"}`.
+- Owner typed a set to you (e.g. "10x37") → `{"action":"log","text":"10x37"}`.
 - Lost the card → `card`. Need state (is one running, what's next) → `status` (sends nothing).
 
 Sets, swaps and rest timers from buttons or typed `10x40` (reps × weight) never reach you. For questions mid-workout,
