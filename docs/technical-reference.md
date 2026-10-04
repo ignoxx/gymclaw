@@ -389,6 +389,8 @@ runtime/message flags. Watcher/Sunday job subsequently publish only owned queued
 `runtime pause` blocks callbacks/messages and revokes writes; `runtime resume` requires
 explicit runtime/message flags and does not restore write authority. No global config
 changes. Activated calls reject simulated `--now`; offline previews/fixtures retain it.
+`runtime relocate` rebinds a paused DB to the current checkout and Python after a host
+move (see [deploy/README.md](../deploy/README.md)); `runtime sync` then recreates timers.
 
 `audit week --week-start YYYY-MM-DD` returns durable weekly performance totals.
 `runtime weekly --template-id ID --telegram-id OWNER_ID` is local planning/briefing preview
