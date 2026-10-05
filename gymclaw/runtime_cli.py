@@ -1,6 +1,6 @@
 """Repo-local autonomous callbacks. No installs or Gateway config edits."""
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import os
 import sys
 from pathlib import Path
@@ -15,7 +15,7 @@ from gymclaw.providers.google_calendar import google_provider
 from gymclaw.providers.mysports import MySportsProvider
 from gymclaw.providers.openclaw import OpenClawProvider, validate_route
 from gymclaw.services import crowd, personal_calendar, runtime, weekly
-from gymclaw.services.calendar import sync_calendar
+from gymclaw.services.calendar import sync_calendar, week_lineup
 from gymclaw.services.errors import DomainError
 from gymclaw.services.profile import get_profile
 from gymclaw.services.workout import emit, utc
@@ -209,7 +209,8 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                         alert = crowd.polling_alert(db, now=now)
                         if alert:
                             runtime.prepare_event_message(db, alert["event_id"], message=alert["message"], now=now, recipient=recipient, profile=provider.profile)
-                    hint = " ".join(h for h in (synced["user_message_hint"], personal["user_message_hint"]) if h) or None
+                    lineup = [week_lineup(db, date.fromisoformat(w), now=now) for w in synced["data"]["weeks"]] if synced["user_message_hint"] else []
+                    hint = " ".join(h for h in (synced["user_message_hint"], *lineup, personal["user_message_hint"]) if h) or None
                     if not hint and any(rolling.get(key) for key in ("changed", "created", "missed")):
                         hint = "Training plan updated. Recovery/calendar constraints kept."
                     if hint:

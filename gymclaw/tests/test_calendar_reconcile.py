@@ -87,7 +87,7 @@ def test_move_kept_reminders_replaced_other_sessions_replanned(setup):
         new_jobs = list(db.scalars(select(NotificationJob).where(NotificationJob.planned_session_id == moved.id, NotificationJob.status == "PENDING")))
         assert len(new_jobs) == 3 and all(j.due_at.date() == at(15).date() for j in new_jobs)
         assert db.get(PlannedSession, ids[2]).status == "CANCELLED"
-        assert result["data"]["changes"] and result["user_message_hint"]
+        assert result["user_message_hint"] == "Long moved to Thu 19:00. Long on Fri dropped: no slot left this week that fits your rest days and calendar."
         assert not result["data"]["remote_events_changed"]
     publish(engine, provider, NOW + timedelta(minutes=4))
     with Session(engine) as db, db.begin():
@@ -179,7 +179,7 @@ def test_all_day_travel_cancels_without_compressing_missed_volume(setup):
     with Session(engine) as db, db.begin():
         result = sync_calendar(db, provider, now=NOW + timedelta(minutes=3))
         assert all(db.get(PlannedSession, i).status == "CANCELLED" for i in ids)
-        assert "0/3" in result["user_message_hint"]
+        assert result["user_message_hint"].startswith("Long on Mon, Long on Wed, Long on Fri dropped")
         assert not db.scalars(select(PlannedSession).where(PlannedSession.status == "TENTATIVE")).all()
 
 
