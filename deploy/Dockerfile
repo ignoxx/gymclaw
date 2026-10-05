@@ -9,7 +9,10 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy UV_NO_CACHE=1
 WORKDIR /opt/gymclaw
 COPY pyproject.toml alembic.ini ./
 COPY gymclaw ./gymclaw
+# Precompile bytecode: the container is read-only, so without this every gymclaw-tool
+# call recompiles all imported modules (~3s per call).
 RUN uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -e . \
+    && .venv/bin/python -m compileall -q -j0 -x '/(test|tests|idlelib|lib2to3)/' /opt/python .venv gymclaw \
     && chmod -R a+rX /opt/python /opt/gymclaw
 
 COPY scripts/gymclaw-tool ./scripts/gymclaw-tool

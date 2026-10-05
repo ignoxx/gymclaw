@@ -13,6 +13,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?}
       GYMCLAW_MODEL: ${GYMCLAW_MODEL:-z-ai/glm-5.3-flash}
+      GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-inference-net/fp4}
       TZ: ${TZ:-Europe/Berlin}
       HTTP_PROXY: http://egress:3128
       HTTPS_PROXY: http://egress:3128

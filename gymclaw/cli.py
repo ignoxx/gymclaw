@@ -15,6 +15,7 @@ from gymclaw.db import make_engine, initialize
 from gymclaw.calendar_cli import calendar_command, publish_command
 from gymclaw.runtime_cli import register_parser as register_runtime_parser, runtime_command
 from gymclaw.crowd_cli import register_parser as register_crowd_parser, crowd_command
+from gymclaw.services.availability import affected_weeks
 from gymclaw.services.calendar import get_week
 from gymclaw.services.replanning import replan_weeks
 from gymclaw.services.profile import get_profile, update_profile
@@ -26,12 +27,14 @@ from gymclaw.services.templates import Template, get_template, import_template, 
 
 
 class Parser(argparse.ArgumentParser):
+    """Bad input becomes a JSON error that carries usage, so the agent can fix the call without exploring.
+    `--help` prints plain-text help and exits 0."""
     def error(self, message):
-        raise ValueError(message)
+        raise ValueError(f"{message}. {' '.join(self.format_usage().split())}")
 
 
 def parser():
-    root = Parser(description="GymClaw JSON domain tools", add_help=False)
+    root = Parser(description="GymClaw JSON domain tools")
     root.add_argument("--db-url", default=None)
     root.add_argument("--json", action="store_true", help="JSON is always enabled")
     groups = root.add_subparsers(dest="group", required=True, parser_class=Parser)
@@ -39,28 +42,32 @@ def parser():
     register_crowd_parser(groups)
     register_availability_parser(groups)
     register_coach_parser(groups)
-    db = groups.add_parser("db", add_help=False)
+    db = groups.add_parser("db")
     db.add_argument("operation", choices=["init"])
-    profile = groups.add_parser("profile", add_help=False)
+    profile = groups.add_parser("profile")
     profile.add_argument("operation", choices=["get", "update"])
     profile.add_argument("--data", help="JSON object with profile fields")
-    setup = groups.add_parser("onboarding", add_help=False)
+    profile.add_argument("--now", type=datetime.fromisoformat)
+    setup = groups.add_parser("onboarding")
     setup.add_argument("operation", choices=["status", "answer", "confirm-plan", "finish"])
     setup.add_argument("--answers", type=json.loads, help='JSON object, e.g. {"experience": "2 years"}')
     setup.add_argument("--profile", type=json.loads, help="JSON profile fields backing those answers")
     setup.add_argument("--template-id", action="append", help="Repeat in rotation order")
     setup.add_argument("--fingerprint")
     setup.add_argument("--request-id")
-    planning = groups.add_parser("schedule", aliases=["planning"], add_help=False)
+    planning = groups.add_parser("schedule", aliases=["planning"])
     planning.add_argument("operation", choices=["plan-week", "replan"])
     planning.add_argument("--week-start", type=date.fromisoformat, required=True)
     planning.add_argument("--now", type=datetime.fromisoformat)
     planning.add_argument("--fixture", type=Path, help="Explicit demo input JSON, not live data")
     planning.add_argument("--request-id")
     planning.add_argument("--template-id")
-    calendar = groups.add_parser("calendar", add_help=False)
-    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "pending-writes", "publish",
+    calendar = groups.add_parser("calendar")
+    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "move", "pending-writes", "publish",
         "personal-connect", "personal-sync", "personal-status", "personal-disconnect"])
+    calendar.add_argument("--session-id", help="move: session to move")
+    calendar.add_argument("--to", type=datetime.fromisoformat, help="move: exact start with offset; omit to pick the quietest valid slot")
+    calendar.add_argument("--day", type=date.fromisoformat, help="move: keep it on this date (YYYY-MM-DD)")
     calendar.add_argument("--calendar-id")
     calendar.add_argument("--url", help="Read-only personal ICS feed (webcal:// or https://)")
     calendar.add_argument("--url-file", type=Path, help="File holding the feed link; keeps it out of argv/history")
@@ -71,11 +78,11 @@ def parser():
     calendar.add_argument("--now", type=datetime.fromisoformat)
     calendar.add_argument("--fixture", type=Path)
     calendar.add_argument("--allow-writes", action="store_true")
-    template = groups.add_parser("template", add_help=False)
+    template = groups.add_parser("template")
     template.add_argument("operation", choices=["import", "get"])
     template.add_argument("--file", type=Path)
     template.add_argument("--template-id")
-    training = groups.add_parser("workout", add_help=False)
+    training = groups.add_parser("workout")
     training.add_argument("operation", choices=["start", "current", "alternatives", "log-set", "rest-complete", "machine-busy", "machine-free", "substitute", "next-exercise", "skip-warmup", "skip-exercise", "finish"])
     training.add_argument("--template-id")
     training.add_argument("--planned-session-id")
@@ -91,17 +98,17 @@ def parser():
     training.add_argument("--rir", type=float)
     training.add_argument("--set-type", choices=["WARMUP", "WORKING"], default="WORKING")
     training.add_argument("--reason")
-    report = groups.add_parser("audit", add_help=False)
+    report = groups.add_parser("audit")
     report.add_argument("operation", choices=["workout", "week"])
     report.add_argument("--workout-id")
     report.add_argument("--week-start", type=date.fromisoformat)
     report.add_argument("--now", type=datetime.fromisoformat)
-    inbox = groups.add_parser("events", add_help=False)
+    inbox = groups.add_parser("events")
     inbox.add_argument("operation", choices=["pending", "ack"])
     inbox.add_argument("--event-id")
     inbox.add_argument("--all", action="store_true", help="Include audit events the code already handled")
     inbox.add_argument("--now", type=datetime.fromisoformat)
-    jobs = groups.add_parser("notifications", add_help=False)
+    jobs = groups.add_parser("notifications")
     jobs.add_argument("operation", choices=["pending", "due"])
     jobs.add_argument("--now", type=datetime.fromisoformat)
     for command in (db, profile, setup, planning, calendar, template, training, report, inbox, jobs):
@@ -201,7 +208,9 @@ def main(argv=None) -> int:
                         changes = json.loads(args.data)
                         if not isinstance(changes, dict):
                             raise ValueError("Profile changes must be JSON object")
-                        data = update_profile(db, changes).model_dump(mode="json")
+                        # Sessions that no longer fit (e.g. a narrower time window) move right away.
+                        now = args.now or datetime.now(timezone.utc)
+                        data = update_profile(db, changes).model_dump(mode="json") | {"replanning": replan_weeks(db, affected_weeks(db, now), now=now)}
                     else:
                         data = get_profile(db).model_dump(mode="json")
                 elif args.group == "calendar":

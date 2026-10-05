@@ -44,8 +44,8 @@ the agent.
    Without this, `gymclaw` would have direct internet access, and it refuses to
    start.
 3. Set the environment variables: `GYMCLAW_TELEGRAM_USER_ID`, `TELEGRAM_BOT_TOKEN`,
-   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL` and
-   `EGRESS_EXTRA_HOSTS` (for example the personal calendar feed host).
+   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL`,
+   `GYMCLAW_PROVIDER` (default `inference-net/fp4`) and `EGRESS_EXTRA_HOSTS` (for example the personal calendar feed host).
 4. Turn off **Escape special characters in labels** (Advanced settings) so the
    dashboard's Traefik labels get `GYMCLAW_DASHBOARD_HOST` filled in.
 5. Add a scheduled task on the `gymclaw` service: `backup.sh`, daily (for example

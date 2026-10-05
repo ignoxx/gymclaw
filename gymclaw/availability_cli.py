@@ -8,7 +8,7 @@ from gymclaw.services.workout import utc
 
 
 def register_parser(groups):
-    command = groups.add_parser("availability", add_help=False)
+    command = groups.add_parser("availability")
     command.add_argument("operation", choices=["add", "list", "remove"])
     command.add_argument("--kind", choices=["TRAVEL", "SICK", "UNAVAILABLE"], default="UNAVAILABLE")
     command.add_argument("--start", type=datetime.fromisoformat)
