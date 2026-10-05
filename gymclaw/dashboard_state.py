@@ -14,7 +14,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from gymclaw.models import AgentEvent, CrowdFeedback, CrowdObservation, PlannedSession, RuntimeSettings, SetLog, UserProfile, WorkoutExercise, WorkoutSession, WorkoutTemplate
+from gymclaw.models import AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, PlannedSession, RuntimeSettings, SetLog, UserProfile, WorkoutExercise, WorkoutSession, WorkoutTemplate
 from gymclaw.services.crowd import polling_health
 from gymclaw.services.illustrations import for_exercise, primary_muscle, search
 from gymclaw.services.preview import last_set
@@ -198,6 +198,17 @@ def insights(db: Session, zone: ZoneInfo, now: datetime, profile: Profile, done:
         "heatmap": heatmap}
 
 
+def body_weight(db: Session, zone: ZoneInfo, now: datetime) -> list[dict]:
+    """Every weigh-in, oldest first, with the average of the 7 days up to it (the trend line)."""
+    rows = list(db.scalars(select(BodyWeight).where(BodyWeight.measured_at <= now).order_by(BodyWeight.measured_at)))
+    points = []
+    for row in rows:
+        week = [r.kg for r in rows if row.measured_at - timedelta(days=7) < r.measured_at <= row.measured_at]
+        local = row.measured_at.astimezone(zone)
+        points.append({"date": local.date().isoformat(), "label": f"{local:%a %-d %b %Y}", "kg": row.kg, "avg": round(mean(week), 1)})
+    return points
+
+
 def snapshot(db: Session, *, now: datetime, demo: bool = False) -> dict:
     row = db.get(UserProfile, 1)
     profile = Profile.model_validate(row) if row else Profile()
@@ -210,7 +221,7 @@ def snapshot(db: Session, *, now: datetime, demo: bool = False) -> dict:
         "range": f"{today:%-d %b} – {today + timedelta(days=6):%-d %b}", "days": days(db, zone, today),
         "next": next_session(db, zone, now), "workout": active_workout(db, zone, now),
         "crowd": crowd(db, zone, now, bool(settings and settings.enabled and settings.crowd_polling_enabled)) | {"health": polling_health(db, now=now)},
-        "history": (done := history(db, zone, now)), "insights": insights(db, zone, now, profile, done),
+        "history": (done := history(db, zone, now)), "insights": insights(db, zone, now, profile, done) | {"weight": body_weight(db, zone, now)},
         "activity": [{"time": hhmm(e.created_at, zone), "day": e.created_at.astimezone(zone).strftime("%a"), "text": ACTIVITY[e.type]} for e in events]}
 
 

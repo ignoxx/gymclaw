@@ -24,9 +24,10 @@ GymClaw isn't a chatbot you prompt. It's an agent that stays on and acts on its 
 | **Every 15 min** in your training hours | Records gym check-in counts to learn when it's quiet. |
 | **48 h before a session** | Locks it in and schedules get-ready, leave and start reminders. |
 | **Before you go** | Tells you when to leave, with the current crowd. |
+| **30 min into a no-show** | Asks once: skip it, or move it to another slot this week? |
 | **During the workout** | Fires a rest timer after every logged set and sends the next set. |
 | **After the workout** | Saves every set, raises targets you've earned and replans if needed. |
-| **Sunday 19:00** | Audits the week, plans the next one into quiet slots and sends a briefing. |
+| **Sunday 19:00** | Audits the week, plans the next one into quiet slots and sends a briefing, with your weight trend (or a gentle ask for a weigh-in). |
 | **Whenever life changes** | Calendar edits, trips and sick days move affected sessions. Pauses expire on their own. |
 
 ## What it does
@@ -38,6 +39,7 @@ GymClaw isn't a chatbot you prompt. It's an agent that stays on and acts on its 
 | **Watches** | Polls gym check-ins and pings you when it's time to leave. |
 | **Coaches** | Sends each exercise with an image, target and buttons. Tap `✅ 10 × 80 kg` or text `10x80`; it reacts 👍 and shows the next set with a live rest countdown. No model in the loop. |
 | **Adapts** | Machine taken? Tap **Swap** for two same-muscle alternatives with images, or wait, or do it later while staying on that muscle group. |
+| **Tracks weight** | Send a photo of the scale; it reads the number and charts the 7-day trend. Old scale pics sent as files are backfilled by their capture date. |
 | **Learns** | Hit all your reps and the next target goes up. Your "how busy is it?" answers tune the crowd forecast. |
 
 Setup happens in the same chat: a short interview (goal, experience, days, time, equipment, injuries), then send a photo of your plan or let it build one. Every exercise gets an illustration.

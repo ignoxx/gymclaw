@@ -26,6 +26,12 @@ Product source of truth: [SPEC.md](../SPEC.md).
   conservative personalized calibration/source reliability, crowd-aware future slot selection.
 - Sunday audit/briefing and rolling maintenance: mark unstarted expired slots missed,
   fill valid horizon, reconsider distant tentative slots after labels, preserve locks.
+- No-show nudge: 30 min into a committed slot with no workout started, the watcher asks once
+  (skip or move). `calendar skip` keeps the week's count (no make-up); `calendar move` works
+  until the slot ends. Unanswered, the slot still ends MISSED and gets a make-up as before.
+- Body weight: weigh-ins read from scale photos by the agent (`body log`), backfill dated from
+  photo EXIF (files, not compressed photos), trend in the Sunday briefing (also its only nudge)
+  and on the dashboard.
 - Proactive calendar consequence messages through durable outbox; explicit pause/resume
   and independently revocable continuing calendar-write authority.
 - JSON CLI, independent of OpenClaw; external providers replaceable with explicit fixtures.
@@ -433,7 +439,8 @@ finish an open workout. Resolve its outstanding exercises explicitly before next
 - `gymclaw/providers/`: typed calendar contract, Google REST/OAuth and demo provider.
 - `gymclaw/services/calendar.py`, `calendar_busy.py`: sync/reconciliation and recurrence.
 - `gymclaw/services/calendar_writes.py`, `replanning.py`: owned outbox and plan repair.
-- `gymclaw/services/weekly.py`: rolling horizon, missed-slot maintenance, weekly audit/briefing.
+- `gymclaw/services/weekly.py`: rolling horizon, no-show nudges, missed-slot maintenance, weekly audit/briefing.
+- `gymclaw/services/body.py`, `body_cli.py`: weigh-ins, photo dates, trend and briefing line.
 - `gymclaw/services/compression.py`: deterministic workout time allocation.
 - `gymclaw/providers/openclaw.py`, `services/runtime.py`: scoped scheduler and durable delivery.
 - `gymclaw/providers/mysports.py`, `providers/crowd.py`, `services/crowd.py`: public signals,

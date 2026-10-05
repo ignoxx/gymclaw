@@ -9,7 +9,7 @@ from gymclaw.dashboard_state import snapshot
 from gymclaw.db import initialize, make_engine
 from gymclaw.models import OnboardingState, PlannedSession
 from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
-from gymclaw.services import audit, crowd, workout
+from gymclaw.services import audit, body, crowd, workout
 from gymclaw.services.planning import Interval
 from gymclaw.services.profile import update_profile
 from gymclaw.services.scheduling import PlanningFixture, schedule_week
@@ -68,6 +68,16 @@ def demo_history(db: Session, templates: tuple[Template, ...], first_monday: dat
             session += 1
 
 
+def demo_weight(db: Session, first_monday: date, zone: ZoneInfo):
+    """A slow cut over 12 weeks, weighed a few mornings a week with day-to-day water swings."""
+    swings = [0.4, -0.3, 0.6, -0.5, 0.1, 0.5, -0.2]
+    entries = []
+    for day in range(0, 7 * 12, 2):
+        at = datetime.combine(first_monday + timedelta(days=day + day % 3), datetime.min.time(), zone).replace(hour=7, minute=10)
+        entries.append(body.WeighIn(kg=round(84.6 - day * 0.03 + swings[day % 7], 1), at=at.isoformat()))
+    body.log(db, entries, now=datetime.combine(first_monday + timedelta(weeks=13), datetime.min.time(), zone), request_id="demo-weight")
+
+
 def build_demo_snapshot() -> dict:
     """Never opens the default DB or contacts providers; all inputs are synthetic."""
     zone = ZoneInfo("Europe/Berlin")
@@ -84,6 +94,7 @@ def build_demo_snapshot() -> dict:
                     import_template(db, template)
                 db.add(OnboardingState(id=1, interview_json={}, split_json=[t.id for t in templates]))
                 demo_history(db, templates, week - timedelta(weeks=6), 6, zone)
+                demo_weight(db, week - timedelta(weeks=12), zone)
                 busy = PlanningFixture(busy=(Interval(start=datetime(2026, 10, 12, 18, tzinfo=zone), end=datetime(2026, 10, 12, 19, tzinfo=zone)),))
                 result = schedule_week(db, week, now=planned_at, fixture=busy, request_id="demo-plan", template_id=templates[0].id)
                 # Today's readings lead up to the workout; history above shapes the "typical" line.
