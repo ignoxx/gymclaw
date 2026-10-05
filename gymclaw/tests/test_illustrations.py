@@ -24,6 +24,14 @@ def test_catalog_assets_and_no_fuzzy_matching():
         ExerciseSpec(id="bad", name="Bad", role="pull", target_weight=1, guide_id="../wrong")
 
 
+def test_every_exercise_has_an_animated_rep():
+    from PIL import Image
+    # Four frames (1 → 2 → 3 → 2) at 350 ms, looping, so it plays as one rep.
+    for slug in catalog():
+        with Image.open(for_exercise("", slug)["telegram_animation"]) as gif:
+            assert gif.n_frames == 4 and gif.info["duration"] == 350 and gif.info["loop"] == 0, slug
+
+
 def test_pose_follows_active_exercise_not_previous_set(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'pose.db'}")
     initialize(engine)
@@ -46,4 +54,11 @@ def test_swap_alternatives_differ_in_equipment():
     from gymclaw.services.illustrations import similar
     # "Rear Delt Fly" and "Bent-Over Rear Delt Raise" are the same dumbbell movement; offer one of them.
     options = similar("cable-rear-delt-fly")
-    assert len({o["equipment"] for o in options}) == len(options) == 2
+    assert len(options) == 3 and len({o["equipment"] for o in options[:2]}) == 2
+
+
+def test_swap_never_offers_the_same_movement_under_another_name():
+    from gymclaw.services.illustrations import similar
+    # Leg Curl and Lying Leg Curl share one picture: swapping one for the other isn't a swap.
+    assert "leg-curl" not in [o["guide_id"] for o in similar("lying-leg-curl")]
+    assert "lying-leg-curl" not in [o["guide_id"] for o in similar("dumbbell-romanian-deadlift", exclude={"leg-curl"})]

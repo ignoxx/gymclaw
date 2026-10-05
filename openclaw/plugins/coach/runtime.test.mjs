@@ -30,8 +30,8 @@ function fakeTimers() {
   };
 }
 
-function plugin(run) {
-  const { calls, api } = fakeTelegram();
+function plugin(run, { coaches = new Map(), telegram = fakeTelegram() } = {}) {
+  const { calls, api } = telegram;
   const registered = { hooks: new Map() };
   registerCoach(
     {
@@ -41,7 +41,7 @@ function plugin(run) {
       registerTool: (t) => (registered.tool = t),
       on: (name, fn) => registered.hooks.set(name, fn),
     },
-    { run, telegram: async () => api },
+    { run, telegram: async () => api, coaches },
   );
   return { calls, registered };
 }
@@ -79,6 +79,23 @@ test("typed set: react, ack on the set card, countdown, then countdown deleted a
   assert.equal(calls.at(-1)[0], "send");
   assert.equal(coach.state().live.card.text, "Bench · set 2");
   assert.equal(timers.intervals.size, 0);
+});
+
+test("shortened rest edits the same countdown and keeps counting to the new time", async () => {
+  const { calls, api } = fakeTelegram();
+  const timers = fakeTimers();
+  let now = Date.parse("2026-10-02T18:00:00Z");
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers });
+  await coach.apply({ cards: [card("until Bench set 2/2", { rest_until: "2026-10-02T18:01:30Z", kind: "rest" })] });
+  await coach.apply({ refresh: true, cards: [card("until Bench set 2/2", { rest_until: "2026-10-02T18:01:00Z", kind: "rest" })] });
+  assert.deepEqual(calls.at(-1).slice(0, 4), ["edit", OWNER, 100, "⏱ 1:00 until Bench set 2/2"]);
+  now += 5000;
+  await timers.tick();
+  assert.equal(calls.at(-1)[3], "⏱ 0:55 until Bench set 2/2");
+  assert.equal(calls.filter((c) => c[0] === "send").length, 1, "no new message, no extra notification");
+  // A settings change with nothing to show leaves the live card alone.
+  await coach.apply({ keep: true, cards: [] });
+  assert.equal(coach.state().live.messageId, 100);
 });
 
 test("swap: menu on the card, wait restores it, choosing deletes options and the old card", async () => {
@@ -143,4 +160,34 @@ test("overlapping syncs collapse into one follow-up run", async () => {
   release();
   await first;
   assert.equal(calls, 2);
+});
+
+test("two registrations share one coach: a skip tap retires the countdown the agent tool sent", async () => {
+  const coaches = new Map();
+  const telegram = fakeTelegram();
+  const rest = card("until Leg press set 2/2", { rest_until: "2099-01-01T00:00:00Z", kind: "rest" });
+  const run = async (args) => (args[1] === "act" ? { handled: true, cards: [rest] } : args[1] === "tap" ? { handled: true, cleanup: "delete", cards: [card("Leg press · set 2")] } : {});
+  const agent = plugin(run, { coaches, telegram });
+  const gateway = plugin(run, { coaches, telegram });
+  await agent.registered.tool.execute("t1", { action: "next" });
+  const ctx = { auth: { isAuthorizedSender: true }, isGroup: false, senderId: OWNER, callbackId: "cb1", callback: { payload: "skip:abcd1234", messageId: 100 } };
+  await gateway.registered.callback.handler(ctx);
+  assert.equal(coaches.size, 1);
+  assert.equal(coaches.get(OWNER).state().live.card.text, "Leg press · set 2");
+});
+
+test("a countdown whose message is gone stops instead of sending a second set card", async () => {
+  const { calls, api } = fakeTelegram();
+  const timers = fakeTimers();
+  let now = Date.parse("2026-10-05T11:06:00Z");
+  let restOvers = 0;
+  api.edit = async () => { throw new Error("Call to 'editMessageText' failed! (400: Bad Request: message to edit not found)"); };
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers, onRestOver: async () => (restOvers++, { cards: [card("Leg extension · set 1")] }) });
+  await coach.apply({ cards: [card("until Leg press set 2/2", { rest_until: "2026-10-05T11:08:16Z", kind: "rest" })] });
+  await timers.tick();
+  assert.equal(timers.intervals.size, 0);
+  now += 180_000;
+  await timers.tick();
+  assert.equal(restOvers, 0);
+  assert.equal(calls.filter((c) => c[0] === "send").length, 1);
 });

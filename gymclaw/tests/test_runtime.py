@@ -1,3 +1,4 @@
+import json
 """Synthetic scheduler contracts. No installed OpenClaw or live Telegram needed."""
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,8 +50,9 @@ class FakeRuntime:
         self.removed.append(job_id)
         self.jobs = [row for row in self.jobs if row["id"] != job_id]
 
-    def send(self, recipient, message):
+    def send(self, recipient, message, buttons=()):
         self.sent.append((recipient, message))
+        self.buttons = buttons
         if self.fail_send:
             raise DomainError("TEST_LOST_SEND", "Lost send response")
         return "message-1"
@@ -180,6 +182,19 @@ def test_moved_plan_suppresses_old_preparation_delivery(engine):
     assert not provider.sent
 
 
+def test_session_start_reminder_carries_a_start_button(engine):
+    with Session(engine) as db, db.begin():
+        plan = PlannedSession(week_id="2026-10-12", status="COMMITTED", planned_start_at=NOW, planned_end_at=NOW + timedelta(hours=1), prep_start_at=NOW, leave_home_at=NOW, expected_finish_at=NOW + timedelta(hours=1))
+        db.add(plan); db.flush()
+        job = NotificationJob(kind="SESSION_START", planned_session_id=plan.id, due_at=NOW, payload_json={"revision": 1, "instruction": "Gym session begins."})
+        db.add(job); db.flush()
+        result = runtime.prepare_notification(db, job.id, now=NOW, recipient="123", profile="gymclaw")
+        ref = plan.id[:8]
+    provider = FakeRuntime()
+    assert runtime.deliver(engine, provider, result["delivery_id"], now=NOW, allow_messages=True)["status"] == "SENT"
+    assert provider.buttons == (("▶️ Start workout", f"gc:begin:{ref}"),)
+
+
 def test_approval_gates_run_before_external_calls(engine):
     provider = FakeRuntime()
     with pytest.raises(DomainError, match="requires --allow-runtime-changes"):
@@ -214,7 +229,9 @@ def test_provider_exact_argv_and_verified_receipt():
     assert "--command-argv" in calls[0] and "--command" not in calls[0]
     assert provider.list_jobs() == []
     assert provider.send("123", "hello; $(not-a-shell)") == "101"
-    assert "hello; $(not-a-shell)" in calls[-1]
+    assert "hello; $(not-a-shell)" in calls[-1] and "--presentation" not in calls[-1]
+    provider.send("123", "go", (("▶️ Start workout", "gc:begin:1a2b3c4d"),))
+    assert json.loads(calls[-1][calls[-1].index("--presentation") + 1]) == {"blocks": [{"type": "buttons", "buttons": [{"label": "▶️ Start workout", "value": "gc:begin:1a2b3c4d"}]}]}
     with pytest.raises(DomainError, match="No confirmed"):
         OpenClawProvider(transport=lambda _: {"ok": True}).send("123", "hello")
 

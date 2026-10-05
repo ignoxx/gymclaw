@@ -325,9 +325,11 @@ def deliver(engine, provider: AutomationProvider, delivery_id: str, *, now: date
             return delivery_data(row)
         row.status, row.handled_at = "SENDING", now
         recipient, message = row.recipient, row.message
+        # The session reminder starts the workout in one tap (handled by the gymclaw-coach plugin).
+        buttons = (("▶️ Start workout", f"gc:begin:{job.planned_session_id[:8]}"),) if row.notification_job_id and job.kind == "SESSION_START" else ()
     # Claim committed; no network I/O under SQLite write transaction.
     try:
-        receipt = provider.send(recipient, message)
+        receipt = provider.send(recipient, message, buttons)
         if not isinstance(receipt, str) or not receipt:
             raise ValueError("Message receipt missing")
     except Exception:
