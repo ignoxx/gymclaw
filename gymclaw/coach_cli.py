@@ -6,7 +6,7 @@ from gymclaw.services import coach, illustrations, workout
 
 
 def register_parser(groups):
-    command = groups.add_parser("coach", add_help=False)
+    command = groups.add_parser("coach")
     command.add_argument("operation", choices=["text", "tap", "act", "start", "card", "rest-over", "preview"])
     command.add_argument("--text")
     command.add_argument("--data", help="Callback payload without the gc: namespace")
@@ -16,7 +16,7 @@ def register_parser(groups):
     command.add_argument("--request-id")
     command.add_argument("--now", type=datetime.fromisoformat)
     command.add_argument("--json", action="store_true")
-    search = groups.add_parser("catalog", add_help=False)
+    search = groups.add_parser("catalog")
     search.add_argument("operation", choices=["search"])
     search.add_argument("--query", default="")
     search.add_argument("--muscle")
