@@ -233,10 +233,10 @@ def test_new_arrival_label_reconsiders_tentative_slot_but_not_user_lock(engine):
         assert event.handled_at is not None
 
 
-def test_split_rotates_after_last_completed_workout_and_respects_locks(tmp_path):
+def test_split_rotates_after_last_started_workout_and_respects_locks(tmp_path):
     from gymclaw.models import OnboardingState, PlannedSession, WorkoutSession
     from gymclaw.services.templates import ExerciseSpec, Template, import_template
-    from gymclaw.services.weekly import assign_rotation
+    from gymclaw.services.weekly import assign_rotation, plan_changes
 
     engine = make_engine(f"sqlite:///{tmp_path / 'rotation.db'}")
     initialize(engine)
@@ -246,7 +246,7 @@ def test_split_rotates_after_last_completed_workout_and_respects_locks(tmp_path)
             for name in ("push", "pull", "legs"):
                 import_template(db, Template(id=name, name=name.title(), exercises=[ExerciseSpec(id=f"{name}-x", name="X", role="x", guide_id="bench-press", target_weight=0)]))
             db.add(OnboardingState(id=1, interview_json={}, split_json=["push", "pull", "legs"]))
-            db.add(WorkoutSession(template_id="push", status="PLAN_UPDATED", template_snapshot={"x": 1}, completed_at=base - timedelta(days=3)))
+            db.add(WorkoutSession(template_id="push", status="PLAN_UPDATED", template_snapshot={"x": 1}, started_at=base - timedelta(days=3), completed_at=base - timedelta(days=3)))
             sessions = []
             for day in range(4):
                 start = base + timedelta(days=2 * day)
@@ -260,6 +260,14 @@ def test_split_rotates_after_last_completed_workout_and_respects_locks(tmp_path)
             assert [s.workout_template_id for s in sessions] == ["pull", "push", "pull", "legs"]
             assert sessions[0].workout_plan_json["template"]["id"] == "pull"
             assert assign_rotation(db, now=base - timedelta(days=1)) == []
+            # A running workout counts: starting Pull doesn't hand Pull to the next session again.
+            db.add(WorkoutSession(template_id="pull", status="SET_ACTIVE", template_snapshot={"x": 1}, started_at=base - timedelta(hours=1)))
+            db.flush()
+            changes = assign_rotation(db, now=base - timedelta(days=1))
+            assert [s.workout_template_id for s in sessions] == ["legs", "push", "pull", "legs"]
+            moved = {"session_id": sessions[2].id, "from": sessions[2].planned_start_at.isoformat(), "to": (sessions[2].planned_start_at + timedelta(minutes=30)).isoformat(), "action": "moved"}
+            assert plan_changes(db, {"rotation": changes, "changed": [moved]}) == "📅 Plan updated: Fri moved to 12:30 (was 12:00) · Mon is now Legs"
+            assert plan_changes(db, {"changed": [moved | {"action": "forecast_updated"}]}) is None
     finally:
         engine.dispose()
 

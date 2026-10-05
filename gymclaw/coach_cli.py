@@ -10,7 +10,11 @@ def register_parser(groups):
     command.add_argument("operation", choices=["text", "tap", "act", "start", "card", "rest-over", "preview"])
     command.add_argument("--text")
     command.add_argument("--data", help="Callback payload without the gc: namespace")
-    command.add_argument("--action", choices=["card", "swap", "later", "next", "end"])
+    command.add_argument("--action", choices=["card", "swap", "later", "next", "end", "switch", "relabel", "rest"])
+    command.add_argument("--exercise", help="switch/relabel: exercise ID, guide_id or exact name")
+    command.add_argument("--which", help="relabel: the logged exercise to correct (default: latest with sets)")
+    command.add_argument("--seconds", type=int, help="rest: seconds between sets")
+    command.add_argument("--remember", action="store_true", help="rest: also the default for future workouts")
     command.add_argument("--template-id")
     command.add_argument("--planned-session-id")
     command.add_argument("--request-id")
@@ -55,7 +59,8 @@ def coach_command(db, args):
         elif args.operation == "tap":
             result = coach.handle_tap(db, needed(args.data, "--data"), now=now, request_id=request_id)
         elif args.operation == "act":
-            result = coach.handle_action(db, needed(args.action, "--action"), now=now, request_id=request_id)
+            result = coach.handle_action(db, needed(args.action, "--action"), now=now, request_id=request_id,
+                exercise=args.exercise, which=args.which, seconds=args.seconds, remember=args.remember)
         else:
             workout.start(db, needed(args.template_id, "--template-id"), now=now, request_id=request_id, planned_session_id=args.planned_session_id)
             result = coach.handle_action(db, "card", now=now, request_id=request_id)
