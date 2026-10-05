@@ -120,7 +120,7 @@ def reconcile_event(db: Session, event: CalendarEvent, *, now: datetime) -> tupl
                 schedule_session_jobs(db, session, now=now)
                 kind = "calendar.gym_event_resized" if old_duration != event.end - event.start else "calendar.gym_event_changed"
                 log = emit(db, kind, now, {"session": session_data(session), "event_id": event.id})
-                emitted.append({"id": log.id, "type": kind})
+                emitted.append({"id": log.id, "type": kind, "session_id": session.id})
                 changed_weeks |= {old_week, week_of(event.start, zone)}
     elif event.status != "cancelled":
         meaningful = previous is None or previous.start_at != event.start or previous.end_at != event.end or previous.status == "cancelled" or previous.raw_json.get("recurrence") != event.raw.get("recurrence") or previous.raw_json.get("transparency") != event.raw.get("transparency")
@@ -175,14 +175,40 @@ def sync_calendar(db: Session, provider: CalendarProvider, *, now: datetime) -> 
         # Deterministic replan already ran; agent should communicate, not duplicate work.
         event.handled_at = now
         emitted.append({"id": event.id, "type": event.type})
-    hint = None
-    if replanned["warnings"]:
-        hint = "Calendar edit kept. " + " ".join(replanned["warnings"])
-    elif replanned["changed"]:
-        hint = "Calendar changes accepted. Other gym sessions replanned; preparation/leave times updated."
-    elif any(e["type"] == "calendar.gym_event_resized" for e in emitted):
-        hint = "Workout slot resized. Workout compressed to available duration; preparation/leave times updated."
-    return {"data": {"calendar_id": provider.calendar_id, "source": provider.source, "full_sync": batch.full, "events_received": len(batch.events), "changes": replanned["changed"], "warnings": replanned["warnings"], "calendar_writes_queued": db.scalar(select(func.count()).select_from(CalendarWrite).where(CalendarWrite.status == "PENDING")), "remote_events_changed": False}, "events": emitted, "user_message_hint": hint}
+    zone = ZoneInfo(get_profile(db).timezone)
+    # Name what happened: a vague "sessions replanned" hides that a workout was dropped.
+    parts = []
+    for e in emitted:
+        if e["type"] in {"calendar.gym_event_changed", "calendar.gym_event_resized"}:
+            session = db.get(PlannedSession, e["session_id"])
+            start, end = session.planned_start_at.astimezone(zone), session.planned_end_at.astimezone(zone)
+            parts.append(f"{workout_name(session)} moved to {start:%a %H:%M}." if e["type"] == "calendar.gym_event_changed" else f"{workout_name(session)} now {start:%a %H:%M}–{end:%H:%M}.")
+    dropped = [db.get(PlannedSession, c["session_id"]) for c in replanned["changed"] if c["action"] == "cancelled_no_valid_slot"]
+    if dropped:
+        names = ", ".join(f"{workout_name(s)} on {s.planned_start_at.astimezone(zone):%a}" for s in dropped)
+        parts.append(f"{names} dropped: no slot left this week that fits your rest days and calendar.")
+    # The drop line already explains the shortfall warning.
+    parts += [w for w in replanned["warnings"] if not (dropped and "sessions feasible" in w)]
+    if any(e["type"] == "calendar.gym_event_resized" for e in emitted):
+        parts.append("Workout compressed to the new slot length.")
+    if not parts and replanned["changed"]:
+        parts.append("Other gym sessions replanned; preparation/leave times updated.")
+    hint = " ".join(parts) or None
+    return {"data": {"calendar_id": provider.calendar_id, "source": provider.source, "full_sync": batch.full, "events_received": len(batch.events), "changes": replanned["changed"], "warnings": replanned["warnings"], "weeks": sorted(w.isoformat() for w in affected), "calendar_writes_queued": db.scalar(select(func.count()).select_from(CalendarWrite).where(CalendarWrite.status == "PENDING")), "remote_events_changed": False}, "events": emitted, "user_message_hint": hint}
+
+
+def workout_name(session: PlannedSession) -> str:
+    return session.workout_plan_json.get("template", {}).get("name") or (session.workout_template_id or "Workout").title()
+
+
+def week_lineup(db: Session, week_start: date, *, now: datetime) -> str:
+    """The week's planned workouts for owner messages, e.g. "This week: Mon 12:15 Legs · Wed 10:30 Push".
+    Build it after rotation so names match the calendar."""
+    zone = ZoneInfo(get_profile(db).timezone)
+    sessions = [s for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED", "STARTED", "COMPLETED"])).order_by(PlannedSession.planned_start_at))
+        if week_of(s.planned_start_at, zone) == week_start]
+    label = "This week" if week_start == week_of(now, zone) else f"Week of {week_start:%b} {week_start.day}"
+    return f"{label}: " + (" · ".join(f"{s.planned_start_at.astimezone(zone):%a %H:%M} {workout_name(s)}" for s in sessions) or "no workouts") + "."
 
 
 def get_week(db: Session, week_start: date) -> dict:
