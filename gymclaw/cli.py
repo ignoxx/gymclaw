@@ -14,6 +14,7 @@ from gymclaw.coach_cli import register_parser as register_coach_parser, catalog_
 from gymclaw.db import make_engine, initialize
 from gymclaw.calendar_cli import calendar_command, publish_command
 from gymclaw.runtime_cli import register_parser as register_runtime_parser, runtime_command
+from gymclaw.session_cli import register_parser as register_session_parser, session_command
 from gymclaw.crowd_cli import register_parser as register_crowd_parser, crowd_command
 from gymclaw.services.availability import affected_weeks
 from gymclaw.services.calendar import get_week
@@ -42,6 +43,7 @@ def parser():
     register_crowd_parser(groups)
     register_availability_parser(groups)
     register_coach_parser(groups)
+    register_session_parser(groups)
     db = groups.add_parser("db")
     db.add_argument("operation", choices=["init"])
     profile = groups.add_parser("profile")
@@ -63,11 +65,8 @@ def parser():
     planning.add_argument("--request-id")
     planning.add_argument("--template-id")
     calendar = groups.add_parser("calendar")
-    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "move", "pending-writes", "publish",
+    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "pending-writes", "publish",
         "personal-connect", "personal-sync", "personal-status", "personal-disconnect"])
-    calendar.add_argument("--session-id", help="move: session to move")
-    calendar.add_argument("--to", type=datetime.fromisoformat, help="move: exact start with offset; omit to pick the quietest valid slot")
-    calendar.add_argument("--day", type=date.fromisoformat, help="move: keep it on this date (YYYY-MM-DD)")
     calendar.add_argument("--calendar-id")
     calendar.add_argument("--url", help="Read-only personal ICS feed (webcal:// or https://)")
     calendar.add_argument("--url-file", type=Path, help="File holding the feed link; keeps it out of argv/history")
@@ -191,6 +190,9 @@ def main(argv=None) -> int:
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "availability":
                     result = availability_command(db, args)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "session":
+                    result = session_command(db, args)
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "onboarding":
                     if args.operation == "status":
