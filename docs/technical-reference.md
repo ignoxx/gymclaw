@@ -445,8 +445,10 @@ finish an open workout. Resolve its outstanding exercises explicitly before next
 - `gymclaw/providers/openclaw.py`, `services/runtime.py`: scoped scheduler and durable delivery.
 - `gymclaw/providers/mysports.py`, `providers/crowd.py`, `services/crowd.py`: public signals,
   source health, arrival labels, calibration and planner integration.
-- `openclaw/`: repo-local workspace, skill and activation handoff.
+- `openclaw/`: repo-local workspace (the agent's tool reference is `AGENTS.md`) and activation handoff.
 - `gymclaw/cli.py`, `calendar_cli.py`, `runtime_cli.py`, `crowd_cli.py`: JSON adapters.
+- `gymclaw/warm.py`: warm worker behind `scripts/gymclaw-tool`. The container keeps one process with
+  GymClaw imported and forks it per call (~1.3s → ~0.1s); without it, calls run in-process.
 
 Services accept explicit time and typed inputs, need no agent runtime. CLI owns
 transactions; service callers must commit/rollback. Use `alembic revision --autogenerate`

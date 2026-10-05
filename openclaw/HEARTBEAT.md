@@ -1,7 +1,7 @@
 # GymClaw monitor checklist
 
-This file is a setup template. Current OpenClaw reads monitor scratch, not
-HEARTBEAT.md; install its contents using the documented scratch command.
+Heartbeat runs in its own session and sees only this file. GymClaw commands: `../scripts/gymclaw-tool …`
+from the workspace, JSON output `{ok, data}`; exit 1 = failed. Flags: `<group> --help`.
 
 - Read pending GymClaw events using ../scripts/gymclaw-tool events pending (actionable only).
 - Surface only actionable unresolved issues; stay silent with NO_REPLY otherwise.

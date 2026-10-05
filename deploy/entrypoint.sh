@@ -30,7 +30,8 @@ fi
 # are written by the agent at runtime, so they are only seeded once.
 WS="$ROOT/openclaw"
 cp -f "$ROOT"/openclaw.dist/{AGENTS.md,SOUL.md,HEARTBEAT.md,README.md} "$WS/"
-rm -rf "$WS/skills" && cp -R "$ROOT/openclaw.dist/skills" "$WS/skills"
+# The tool reference lives in AGENTS.md now (always in the prompt); drop the old skill copy.
+rm -rf "$WS/skills"
 [[ -e "$WS/USER.md" ]] || cp "$ROOT/openclaw.dist/USER.md" "$WS/USER.md"
 mkdir -p "$WS/memory" "$WS/media"
 
@@ -59,6 +60,13 @@ settings = {
     "agents.defaults.timeoutSeconds": 600,
     "agents.defaults.thinkingDefault": "off",
     "agents.defaults.reasoningDefault": "off",
+    # Heartbeat checks GymClaw events in its own fresh session with only HEARTBEAT.md, so it never
+    # queues owner messages behind it or grows the chat history.
+    "agents.defaults.heartbeat": {"isolatedSession": True, "lightContext": True},
+    # Unused tools; their schemas were ~28k chars of every prompt.
+    "tools.deny": ["cron", "gateway", "nodes", "process", "apply_patch", "tts", "skill_workshop",
+        "image_generate", "video_generate", "music_generate", "agents_list", "subagents", "sessions_spawn",
+        "sessions_list", "sessions_send", "sessions_history", "sessions_yield", "create_goal", "update_goal", "get_goal"],
     "agents.defaults.compaction": {"mode": "safeguard", "timeoutSeconds": 120, "maxHistoryShare": 0.35,
         "recentTurnsPreserve": 1, "qualityGuard": {"enabled": True, "maxRetries": 0},
         "notifyUser": True, "truncateAfterCompaction": True},
@@ -104,4 +112,7 @@ fi
 
 cd "$ROOT"
 .venv/bin/python -m gymclaw.cli db init >/dev/null
+# Warm worker for gymclaw-tool: imports GymClaw once instead of ~1.3s per call. Calls run
+# in-process if it is down, so a crash only costs speed; the loop brings it back.
+(while :; do .venv/bin/python -m gymclaw.warm --serve /tmp/gymclaw-tool.sock; sleep 1; done) &
 exec openclaw --profile gymclaw gateway

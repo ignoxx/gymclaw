@@ -25,7 +25,7 @@ as a non-root user with a read-only root filesystem, no capabilities and
 | `openclaw-state` | `/home/node/.openclaw-gymclaw` | OpenClaw config, gateway token, chat sessions, scheduled jobs |
 | `gymclaw-backups` | `/backups` | `backup.sh` archives |
 
-Repo-owned workspace files (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, skills) are
+Repo-owned workspace files (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) are
 synced from the image on every start. `USER.md` is seeded once, then belongs to
 the agent.
 
