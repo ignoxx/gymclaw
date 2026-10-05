@@ -3,6 +3,10 @@
 FROM ghcr.io/openclaw/openclaw:2026.7.1
 
 USER root
+# OpenClaw's image tool converts photos (iPhone HEIC included) with an external processor and the
+# base image has none. Debian's ImageMagick 6 provides `convert` with the libheif delegate.
+RUN apt-get update && apt-get install -y --no-install-recommends imagemagick \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
 # Base image ships Python 3.11; GymClaw needs 3.12+.
 ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy UV_NO_CACHE=1
