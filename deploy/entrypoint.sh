@@ -75,6 +75,13 @@ settings = {
     "commands.ownerAllowFrom": [f"telegram:{owner}"],
     "tools.web.search.enabled": False,
     "messages.suppressToolErrors": True,
+    # The default "steer" folds a message into whatever run is active. If that is a heartbeat,
+    # the reply goes nowhere. "collect" waits for it and answers in a turn of its own.
+    "messages.queue.mode": "collect",
+    # 👀 on every DM as soon as it arrives, removed once the reply is sent.
+    "messages.ackReaction": "👀",
+    "messages.ackReactionScope": "direct",
+    "messages.removeAckAfterReply": True,
     "plugins.allow": ["telegram", "openrouter", "memory-core", "gymclaw-failure-details", "gymclaw-coach"],
     "plugins.load.paths": [f"{e['PLUGINS']}/failure-details", f"{e['PLUGINS']}/coach"],
     "plugins.entries.bonjour.enabled": False,

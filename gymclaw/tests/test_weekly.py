@@ -202,7 +202,7 @@ def test_calendar_resize_watch_proactively_sends_once_without_publication(engine
     result = runtime_command(engine, args, now_override=SUNDAY + timedelta(minutes=1))
     assert result["data"]["publication"]["published"] is False
     assert len(provider.sent) == 1
-    assert "Workout slot resized" in provider.sent[0][1]
+    assert provider.sent[0][1].startswith("Short now Mon 07:00–07:45. Workout compressed to the new slot length. Week of Oct 12: Mon 07:00 Short.")
     assert "publication pending approval" in provider.sent[0][1]
     runtime_command(engine, args, now_override=SUNDAY + timedelta(minutes=2))
     assert len(provider.sent) == 1
