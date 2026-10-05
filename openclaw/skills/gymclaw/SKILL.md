@@ -60,14 +60,19 @@ use `status` first. Only these actions exist; don't invent others.
 ## Calendar and availability
 
 - `calendar sync`, `calendar get-week --week-start YYYY-MM-DD`. Week starts Monday.
-- Move one session: `calendar move --session-id ID [--day YYYY-MM-DD | --to 2026-10-09T11:30:00+02:00]`.
-  Without `--to` it picks the quietest valid slot (on `--day`, else in that week). An invalid `--to`
-  fails with the valid start times for that day; offer those.
 - Lasting preferences (time window, weekdays, session length, rest days): `profile update --data
   '{"latest_workout_finish":"17:00"}'` (fields: `profile get`). It moves sessions that no longer fit
-  and returns them in `data.replanning.changed`. Don't toggle the profile to steer one session; use `calendar move`.
+  and returns them in `data.replanning.changed`. Don't toggle the profile to steer one session; use `session`.
 - Personal calendar is read-only busy time, refreshed by the watcher. `calendar personal-status`
   shows health; `calendar personal-sync` forces a refresh. Never connect/disconnect it unless the owner asks.
+- One session (the owner's word wins; relay any warning in one line, don't refuse):
+  - Exact time ("Friday at 11:30"): `session move --session-id ID --start YYYY-MM-DDTHH:MM [--end …]`.
+    Local time; keeps the duration. Pins it, even outside the workout window.
+  - "Somewhere quieter": `session move --session-id ID [--day YYYY-MM-DD]` (quietest valid slot).
+  - Extra session: `session add --template-id ID --start … [--end …]`.
+  - Skip one: `session cancel --session-id ID` (like deleting it in the calendar; a replacement
+    is planned if one fits and shows in `replanning.changed`).
+  - Different workout: `session set-workout --session-id ID --template-id ID`.
 - Travel/illness: `availability add --kind TRAVEL|SICK --through YYYY-MM-DD` (inclusive); ask before
   `--cancel-locked`. `availability remove --block-id ID`.
 - Keep owner-locked events. Publication (`calendar publish --allow-writes`) and

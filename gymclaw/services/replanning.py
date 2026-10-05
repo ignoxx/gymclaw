@@ -13,7 +13,7 @@ from gymclaw.services.notifications import cancel_session_jobs, schedule_session
 from gymclaw.services.errors import DomainError
 from gymclaw.services.planning import Candidate, Interval, generate_candidates, overlaps, plan_week, recovery_ok
 from gymclaw.services.profile import get_profile
-from gymclaw.services.workout import emit, mutate, utc
+from gymclaw.services.workout import emit, utc
 
 ACTIVE = {"TENTATIVE", "COMMITTED", "STARTED", "COMPLETED"}
 
@@ -145,46 +145,26 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
     return {"changed": changed, "warnings": list(dict.fromkeys(warnings))}
 
 
-def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None) -> dict:
-    """Owner-requested move of one upcoming session. `to` is an exact start; otherwise the planner
-    picks the best-scoring (quietest) valid slot, on `day` if given, else anywhere in the session's week.
-    The new slot must satisfy the same rules as planning: workout window, calendar, rest days."""
-    now = utc(now)
-    if to is not None and (to.tzinfo is None or to.utcoffset() is None):
-        raise ValueError("--to must include a UTC offset")
-
-    def action():
-        session = db.get(PlannedSession, session_id)
-        if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_start_at <= now:
-            raise DomainError("SESSION_NOT_MOVABLE", "Only upcoming tentative or committed sessions can be moved")
-        if session.user_locked:
-            raise DomainError("SESSION_LOCKED", "Session was edited in the calendar; move the calendar event instead")
-        profile = get_profile(db)
-        zone = ZoneInfo(profile.timezone)
-        target_day = to.astimezone(zone).date() if to else day
-        week = week_of(datetime.combine(target_day, datetime.min.time(), zone) if target_day else session.planned_start_at, zone)
-        window_start = datetime.combine(week - timedelta(days=1), datetime.min.time(), zone)
-        others = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(ACTIVE), PlannedSession.id != session.id)))
-        deleted = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status == "CANCELLED")) if s.workout_plan_json.get("deleted_by_user"))
-        from gymclaw.services.crowd import CrowdModel, planning_signals
-        signals = planning_signals(db, week, now=now)
-        candidates = [c for c in generate_candidates(profile, week, busy=busy_intervals(db, window_start, window_start + timedelta(days=9)), unavailable=deleted, existing=others, signals=signals, now=now)
-            if target_day is None or c.start.astimezone(zone).date() == target_day]
-        if to is not None:
-            matching = [c for c in candidates if c.start == utc(to)]
-            if not matching:
-                starts = sorted({c.start.astimezone(zone).strftime("%H:%M") for c in candidates})
-                raise DomainError("SLOT_NOT_VALID", f"{to.astimezone(zone):%a %H:%M} breaks the workout window ({profile.earliest_workout_start:%H:%M}–{profile.latest_workout_finish:%H:%M}), "
-                    f"a calendar event or rest days. Valid starts that day: {', '.join(starts) or 'none'}")
-            candidates = matching
-        if not candidates:
-            raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window, calendar or rest days)")
-        slot = max(candidates, key=lambda c: c.score)
-        old_start = session.planned_start_at
-        if slot.start != old_start or slot.end != session.planned_end_at:
-            cancel_session_jobs(db, session.id, now=now)
-        session.source_revision += 1
-        place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
-        return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence}
-
-    return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}, now, action)
+def best_slot(db: Session, session: PlannedSession, *, now: datetime, day: date | None = None) -> dict:
+    """Move one session to the best-scoring (quietest) valid slot, on `day` if given, else anywhere in
+    its week. Planner rules apply: workout window, calendar, rest days. Exact owner times use
+    `session_edits.move` instead. The planner owns the result, so any earlier pin is released."""
+    profile = get_profile(db)
+    zone = ZoneInfo(profile.timezone)
+    week = week_of(datetime.combine(day, datetime.min.time(), zone) if day else session.planned_start_at, zone)
+    window_start = datetime.combine(week - timedelta(days=1), datetime.min.time(), zone)
+    others = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(ACTIVE), PlannedSession.id != session.id)))
+    deleted = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status == "CANCELLED")) if s.workout_plan_json.get("deleted_by_user"))
+    from gymclaw.services.crowd import CrowdModel, planning_signals
+    signals = planning_signals(db, week, now=now)
+    candidates = [c for c in generate_candidates(profile, week, busy=busy_intervals(db, window_start, window_start + timedelta(days=9)), unavailable=deleted, existing=others, signals=signals, now=now)
+        if day is None or c.start.astimezone(zone).date() == day]
+    if not candidates:
+        raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window, calendar or rest days). Pass an exact --start to pin a time anyway")
+    slot = max(candidates, key=lambda c: c.score)
+    old_start = session.planned_start_at
+    cancel_session_jobs(db, session.id, now=now)
+    session.user_locked = False
+    session.source_revision += 1
+    place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
+    return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence}

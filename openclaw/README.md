@@ -230,7 +230,7 @@ Errors withhold child output to avoid credential leakage.
 - Verified private bot/owner can invoke profile/current through skill.
 - Start appropriate workout, log explicit warm-up and working set.
 - Rest automation persists and sends exactly next-step prompt with receipt.
-- Early next set cancels old timer; calendar move replaces reminders.
+- Early next set cancels old timer; session moves replace reminders.
 - Preview first real week and separately approve calendar publication.
 - Verify Gateway restart recovery, disabled-job visibility and blocked send recovery.
 

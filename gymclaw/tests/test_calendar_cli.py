@@ -65,7 +65,7 @@ def test_calendar_cli_safe_defaults_and_scope_errors(tmp_path):
     assert status == 1 and result["error"]["code"] == "CALENDAR_SCOPE_MISMATCH"
 
 
-def test_move_session_picks_valid_slot_or_explains(engine, capsys):
+def test_session_move_exact_or_quietest_slot(engine, capsys):
     def call(*args):
         code = main(["--db-url", str(engine.url), *args, "--now", SUNDAY.isoformat()])
         return code, json.loads(capsys.readouterr().out)
@@ -73,18 +73,18 @@ def test_move_session_picks_valid_slot_or_explains(engine, capsys):
     with Session(engine) as db, db.begin():
         sessions = weekly.weekly_plan(db, "short", now=SUNDAY)["plan"]["sessions"]
     friday = next(s for s in sessions if s["start"].startswith("2026-10-16"))
-    move = ("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-1-move")
-    code, moved = call(*move, "--to", "2026-10-16T12:00:00+02:00")
-    assert code == 0 and moved["data"]["to"] == "2026-10-16T10:00:00+00:00"
-    assert call(*move, "--to", "2026-10-16T12:00:00+02:00")[1] == moved
+    move = ("session", "move", "--session-id", friday["id"], "--request-id", "tg-1-move")
+    # Local time without offset is the owner's timezone.
+    code, moved = call(*move, "--start", "2026-10-16T12:00")
+    assert code == 0 and moved["data"]["session"]["start"] == "2026-10-16T10:00:00+00:00"
+    assert call(*move, "--start", "2026-10-16T12:00")[1] == moved
     writes = call("calendar", "pending-writes")[1]["data"]["writes"]
     assert any(w["session_id"] == friday["id"] and w["body"]["start"]["dateTime"] == "2026-10-16T12:00:00+02:00" for w in writes)
-    # Past the workout window: the error lists what does fit that day.
-    code, refused = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-2-move", "--to", "2026-10-16T23:00:00+02:00")
-    assert code == 1 and refused["error"]["code"] == "SLOT_NOT_VALID" and "12:00" in refused["error"]["message"]
-    # Thursday would leave no rest day after Wednesday.
-    code, refused = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-3-move", "--day", "2026-10-15")
+    # Thursday would leave no rest day after Wednesday; the planner refuses and points to --start.
+    code, refused = call("session", "move", "--session-id", friday["id"], "--request-id", "tg-2-move", "--day", "2026-10-15")
     assert code == 1 and refused["error"]["code"] == "NO_VALID_SLOT"
+    code, moved = call("session", "move", "--session-id", friday["id"], "--request-id", "tg-3-move", "--day", "2026-10-16")
+    assert code == 0 and moved["data"]["to"].startswith("2026-10-16")
 
 
 def test_profile_window_change_moves_sessions_that_no_longer_fit(engine, capsys):
