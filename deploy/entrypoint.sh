@@ -80,6 +80,10 @@ settings = {
     "channels.telegram.actions.reactions": True,
     "channels.telegram.reactionLevel": "extensive",
     "channels.telegram.streaming.mode": "off",
+    # Name the egress proxy explicitly. With only the proxy env vars, inbound media downloads (photos,
+    # files) still resolve api.telegram.org locally for their SSRF check, and this container has no
+    # outside DNS. An explicit proxy lets the proxy resolve it.
+    **({"channels.telegram.proxy": e["HTTPS_PROXY"]} if e.get("HTTPS_PROXY") else {}),
     "commands.ownerAllowFrom": [f"telegram:{owner}"],
     "tools.web.search.enabled": False,
     "messages.suppressToolErrors": True,
