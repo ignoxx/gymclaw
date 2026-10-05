@@ -81,6 +81,23 @@ test("typed set: react, ack on the set card, countdown, then countdown deleted a
   assert.equal(timers.intervals.size, 0);
 });
 
+test("shortened rest edits the same countdown and keeps counting to the new time", async () => {
+  const { calls, api } = fakeTelegram();
+  const timers = fakeTimers();
+  let now = Date.parse("2026-10-02T18:00:00Z");
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers });
+  await coach.apply({ cards: [card("until Bench set 2/2", { rest_until: "2026-10-02T18:01:30Z", kind: "rest" })] });
+  await coach.apply({ refresh: true, cards: [card("until Bench set 2/2", { rest_until: "2026-10-02T18:01:00Z", kind: "rest" })] });
+  assert.deepEqual(calls.at(-1).slice(0, 4), ["edit", OWNER, 100, "⏱ 1:00 until Bench set 2/2"]);
+  now += 5000;
+  await timers.tick();
+  assert.equal(calls.at(-1)[3], "⏱ 0:55 until Bench set 2/2");
+  assert.equal(calls.filter((c) => c[0] === "send").length, 1, "no new message, no extra notification");
+  // A settings change with nothing to show leaves the live card alone.
+  await coach.apply({ keep: true, cards: [] });
+  assert.equal(coach.state().live.messageId, 100);
+});
+
 test("swap: menu on the card, wait restores it, choosing deletes options and the old card", async () => {
   const { calls, api } = fakeTelegram();
   const coach = createCoach({ telegram: async () => api, chatId: OWNER, timers: fakeTimers() });

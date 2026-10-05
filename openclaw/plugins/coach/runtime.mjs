@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 // Cheap pre-check so ordinary chat never pays for a Python start-up.
 export const SET_LIKE = /^\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*[x×*]\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*$|^\s*\d+\s*reps?\s*(?:at|@)\s*\d+(?:[.,]\d+)?\s*(?:kg)?\s*$/i;
 export const TICK_MS = 5000;
-const ACTIONS = ["status", "preview", "start", "log", "card", "swap", "later", "next", "end"];
+const ACTIONS = ["status", "preview", "start", "log", "card", "swap", "switch", "relabel", "rest", "later", "next", "end"];
 
 /** Run `gymclaw-tool coach ...`; resolves the JSON `data` or rejects with the CLI error code. */
 export function cliRunner(toolPath, { timeoutMs = 20000 } = {}) {
@@ -96,6 +96,13 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
       for (const card of result.cards ?? []) extras.push({ messageId: await api.send(chatId, card.text, { photo: card.photo, buttons: keyboard(card.buttons) }), card });
       return;
     }
+    if (result.refresh && live && result.cards?.length) {
+      // Same message, new content (rest shortened): the running countdown picks up the new time.
+      live.card = result.cards[0];
+      await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(live.card.buttons)));
+      return;
+    }
+    if (result.keep && !result.cards?.length) return;
     if (result.restore) {
       await clearExtras();
       if (live) await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(live.card.buttons)));
@@ -235,8 +242,13 @@ export function registerCoach(api, { run, telegram } = {}) {
       "so after calling reply NO_REPLY unless the owner asked a question. Actions: status (read the running workout, sends " +
       "nothing), preview (next or given planned session: one image with every exercise + plan; use for \"what's on today\"), " +
       "log (text like \"10x40\" = 10 reps at 40 kg: logs a set), start (template_id, optional " +
-      "planned_session_id), card (resend current card), swap (equipment taken: show same-muscle alternatives), " +
-      "later (do current exercise later), next (move on to the next exercise), end (end early, save, show summary).",
+      "planned_session_id), card (resend current card), swap (show up to 3 same-muscle alternatives as buttons; only " +
+      "before the first set), switch (exercise: the owner is doing this exercise now — any exercise, any time; " +
+      "finishes or replaces the current one), relabel (exercise: what the owner really did; which: the logged exercise " +
+      "to fix, default the latest; works after the workout too), rest (seconds between sets for this workout; " +
+      "remember=true also makes it the default), later (do current exercise later), next (move on to the next " +
+      "exercise), end (end early, save, show summary). exercise takes a guide_id or exact name; on EXERCISE_UNKNOWN " +
+      "pick one of the suggested guide_ids. The result's `card` is what the owner now sees.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -246,6 +258,10 @@ export function registerCoach(api, { run, telegram } = {}) {
         template_id: { type: "string" },
         text: { type: "string", description: "Set for action log, reps first, e.g. 10x40" },
         planned_session_id: { type: "string" },
+        exercise: { type: "string", description: "switch/relabel: guide_id or exact exercise name" },
+        which: { type: "string", description: "relabel: the logged exercise to correct" },
+        seconds: { type: "integer", description: "rest: seconds between sets" },
+        remember: { type: "boolean", description: "rest: also the default for future workouts" },
       },
     },
     async execute(toolCallId, params) {
@@ -261,13 +277,19 @@ export function registerCoach(api, { run, telegram } = {}) {
           ? ["coach", "start", "--template-id", params.template_id ?? "", ...(params.planned_session_id ? ["--planned-session-id", params.planned_session_id] : []), "--request-id", requestId]
           : params.action === "card"
             ? ["coach", "card"]
-            : ["coach", "act", "--action", params.action, "--request-id", requestId];
+            : ["coach", "act", "--action", params.action, "--request-id", requestId,
+                ...(params.exercise ? ["--exercise", params.exercise] : []),
+                ...(params.which ? ["--which", params.which] : []),
+                ...(params.seconds ? ["--seconds", String(params.seconds)] : []),
+                ...(params.remember ? ["--remember"] : [])];
       try {
         const result = await cli(args);
         if (params.action === "status") return { content: [{ type: "text", text: JSON.stringify({ ok: true, workout: result }) }] };
         await coach.apply(result);
         if (changed(result)) sync();
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, cards_sent: result.cards?.length ?? 0, ack: result.ack ?? null }) }] };
+        // Exactly what the owner sees now, so replies describe the real card, not a guess.
+        const shown = (result.cards ?? []).map((card) => card.text);
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ack: result.ack ?? null, ...(result.live_buttons ? { swap_options: shown } : { card: shown[0] ?? null }) }) }] };
       } catch (error) {
         return { content: [{ type: "text", text: JSON.stringify({ ok: false, code: error.code, message: error.message }) }] };
       }

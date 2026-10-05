@@ -267,8 +267,14 @@ Continue logging sets, or use:
   next comes a pending movement for the same primary muscle, else plan order. Deferred work is never dropped.
 - `workout machine-free --workout-id ... --exercise-id ... --request-id ...`: deferred equipment is
   free; it becomes active unless the current exercise already has sets. IDs are runtime UUIDs from queue.
-- `workout alternatives --workout-id ... [--exercise-id ...]`: read-only swap options, template
-  alternatives first, then same-muscle catalog exercises (owner history ranks first).
+- `workout alternatives --workout-id ... [--exercise-id ...]`: read-only swap options (up to 3), template
+  alternatives first, then same-muscle catalog exercises (owner history ranks first). Never one already
+  in the workout or with the same artwork (the same movement under another name).
+- `coach act --action switch|relabel|rest --request-id ... [--exercise X] [--which Y] [--seconds N] [--remember]`:
+  owner-led changes. `switch` makes any named exercise the current one (finishes the started one or
+  replaces an unstarted one), `relabel` renames a logged exercise and keeps its sets (also after the
+  workout; progression and template follow), `rest` sets rest for the rest of the workout (`--remember`:
+  profile default too). `--exercise` is a guide_id or exact name; otherwise EXERCISE_UNKNOWN lists matches.
 - `workout substitute --workout-id ... --exercise-id ... --substitute-id db-fly
   --request-id ...`: template alternative or same-muscle catalog slug; only remaining volume.
 - `workout next-exercise --workout-id ... --exercise-id ... --request-id ...`: move on; completes

@@ -39,8 +39,14 @@ def primary_muscle(guide_id: str | None) -> str | None:
     return item["primaryMuscle"] if item else None
 
 
+# Gym shorthand the owner types ("DB RDL"), spelled out the way catalog names are.
+ALIASES = {"db": "dumbbell", "bb": "barbell", "kb": "kettlebell", "rdl": "romanian deadlift", "sldl": "stiff leg deadlift",
+    "ohp": "overhead press", "ext": "extension", "tri": "tricep", "bi": "bicep"}
+
+
 def words(text: str) -> set[str]:
-    return {w.rstrip("s") for w in re.findall(r"[a-z]+", text.casefold())}
+    spelled = " ".join(ALIASES.get(w, w) for w in re.findall(r"[a-z]+", text.casefold()))
+    return {w.rstrip("s") for w in spelled.split()}
 
 
 @lru_cache(maxsize=1)
@@ -71,16 +77,25 @@ def search(query: str = "", *, muscle: str | None = None, equipment: str | None 
     return [result for _, _, result in sorted(results, key=lambda r: (-r[0], r[1]))[:limit]]
 
 
-def similar(guide_id: str, *, exclude: set[str] = frozenset(), prefer: set[str] = frozenset(), limit: int = 2) -> list[dict]:
-    """Same primary muscle and exercise type, no stretches. `prefer` slugs (e.g. owner history) rank first,
-    then shared movement words (press, fly, incline), then different equipment (the original may be occupied)."""
+def artwork(slug: str) -> str:
+    """Identity of an entry's picture. A few catalog entries are the same movement under two names
+    with the same art (Leg Curl / Lying Leg Curl); offering one for the other isn't a swap."""
+    item = catalog()[slug]
+    return (item["frames"][0]["attribution"].get("source") or {}).get("url") or slug
+
+
+def similar(guide_id: str, *, exclude: set[str] = frozenset(), prefer: set[str] = frozenset(), limit: int = 3) -> list[dict]:
+    """Same primary muscle and exercise type, no stretches, never the same artwork as the original or an
+    excluded entry. `prefer` slugs (e.g. owner history) rank first, then shared movement words (press,
+    fly, incline), then different equipment (the original may be occupied)."""
     original = catalog().get(guide_id)
     if original is None:
         return []
     base = words(original["name"])
+    taken = {artwork(slug) for slug in exclude | {guide_id} if slug in catalog()}
     options = []
     for item in catalog().values():
-        if item["slug"] == guide_id or item["slug"] in exclude or item["isStretch"]:
+        if item["slug"] in exclude or artwork(item["slug"]) in taken or item["isStretch"]:
             continue
         if item["primaryMuscle"] != original["primaryMuscle"] or item["exerciseType"] != original["exerciseType"]:
             continue
