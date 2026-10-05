@@ -211,8 +211,7 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                             runtime.prepare_event_message(db, alert["event_id"], message=alert["message"], now=now, recipient=recipient, profile=provider.profile)
                     lineup = [week_lineup(db, date.fromisoformat(w), now=now) for w in synced["data"]["weeks"]] if synced["user_message_hint"] else []
                     hint = " ".join(h for h in (synced["user_message_hint"], *lineup, personal["user_message_hint"]) if h) or None
-                    if not hint and any(rolling.get(key) for key in ("changed", "created", "missed")):
-                        hint = "Training plan updated. Recovery/calendar constraints kept."
+                    hint = hint or weekly.plan_changes(db, rolling)
                     if hint:
                         if not authority["calendar_writes_enabled"]:
                             hint += " Local plan; calendar publication pending approval."

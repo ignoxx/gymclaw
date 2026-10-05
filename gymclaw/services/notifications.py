@@ -27,7 +27,7 @@ def schedule_session_jobs(db: Session, session: PlannedSession, *, now: datetime
         cancel_session_jobs(db, session.id, now=now)
         return
     existing = list(db.scalars(select(NotificationJob).where(NotificationJob.planned_session_id == session.id)))
-    desired = [("GET_READY", session.prep_start_at, "Gym soon. Start getting ready now."), ("LEAVE", session.leave_home_at, "Leave now. Gym session starts soon."), ("SESSION_START", session.planned_start_at, "Gym session begins. Start workout when you arrive.")]
+    desired = [("GET_READY", session.prep_start_at, "Gym soon. Start getting ready now."), ("LEAVE", session.leave_home_at, "Leave now. Gym session starts soon."), ("SESSION_START", session.planned_start_at, "Gym session begins. Tap Start when you're there.")]
     for kind, due, message in desired:
         if due <= now:
             continue

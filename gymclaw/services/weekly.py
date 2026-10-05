@@ -97,12 +97,13 @@ def first_plan_key(db: Session, week: date, now: datetime, template_id: str) -> 
 
 def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
     """Rotate the owner's split (e.g. Push → Pull → Legs) over upcoming sessions, continuing after the
-    last completed workout. User-locked sessions keep their template but still advance the rotation."""
+    last started workout (a running one counts, so starting it doesn't reshuffle the week).
+    User-locked sessions keep their template but still advance the rotation."""
     row = db.get(OnboardingState, 1)
     split = row.split_json if row else []
     if len(split) < 2:
         return []
-    last = db.scalar(select(WorkoutSession.template_id).where(WorkoutSession.status == "PLAN_UPDATED").order_by(WorkoutSession.completed_at.desc()).limit(1))
+    last = db.scalar(select(WorkoutSession.template_id).order_by(WorkoutSession.started_at.desc()).limit(1))
     position = split.index(last) + 1 if last in split else 0
     changed = []
     for session in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"])).order_by(PlannedSession.planned_start_at, PlannedSession.id)):
@@ -127,6 +128,37 @@ def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
 
 CROWD_RECHECK = timedelta(minutes=30)
 STALE_WORKOUT = timedelta(hours=3)
+
+
+def plan_changes(db: Session, rolling: dict) -> str | None:
+    """What a rolling replan changed, in the owner's words: 'Fri moved to 11:00 (was 10:30) · Wed is now Push'.
+    None when nothing visible changed (forecast-only updates stay quiet)."""
+    zone = ZoneInfo(get_profile(db).timezone)
+
+    def local(value: str | datetime) -> datetime:
+        return (datetime.fromisoformat(value) if isinstance(value, str) else value).astimezone(zone)
+
+    parts = []
+    for change in rolling.get("changed", []):
+        session = db.get(PlannedSession, change["session_id"])
+        if change["action"] == "moved":
+            old, new = local(change["from"]), local(change["to"])
+            parts.append(f"{new:%a} moved to {new:%H:%M} (was {old:%H:%M})" if old.date() == new.date() else f"{old:%a %H:%M} moved to {new:%a %H:%M}")
+        elif change["action"] == "replacement":
+            parts.append(f"New session {local(change['to']):%a %H:%M}")
+        elif change["action"] == "cancelled_no_valid_slot" and session:
+            parts.append(f"{local(session.planned_start_at):%a} dropped: no free slot")
+    for change in rolling.get("rotation", []):
+        session = db.get(PlannedSession, change["session_id"])
+        if session:
+            parts.append(f"{local(session.planned_start_at):%a} is now {get_template(db, change['template_id']).name}")
+    if rolling.get("created"):
+        parts.append(f"{len(rolling['created'])} new sessions planned")
+    for session_id in rolling.get("missed", []):
+        session = db.get(PlannedSession, session_id)
+        if session:
+            parts.append(f"{local(session.planned_start_at):%a} marked missed")
+    return "📅 Plan updated: " + " · ".join(parts) if parts else None
 
 
 def close_stale_workouts(db: Session, *, now: datetime) -> list[str]:

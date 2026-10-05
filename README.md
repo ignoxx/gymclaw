@@ -38,7 +38,7 @@ GymClaw isn't a chatbot you prompt. It's an agent that stays on and acts on its 
 | **Replans** | Meetings, trips and sick days move sessions to the next valid slot. You can also just say it in chat. |
 | **Watches** | Polls gym check-ins and pings you when it's time to leave. |
 | **Coaches** | Sends each exercise with an image, target and buttons. Tap `✅ 10 × 80 kg` or text `10x80`; it reacts 👍 and shows the next set with a live rest countdown. No model in the loop. |
-| **Adapts** | Machine taken? Tap **Swap** for two same-muscle alternatives with images, or wait, or do it later while staying on that muscle group. |
+| **Adapts** | Machine taken? Tap **Swap** for up to three same-muscle alternatives with images, or wait, or do it later while staying on that muscle group. Or just say what you're doing instead; the plan follows. |
 | **Tracks weight** | Send a photo of the scale; it reads the number and charts the 7-day trend. Old scale pics sent as files are backfilled by their capture date. |
 | **Learns** | Hit all your reps and the next target goes up. Your "how busy is it?" answers tune the crowd forecast. |
 

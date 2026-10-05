@@ -5,13 +5,14 @@ Deterministic and model-free. The `gymclaw-coach` OpenClaw plugin is a thin tran
 (Telegram allows 64 bytes). The ref is the first 8 characters of the workout exercise ID, so old
 buttons stop working once the workout has moved past that exercise.
 
-Result: {"handled", "react", "ack", "cleanup", "keep", "live_buttons", "restore", "cards": [card]}
+Result: {"handled", "react", "ack", "cleanup", "keep", "live_buttons", "restore", "refresh", "cards": [card]}
 card: {"text", "photo", "buttons", "rest_until", "kind": "set"|"rest"|"option"}
 - react: emoji for the owner's typed message
 - ack: short line appended to the previous card before its buttons are removed
 - cleanup "delete": remove the previous card and swap options instead of keeping them
 - keep + live_buttons: swap menu; the current card's buttons change, options are sent below it
 - restore: drop the options and give the current card its buttons back ("Keep")
+- refresh: edit the live card in place with the returned card (rest countdown shortened)
 - rest cards carry rest_until; the plugin counts down and replaces them with the next set card
 """
 from datetime import datetime
@@ -19,13 +20,14 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from gymclaw.models import WorkoutExercise, WorkoutSession
+from gymclaw.models import PlannedSession, WorkoutExercise, WorkoutSession
 from gymclaw.services import adaptation, audit
 from gymclaw.services.crowd import record_feedback
 from gymclaw.services.errors import DomainError
+from gymclaw.services.profile import update_profile
 from gymclaw.services.set_parser import SetInput, parse_set
 from gymclaw.services.templates import ExerciseSpec, remember_swap
-from gymclaw.services.workout import UNRESOLVED, current, exercises, expected_weight, format_target, log_set, pending_rest, rest_complete, skip_rest, skip_warmup, utc
+from gymclaw.services.workout import UNRESOLVED, current, cut_rest, exercises, expected_weight, format_target, log_set, logs, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, utc
 
 RATINGS = (("Empty", "EMPTY"), ("Fine", "FINE"), ("Busy", "BUSY"), ("Packed", "PACKED"))
 
@@ -46,8 +48,8 @@ def kg(weight: float) -> str:
 
 
 def done(reps: int, weight: float) -> str:
-    """A set the way the owner says it: reps first, '10 × 40 kg'."""
-    return f"{reps} × {kg(weight)}"
+    """A set the way the owner says it: reps first, '10 × 40 kg' ('12 reps' for bodyweight)."""
+    return f"{reps} × {kg(weight)}" if weight else f"{reps} reps"
 
 
 def card(text: str, buttons: list[list[dict]] | None = None, *, photo: str | None = None, rest_until: str | None = None, kind: str = "set") -> dict:
@@ -68,9 +70,10 @@ def exercise_card(db: Session, workout: WorkoutSession, now: datetime) -> dict:
             [[button("✅ It's free now", "free", ref), button("🔄 Swap", "swap", ref)], [button("⏭ Skip it", "drop", ref)]])
     ref = active["id"][:8]
     if data["rest_job"] and not active["new_exercise"]:
-        # Between sets there is nothing to log yet: just the countdown and a way to skip it.
+        # Between sets there is nothing to log yet: just the countdown and ways to shorten it.
         return card(f"until **{active['name']}** set {active['set_number']}/{active['working_sets']}",
-            [[button("⏭ Skip", "skip", ref)]], rest_until=data["rest_job"]["due_at"], kind="rest")
+            [[button("−15s", "cut", ref, "15"), button("−30s", "cut", ref, "30"), button("⏭ Skip", "skip", ref)]],
+            rest_until=data["rest_job"]["due_at"], kind="rest")
     head = f"**{active['name']}**" + (f" · {active['primary_muscle']}" if active["primary_muscle"] else "")
     if active["set_type"] == "WARMUP":
         lines = [head, f"Warm-up · {format_target(active)}"]
@@ -78,6 +81,9 @@ def exercise_card(db: Session, workout: WorkoutSession, now: datetime) -> dict:
     else:
         last = active["last_set"]
         quick = (last["weight"], last["reps"]) if last else (active["target_weight"], active["rep_min"]) if active["target_weight"] else None
+        if quick is None and active["bodyweight"]:
+            # Bodyweight: reps are the whole set, no weight to ask for.
+            quick = (0, active["rep_min"])
         reps = format_target(active | {"target_weight": 0}).removesuffix(" reps")
         if quick:
             lines = [head, f"Set {active['set_number']}/{active['working_sets']} · {format_target(active)}"]
@@ -164,6 +170,8 @@ def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> 
             return {"handled": True, "ack": "⌛ Old button.", "cards": []}
         record_feedback(db, workout.id, rating=rating, now=now, request_id=request_id)
         return {"handled": True, "ack": f"Saved: {rating.title()}. Thanks.", "cards": []}
+    if action == "begin":
+        return begin(db, args[0], now=now, request_id=request_id)
     workout = active_workout(db)
     if workout is None:
         return {"handled": True, "ack": "⌛ No workout running.", "cards": []}
@@ -189,6 +197,16 @@ def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> 
     if action == "skip":
         skip_rest(db, workout.id, now=now, request_id=request_id)
         return {"handled": True, "cleanup": "delete", "cards": after_change(db, workout, now, request_id)}
+    if action == "cut":
+        cut_rest(db, workout.id, int(args[1]), now=now, request_id=request_id)
+        if pending_rest(db, workout) is None:
+            return {"handled": True, "cleanup": "delete", "cards": after_change(db, workout, now, request_id)}
+        # Same countdown message, new time: no new notification on the phone.
+        return {"handled": True, "refresh": True, "cards": [exercise_card(db, workout, now)]}
+    if action in {"swap", "sub"} and row.status == "ACTIVE" and logs(db, row, "WORKING"):
+        # A set done means the owner is on that machine: finish it there. (A machine taken mid-way is
+        # deferred first, and its remaining sets can then be swapped.) Naming an exercise in chat still works.
+        return {"handled": True, "ack": f"Already started {name}: finish it or tap Next.", "cards": [exercise_card(db, workout, now)]}
     if action == "swap":
         # The card's own buttons become wait/later; options are sent below it. No extra menu message.
         menu = [button(f"↩ Keep {row.config_json['name']}", "wait", ref)]
@@ -254,18 +272,59 @@ def handle_rest_over(db: Session, *, now: datetime) -> dict:
     return {"handled": True, "rest_over": True, "cleanup": "delete", "cards": after_change(db, workout, now, f"rest-due:{job.id}")}
 
 
-def handle_action(db: Session, action: str, *, now: datetime, request_id: str) -> dict:
-    """Agent-initiated action on the current exercise ('swap', 'later', 'next', 'end', 'card')."""
+def handle_action(db: Session, action: str, *, now: datetime, request_id: str, exercise: str | None = None,
+                  which: str | None = None, seconds: int | None = None, remember: bool = False) -> dict:
+    """Agent-initiated action: 'card', 'swap', 'later', 'next', 'end' on the current exercise;
+    'switch' (exercise: do this one now), 'relabel' (exercise: what was really done, which: the logged one;
+    also after the workout), 'rest' (seconds for this workout; remember: also the default from now on)."""
     now = utc(now)
+    if action == "rest":
+        seconds = needed(seconds, "seconds")
+    if action == "rest" and remember:
+        update_profile(db, {"default_compound_rest_seconds": seconds, "default_accessory_rest_seconds": seconds})
     workout = active_workout(db)
+    if action == "relabel":
+        workout = workout or db.scalar(select(WorkoutSession).order_by(WorkoutSession.started_at.desc()).limit(1))
+        if workout is None:
+            raise DomainError("NO_WORKOUT", "No workout to correct")
+        result = adaptation.relabel(db, workout.id, needed(exercise, "exercise"), which=which, now=now, request_id=request_id)["data"]
+        ack = f"✏️ Saved as {result.get('name', exercise)}."
+        return {"handled": True, "ack": ack, "cards": after_change(db, workout, now, request_id) if workout.status != "PLAN_UPDATED" else []}
     if workout is None:
+        if action == "rest" and remember:
+            return {"handled": True, "ack": f"Rest is {seconds}s from now on.", "cards": []}
         raise DomainError("NO_ACTIVE_WORKOUT", "No workout running; start one first")
     if action == "card":
         return {"handled": True, "ack": None, "cards": after_change(db, workout, now, request_id)}
     if action == "end":
         return end_workout(db, workout, now=now, request_id=request_id)
+    if action == "rest":
+        set_rest(db, workout.id, seconds, now=now, request_id=request_id)
+        # The live card stays; the next rest uses the new time.
+        return {"handled": True, "ack": None, "keep": True, "cards": []}
+    if action == "switch":
+        adaptation.switch_to(db, workout.id, needed(exercise, "exercise"), now=now, request_id=request_id)
+        return {"handled": True, "cleanup": "delete", "cards": after_change(db, workout, now, request_id)}
     rows = exercises(db, workout)
     row = next((e for e in rows if e.status == "ACTIVE"), None) or next((e for e in rows if e.status == "DEFERRED"), None)
     if row is None:
         raise DomainError("NO_ACTIVE_EXERCISE", "Nothing left to act on; end the workout")
     return handle_tap(db, f"{action}:{row.id[:8]}", now=now, request_id=request_id)
+
+
+def begin(db: Session, ref: str, *, now: datetime, request_id: str) -> dict:
+    """'Start workout' on the session reminder: start that planned session's workout and send its first card."""
+    running = active_workout(db)
+    if running is not None:
+        return {"handled": True, "ack": "Already running.", "cards": [exercise_card(db, running, now)]}
+    planned = db.scalar(select(PlannedSession).where(PlannedSession.id.startswith(ref)))
+    if planned is None or planned.status not in {"TENTATIVE", "COMMITTED"} or not planned.workout_template_id:
+        return {"handled": True, "ack": "⌛ This session can't be started anymore.", "cards": []}
+    start(db, planned.workout_template_id, now=now, request_id=request_id, planned_session_id=planned.id)
+    return {"handled": True, "ack": "▶️ Started.", "cards": [exercise_card(db, active_workout(db), now)]}
+
+
+def needed(value, name: str):
+    if value is None:
+        raise DomainError("ARGUMENT_REQUIRED", f"Missing {name}")
+    return value

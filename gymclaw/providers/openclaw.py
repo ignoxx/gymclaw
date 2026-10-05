@@ -44,7 +44,7 @@ class AutomationProvider(Protocol):
     def list_jobs(self) -> list[dict]: ...
     def create(self, spec: AutomationSpec) -> str: ...
     def remove(self, job_id: str): ...
-    def send(self, recipient: str, message: str) -> str: ...
+    def send(self, recipient: str, message: str, buttons: tuple[tuple[str, str], ...] = ()) -> str: ...
 
 
 def cli_json(text: str) -> dict:
@@ -127,9 +127,11 @@ class OpenClawProvider:
     def remove(self, job_id: str):
         self.call("cron", "remove", job_id)
 
-    def send(self, recipient: str, message: str) -> str:
+    def send(self, recipient: str, message: str, buttons: tuple[tuple[str, str], ...] = ()) -> str:
+        """`buttons` are (label, callback data) pairs in one row, e.g. ("▶️ Start workout", "gc:begin:1a2b3c4d")."""
         validate_route(self.profile, recipient)
-        value = self.call("message", "send", "--channel", "telegram", "--target", recipient, "--message", message)
+        extra = ["--presentation", json.dumps({"blocks": [{"type": "buttons", "buttons": [{"label": label, "value": value} for label, value in buttons]}]})] if buttons else []
+        value = self.call("message", "send", "--channel", "telegram", "--target", recipient, "--message", message, *extra)
         payload = value.get("payload", {})
         receipt = value.get("messageId") or (payload.get("messageId") if isinstance(payload, dict) else None)
         if value.get("action") != "send" or value.get("channel") != "telegram" or value.get("dryRun") is not False or not receipt or value.get("ok") is False or (isinstance(payload, dict) and payload.get("ok") is False):

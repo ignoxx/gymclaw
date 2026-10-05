@@ -117,7 +117,17 @@ def active_exercise(db: Session, workout: WorkoutSession) -> WorkoutExercise:
 
 
 def warmup_pending(db: Session, exercise: WorkoutExercise) -> bool:
-    return exercise.config_json.get("warmup_required", False) and not logs(db, exercise, "WARMUP")
+    # Unknown working weight (first session): a warm-up has no weight to aim for, so it's skipped.
+    return exercise.config_json.get("warmup_required", False) and exercise.target_weight > 0 and not logs(db, exercise, "WARMUP")
+
+
+def warmup_weight(exercise: WorkoutExercise) -> float:
+    """Template warm-up weight, else about half the working weight on the exercise's increment."""
+    explicit = exercise.config_json.get("warmup_weight")
+    if explicit:
+        return explicit
+    step = exercise.config_json.get("increment") or 2.5
+    return round(exercise.target_weight / 2 / step) * step
 
 
 def compatible(exercise: WorkoutExercise, rows: list[WorkoutExercise]) -> bool:
@@ -207,8 +217,9 @@ def current(db: Session, workout_id: str, *, now: datetime) -> dict:
     active_data = None
     if active:
         is_warmup = warmup_pending(db, active)
-        from gymclaw.services.illustrations import for_exercise, primary_muscle
+        from gymclaw.services.illustrations import catalog, for_exercise, primary_muscle
         last = last_working_set(db, active)
+        guide = catalog().get(active.config_json.get("guide_id") or "")
         active_data = {
             "illustration": for_exercise(active.config_json["name"], active.config_json.get("guide_id")),
             "id": active.id, "exercise_id": active.exercise_id, "name": active.config_json["name"],
@@ -218,7 +229,8 @@ def current(db: Session, workout_id: str, *, now: datetime) -> dict:
             "set_type": "WARMUP" if is_warmup else "WORKING",
             "set_number": 1 if is_warmup else len(logs(db, active, "WORKING")) + 1,
             "working_sets": active.planned_working_sets,
-            "target_weight": active.config_json["warmup_weight"] if is_warmup else active.target_weight,
+            "bodyweight": bool(guide and guide["exerciseType"].startswith("bodyweight")),
+            "target_weight": warmup_weight(active) if is_warmup else active.target_weight,
             "rep_min": active.config_json["warmup_reps"] if is_warmup else active.rep_min,
             "rep_max": active.config_json["warmup_reps"] if is_warmup else active.rep_max,
         }
@@ -398,3 +410,42 @@ def skip_rest(db: Session, workout_id: str, *, now: datetime, request_id: str) -
         return touch(db, workout, now)
 
     return mutate(db, "workout.rest_skipped", request_id, {"workout_id": workout_id}, now, action)
+
+
+def set_rest(db: Session, workout_id: str, seconds: int, *, now: datetime, request_id: str) -> dict:
+    """Owner wants a different rest between sets: applies to every exercise not done yet in this workout.
+    A countdown already running keeps its time; the next one uses the new rest."""
+    now = utc(now)
+    if not 10 <= seconds <= 600:
+        raise DomainError("INVALID_REST", "Rest must be 10–600 seconds")
+
+    def action():
+        workout = load_workout(db, workout_id, now)
+        for row in exercises(db, workout):
+            if row.status in UNRESOLVED:
+                row.rest_seconds = seconds
+        return touch(db, workout, now)
+
+    return mutate(db, "workout.rest_changed", request_id, {"workout_id": workout_id, "seconds": seconds}, now, action)
+
+
+def cut_rest(db: Session, workout_id: str, seconds: int, *, now: datetime, request_id: str) -> dict:
+    """Shorten the running rest countdown. Cutting past zero ends the rest (same as skipping it).
+    The cron fallback ping keeps its old time; it finds the job already closed and stays silent."""
+    now = utc(now)
+
+    def action():
+        workout = load_workout(db, workout_id, now)
+        job = pending_rest(db, workout)
+        if workout.status != "RESTING" or job is None:
+            raise DomainError("NOT_RESTING", "No rest to shorten")
+        due = job.due_at - timedelta(seconds=seconds)
+        if due <= now:
+            cancel_rest(db, workout, now)
+            transition(db, workout, "SET_ACTIVE", now)
+        else:
+            job.due_at = due
+            db.get(SetLog, job.set_log_id).rest_due_at = due
+        return touch(db, workout, now)
+
+    return mutate(db, "workout.rest_cut", request_id, {"workout_id": workout_id, "seconds": seconds}, now, action)

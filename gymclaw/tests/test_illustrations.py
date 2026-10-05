@@ -46,4 +46,11 @@ def test_swap_alternatives_differ_in_equipment():
     from gymclaw.services.illustrations import similar
     # "Rear Delt Fly" and "Bent-Over Rear Delt Raise" are the same dumbbell movement; offer one of them.
     options = similar("cable-rear-delt-fly")
-    assert len({o["equipment"] for o in options}) == len(options) == 2
+    assert len(options) == 3 and len({o["equipment"] for o in options[:2]}) == 2
+
+
+def test_swap_never_offers_the_same_movement_under_another_name():
+    from gymclaw.services.illustrations import similar
+    # Leg Curl and Lying Leg Curl share one picture: swapping one for the other isn't a swap.
+    assert "leg-curl" not in [o["guide_id"] for o in similar("lying-leg-curl")]
+    assert "lying-leg-curl" not in [o["guide_id"] for o in similar("dumbbell-romanian-deadlift", exclude={"leg-curl"})]
