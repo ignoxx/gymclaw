@@ -15,7 +15,8 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
   notifies the phone. A new exercise starts right away. The runtime cron ping is only a fallback 30 s
   later, e.g. after a gateway restart mid-rest.
 - **Swap:** the card's buttons become `↩ Keep <exercise>` / `↪ Do it later` and up to three same-muscle
-  alternatives appear below it (never the same movement under another name). Choosing one deletes the
+  alternatives appear below it (never the same movement under another name; an exercise swapped away
+  earlier comes back first as `↩ Back to …`). Choosing one deletes the
   options and the old card, and the swap is saved in the template (the old exercise stays as an
   alternative). Keep restores the card. Not after the first set: the owner is on that machine.
 - **Start:** the session reminder carries `▶️ Start workout` (`gc:begin:<planned-session-ref>`).

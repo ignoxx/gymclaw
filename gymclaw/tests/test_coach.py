@@ -229,3 +229,14 @@ def test_start_button_bodyweight_sets_and_no_blind_warmup(db):
     crunch = coach.handle_text(db, "10x80", now=at(80), request_id="m1")["cards"][0]
     assert "Set 1/1 · 12–15 reps" in crunch["text"] and "✅ 12 reps" in buttons(crunch)
     assert coach.handle_tap(db, buttons(crunch)["✅ 12 reps"], now=at(90), request_id="cb-crunch")["ack"] == "✅ 12 reps"
+
+
+def test_swapped_away_exercise_comes_back_first(db):
+    card = coach.exercise_card(db, coach.active_workout(db), NOW)
+    option = coach.handle_tap(db, buttons(card)["🔄 Swap"], now=at(1), request_id="cb-1")["cards"][0]
+    swapped = coach.handle_tap(db, next(iter(buttons(option).values())), now=at(2), request_id="cb-2")["cards"][0]
+    # Changed their mind on B: A is offered again, first.
+    again = coach.handle_tap(db, buttons(swapped)["🔄 Swap"], now=at(3), request_id="cb-3")["cards"]
+    assert "↩ Back to Machine incline press" in buttons(again[0])
+    back = coach.handle_tap(db, buttons(again[0])["↩ Back to Machine incline press"], now=at(4), request_id="cb-4")["cards"][0]
+    assert back["text"].startswith("**Machine incline press**")

@@ -101,7 +101,7 @@ def substitute(db: Session, workout_id: str, exercise_id: str, substitute_id: st
         needs_warmup = warmup_pending(db, original)
         if needs_warmup and spec.warmup_weight is None:
             raise DomainError("WARMUP_REQUIRED", "Primary replacement needs explicit warm-up weight")
-        if any(e.exercise_id == substitute_id for e in exercises(db, workout)):
+        if any(e.exercise_id == substitute_id and e not in swapped_away(db, workout) for e in exercises(db, workout)):
             raise DomainError("INVALID_SUBSTITUTION", "Replacement exercise already used in this workout")
         was_active = original.status == "ACTIVE"
         replacement = make_exercise(db, workout, spec, original.position, warmup=needs_warmup, working_sets=remaining)
@@ -130,7 +130,11 @@ def substitute(db: Session, workout_id: str, exercise_id: str, substitute_id: st
 
 
 def replacement_spec(db: Session, workout, original: WorkoutExercise, substitute_id: str) -> ExerciseSpec:
-    """Template alternative, or a catalog exercise for the same primary muscle (weights from history)."""
+    """An exercise swapped away earlier in this workout, a template alternative, or a catalog exercise for
+    the same primary muscle (weights from history)."""
+    back = next((e for e in swapped_away(db, workout) if e.exercise_id == substitute_id), None)
+    if back is not None:
+        return spec_of(back)
     if substitute_id in original.config_json["substitutes"]:
         return next(e for e in Template.model_validate(workout.template_snapshot).alternatives if e.id == substitute_id)
     item = catalog().get(substitute_id)
@@ -145,22 +149,33 @@ def replacement_spec(db: Session, workout, original: WorkoutExercise, substitute
         warmup_weight=config.get("warmup_weight"), warmup_reps=config["warmup_reps"])
 
 
+def swapped_away(db: Session, workout) -> list[WorkoutExercise]:
+    """Exercises swapped out before any set was logged. They stay swappable: the owner may change their mind."""
+    return [e for e in exercises(db, workout) if e.status == "SUBSTITUTED" and not logs(db, e, "WORKING")]
+
+
 def alternatives(db: Session, workout_id: str, exercise_id: str | None = None, *, limit: int = 3) -> dict:
-    """Read-only swap options: saved template alternatives first, then same-muscle catalog exercises.
-    Never the exercise being swapped (or the same movement under another name) or one already in the workout."""
+    """Read-only swap options: exercises swapped away from this slot first ("back to A"), then saved template
+    alternatives, then same-muscle catalog exercises. Never the exercise being swapped (or the same movement
+    under another name) or one still in the workout."""
     workout = load_workout(db, workout_id)
     exercise = find_exercise(db, workout, exercise_id)
-    rows = exercises(db, workout)
+    earlier = swapped_away(db, workout)
+    rows = [e for e in exercises(db, workout) if e not in earlier]
     used = ({e.exercise_id for e in rows} | {e.config_json.get("guide_id") for e in rows}) - {None}
     pictures = {artwork(slug) for slug in used if slug in catalog()}
+    back = {e.exercise_id: e for e in earlier if e.position == exercise.position and e.exercise_id not in used}
+    options = [{"substitute_id": e.exercise_id, "name": e.config_json["name"], "source": "workout",
+        "illustration": for_exercise(e.config_json["name"], e.config_json.get("guide_id"))} for e in back.values()]
+    used |= {e.config_json.get("guide_id") for e in back.values()} - {None}
     template = Template.model_validate(workout.template_snapshot)
-    options = [{"substitute_id": spec.id, "name": spec.name, "source": "template", "illustration": for_exercise(spec.name, spec.guide_id)}
+    options += [{"substitute_id": spec.id, "name": spec.name, "source": "template", "illustration": for_exercise(spec.name, spec.guide_id)}
         for spec in template.alternatives if spec.id in exercise.config_json["substitutes"] and spec.id not in used
         and not (spec.guide_id in used or spec.guide_id and artwork(spec.guide_id) in pictures)]
     # Exercises the owner has logged before rank first among catalog options.
     history = set(db.scalars(select(WorkoutExercise.exercise_id).join(SetLog).distinct()))
     guide_id = exercise.config_json.get("guide_id")
-    exclude = used | {o["illustration"]["guide_id"] for o in options if o["illustration"]}
+    exclude = used | set(back) | {o["illustration"]["guide_id"] for o in options if o["illustration"]}
     for item in similar(guide_id, exclude=exclude, prefer=history, limit=limit) if guide_id else []:
         options.append({"substitute_id": item["guide_id"], "name": item["name"], "source": "catalog", "illustration": item})
     return {"exercise_id": exercise.id, "name": exercise.config_json["name"], "options": options[:limit]}

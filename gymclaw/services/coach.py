@@ -243,7 +243,7 @@ def swap_cards(db: Session, workout: WorkoutSession, row: WorkoutExercise) -> li
     if not options:
         return [card("No alternatives for this muscle in the catalog.", kind="option")]
     return [card(f"**{o['name']}**" + (f" · {o['illustration']['equipment']}" if o["illustration"] else ""),
-        [[button(f"Use {o['name']}", "sub", ref, o["substitute_id"])]], photo=o["illustration"]["telegram_png"] if o["illustration"] else None, kind="option")
+        [[button(f"↩ Back to {o['name']}" if o["source"] == "workout" else f"Use {o['name']}", "sub", ref, o["substitute_id"])]], photo=o["illustration"]["telegram_png"] if o["illustration"] else None, kind="option")
         for o in options]
 
 
