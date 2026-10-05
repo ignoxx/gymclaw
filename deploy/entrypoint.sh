@@ -3,8 +3,9 @@
 # OpenClaw config, migrate the DB, then run the gateway in the foreground.
 #
 # Required env: GYMCLAW_TELEGRAM_USER_ID, TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY.
-# Optional env: GYMCLAW_MODEL (default z-ai/glm-5.3-flash), GYMCLAW_ALLOW_DIRECT_EGRESS=1
-# (local testing only).
+# Optional env: GYMCLAW_MODEL (default z-ai/glm-5.3-flash), GYMCLAW_PROVIDER (OpenRouter
+# provider tried first, default inference-net/fp4; `auto` = OpenRouter's default routing),
+# GYMCLAW_ALLOW_DIRECT_EGRESS=1 (local testing only).
 set -euo pipefail
 ROOT=/opt/gymclaw
 OWNER="${GYMCLAW_TELEGRAM_USER_ID:?GYMCLAW_TELEGRAM_USER_ID required}"
@@ -36,10 +37,15 @@ mkdir -p "$WS/memory" "$WS/media"
 MODEL="openrouter/${GYMCLAW_MODEL:-z-ai/glm-5.3-flash}"
 PLUGINS="$ROOT/openclaw.dist/plugins"
 # Values are JSON-encoded by Python; nothing here is interpolated into JSON by hand.
-CONFIG="$(OWNER="$OWNER" MODEL="$MODEL" PLUGINS="$PLUGINS" WS="$WS" ROOT="$ROOT" "$ROOT/.venv/bin/python" - <<'PY'
+PROVIDER="${GYMCLAW_PROVIDER:-inference-net/fp4}"
+CONFIG="$(OWNER="$OWNER" MODEL="$MODEL" PROVIDER="$PROVIDER" PLUGINS="$PLUGINS" WS="$WS" ROOT="$ROOT" "$ROOT/.venv/bin/python" - <<'PY'
 import json, os
 e = os.environ
 owner, model = e["OWNER"], e["MODEL"]
+# Sent verbatim in each OpenRouter request. Falls back to other providers if the pinned one is down.
+extra_body = {"reasoning": {"effort": "minimal"}}
+if e["PROVIDER"] != "auto":
+    extra_body["provider"] = {"order": [e["PROVIDER"]], "allow_fallbacks": True}
 settings = {
     "gateway.mode": "local",
     "gateway.bind": "loopback",
@@ -49,7 +55,7 @@ settings = {
     "agents.defaults.workspace": e["WS"],
     "agents.defaults.skipBootstrap": True,
     "agents.defaults.model.primary": model,
-    "agents.defaults.models": {model: {"params": {"maxTokens": 16384, "extra_body": {"reasoning": {"effort": "minimal"}}}}},
+    "agents.defaults.models": {model: {"params": {"maxTokens": 16384, "extra_body": extra_body}}},
     "agents.defaults.timeoutSeconds": 600,
     "agents.defaults.thinkingDefault": "off",
     "agents.defaults.reasoningDefault": "off",

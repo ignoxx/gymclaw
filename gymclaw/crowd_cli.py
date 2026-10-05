@@ -15,7 +15,7 @@ from gymclaw.services.workout import utc
 
 
 def register_parser(groups):
-    command = groups.add_parser("crowd", add_help=False)
+    command = groups.add_parser("crowd")
     command.add_argument("operation", choices=["poll", "predict", "record-feedback", "get-source-health"])
     command.add_argument("--fixture", type=Path)
     command.add_argument("--during-gym-hours", action="store_true")
