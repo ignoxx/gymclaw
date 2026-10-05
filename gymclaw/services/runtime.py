@@ -108,6 +108,18 @@ def stale_reason(db: Session, job: NotificationJob, *, now: datetime, delivery: 
     return None
 
 
+def event_stale_reason(db: Session, row: NotificationDelivery, *, now: datetime) -> str | None:
+    if now > row.created_at + timedelta(hours=24):
+        return "event_message_expired"
+    event = db.get(AgentEvent, row.agent_event_id)
+    if event.type == "planning.no_show":
+        # Started, skipped, moved or already over: the question no longer applies.
+        planned = db.get(PlannedSession, event.payload_json["session_id"])
+        if planned is None or planned.status != "COMMITTED" or planned.planned_end_at <= now or planned.planned_start_at.isoformat() != event.payload_json["start"]:
+            return "session_resolved"
+    return None
+
+
 def automation_plan(db: Session, engine, *, now: datetime, recipient: str, profile: str,
                     project_root: Path, python: str = sys.executable, include_watcher: bool = True) -> list[AutomationSpec]:
     now = utc(now)
@@ -304,7 +316,7 @@ def deliver(engine, provider: AutomationProvider, delivery_id: str, *, now: date
             job = db.get(NotificationJob, row.notification_job_id)
             reason = stale_reason(db, job, now=now, delivery=row)
         else:
-            reason = "event_message_expired" if now > row.created_at + timedelta(hours=24) else None
+            reason = event_stale_reason(db, row, now=now)
         if reason:
             row.status, row.handled_at = "CANCELLED", now
             if row.agent_event_id:

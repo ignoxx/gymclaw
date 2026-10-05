@@ -68,12 +68,24 @@ use `status` first. Only these actions exist; don't invent others.
   and returns them in `data.replanning.changed`. Don't toggle the profile to steer one session; use `calendar move`.
 - Personal calendar is read-only busy time, refreshed by the watcher. `calendar personal-status`
   shows health; `calendar personal-sync` forces a refresh. Never connect/disconnect it unless the owner asks.
+- No-show nudge ("… hasn't started. Skip it or move it?"): find the session in `calendar get-week`.
+  Skip → `calendar skip --session-id ID` (no make-up). Move → `calendar move --session-id ID [--day …]`.
 - Travel/illness: `availability add --kind TRAVEL|SICK --through YYYY-MM-DD` (inclusive); ask before
   `--cancel-locked`. `availability remove --block-id ID`.
 - Keep owner-locked events. Publication (`calendar publish --allow-writes`) and
   `runtime sync --allow-calendar-writes` only with explicit owner approval.
 - After set-independent changes (moves, availability), if runtime is enabled:
   `runtime sync --telegram-id OWNER_ID --allow-runtime-changes --allow-messages`.
+
+## Body weight
+
+- Scale photo → read the number with your own vision, `body log --kg 82.4`, reply with the hint
+  (it echoes the number so a misread gets caught). Wrong number → `body delete --entry-id ID`, log again.
+- Old scale photos (backfill): pass each file, its capture date is used:
+  `body log --entries '[{"kg":82.4,"photo":"/path/a.jpg"},{"kg":81.9,"at":"2026-03-02"}]'`.
+  `PHOTO_DATE_UNKNOWN` means a compressed photo: ask for it as a file, or for the date (`at`).
+  Already-logged photos are skipped as duplicates.
+- `body list` for history and trend. Don't ask for weigh-ins; the Sunday briefing does that.
 
 ## Events, runtime, crowd
 

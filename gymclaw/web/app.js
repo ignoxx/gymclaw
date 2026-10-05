@@ -500,12 +500,42 @@ function renderHeatmap(insights) {
   });
 }
 
+/* Daily weight swings 1–2 kg: raw weigh-ins as faint dots, the 7-day average as the line. Time-scaled x,
+   because weigh-ins are irregular (a backfill may be weekly, then daily). */
+function renderWeight(insights) {
+  const box = document.getElementById('weight-chart');
+  const points = insights.weight || [];
+  document.getElementById('weight-legend').hidden = !points.length;
+  if (!points.length) {
+    box.replaceChildren(el('p', 'empty', 'Send GymClaw a photo of your scale to start tracking.'));
+    return;
+  }
+  const values = points.flatMap(p => [p.kg, p.avg]);
+  const low = Math.floor(Math.min(...values) - 0.5), top = Math.ceil(Math.max(...values) + 0.5);
+  const chart = frame(box, top - low, { label: 'Body weight: weigh-ins and 7-day average' });
+  chart.svg.querySelectorAll('text.label').forEach((label, i) => { label.textContent = low + [0, (top - low) / 2, top - low][i]; });
+  const day = date => Date.parse(date) / 864e5;
+  const first = day(points[0].date), span = Math.max(1, day(points.at(-1).date) - first);
+  const x = date => chart.L + 12 + (day(date) - first) / span * (chart.W - chart.L - chart.R - 24);
+  const y = kg => chart.y(kg - low);
+  const ticks = Math.min(span, chart.W < 420 ? 3 : 6);
+  for (let i = 0; i <= ticks; i++) {
+    const at = new Date((first + span * i / ticks) * 864e5);
+    chart.svg.append(svgText(x(at.toISOString().slice(0, 10)), chart.H - 6, `${at.getUTCDate()} ${at.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' })}`, { 'text-anchor': 'middle' }));
+  }
+  points.forEach(p => chart.svg.append(svgEl('circle', { cx: x(p.date), cy: y(p.kg), r: 3, class: 'weigh-in' })));
+  chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(p.avg).toFixed(1)}`).join(' ') }));
+  crosshair(chart, points.map(p => x(p.date)), i => ({ title: points[i].label,
+    rows: [[kgs(points[i].kg), 'weigh-in', 'weigh-in'], [kgs(points[i].avg), '7-day average', 'today']], y: y(points[i].avg) }));
+}
+
 function renderInsights(data) {
   renderKpis(data.insights);
   renderWeeks(data.insights);
   renderProgress(data.insights);
   renderMuscles(data.insights);
   renderHeatmap(data.insights);
+  renderWeight(data.insights);
 }
 
 /* ---------- History ---------- */

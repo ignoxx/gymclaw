@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from gymclaw.availability_cli import register_parser as register_availability_parser, availability_command
+from gymclaw.body_cli import register_parser as register_body_parser, body_command
 from gymclaw.coach_cli import register_parser as register_coach_parser, catalog_command, coach_command
 from gymclaw.db import make_engine, initialize
 from gymclaw.calendar_cli import calendar_command, publish_command
@@ -42,6 +43,7 @@ def parser():
     register_crowd_parser(groups)
     register_availability_parser(groups)
     register_coach_parser(groups)
+    register_body_parser(groups)
     db = groups.add_parser("db")
     db.add_argument("operation", choices=["init"])
     profile = groups.add_parser("profile")
@@ -63,9 +65,9 @@ def parser():
     planning.add_argument("--request-id")
     planning.add_argument("--template-id")
     calendar = groups.add_parser("calendar")
-    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "move", "pending-writes", "publish",
+    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "move", "skip", "pending-writes", "publish",
         "personal-connect", "personal-sync", "personal-status", "personal-disconnect"])
-    calendar.add_argument("--session-id", help="move: session to move")
+    calendar.add_argument("--session-id", help="move/skip: the session")
     calendar.add_argument("--to", type=datetime.fromisoformat, help="move: exact start with offset; omit to pick the quietest valid slot")
     calendar.add_argument("--day", type=date.fromisoformat, help="move: keep it on this date (YYYY-MM-DD)")
     calendar.add_argument("--calendar-id")
@@ -191,6 +193,9 @@ def main(argv=None) -> int:
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "availability":
                     result = availability_command(db, args)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "body":
+                    result = body_command(db, args)
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "onboarding":
                     if args.operation == "status":

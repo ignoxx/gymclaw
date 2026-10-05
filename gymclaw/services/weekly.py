@@ -8,12 +8,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from gymclaw.models import AgentEvent, CalendarEventSnapshot, CalendarSyncState, CalendarWrite, CrowdFeedback, LearnedPreference, OnboardingState, PlannedSession, SetLog, WorkoutExercise, WorkoutSession
+from gymclaw.models import AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, LearnedPreference, OnboardingState, PlannedSession, SetLog, WorkoutExercise, WorkoutSession
+from gymclaw.services import body
 from gymclaw.services.calendar import allocation, get_week, week_of
 from gymclaw.services.calendar_writes import queue_session_write
-from gymclaw.services.notifications import cancel_session_jobs
 from gymclaw.services.profile import get_profile
-from gymclaw.services.replanning import commit_upcoming, replan_weeks
+from gymclaw.services.replanning import commit_upcoming, replan_weeks, retire_session
 from gymclaw.services.scheduling import schedule_week
 from gymclaw.services.templates import get_template
 from gymclaw.services.workout import emit, utc
@@ -54,14 +54,36 @@ def mark_missed(db: Session, *, now: datetime) -> list[str]:
     """Elapsed slot is missed, never fabricated completion; retain calendar history."""
     ids = []
     for plan in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]), PlannedSession.planned_end_at < now)):
-        plan.status = "MISSED"
-        plan.source_revision += 1
-        cancel_session_jobs(db, plan.id, now=now)
-        for write in db.scalars(select(CalendarWrite).where(CalendarWrite.planned_session_id == plan.id, CalendarWrite.status == "PENDING")):
-            write.status, write.handled_at = "CANCELLED", now
+        retire_session(db, plan, "MISSED", now=now)
         emit(db, "workout.missed", now, {"session_id": plan.id, "reason": "planned_window_elapsed_without_start"})
         ids.append(plan.id)
     return ids
+
+
+NO_SHOW_AFTER = timedelta(minutes=30)
+
+
+def no_show_nudges(db: Session, *, now: datetime) -> list[dict]:
+    """30 min into a committed slot with no workout started: ask once whether to skip or move it.
+    Unanswered, the slot still ends as MISSED and replanning finds a make-up slot, as before."""
+    from gymclaw.services.availability import session_blocked
+    now = utc(now)
+    zone = ZoneInfo(get_profile(db).timezone)
+    nudges = []
+    for session in db.scalars(select(PlannedSession).where(PlannedSession.status == "COMMITTED",
+            PlannedSession.planned_start_at <= now - NO_SHOW_AFTER, PlannedSession.planned_end_at > now)):
+        key = f"no-show:{session.id}:{session.planned_start_at.isoformat()}"
+        if db.scalar(select(AgentEvent.id).where(AgentEvent.correlation_id == key)) or session_blocked(db, session):
+            continue
+        # A workout started from chat without the session still means the owner showed up.
+        if db.scalar(select(WorkoutSession.id).where(WorkoutSession.started_at >= session.prep_start_at).limit(1)):
+            continue
+        name = session.workout_plan_json.get("template", {}).get("name", "Workout")
+        message = f"⏰ {name} was planned for {session.planned_start_at.astimezone(zone):%H:%M} and hasn't started. Skip it or move it? Or just start when you're there."
+        event = emit(db, "planning.no_show", now, {"session_id": session.id, "start": session.planned_start_at.isoformat(), "message": message})
+        event.correlation_id = key
+        nudges.append({"event_id": event.id, "session_id": session.id, "message": message})
+    return nudges
 
 
 def first_plan_key(db: Session, week: date, now: datetime, template_id: str) -> str:
@@ -270,8 +292,9 @@ def new_targets(db: Session, week_start: date, zone: ZoneInfo) -> list[str]:
     return targets
 
 
-def briefing(db: Session, week_start: date, report: dict, *, published: bool) -> str:
-    """Sunday Telegram message: last week's result, next week's sessions and new progression targets.
+def briefing(db: Session, week_start: date, report: dict, *, published: bool, now: datetime) -> str:
+    """Sunday Telegram message: last week's result, next week's sessions, new progression targets
+    and one body-weight line (the only place GymClaw asks for a weigh-in).
     Plain text plus emoji (no markdown) so it renders the same on every delivery path."""
     from gymclaw.services.crowd import feel
     zone = ZoneInfo(get_profile(db).timezone)
@@ -309,4 +332,6 @@ def briefing(db: Session, week_start: date, report: dict, *, published: bool) ->
         lines += ["", f"{days} can still move if your calendar changes."]
     if targets := new_targets(db, previous, zone):
         lines += ["", "🎯 New targets: " + ", ".join(targets)]
+    if weight := body.briefing_line(db, now=now):
+        lines += ["", weight]
     return "\n".join(lines)
