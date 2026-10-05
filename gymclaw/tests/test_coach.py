@@ -39,7 +39,7 @@ def buttons(card: dict) -> dict[str, str]:
 def test_typed_set_reacts_then_rest_card_then_fresh_set_card(db):
     first = coach.handle_action(db, "card", now=NOW, request_id="card")["cards"][0]
     # First leg day: no weight known, so no 0 kg warm-up; the card asks for the weight.
-    assert first["photo"] and Path(first["photo"]).is_file()
+    assert first["photo"].endswith("animation.gif") and Path(first["photo"]).is_file()
     assert "Set 1/2 · 8–10 × **? kg**" in first["text"] and "✍️ **Reply reps × weight:** `8x40`" in first["text"]
     assert coach.handle_text(db, "how long do I rest?", now=at(5), request_id="chat") == {"handled": False}
     result = coach.handle_text(db, "12x90kg", now=at(10), request_id="msg-1")

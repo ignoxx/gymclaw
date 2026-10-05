@@ -24,6 +24,14 @@ def test_catalog_assets_and_no_fuzzy_matching():
         ExerciseSpec(id="bad", name="Bad", role="pull", target_weight=1, guide_id="../wrong")
 
 
+def test_every_exercise_has_an_animated_rep():
+    from PIL import Image
+    # Four frames (1 → 2 → 3 → 2) at 350 ms, looping, so it plays as one rep.
+    for slug in catalog():
+        with Image.open(for_exercise("", slug)["telegram_animation"]) as gif:
+            assert gif.n_frames == 4 and gif.info["duration"] == 350 and gif.info["loop"] == 0, slug
+
+
 def test_pose_follows_active_exercise_not_previous_set(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'pose.db'}")
     initialize(engine)
