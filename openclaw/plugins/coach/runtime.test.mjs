@@ -30,8 +30,8 @@ function fakeTimers() {
   };
 }
 
-function plugin(run) {
-  const { calls, api } = fakeTelegram();
+function plugin(run, { coaches = new Map(), telegram = fakeTelegram() } = {}) {
+  const { calls, api } = telegram;
   const registered = { hooks: new Map() };
   registerCoach(
     {
@@ -41,7 +41,7 @@ function plugin(run) {
       registerTool: (t) => (registered.tool = t),
       on: (name, fn) => registered.hooks.set(name, fn),
     },
-    { run, telegram: async () => api },
+    { run, telegram: async () => api, coaches },
   );
   return { calls, registered };
 }
@@ -160,4 +160,34 @@ test("overlapping syncs collapse into one follow-up run", async () => {
   release();
   await first;
   assert.equal(calls, 2);
+});
+
+test("two registrations share one coach: a skip tap retires the countdown the agent tool sent", async () => {
+  const coaches = new Map();
+  const telegram = fakeTelegram();
+  const rest = card("until Leg press set 2/2", { rest_until: "2099-01-01T00:00:00Z", kind: "rest" });
+  const run = async (args) => (args[1] === "act" ? { handled: true, cards: [rest] } : args[1] === "tap" ? { handled: true, cleanup: "delete", cards: [card("Leg press · set 2")] } : {});
+  const agent = plugin(run, { coaches, telegram });
+  const gateway = plugin(run, { coaches, telegram });
+  await agent.registered.tool.execute("t1", { action: "next" });
+  const ctx = { auth: { isAuthorizedSender: true }, isGroup: false, senderId: OWNER, callbackId: "cb1", callback: { payload: "skip:abcd1234", messageId: 100 } };
+  await gateway.registered.callback.handler(ctx);
+  assert.equal(coaches.size, 1);
+  assert.equal(coaches.get(OWNER).state().live.card.text, "Leg press · set 2");
+});
+
+test("a countdown whose message is gone stops instead of sending a second set card", async () => {
+  const { calls, api } = fakeTelegram();
+  const timers = fakeTimers();
+  let now = Date.parse("2026-10-05T11:06:00Z");
+  let restOvers = 0;
+  api.edit = async () => { throw new Error("Call to 'editMessageText' failed! (400: Bad Request: message to edit not found)"); };
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers, onRestOver: async () => (restOvers++, { cards: [card("Leg extension · set 1")] }) });
+  await coach.apply({ cards: [card("until Leg press set 2/2", { rest_until: "2026-10-05T11:08:16Z", kind: "rest" })] });
+  await timers.tick();
+  assert.equal(timers.intervals.size, 0);
+  now += 180_000;
+  await timers.tick();
+  assert.equal(restOvers, 0);
+  assert.equal(calls.filter((c) => c[0] === "send").length, 1);
 });
