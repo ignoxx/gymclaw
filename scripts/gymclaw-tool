@@ -8,4 +8,7 @@ cd "$ROOT"
 if [[ "$ROOT" == /sandbox/.openclaw/workspace/* && -f /sandbox/.openclaw/openclaw.json ]]; then
   export OPENCLAW_CONFIG_PATH=/sandbox/.openclaw/openclaw.json
 fi
-exec "$ROOT/.venv/bin/python" -m gymclaw.cli "$@"
+# The container entrypoint runs a warm worker on this socket (see gymclaw/warm.py). Without one,
+# the CLI runs in-process as before.
+export GYMCLAW_WARM_SOCKET="${GYMCLAW_WARM_SOCKET:-/tmp/gymclaw-tool.sock}"
+exec "$ROOT/.venv/bin/python" -m gymclaw.warm "$@"
