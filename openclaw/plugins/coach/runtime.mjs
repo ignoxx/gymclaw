@@ -29,6 +29,13 @@ export function withRest(card, nowMs) {
   return `⏱ ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} ${card.text}`;
 }
 
+// One coach per owner chat for the whole process. OpenClaw may call a plugin's register() more than
+// once (gateway channel handlers, agent tools); separate coaches each think they own the live card,
+// and a countdown the other one deleted would still fire and send a duplicate set card.
+const COACHES = (globalThis[Symbol.for("gymclaw-coach.coaches")] ??= new Map());
+// Telegram's answer when the message we edit was deleted (e.g. by another handler or the owner).
+const GONE = /message to edit not found|message can't be edited|message_id_invalid/i;
+
 const keyboard = (buttons) => buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data })));
 // Countdowns and swap options are throwaway: deleted once replaced, so the chat stays clean.
 const throwaway = (entry) => entry.card.kind === "rest" || entry.card.kind === "option";
@@ -69,7 +76,15 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
   function startCountdown(entry) {
     entry.timer = timers.setInterval(async () => {
       if (Date.parse(entry.card.rest_until) > now()) {
-        await quietly((await telegram()).edit(chatId, entry.messageId, withRest(entry.card, now()), keyboard(entry.card.buttons)));
+        try {
+          await (await telegram()).edit(chatId, entry.messageId, withRest(entry.card, now()), keyboard(entry.card.buttons));
+        } catch (error) {
+          if (!GONE.test(String(error?.message ?? error))) return log.debug?.(`gymclaw-coach edit skipped: ${error?.message ?? error}`);
+          // The countdown is gone, so is its job: stop, and never announce the rest it was showing.
+          timers.clearInterval(entry.timer);
+          entry.timer = null;
+          if (live === entry) live = null;
+        }
         return;
       }
       timers.clearInterval(entry.timer);
@@ -160,7 +175,7 @@ export function createSyncer(cli, ownerId, log) {
 }
 
 /** Wire hooks, the callback namespace and the agent tool. `deps` lets tests inject fakes. */
-export function registerCoach(api, { run, telegram } = {}) {
+export function registerCoach(api, { run, telegram, coaches = COACHES } = {}) {
   const config = api.pluginConfig ?? {};
   const ownerId = String(config.ownerId ?? "");
   if (!/^[1-9]\d{0,19}$/.test(ownerId) || !(run || config.tool)) {
@@ -170,17 +185,20 @@ export function registerCoach(api, { run, telegram } = {}) {
   const cli = run ?? cliRunner(config.tool);
   // Owner DM: chat ID equals the owner's Telegram user ID.
   const sync = createSyncer(cli, ownerId, api.logger);
-  const coach = createCoach({
-    telegram,
-    chatId: ownerId,
-    log: api.logger,
-    // Closing the rest job here keeps the cron fallback ping silent; sync then removes it.
-    onRestOver: async () => {
-      const result = await cli(["coach", "rest-over"]);
-      if (result.rest_over) sync();
-      return result;
-    },
-  });
+  if (!coaches.has(ownerId)) {
+    coaches.set(ownerId, createCoach({
+      telegram,
+      chatId: ownerId,
+      log: api.logger,
+      // Closing the rest job here keeps the cron fallback ping silent; sync then removes it.
+      onRestOver: async () => {
+        const result = await cli(["coach", "rest-over"]);
+        if (result.rest_over) sync();
+        return result;
+      },
+    }));
+  }
+  const coach = coaches.get(ownerId);
   const changed = (result) => result.handled !== false && !result.keep && (result.cards?.length || result.ack);
 
   async function report(error) {
