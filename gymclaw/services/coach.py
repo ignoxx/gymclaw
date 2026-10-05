@@ -58,7 +58,7 @@ def card(text: str, buttons: list[list[dict]] | None = None, *, photo: str | Non
 
 
 def exercise_card(db: Session, workout: WorkoutSession, now: datetime) -> dict:
-    """Card for whatever the owner should do next. Every set card carries the illustration."""
+    """Card for whatever the owner should do next. Every set card carries the animated illustration."""
     data = current(db, workout.id, now=now)
     rows = exercises(db, workout)
     deferred = [e for e in rows if e.status == "DEFERRED"]
@@ -103,7 +103,7 @@ def exercise_card(db: Session, workout: WorkoutSession, now: datetime) -> dict:
             + [button("⏭ Skip" if active["new_exercise"] else "⏭ Next exercise", "next", ref)])
     if deferred:
         buttons.append([button(f"↩ {deferred[0].config_json['name']} free?", "free", deferred[0].id[:8])])
-    picture = active["illustration"]["telegram_png"] if active["illustration"] else None
+    picture = active["illustration"]["telegram_animation"] if active["illustration"] else None
     return card("\n".join(lines), buttons, photo=picture)
 
 
@@ -243,7 +243,7 @@ def swap_cards(db: Session, workout: WorkoutSession, row: WorkoutExercise) -> li
     if not options:
         return [card("No alternatives for this muscle in the catalog.", kind="option")]
     return [card(f"**{o['name']}**" + (f" · {o['illustration']['equipment']}" if o["illustration"] else ""),
-        [[button(f"↩ Back to {o['name']}" if o["source"] == "workout" else f"Use {o['name']}", "sub", ref, o["substitute_id"])]], photo=o["illustration"]["telegram_png"] if o["illustration"] else None, kind="option")
+        [[button(f"↩ Back to {o['name']}" if o["source"] == "workout" else f"Use {o['name']}", "sub", ref, o["substitute_id"])]], photo=o["illustration"]["telegram_animation"] if o["illustration"] else None, kind="option")
         for o in options]
 
 
