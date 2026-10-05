@@ -10,9 +10,10 @@ from gymclaw.services.calendar import allocation, week_of
 from gymclaw.services.calendar_busy import busy_intervals
 from gymclaw.services.calendar_writes import queue_session_write
 from gymclaw.services.notifications import cancel_session_jobs, schedule_session_jobs
-from gymclaw.services.planning import Interval, overlaps, plan_week, recovery_ok
+from gymclaw.services.errors import DomainError
+from gymclaw.services.planning import Candidate, Interval, generate_candidates, overlaps, plan_week, recovery_ok
 from gymclaw.services.profile import get_profile
-from gymclaw.services.workout import emit, utc
+from gymclaw.services.workout import emit, mutate, utc
 
 ACTIVE = {"TENTATIVE", "COMMITTED", "STARTED", "COMPLETED"}
 
@@ -38,6 +39,23 @@ def commit_upcoming(db: Session, *, now: datetime):
             session.source_revision += 1
             queue_session_write(db, session, now=now)
         schedule_session_jobs(db, session, now=now)
+
+
+def place(db: Session, session: PlannedSession, slot: Candidate, *, week: date, now: datetime, crowd_model):
+    """Put a session on a planner slot: times, crowd forecast, workout fit, calendar intent and reminders."""
+    session.planned_start_at, session.planned_end_at = slot.start, slot.end
+    session.prep_start_at, session.leave_home_at = slot.prep_start, slot.leave_home
+    session.expected_finish_at = slot.end
+    session.crowd_prediction, session.crowd_confidence = slot.crowd, slot.confidence
+    session.status = "COMMITTED" if slot.start <= now + timedelta(hours=48) else "TENTATIVE"
+    session.week_id = week.isoformat()
+    db.flush()
+    allocation(db, session)
+    session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if not k.startswith("crowd_")}
+    if slot.crowd is not None:
+        session.workout_plan_json |= {"crowd_source": "demo_fixture" if crowd_model.predict(slot.start)["demo"] else "local_crowd_model", "crowd_score_kind": "personal_perceived_crowd_proxy"}
+    queue_session_write(db, session, now=now)
+    schedule_session_jobs(db, session, now=now)
 
 
 def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_tentative: bool = False) -> dict:
@@ -95,19 +113,7 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
                 db.add(session)
                 old_start = None
                 same_time = False
-            session.planned_start_at, session.planned_end_at = slot.start, slot.end
-            session.prep_start_at, session.leave_home_at = slot.prep_start, slot.leave_home
-            session.expected_finish_at = slot.end
-            session.crowd_prediction, session.crowd_confidence = slot.crowd, slot.confidence
-            session.status = "COMMITTED" if slot.start <= now + timedelta(hours=48) else "TENTATIVE"
-            session.week_id = week.isoformat()
-            db.flush()
-            allocation(db, session)
-            session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if not k.startswith("crowd_")}
-            if slot.crowd is not None:
-                session.workout_plan_json |= {"crowd_source": "demo_fixture" if crowd_model.predict(slot.start)["demo"] else "local_crowd_model", "crowd_score_kind": "personal_perceived_crowd_proxy"}
-            queue_session_write(db, session, now=now)
-            schedule_session_jobs(db, session, now=now)
+            place(db, session, slot, week=week, now=now, crowd_model=crowd_model)
             changed.append({"session_id": session.id, "from": old_start.isoformat() if old_start else None, "to": slot.start.isoformat(), "action": "forecast_updated" if same_time else "moved" if old_start else "replacement"})
         for session in invalid[len(planned.sessions):]:
             session.status = "CANCELLED"
@@ -137,3 +143,48 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
     if changed:
         emit(db, "planning.replanned", now, {"changes": changed, "warnings": warnings})
     return {"changed": changed, "warnings": list(dict.fromkeys(warnings))}
+
+
+def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None) -> dict:
+    """Owner-requested move of one upcoming session. `to` is an exact start; otherwise the planner
+    picks the best-scoring (quietest) valid slot, on `day` if given, else anywhere in the session's week.
+    The new slot must satisfy the same rules as planning: workout window, calendar, rest days."""
+    now = utc(now)
+    if to is not None and (to.tzinfo is None or to.utcoffset() is None):
+        raise ValueError("--to must include a UTC offset")
+
+    def action():
+        session = db.get(PlannedSession, session_id)
+        if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_start_at <= now:
+            raise DomainError("SESSION_NOT_MOVABLE", "Only upcoming tentative or committed sessions can be moved")
+        if session.user_locked:
+            raise DomainError("SESSION_LOCKED", "Session was edited in the calendar; move the calendar event instead")
+        profile = get_profile(db)
+        zone = ZoneInfo(profile.timezone)
+        target_day = to.astimezone(zone).date() if to else day
+        week = week_of(datetime.combine(target_day, datetime.min.time(), zone) if target_day else session.planned_start_at, zone)
+        window_start = datetime.combine(week - timedelta(days=1), datetime.min.time(), zone)
+        others = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(ACTIVE), PlannedSession.id != session.id)))
+        deleted = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status == "CANCELLED")) if s.workout_plan_json.get("deleted_by_user"))
+        from gymclaw.services.crowd import CrowdModel, planning_signals
+        signals = planning_signals(db, week, now=now)
+        candidates = [c for c in generate_candidates(profile, week, busy=busy_intervals(db, window_start, window_start + timedelta(days=9)), unavailable=deleted, existing=others, signals=signals, now=now)
+            if target_day is None or c.start.astimezone(zone).date() == target_day]
+        if to is not None:
+            matching = [c for c in candidates if c.start == utc(to)]
+            if not matching:
+                starts = sorted({c.start.astimezone(zone).strftime("%H:%M") for c in candidates})
+                raise DomainError("SLOT_NOT_VALID", f"{to.astimezone(zone):%a %H:%M} breaks the workout window ({profile.earliest_workout_start:%H:%M}–{profile.latest_workout_finish:%H:%M}), "
+                    f"a calendar event or rest days. Valid starts that day: {', '.join(starts) or 'none'}")
+            candidates = matching
+        if not candidates:
+            raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window, calendar or rest days)")
+        slot = max(candidates, key=lambda c: c.score)
+        old_start = session.planned_start_at
+        if slot.start != old_start or slot.end != session.planned_end_at:
+            cancel_session_jobs(db, session.id, now=now)
+        session.source_revision += 1
+        place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
+        return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence}
+
+    return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}, now, action)

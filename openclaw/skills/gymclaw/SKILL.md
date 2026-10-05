@@ -8,7 +8,8 @@ user-invocable: true
 
 `../scripts/gymclaw-tool <group> <operation> …` → JSON `{ok, data, user_message_hint}`. Exit 1 = failed;
 never continue as if it worked. Mutations need `--request-id`: one per owner action (e.g. `tg-<message id>-<op>`),
-reused only for a retry of that same action.
+reused only for a retry of that same action. Everything you need is below; if a flag is unclear, use
+`<group> --help`. Never read GymClaw's source code.
 
 ## Replying
 
@@ -59,6 +60,12 @@ use `status` first. Only these actions exist; don't invent others.
 ## Calendar and availability
 
 - `calendar sync`, `calendar get-week --week-start YYYY-MM-DD`. Week starts Monday.
+- Move one session: `calendar move --session-id ID [--day YYYY-MM-DD | --to 2026-10-09T11:30:00+02:00]`.
+  Without `--to` it picks the quietest valid slot (on `--day`, else in that week). An invalid `--to`
+  fails with the valid start times for that day; offer those.
+- Lasting preferences (time window, weekdays, session length, rest days): `profile update --data
+  '{"latest_workout_finish":"17:00"}'` (fields: `profile get`). It moves sessions that no longer fit
+  and returns them in `data.replanning.changed`. Don't toggle the profile to steer one session; use `calendar move`.
 - Personal calendar is read-only busy time, refreshed by the watcher. `calendar personal-status`
   shows health; `calendar personal-sync` forces a refresh. Never connect/disconnect it unless the owner asks.
 - Travel/illness: `availability add --kind TRAVEL|SICK --through YYYY-MM-DD` (inclusive); ask before

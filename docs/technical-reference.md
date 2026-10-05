@@ -171,6 +171,9 @@ ID/times/bodies in `pending-writes` before approving publication. `schedule plan
 remains the provider-free local operation; optional `--template-id` adds compression plan.
 `calendar get-week --week-start ...` reads local state; `calendar replan --week-start ...`
 syncs then repairs it. `planning replan --week-start ...` repairs cached state without API.
+`calendar move --session-id ... [--day ... | --to ...]` moves one upcoming session to the
+quietest valid slot or an exact valid start, without a provider sync. `profile update`
+repairs upcoming weeks right away, so a narrower time window moves sessions that no longer fit.
 
 Sync accepts manual edits, recalculates prep/leave/finish, replaces local reminder jobs,
 locks edited sessions, compresses resized slots and repairs only invalid unlocked sessions.

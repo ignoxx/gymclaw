@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 
 def register_parser(groups):
-    command = groups.add_parser("runtime", add_help=False)
+    command = groups.add_parser("runtime")
     command.add_argument("operation", choices=["plan", "sync", "fire", "watch", "weekly", "poll-crowd", "deliveries", "deliver", "resolve", "pause", "resume", "revoke-calendar-writes", "relocate"])
     command.add_argument("--now", type=datetime.fromisoformat)
     command.add_argument("--telegram-id", default=os.environ.get("GYMCLAW_TELEGRAM_USER_ID"))

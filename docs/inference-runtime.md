@@ -59,7 +59,12 @@ used about 500 reasoning tokens on a 147k-token context, which made every reply 
 cannot be disabled on this endpoint (`reasoning.enabled: false` returns 400 "Reasoning is
 mandatory"), so the Gateway sends `reasoning: {"effort": "minimal"}` (~20 reasoning tokens) via
 `agents.defaults.models["inference/z-ai/glm-5.3-flash"].params.extra_body`.
-`agents.defaults.reasoningDefault: "off"` keeps reasoning out of Telegram. Workout taps and typed
+`agents.defaults.reasoningDefault: "off"` keeps reasoning out of Telegram.
+
+Default routing mostly landed on Together, where one call still spent 1,717 reasoning tokens (31s)
+despite minimal effort. The Coolify entrypoint pins `provider.order: ["inference-net/fp4"]`
+in the same `extra_body`, with fallbacks allowed if it's down. Override with `GYMCLAW_PROVIDER`
+(`auto` = OpenRouter's default routing). Workout taps and typed
 sets skip the model entirely (see the [coach plugin](../openclaw/plugins/coach/README.md)).
 
 ## Apply / revert
