@@ -177,7 +177,7 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                 data = weekly.weekly_plan(db, required(template_id, "--template-id or activated template"), now=now)
             publication = publish_if_enabled(engine, args, authority, now=now) if live_activation else {"published": False}
             with Session(engine) as db, db.begin():
-                text = weekly.briefing(db, datetime.fromisoformat(data["week_start"]).date(), data["audit"], published=publication["published"])
+                text = weekly.briefing(db, datetime.fromisoformat(data["week_start"]).date(), data["audit"], published=publication["published"], now=now)
                 delivery = runtime.prepare_event_message(db, data["event_id"], message=text, now=now, recipient=recipient, profile=provider.profile) if live_activation else {"queued": False, "reason": "local_preview"}
             data |= {"publication": publication, "briefing": text, "delivery": delivery, "source": calendar.source}
             if live_activation:
@@ -203,6 +203,8 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                     synced = sync_calendar(db, google_provider(db, state.calendar_id), now=now)
                     personal = personal_calendar.refresh(db, now=now)
                     rolling = weekly.rolling_plan(db, authority["template_id"], now=now) if authority.get("template_id") else {}
+                    for nudge in weekly.no_show_nudges(db, now=now):
+                        runtime.prepare_event_message(db, nudge["event_id"], message=nudge["message"], now=now, recipient=recipient, profile=provider.profile)
                     if authority["crowd_polling_enabled"]:
                         alert = crowd.polling_alert(db, now=now)
                         if alert:

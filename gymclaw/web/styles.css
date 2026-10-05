@@ -103,6 +103,8 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .line { stroke: #424e30; stroke-width: 2; fill: none; stroke-linejoin: round; }
 .typical { stroke: #a9b39a; stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
 .dot { fill: var(--ink); }
+.weigh-in { fill: #a9b39a; }
+.key.weigh-in::before { width: 6px; height: 6px; border: 0; border-radius: 50%; background: #a9b39a; vertical-align: 1px; }
 
 /* Activity */
 .activity { padding: 0 4px; }
@@ -165,6 +167,7 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .tip-row span { color: #b9bfb2; }
 .tip-key { display: inline-block; width: 12px; border-top: 2px solid var(--lime); }
 .tip-key.typical { border-top: 2px dashed #a9b39a; }
+.tip-key.weigh-in { width: 6px; height: 6px; border: 0; border-radius: 50%; background: #a9b39a; }
 
 /* Progress */
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
@@ -173,6 +176,8 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .kpi > strong { font-family: 'Barlow Condensed', sans-serif; font-size: 40px; line-height: 1.05; font-weight: 600; }
 .kpi > small { font-size: 10px; color: var(--muted); }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.panel.weight { margin-top: 18px; }
+.panel.weight .legend { display: flex; }
 #exercise-select { font: inherit; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--white); color: var(--ink); max-width: 60%; }
 .bars { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
 .bar-row { display: grid; grid-template-columns: 90px 1fr 54px; align-items: center; gap: 10px; font-size: 11px; cursor: default; }

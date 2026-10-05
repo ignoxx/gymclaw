@@ -39,7 +39,7 @@ def test_weekly_plan_retry_one_briefing_and_no_duplicate_calendar_intent(engine)
         assert len(result["plan"]["sessions"]) == 3
         assert result["audit"]["completed_workouts"] == 0
         assert len(pending_writes(db)) == 3
-        text = weekly.briefing(db, datetime(2026, 10, 12).date(), result["audit"], published=False)
+        text = weekly.briefing(db, datetime(2026, 10, 12).date(), result["audit"], published=False, now=SUNDAY)
         assert "Local plan only" in text and "Mon" in text and "Last week 0/3" in text
         event_id = result["event_id"]
     with Session(engine) as db, db.begin():
@@ -59,11 +59,12 @@ def test_briefing_hides_uncertain_crowd_and_lists_new_targets(engine):
         db.add(AgentEvent(type="progression.updated", created_at=SUNDAY - timedelta(days=2),
             payload_json={"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"}))
         db.flush()
-        text = weekly.briefing(db, datetime(2026, 10, 12).date(), result["audit"], published=True)
+        text = weekly.briefing(db, datetime(2026, 10, 12).date(), result["audit"], published=True, now=SUNDAY)
     assert text.startswith("🏋️ Your week · Oct 12–18")
     assert "🔴 Packed" in text and "Empty" not in text and "score" not in text
     assert "can still move if your calendar changes" in text
-    assert text.endswith("🎯 New targets: bench 82.5 kg (+2.5)")
+    assert "\n🎯 New targets: bench 82.5 kg (+2.5)\n" in text
+    assert text.endswith("⚖️ Snap a photo of your scale anytime and I'll track your weight.")
 
 
 def test_rolling_watch_marks_elapsed_unstarted_session_missed_not_completed(engine):
@@ -348,3 +349,48 @@ def test_event_body_has_plan_location_and_split_colour(tmp_path):
             assert "1. Row · 2 sets of 8–12" in body["description"]
     finally:
         engine.dispose()
+
+
+def first_session(db) -> PlannedSession:
+    return db.scalars(select(PlannedSession).order_by(PlannedSession.planned_start_at)).first()
+
+
+def test_no_show_nudges_once_then_skip_counts_toward_the_week(engine):
+    with Session(engine) as db, db.begin():
+        weekly.weekly_plan(db, "short", now=SUNDAY)
+        session = first_session(db)
+        assert session.status == "COMMITTED"
+        assert weekly.no_show_nudges(db, now=session.planned_start_at + timedelta(minutes=29)) == []
+        late = session.planned_start_at + timedelta(minutes=31)
+        [nudge] = weekly.no_show_nudges(db, now=late)
+        assert nudge["session_id"] == session.id and "hasn't started. Skip it or move it?" in nudge["message"]
+        assert weekly.no_show_nudges(db, now=late + timedelta(minutes=1)) == []
+        delivery = runtime.prepare_event_message(db, nudge["event_id"], message=nudge["message"], now=late, recipient="123", profile="gymclaw")
+        session_id = session.id
+    assert main(["--db-url", str(engine.url), "calendar", "skip", "--session-id", session_id, "--request-id", "tg-1-skip", "--now", late.isoformat()]) == 0
+    with Session(engine) as db, db.begin():
+        assert db.get(PlannedSession, session_id).status == "SKIPPED"
+        # The skip is final: rolling replanning keeps three sessions this week, no make-up.
+        weekly.rolling_plan(db, "short", now=late + timedelta(minutes=5))
+        active = [s for s in db.scalars(select(PlannedSession)) if s.status in {"TENTATIVE", "COMMITTED"}]
+        assert len(active) == 2
+    # Answered before the send went out: the question is dropped, not sent.
+    assert runtime.deliver(engine, FakeRuntime(), delivery["id"], now=late + timedelta(minutes=5), allow_messages=True)["status"] == "CANCELLED"
+
+
+def test_no_show_is_quiet_when_a_workout_started_and_can_still_be_moved(engine):
+    from gymclaw.services import workout
+    from gymclaw.services.replanning import move_session
+    with Session(engine) as db, db.begin():
+        weekly.weekly_plan(db, "short", now=SUNDAY)
+        session = first_session(db)
+        late = session.planned_start_at + timedelta(minutes=31)
+        moved = move_session(db, session.id, now=late, request_id="tg-2-move")["data"]
+        assert datetime.fromisoformat(moved["to"]) > late and db.get(PlannedSession, session.id).status in {"TENTATIVE", "COMMITTED"}
+    with Session(engine) as db, db.begin():
+        weekly.weekly_plan(db, "short", now=SUNDAY)
+        session = first_session(db)
+        # Started from chat without linking the planned session: still counts as showing up.
+        workout.start(db, "short", now=session.planned_start_at, request_id="unlinked")
+        assert session.status == "COMMITTED"
+        assert weekly.no_show_nudges(db, now=session.planned_start_at + timedelta(minutes=31)) == []

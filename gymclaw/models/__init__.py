@@ -357,3 +357,13 @@ class AgentEvent(Base):
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     correlation_id: Mapped[str | None] = mapped_column(unique=True)
+
+
+class BodyWeight(Base):
+    """One weigh-in. `measured_at` is unique, so re-importing the same scale photo is a no-op."""
+    __tablename__ = "body_weight"
+    __table_args__ = (CheckConstraint("kg >= 20 AND kg <= 400"),)
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    measured_at: Mapped[datetime] = mapped_column(UTCDateTime, unique=True)
+    kg: Mapped[float]
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
