@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from gymclaw.models import PlannedSession
+from gymclaw.models import CalendarWrite, PlannedSession
 from gymclaw.services.calendar import allocation, week_of
 from gymclaw.services.calendar_busy import busy_intervals
 from gymclaw.services.calendar_writes import queue_session_write
@@ -73,7 +73,8 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
         start = datetime.combine(week - timedelta(days=1), datetime.min.time(), zone)
         end = start + timedelta(days=9)
         busy = busy_intervals(db, start, end)
-        fixed = [s for s in all_rows if s.status in ACTIVE and (s.user_locked or s.status in {"STARTED", "COMPLETED"} or s.planned_start_at < now or week_of(s.planned_start_at, zone) != week)]
+        # Skipped sessions count toward the week: the owner chose not to make them up.
+        fixed = [s for s in all_rows if s.status == "SKIPPED" or s.status in ACTIVE and (s.user_locked or s.status in {"STARTED", "COMPLETED"} or s.planned_start_at < now or week_of(s.planned_start_at, zone) != week)]
         invalid, kept = [], list(fixed)
         for session in week_rows:
             if session in fixed or session.status not in ACTIVE:
@@ -146,17 +147,18 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
 
 
 def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None) -> dict:
-    """Owner-requested move of one upcoming session. `to` is an exact start; otherwise the planner
-    picks the best-scoring (quietest) valid slot, on `day` if given, else anywhere in the session's week.
-    The new slot must satisfy the same rules as planning: workout window, calendar, rest days."""
+    """Owner-requested move of one session that hasn't ended (a no-show can still be moved). `to` is an
+    exact start; otherwise the planner picks the best-scoring (quietest) valid slot, on `day` if given,
+    else anywhere in the session's week. The new slot must satisfy the same rules as planning:
+    workout window, calendar, rest days."""
     now = utc(now)
     if to is not None and (to.tzinfo is None or to.utcoffset() is None):
         raise ValueError("--to must include a UTC offset")
 
     def action():
         session = db.get(PlannedSession, session_id)
-        if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_start_at <= now:
-            raise DomainError("SESSION_NOT_MOVABLE", "Only upcoming tentative or committed sessions can be moved")
+        if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_end_at <= now:
+            raise DomainError("SESSION_NOT_MOVABLE", "Only tentative or committed sessions that haven't ended can be moved")
         if session.user_locked:
             raise DomainError("SESSION_LOCKED", "Session was edited in the calendar; move the calendar event instead")
         profile = get_profile(db)
@@ -188,3 +190,29 @@ def move_session(db: Session, session_id: str, *, now: datetime, request_id: str
         return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence}
 
     return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}, now, action)
+
+
+def retire_session(db: Session, session: PlannedSession, status: str, *, now: datetime):
+    """End a session that won't happen. Its calendar event stays as history; reminders and unsent edits are dropped."""
+    session.status = status
+    session.source_revision += 1
+    cancel_session_jobs(db, session.id, now=now)
+    for write in db.scalars(select(CalendarWrite).where(CalendarWrite.planned_session_id == session.id, CalendarWrite.status == "PENDING")):
+        write.status, write.handled_at = "CANCELLED", now
+
+
+def skip_session(db: Session, session_id: str, *, now: datetime, request_id: str) -> dict:
+    """Owner skips a session whose time has come (e.g. answering the no-show nudge). It still counts
+    toward the week, so no make-up session is added; `move_session` is the make-up path."""
+    now = utc(now)
+
+    def action():
+        session = db.get(PlannedSession, session_id)
+        if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_end_at <= now:
+            raise DomainError("SESSION_NOT_SKIPPABLE", "Only tentative or committed sessions that haven't ended can be skipped")
+        if now < session.prep_start_at:
+            raise DomainError("SESSION_NOT_DUE", "Skip works once it's time to get ready; move upcoming sessions or add availability instead")
+        retire_session(db, session, "SKIPPED", now=now)
+        return {"session_id": session.id, "status": session.status}
+
+    return mutate(db, "planning.session_skipped", request_id, {"session_id": session_id}, now, action)
