@@ -1,4 +1,4 @@
-"""Workout Guide first-pose assets and catalog search.
+"""Workout Guide assets (first-pose stills, three-pose animations) and catalog search.
 
 Every planned exercise carries a `guide_id`, so every exercise has an image.
 Attribution lives in the asset NOTICE and README, not in chat captions.
@@ -20,7 +20,9 @@ def catalog() -> dict[str, dict]:
 def entry(item: dict) -> dict:
     slug = item["slug"]
     return {"guide_id": slug, "name": item["name"], "equipment": item["equipment"], "primary_muscle": item["primaryMuscle"],
-        "svg_url": f"/illustrations/{slug}.svg", "telegram_png": str(ASSET_ROOT / slug / "frame-1.png")}
+        "svg_url": f"/illustrations/{slug}.svg", "telegram_png": str(ASSET_ROOT / slug / "frame-1.png"),
+        # Looping rep (all three poses) for cards; Telegram plays a .gif as an animation.
+        "telegram_animation": str(ASSET_ROOT / slug / "animation.gif")}
 
 
 def for_exercise(name: str, guide_id: str | None = None) -> dict | None:

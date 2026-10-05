@@ -2,7 +2,7 @@
 
 Model-free workout flow in Telegram. Logging a set takes about a second and never wakes the agent.
 
-- **Cards:** every set card has the illustration, the target and buttons:
+- **Cards:** every set card has the illustration (a looping GIF of the rep, sent as a Telegram animation), the target and buttons:
   `✅ 10 × 40 kg` (repeat last set, reps first), `🔄 Swap` (before the first set only), `⏭ Skip` before the
   first set / `⏭ Next exercise` after it. With no weight known: `✍️ Reply reps × weight` plus, when history
   has the same movement or a similar exercise (same muscle and equipment), a one-tap guess `✅ 8 × 40 kg?`.
