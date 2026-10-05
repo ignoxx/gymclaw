@@ -70,8 +70,10 @@ def event_body(db: Session, session: PlannedSession) -> dict:
     }
 
 
-def queue_session_write(db: Session, session: PlannedSession, *, now: datetime, metadata_only: bool = False) -> CalendarWrite | None:
-    if session.user_locked and not metadata_only or session.status in {"STARTED", "COMPLETED", "SKIPPED", "MISSED"}:
+def queue_session_write(db: Session, session: PlannedSession, *, now: datetime, metadata_only: bool = False, owner_edit: bool = False) -> CalendarWrite | None:
+    """Queue the calendar change for a session. Locked sessions only get metadata, unless the owner
+    pinned the time from chat (`owner_edit`): then the write carries exactly the owner's time."""
+    if session.user_locked and not (metadata_only or owner_edit) or session.status in {"STARTED", "COMPLETED", "SKIPPED", "MISSED"}:
         return None
     action = "DELETE" if session.status == "CANCELLED" else "UPDATE" if session.calendar_event_id else "CREATE"
     if action == "DELETE" and not session.calendar_event_id:
@@ -98,6 +100,13 @@ def queue_session_write(db: Session, session: PlannedSession, *, now: datetime, 
     return write
 
 
+def keeps_owner_time(body: dict, session: PlannedSession) -> bool:
+    """Locked sessions are never moved by GymClaw: a write may omit times or carry the session's own."""
+    if "start" not in body and "end" not in body:
+        return True
+    return all(key in body and datetime.fromisoformat(body[key]["dateTime"]) == value for key, value in (("start", session.planned_start_at), ("end", session.planned_end_at)))
+
+
 def pending_writes(db: Session) -> list[dict]:
     return [{"id": w.id, "session_id": w.planned_session_id, "action": w.action, "event_id": w.event_id, "revision": w.revision, "body": w.body_json} for w in db.scalars(select(CalendarWrite).where(CalendarWrite.status == "PENDING").order_by(CalendarWrite.created_at, CalendarWrite.id))]
 
@@ -113,8 +122,7 @@ def apply_write(db: Session, provider: CalendarProvider, write_id: str, *, now: 
     if write.status != "PENDING":
         return {"write_id": write.id, "status": write.status, "retried": True}
     session = db.get(PlannedSession, write.planned_session_id)
-    metadata_only = write.action == "UPDATE" and not {"start", "end"} & write.body_json.keys()
-    if session.user_locked and not metadata_only or write.revision != session.source_revision:
+    if session.user_locked and (write.action == "DELETE" or not keeps_owner_time(write.body_json, session)) or write.revision != session.source_revision:
         write.status = "CANCELLED"
         write.handled_at = now
         return {"write_id": write.id, "status": write.status}
