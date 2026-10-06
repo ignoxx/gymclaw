@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from gymclaw.models import CalendarSyncState
 from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
-from gymclaw.providers.mysports import MySportsProvider
+from gymclaw.providers import crowd_sources
 from gymclaw.services import crowd
 from gymclaw.services.errors import DomainError
 from gymclaw.services.profile import get_profile
@@ -16,7 +16,7 @@ from gymclaw.services.workout import utc
 
 def register_parser(groups):
     command = groups.add_parser("crowd")
-    command.add_argument("operation", choices=["poll", "predict", "record-feedback", "get-source-health"])
+    command.add_argument("operation", choices=["poll", "test", "predict", "record-feedback", "get-source-health"])
     command.add_argument("--fixture", type=Path)
     command.add_argument("--during-gym-hours", action="store_true")
     command.add_argument("--now", type=datetime.fromisoformat)
@@ -39,6 +39,12 @@ def needed(value, flag):
 def crowd_command(engine, args) -> dict:
     if args.fixture and args.operation != "poll":
         raise ValueError("Crowd fixtures apply only to poll")
+    if args.operation == "test":
+        # One live read of the configured source, nothing stored: for setting up a new gym.
+        provider = crowd_sources.from_environment()
+        reading = provider.get_reading()
+        return {"data": {"provider_id": provider.provider_id, "raw_value": int(reading.raw_value), "count_stored": False},
+            "events": [], "user_message_hint": None}
     if args.operation == "poll":
         if args.during_gym_hours:
             with Session(engine) as db, db.begin():
@@ -57,7 +63,7 @@ def crowd_command(engine, args) -> dict:
         else:
             if args.now:
                 raise DomainError("LIVE_TIME_REQUIRED", "Live crowd reads use actual retrieval time; --now requires fixture")
-            provider = MySportsProvider.from_environment()
+            provider = crowd_sources.from_environment()
         with Session(engine) as db, db.begin():
             result = crowd.poll(db, provider, now=args.now)
         # Persist failure health before returning nonzero; do not fabricate a count.
