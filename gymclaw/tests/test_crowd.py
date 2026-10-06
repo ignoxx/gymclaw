@@ -59,20 +59,17 @@ class Transport:
         return Response(self.body)
 
 
-@pytest.mark.parametrize("source", ["env", "file"])
-def test_private_gym_config_without_hardcoded_fallback(tmp_path, monkeypatch, source):
+@pytest.mark.parametrize("config", [{"studio_id": "1234567890", "tenant": "fixture-tenant"},
+    {"kind": "mysports", "studio_id": "1234567890", "tenant": "fixture-tenant"}])
+def test_private_gym_config_without_hardcoded_fallback(tmp_path, monkeypatch, config):
     monkeypatch.chdir(tmp_path)
-    for name in ("GYMCLAW_MYSPORTS_STUDIO_ID", "GYMCLAW_MYSPORTS_TENANT", "GYMCLAW_CROWD_CONFIG"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("GYMCLAW_CROWD_CONFIG", raising=False)
+    monkeypatch.setenv("GYMCLAW_MYSPORTS_STUDIO_ID", "999")  # Ignored: the file is the whole config.
     with pytest.raises(DomainError) as error:
         crowd_sources.from_environment()
     assert error.value.code == "GYM_API_NOT_CONFIGURED"
-    if source == "env":
-        monkeypatch.setenv("GYMCLAW_MYSPORTS_STUDIO_ID", "1234567890")
-        monkeypatch.setenv("GYMCLAW_MYSPORTS_TENANT", "fixture-tenant")
-    else:
-        (tmp_path / "data").mkdir()
-        (tmp_path / "data/crowd-config.json").write_text(json.dumps({"studio_id": "1234567890", "tenant": "fixture-tenant"}))
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data/crowd-config.json").write_text(json.dumps(config))
     transport = Transport({"value": 7})
     assert crowd_sources.from_environment(transport=transport).get_reading().raw_value == 7
     assert transport.calls[0][1].endswith("/1234567890/utilization/v2/active-checkin")
@@ -80,8 +77,6 @@ def test_private_gym_config_without_hardcoded_fallback(tmp_path, monkeypatch, so
 
 def test_invalid_private_gym_config_withholds_values(tmp_path, monkeypatch):
     monkeypatch.setenv("GYMCLAW_CROWD_CONFIG", str(tmp_path / "private.json"))
-    monkeypatch.delenv("GYMCLAW_MYSPORTS_STUDIO_ID", raising=False)
-    monkeypatch.delenv("GYMCLAW_MYSPORTS_TENANT", raising=False)
     (tmp_path / "private.json").write_text('{"studio_id":"private-invalid-value","tenant":"fixture-tenant"}')
     with pytest.raises(DomainError) as error:
         crowd_sources.from_environment()
@@ -90,8 +85,6 @@ def test_invalid_private_gym_config_withholds_values(tmp_path, monkeypatch):
 
 
 def configure(tmp_path, monkeypatch, config):
-    for name in ("GYMCLAW_MYSPORTS_STUDIO_ID", "GYMCLAW_MYSPORTS_TENANT"):
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GYMCLAW_CROWD_CONFIG", str(tmp_path / "crowd.json"))
     (tmp_path / "crowd.json").write_text(json.dumps(config))
 
@@ -117,11 +110,10 @@ def test_http_identity_covers_headers(tmp_path, monkeypatch):
 
 
 def test_existing_mysports_history_keeps_its_binding(engine, tmp_path, monkeypatch):
-    """Legacy file (extra field, studio from env) resolves to the identity the live DB is bound to."""
+    """Legacy file (no kind, extra field) resolves to the identity the live DB is bound to."""
     with Session(engine) as db, db.begin():
         crowd.poll(db, MySportsProvider(studio_id="1234567890", tenant="fixture-tenant", transport=Transport({"value": 5})), now=NOW)
-    configure(tmp_path, monkeypatch, {"tenant": "fixture-tenant", "note": "my gym"})
-    monkeypatch.setenv("GYMCLAW_MYSPORTS_STUDIO_ID", "1234567890")
+    configure(tmp_path, monkeypatch, {"studio_id": "1234567890", "tenant": "fixture-tenant", "note": "my gym"})
     source = crowd_sources.from_environment(transport=Transport({"value": 9}))
     assert source.provider_id == "mysports:fixture-tenant:1234567890"
     with Session(engine) as db, db.begin():
