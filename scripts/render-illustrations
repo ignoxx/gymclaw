@@ -1,44 +1,13 @@
 #!/usr/bin/env bash
-# Re-render Telegram images from the Workout Guide art.
-# - frame-1.png: 1024 px still on an opaque dark background, 32-colour palette (line art stays crisp,
-#   ~30 KB each). Used where one still is needed (session preview collage).
-# - animation.gif: 1024 px loop of all three poses, 1 → 2 → 3 → 2 at 350 ms, so it plays as a rep.
-#   Same size and 32 colours as the still, no dithering (dithering makes line art grainy; ~65 KB each).
-#   Exercise cards send this; Telegram shows it as an animation.
-# Art is drawn at 80% of the canvas and centred: the source art runs close to its edges, and
-# Telegram's rounded corners would otherwise clip it.
-# Frames 2 and 3 aren't bundled: they come from WORKOUT_GUIDE_SRC (an upstream checkout's
-# packages/workout-guide/assets), else the pinned upstream commit is cloned into a temp dir.
-# Needs rsvg-convert (librsvg), ImageMagick and git: brew install librsvg imagemagick
+# Re-render Telegram PNGs from the bundled Workout Guide SVGs.
+# 1024 px on an opaque dark background, 32-colour palette (line art stays crisp, ~30 KB each).
+# Art is drawn at 820 px and centred: the source art runs close to its edges, and Telegram's
+# rounded photo corners would otherwise clip it.
+# Needs rsvg-convert (librsvg) and ImageMagick: brew install librsvg imagemagick
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/gymclaw/assets/workout-guide"
-COMMIT=aac599224bb9780305239607ef98540b7e0ce389  # Same commit as NOTICE.md.
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-
-SRC="${WORKOUT_GUIDE_SRC:-}"
-if [[ -z "$SRC" ]]; then
-  git clone -q --filter=blob:none --no-checkout https://github.com/bryllim/workout-guide "$WORK/upstream"
-  git -C "$WORK/upstream" checkout -q "$COMMIT" -- packages/workout-guide/assets
-  SRC="$WORK/upstream/packages/workout-guide/assets"
-fi
-
-# render <svg> <art px> <canvas px> <out.png>
-render() {
-  rsvg-convert -w "$2" -h "$2" -b '#000000' "$1" | magick - -background '#000000' -gravity center -extent "$3x$3" "$4"
-}
-
-for dir in "$ROOT"/*/; do
-  slug="$(basename "$dir")"
-  [[ -f "$dir/frame-1.svg" ]] || continue
-  if ! cmp -s "$dir/frame-1.svg" "$SRC/$slug/frame-1.svg"; then
-    echo "$slug: bundled frame 1 differs from upstream $COMMIT" >&2
-    exit 1
-  fi
-  rsvg-convert -w 820 -h 820 -b '#000000' "$dir/frame-1.svg" \
-    | magick - -background '#000000' -gravity center -extent 1024x1024 -colors 32 -strip "PNG8:$dir/frame-1.png"
-  for n in 1 2 3; do render "$SRC/$slug/frame-$n.svg" 820 1024 "$WORK/$n.png"; done
-  magick -delay 35 -loop 0 "$WORK/1.png" "$WORK/2.png" "$WORK/3.png" "$WORK/2.png" \
-    -dither None -colors 32 -layers Optimize "$dir/animation.gif"
+for svg in "$ROOT"/*/frame-1.svg; do
+  png="${svg%.svg}.png"
+  rsvg-convert -w 820 -h 820 -b '#000000' "$svg" | magick - -background '#000000' -gravity center -extent 1024x1024 -colors 32 -strip "PNG8:$png"
 done
-echo "Rendered $(ls "$ROOT"/*/frame-1.png | wc -l | tr -d ' ') stills and $(ls "$ROOT"/*/animation.gif | wc -l | tr -d ' ') animations"
+echo "Rendered $(ls "$ROOT"/*/frame-1.png | wc -l | tr -d ' ') PNGs"
