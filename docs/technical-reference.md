@@ -378,10 +378,9 @@ outside configured workout hours without HTTP. Not installed automatically.
 
 ## OpenClaw / Telegram activation
 
-[Activation handoff](../openclaw/README.md) covers dedicated profile, secure owner-only
-Telegram setup, NemoClaw deployment differences and approval boundaries. No runtime
-is installed/configured automatically. Current Node 25 is outside documented OpenClaw
-support; choose Node 24.16+ or 26.1+ before activation.
+[Self-hosting](self-hosting.md) covers the Docker deployment, owner-only Telegram
+and approval boundaries; [deploy/entrypoint.sh](../deploy/entrypoint.sh) holds the exact
+OpenClaw config. No runtime is installed/configured automatically.
 
 ```text
 python -m gymclaw.cli runtime plan --telegram-id OWNER_ID

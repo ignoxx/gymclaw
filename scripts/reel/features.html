@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- GymClaw feature film. One page, two cuts: features.html?cut=15 (reel) and ?cut=60 (tour).
+<!-- GymClaw feature film: the 60 s tour (features.html?cut=60).
      Every frame is a pure function of t; render.mjs calls window.render(t). -->
 <html><head><meta charset="utf-8"><title>GymClaw Features</title>
 <link rel="stylesheet" href="lib.css">
@@ -132,8 +132,6 @@ const CH_DEFS={
   replan:{kick:'REPLAN',lines:['Life happens.','It replans.'],
     sub:'New meeting, trip or sick day? It moves sessions to the <em>next quiet slot</em>. You never re-plan.'},
   watch:{kick:'WATCH',lines:['Watches the','crowd for you.'],
-    sub:'Polls gym check-ins <em>every 15 min</em> and pings you when it\'s time to leave.'},
-  watch60:{kick:'WATCH',lines:['Watches the','crowd for you.'],
     sub:'Polls check-ins <em>every 15 min</em>, tells you when to leave, and learns how busy it <em>actually felt</em>.'},
   coach:{kick:'COACH',lines:['Coaches you','set by set.'],
     sub:'Exercise images, target weights, rest timers. Log a set with one text: <em>10x80</em>.'},
@@ -390,9 +388,9 @@ function hoodFrame(t,a){
     const [x1,y1,x2,y2]=HOOD_EDGES[i+1]; pk.setAttribute('cx',lerp(x1,x2,ph)); pk.setAttribute('cy',lerp(y1,y2,ph)); pk.style.opacity=live?1:0});
 }
 
-const BUILD={setup:buildSetup,plan:buildPlan,replan:buildReplan,watch:buildWatch,watch60:buildWatch,coach:buildCoach,adapt:buildAdapt,progress:buildProgress,hood:buildHood};
-const FRAME={setup:setupFrame,plan:planFrame,replan:replanFrame,watch:watchFrame,watch60:watchFrame,coach:coachFrame,adapt:adaptFrame,progress:progressFrame,hood:hoodFrame};
-const VIZ_ID={watch:'watchViz',watch60:'watchViz',progress:'progressViz'};
+const BUILD={setup:buildSetup,plan:buildPlan,replan:buildReplan,watch:buildWatch,coach:buildCoach,adapt:buildAdapt,progress:buildProgress,hood:buildHood};
+const FRAME={setup:setupFrame,plan:planFrame,replan:replanFrame,watch:watchFrame,coach:coachFrame,adapt:adaptFrame,progress:progressFrame,hood:hoodFrame};
+const VIZ_ID={watch:'watchViz',progress:'progressViz'};
 
 // ===================== cuts =====================
 function WEEK_MSG(){return `<b>🗓 Week planned</b><br>Quietest slots that fit your calendar:<div class="slots"><div><span>Mon</span>19:45 · <b>Push</b></div><div><span>Wed</span>18:00 · <b>Pull</b></div><div><span>Fri</span>18:00 · <b>Legs</b></div></div><span class="meta">07:15</span>`}
@@ -400,42 +398,12 @@ const LEAVE_MSG=`🏃 Leave by <b>19:35</b> for Push at 19:45.<br>Gym is quiet: 
 const DONE_MSG=next=>`<b>🏁 Push complete</b><br>8 of 8 working sets · 51 min<br>📈 Bench press → <b>82.5 kg</b> next time<br>🗓 Next: Pull · ${next}<span class="meta">20:36</span>`;
 
 const CUTS={
- 15:{duration:15, hook:{claw:.9,close:2.0}, outro:13.45, tagline:'Quieter gym hours. Smarter sets. Zero babysitting.',
-  chapters:[
-    {id:'plan',a:2.5,b:5,ev:{k:1}},
-    {id:'watch',a:5,b:7,ev:{k:1}},
-    {id:'coach',a:7,b:9.5,ev:{sends:[8.35],rests:[[8.75,9.4]],sets:[8.4,9.0,9.15]}},
-    {id:'adapt',a:9.5,b:12,ev:{busy:10.4,swap:10.65,now:11.1,tag:11.2}},
-    {id:'progress',a:12,b:13.5,ev:{k:1}}],
-  clock:[[0,'07:15'],[5,'19:25'],[7,'19:49'],[9.15,'19:58'],[12,'20:36']],
-  locks:[{in:5.0,out:6.3,date:'Monday 12 October',time:'19:25',notifs:[{at:5.35,html:'🏃 Leave by 19:35 for Push at 19:45.<br>Gym is quiet: 14 check-ins and dropping.'}]}],
-  typed:[{from:7.8,send:8.35,text:'10x80'}],
-  taps:[{at:4.5,id:'bOk',label:'✓ Confirmed'},{at:10.4,id:'bBusy',tint:'hot'}],
-  msgs:[
-    {k:'chip',at:-1,html:'Sunday'},
-    {k:'bot',at:-1,html:`Last week: <b>3 of 3</b> workouts done 🔥<span class="meta">Sat 20:41</span>`},
-    {k:'typing',at:3.3,end:3.9},
-    {k:'bot',at:3.9,html:WEEK_MSG(),kb:kb(['👍 Looks good','bOk'],['✏️ Change'])},
-    {k:'chip',at:5.0,html:'Monday'},
-    {k:'bot',at:5.0,html:LEAVE_MSG},
-    {k:'typing',at:6.9,end:7.25},
-    {k:'photo',at:7.25,img:'bench-press',html:`<b>Bench press</b> · set 1 of 3<br>8–10 × 80 kg · rest 90 s<span class="meta">19:47</span>`,kb:kb(['Occupied'],['Alternative'])},
-    {k:'user',at:8.35,html:`10x80<span class="meta">19:49 ✓✓</span>`},
-    {k:'typing',at:8.45,end:8.7},
-    {k:'bot',at:8.7,html:`✅ Saved: 10 × 80 kg<br>⏱ Rest 90 s. I'll ping you.<span class="meta">19:49</span>`},
-    {k:'chip',at:9.15,html:'⏩ Bench press · 3 of 3 sets saved'},
-    {k:'typing',at:9.45,end:9.75},
-    {k:'photo',at:9.75,img:'overhead-press',html:`<b>Overhead press</b> · set 1 of 3<br>8–10 × 30 kg<span class="meta">19:58</span>`,kb:kb(['Occupied','bBusy'],['Alternative'])},
-    {k:'typing',at:10.75,end:11.0},
-    {k:'photo',at:11.0,img:'tricep-pushdown',html:`👍 Overhead press moved to later.<br>Now: <b>Tricep pushdown</b> · 12–15 × 25 kg<span class="meta">19:58</span>`},
-    {k:'typing',at:12.0,end:12.25},
-    {k:'bot',at:12.25,html:DONE_MSG('Wed 18:00')}]},
  60:{duration:60, hook:{claw:2.6,close:5.0,line3:1.35}, outro:56.4, tagline:'Quieter gym hours. Smarter sets. Zero babysitting.',
   chapters:[
     {id:'setup',a:5.5,b:12.5,ev:{photo:8.3,scan:[8.6,9.6],rows:[9.7,9.85,10.0],missing:10.15,fill:10.6,tag:11.1}},
     {id:'plan',a:12.5,b:20,ev:{k:2.4}},
     {id:'replan',a:20,b:26.5,ev:{drop:21.3,conflict:21.7,move:[22.4,23.0],away:24.6,tag:23.2}},
-    {id:'watch60',a:26.5,b:33,ev:{k:1.4,felt:31.3}},
+    {id:'watch',a:26.5,b:33,ev:{k:1.4,felt:31.3}},
     {id:'coach',a:33,b:40.5,ev:{sends:[35.2,38.4],rests:[[35.6,37.35],[38.75,39.55]],sets:[35.25,38.45,39.65]}},
     {id:'adapt',a:40.5,b:47,ev:{busy:42.0,swap:42.25,now:42.7,tag:42.9,alt:45.6}},
     {id:'progress',a:47,b:51.5,ev:{k:1.4}},
@@ -493,7 +461,7 @@ const CUTS={
     {k:'typing',at:47.1,end:47.4},
     {k:'bot',at:47.4,html:DONE_MSG('Thu 18:30')}]},
 };
-const CUT=CUTS[new URLSearchParams(location.search).get('cut')||'15'];
+const CUT=CUTS[new URLSearchParams(location.search).get('cut')||'60'];
 const H=CUT.hook.claw, C=CUT.hook.close, O=CUT.outro;
 const CH=CUT.chapters;
 
