@@ -5,7 +5,13 @@ FROM ghcr.io/openclaw/openclaw:2026.7.1
 USER root
 # OpenClaw's image tool converts photos (iPhone HEIC included) with an external processor and the
 # base image has none. Debian's ImageMagick 6 provides `convert` with the libheif delegate.
-RUN apt-get update && apt-get install -y --no-install-recommends imagemagick \
+# Bookworm's libheif 1.15 rejects current iPhone HEICs ("Too many auxiliary image references"),
+# so libheif and its HEVC decoder come from bookworm-backports (1.19).
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" \
+        > /etc/apt/sources.list.d/bookworm-backports.list \
+    && apt-get update && apt-get install -y --no-install-recommends imagemagick \
+    && apt-get install -y --no-install-recommends -t bookworm-backports \
+        libheif1 libheif-plugin-libde265 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
 # Base image ships Python 3.11; GymClaw needs 3.12+.
