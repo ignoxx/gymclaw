@@ -7,8 +7,8 @@ Config is private JSON at data/crowd-config.json (or GYMCLAW_CROWD_CONFIG), one 
   {"kind": "http", "url": "https://…", "regex": "(\\d+) people"}
   {"kind": "command", "argv": ["python3", "data/crowd-source.py"]}
 
-A file without "kind" is the original MySports shape. GYMCLAW_MYSPORTS_STUDIO_ID and
-GYMCLAW_MYSPORTS_TENANT still win over the file. See docs/crowd.md.
+The file holds everything needed to read the count; nothing else configures the source.
+A file without "kind" is the original MySports shape. See docs/crowd.md.
 """
 import hashlib
 import json
@@ -121,16 +121,13 @@ class CommandCountProvider:
 
 def from_environment(*, transport: Transport = requests, run=subprocess.run):
     """The configured crowd provider, or GYM_API_NOT_CONFIGURED. Config values never appear in errors."""
-    studio_id, tenant = os.environ.get("GYMCLAW_MYSPORTS_STUDIO_ID"), os.environ.get("GYMCLAW_MYSPORTS_TENANT")
     try:
-        values = {}
-        if not (studio_id and tenant):
-            values = json.loads(Path(os.environ.get("GYMCLAW_CROWD_CONFIG", "data/crowd-config.json")).read_text())
-            if not isinstance(values, dict):
-                raise ValueError("Invalid crowd config")
-        if values.get("kind", "mysports") == "mysports":
-            # Original shape: only the two identifiers count, and each env var overrides its file field.
-            values = {"kind": "mysports", "studio_id": studio_id or values.get("studio_id"), "tenant": tenant or values.get("tenant")}
+        values = json.loads(Path(os.environ.get("GYMCLAW_CROWD_CONFIG", "data/crowd-config.json")).read_text())
+        if not isinstance(values, dict):
+            raise ValueError("Invalid crowd config")
+        if "kind" not in values:
+            # Original MySports file: only the two identifiers count.
+            values = {"kind": "mysports", "studio_id": values.get("studio_id"), "tenant": values.get("tenant")}
         config = SourceConfig.validate_python(values)
         if isinstance(config, MySportsSource):
             return MySportsProvider(studio_id=config.studio_id, tenant=config.tenant, transport=transport)

@@ -59,8 +59,7 @@ which hours feel busy.
 
 `GET https://www.mysports.com/nox/public/v1/studios/{studio_id}/utilization/v2/active-checkin` with
 header `x-tenant`, response `{"value": 7}`. No session cookie needed. Undocumented route, no
-observation time or cache age, so freshness stays unknown. `GYMCLAW_MYSPORTS_STUDIO_ID` and
-`GYMCLAW_MYSPORTS_TENANT` override the file.
+observation time or cache age, so freshness stays unknown.
 
 ## What the forecast uses
 
