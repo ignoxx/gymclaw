@@ -324,16 +324,15 @@ pytest -q gymclaw/tests/test_workout_cli.py
 
 ```text
 python -m gymclaw.cli crowd poll
+python -m gymclaw.cli crowd test
 python -m gymclaw.cli crowd get-source-health
 python -m gymclaw.cli crowd record-feedback --workout-id ID --rating busy --request-id UNIQUE_ID
 python -m gymclaw.cli crowd predict --at 2026-10-21T20:00:00+02:00
 ```
 
-`poll` performs public GET to MySports `active-checkin` with `x-tenant`, no SESSION
-cookie or token. Observed undocumented route; no live request was performed during
-implementation. Studio/tenant defaults follow handoff and can be changed via
-`GYMCLAW_MYSPORTS_STUDIO_ID`/`GYMCLAW_MYSPORTS_TENANT` before first poll. DB binds source
-identity to prevent silent studio/provider mixing. [Evidence/limits](crowd.md).
+`poll` reads the configured source (MySports, any HTTPS JSON/text endpoint, or an owner-provided
+command) and stores the count; `test` reads once and stores nothing. DB binds source identity to
+prevent silent gym/provider mixing. [Sources, setup and limits](crowd.md).
 
 Save every **reported active count** with local retrieval time. MySports has no source
 observation time/cache age: freshness stays null, never "0 seconds/live". Changed
@@ -450,7 +449,7 @@ finish an open workout. Resolve its outstanding exercises explicitly before next
 - `gymclaw/services/body.py`, `body_cli.py`: weigh-ins, photo dates, trend and briefing line.
 - `gymclaw/services/compression.py`: deterministic workout time allocation.
 - `gymclaw/providers/openclaw.py`, `services/runtime.py`: scoped scheduler and durable delivery.
-- `gymclaw/providers/mysports.py`, `providers/crowd.py`, `services/crowd.py`: public signals,
+- `gymclaw/providers/crowd_sources.py`, `providers/mysports.py`, `providers/crowd.py`, `services/crowd.py`: public signals,
   source health, arrival labels, calibration and planner integration.
 - `openclaw/`: repo-local workspace (the agent's tool reference is `AGENTS.md`) and activation handoff.
 - `gymclaw/cli.py`, `calendar_cli.py`, `runtime_cli.py`, `crowd_cli.py`: JSON adapters.

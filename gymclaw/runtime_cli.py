@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from gymclaw.calendar_cli import provider_for, publish_command
 from gymclaw.models import CalendarSyncState, NotificationDelivery, RuntimeSettings
 from gymclaw.providers.google_calendar import google_provider
-from gymclaw.providers.mysports import MySportsProvider
+from gymclaw.providers import crowd_sources
 from gymclaw.providers.openclaw import OpenClawProvider, validate_route
 from gymclaw.services import crowd, personal_calendar, runtime, weekly
 from gymclaw.services.calendar import sync_calendar, week_lineup
@@ -155,7 +155,7 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                 raise DomainError("LIVE_TIME_REQUIRED", "Runtime crowd polling uses actual retrieval time")
             # Around the clock: the whole day's curve matters, not just training hours.
             with Session(engine) as db, db.begin():
-                result = crowd.poll(db, MySportsProvider.from_environment())
+                result = crowd.poll(db, crowd_sources.from_environment())
             if not result["data"]["available"]:
                 raise DomainError(result["data"]["error_code"], "Crowd source unavailable; failure health recorded")
             return result
