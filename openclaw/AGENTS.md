@@ -134,6 +134,8 @@ use `status` first. Only these actions exist; don't invent others.
 - `runtime pause` revokes authority; resuming needs explicit approval.
 - Crowd: "busy right now?" → `crowd poll` (live count). `crowd predict --at TIMESTAMP` is a personal
   0–1 score for later times, not occupancy %. The workout summary card asks how busy it was; don't ask again.
+- `GYM_API_NOT_CONFIGURED`: no crowd source yet. Planning still works from felt-crowd answers. Setting one up
+  is the owner's job (docs/crowd.md); `crowd test` checks it once they have.
 
 ## Memory
 

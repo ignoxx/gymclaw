@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from gymclaw.db import initialize, make_engine
 from gymclaw.models import CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
 from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
+from gymclaw.providers import crowd_sources
 from gymclaw.providers.mysports import MySportsProvider
 from gymclaw.services import crowd
 from gymclaw.services.errors import DomainError
@@ -42,9 +43,10 @@ class Response:
 
     def __init__(self, body):
         self.body = body
+        self.text = body if isinstance(body, str) else json.dumps(body)
 
     def json(self):
-        return self.body
+        return json.loads(self.body) if isinstance(self.body, str) else self.body
 
 
 class Transport:
@@ -63,7 +65,7 @@ def test_private_gym_config_without_hardcoded_fallback(tmp_path, monkeypatch, so
     for name in ("GYMCLAW_MYSPORTS_STUDIO_ID", "GYMCLAW_MYSPORTS_TENANT", "GYMCLAW_CROWD_CONFIG"):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(DomainError) as error:
-        MySportsProvider.from_environment()
+        crowd_sources.from_environment()
     assert error.value.code == "GYM_API_NOT_CONFIGURED"
     if source == "env":
         monkeypatch.setenv("GYMCLAW_MYSPORTS_STUDIO_ID", "1234567890")
@@ -72,7 +74,7 @@ def test_private_gym_config_without_hardcoded_fallback(tmp_path, monkeypatch, so
         (tmp_path / "data").mkdir()
         (tmp_path / "data/crowd-config.json").write_text(json.dumps({"studio_id": "1234567890", "tenant": "fixture-tenant"}))
     transport = Transport({"value": 7})
-    assert MySportsProvider.from_environment(transport=transport).get_reading().raw_value == 7
+    assert crowd_sources.from_environment(transport=transport).get_reading().raw_value == 7
     assert transport.calls[0][1].endswith("/1234567890/utilization/v2/active-checkin")
 
 
@@ -82,9 +84,58 @@ def test_invalid_private_gym_config_withholds_values(tmp_path, monkeypatch):
     monkeypatch.delenv("GYMCLAW_MYSPORTS_TENANT", raising=False)
     (tmp_path / "private.json").write_text('{"studio_id":"private-invalid-value","tenant":"fixture-tenant"}')
     with pytest.raises(DomainError) as error:
-        MySportsProvider.from_environment()
+        crowd_sources.from_environment()
     assert error.value.code == "GYM_API_NOT_CONFIGURED"
     assert "private-invalid-value" not in str(error.value)
+
+
+def configure(tmp_path, monkeypatch, config):
+    for name in ("GYMCLAW_MYSPORTS_STUDIO_ID", "GYMCLAW_MYSPORTS_TENANT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GYMCLAW_CROWD_CONFIG", str(tmp_path / "crowd.json"))
+    (tmp_path / "crowd.json").write_text(json.dumps(config))
+
+
+@pytest.mark.parametrize("config, body", [
+    ({"json_path": "data.0.count"}, {"data": [{"count": 12}]}),
+    ({"regex": r"(\d+) people"}, "<b>12 people</b> training now"),
+])
+def test_http_source_reads_count(tmp_path, monkeypatch, config, body):
+    configure(tmp_path, monkeypatch, {"kind": "http", "url": "https://gym.example/live", "headers": {"x-key": "k"}} | config)
+    transport = Transport(body)
+    source = crowd_sources.from_environment(transport=transport)
+    assert source.get_reading().raw_value == 12 and source.provider_id == "http:https://gym.example/live"
+    assert transport.calls[0][2]["headers"] == {"x-key": "k"}
+
+
+@pytest.mark.parametrize("stdout, code", [("12\n", None), ('{"value": 12}', None), ("busy", "GYM_API_INVALID_RESPONSE"), ("-3", "GYM_API_INVALID_RESPONSE")])
+def test_command_source_reads_count(tmp_path, monkeypatch, stdout, code):
+    configure(tmp_path, monkeypatch, {"kind": "command", "argv": ["python3", "data/crowd-source.py"]})
+    ran = []
+    def run(argv, **kwargs):
+        ran.append(argv)
+        return type("Done", (), {"returncode": 0, "stdout": stdout})()
+    source = crowd_sources.from_environment(run=run)
+    if code:
+        with pytest.raises(DomainError) as error:
+            source.get_reading()
+        assert error.value.code == code
+    else:
+        assert source.get_reading().raw_value == 12 and ran == [["python3", "data/crowd-source.py"]]
+
+
+@pytest.mark.parametrize("config", [
+    {"kind": "http", "url": "http://plain.example", "json_path": "n"},
+    {"kind": "http", "url": "https://gym.example", "json_path": "n", "regex": "(\\d+)"},
+    {"kind": "http", "url": "https://gym.example", "regex": "\\d+"},
+    {"kind": "command", "argv": []},
+    {"kind": "scrape-it-somehow"},
+])
+def test_invalid_source_config_is_not_configured(tmp_path, monkeypatch, config):
+    configure(tmp_path, monkeypatch, config)
+    with pytest.raises(DomainError) as error:
+        crowd_sources.from_environment()
+    assert error.value.code == "GYM_API_NOT_CONFIGURED"
 
 
 def test_mysports_observed_public_contract_no_session_cookie():
