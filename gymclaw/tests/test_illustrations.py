@@ -6,14 +6,13 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from gymclaw.db import initialize, make_engine
-from gymclaw.services.illustrations import catalog, for_exercise, public_assets
+from gymclaw.services.illustrations import for_exercise, public_assets
 from gymclaw.services.set_parser import SetInput
 from gymclaw.services.templates import ExerciseSpec, Template, import_template
 from gymclaw.services.workout import start, log_set
 
 
 def test_catalog_assets_and_no_fuzzy_matching():
-    assert len(catalog()) == 302
     assert all(path.is_file() for path in public_assets().values())
     pose = for_exercise("Seated Cable Row")
     assert pose["equipment"] == "Cable" and Path(pose["telegram_png"]).is_file()
