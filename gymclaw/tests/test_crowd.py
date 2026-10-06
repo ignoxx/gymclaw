@@ -106,7 +106,10 @@ def test_http_identity_covers_headers(tmp_path, monkeypatch):
     for tenant in ("gym-a", "gym-b"):
         configure(tmp_path, monkeypatch, {"kind": "http", "url": "https://gym.example/live", "headers": {"x-tenant": tenant}, "json_path": "n"})
         ids.append(crowd_sources.from_environment().provider_id)
-    assert ids[0] != ids[1]
+    configure(tmp_path, monkeypatch, {"kind": "http", "url": "https://gym.example/live", "headers": {"b": "2", "x-tenant": "gym-b"}, "json_path": "n"})
+    first = crowd_sources.from_environment().provider_id
+    configure(tmp_path, monkeypatch, {"json_path": "n", "headers": {"x-tenant": "gym-b", "b": "2"}, "url": "https://gym.example/live", "kind": "http"})
+    assert ids[0] != ids[1] and first == crowd_sources.from_environment().provider_id  # Key order doesn't matter.
 
 
 def test_existing_mysports_history_keeps_its_binding(engine, tmp_path, monkeypatch):

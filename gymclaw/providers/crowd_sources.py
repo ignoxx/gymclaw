@@ -77,7 +77,7 @@ class HttpCountProvider:
             raise ValueError("regex needs a group for the count")
         self.config, self.transport = config, transport
         # Headers and the extraction rule can select another gym at the same URL, so they're part of the identity.
-        self.provider_id = f"http:{config.url}#" + hashlib.sha256(config.model_dump_json().encode()).hexdigest()[:12]
+        self.provider_id = f"http:{config.url}#" + hashlib.sha256(json.dumps(config.model_dump(), sort_keys=True).encode()).hexdigest()[:12]
 
     def get_reading(self) -> CrowdReading:
         try:
