@@ -64,7 +64,7 @@ def cli_json(text: str) -> dict:
 
 def run_json(argv: list[str]) -> dict:
     if shutil.which(argv[0]) is None:
-        raise DomainError("OPENCLAW_NOT_INSTALLED", "OpenClaw CLI unavailable; activation instructions: openclaw/README.md")
+        raise DomainError("OPENCLAW_NOT_INSTALLED", "OpenClaw CLI unavailable; setup: docs/self-hosting.md")
     try:
         env = dict(os.environ)
         if env.get("OPENCLAW_CONFIG_PATH") == "/sandbox/.openclaw/openclaw.json":

@@ -4,9 +4,7 @@
 
 [![GymClaw: your training week, run for you](assets/hero.png)](https://ignoxx.github.io/gymclaw/)
 
-▶ **[Watch the videos](https://ignoxx.github.io/gymclaw/)**: one week with GymClaw (60 s), feature tour (60 s), motion reel (15 s)
-
-<sub>Telegram screens, times and data in the videos are simulated. See [video notes](videos/README.md).</sub>
+▶ **[Watch the videos](https://ignoxx.github.io/gymclaw/)**: one week with GymClaw (60 s) and feature tour (60 s)
 
 ## Why
 
@@ -88,18 +86,11 @@ Open http://127.0.0.1:8765. The dashboard runs the real planning and workout cod
 
 Run the tests with `pytest -q`.
 
-<details>
-<summary>Run against your own NemoClaw install</summary>
+## Self-host
 
-```bash
-python -m gymclaw.dashboard --live
-```
+GymClaw runs one owner per deployment: your Telegram, your calendar, your gym. Bring a Telegram bot, an OpenRouter key and a Google calendar, then `docker compose up`. The bot walks you through the rest in chat. Full guide: [docs/self-hosting.md](docs/self-hosting.md).
 
-Open http://127.0.0.1:8766. This reads saved calendar, crowd, workout and runtime state from your NemoClaw sandbox in read-only mode and starts no new poller. It refreshes every minute; private views stay on localhost.
-
-Agent setup is in [openclaw/README.md](openclaw/README.md). Copy `.env.example` to `.env` and fill in your calendar, gym and Telegram IDs.
-
-</details>
+Crowd-aware planning needs a live check-in count from your gym. Every gym exposes that differently; see [crowd data](docs/crowd.md).
 
 ## Status
 
@@ -112,7 +103,7 @@ Agent setup is in [openclaw/README.md](openclaw/README.md). Copy `.env.example` 
 
 ## Docs
 
-[Agent setup](openclaw/README.md) · [Deploy](deploy/README.md) · [Coach plugin](openclaw/plugins/coach/README.md) · [CLI reference](docs/technical-reference.md) · [Onboarding](docs/onboarding.md) · [Crowd data](docs/crowd.md) · [Inference](docs/inference-runtime.md) · [Spec](SPEC.md) · [Security](SECURITY.md) · [Rebuild the videos](scripts/reel/README.md)
+[Self-hosting](docs/self-hosting.md) · [Deploy](deploy/README.md) · [Coach plugin](openclaw/plugins/coach/README.md) · [CLI reference](docs/technical-reference.md) · [Onboarding](docs/onboarding.md) · [Crowd data](docs/crowd.md) · [Inference](docs/inference-runtime.md) · [Spec](SPEC.md) · [Security](SECURITY.md) · [Rebuild the videos](scripts/reel/README.md)
 
 ## Credits
 
