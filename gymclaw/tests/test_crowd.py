@@ -104,8 +104,30 @@ def test_http_source_reads_count(tmp_path, monkeypatch, config, body):
     configure(tmp_path, monkeypatch, {"kind": "http", "url": "https://gym.example/live", "headers": {"x-key": "k"}} | config)
     transport = Transport(body)
     source = crowd_sources.from_environment(transport=transport)
-    assert source.get_reading().raw_value == 12 and source.provider_id == "http:https://gym.example/live"
+    assert source.get_reading().raw_value == 12 and source.provider_id.startswith("http:https://gym.example/live#")
     assert transport.calls[0][2]["headers"] == {"x-key": "k"}
+
+
+def test_http_identity_covers_headers(tmp_path, monkeypatch):
+    ids = []
+    for tenant in ("gym-a", "gym-b"):
+        configure(tmp_path, monkeypatch, {"kind": "http", "url": "https://gym.example/live", "headers": {"x-tenant": tenant}, "json_path": "n"})
+        ids.append(crowd_sources.from_environment().provider_id)
+    assert ids[0] != ids[1]
+
+
+def test_existing_mysports_history_keeps_its_binding(engine, tmp_path, monkeypatch):
+    """Legacy file (extra field, studio from env) resolves to the identity the live DB is bound to."""
+    with Session(engine) as db, db.begin():
+        crowd.poll(db, MySportsProvider(studio_id="1234567890", tenant="fixture-tenant", transport=Transport({"value": 5})), now=NOW)
+    configure(tmp_path, monkeypatch, {"tenant": "fixture-tenant", "note": "my gym"})
+    monkeypatch.setenv("GYMCLAW_MYSPORTS_STUDIO_ID", "1234567890")
+    source = crowd_sources.from_environment(transport=Transport({"value": 9}))
+    assert source.provider_id == "mysports:fixture-tenant:1234567890"
+    with Session(engine) as db, db.begin():
+        crowd.poll(db, source, now=NOW + timedelta(minutes=15))
+    with Session(engine) as db:
+        assert [row.raw_value for row in db.scalars(select(CrowdObservation).order_by(CrowdObservation.observed_at))] == [5, 9]
 
 
 @pytest.mark.parametrize("stdout, code", [("12\n", None), ('{"value": 12}', None), ("busy", "GYM_API_INVALID_RESPONSE"), ("-3", "GYM_API_INVALID_RESPONSE")])
