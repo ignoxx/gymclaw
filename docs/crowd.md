@@ -1,63 +1,74 @@
-# Crowd evidence and model limits
+# Crowd data
 
-MySports integration follows reviewed handoff/FINDINGS and captured public response:
+GymClaw learns when your gym is quiet from a live check-in count, polled every 15 minutes. Every
+gym exposes that differently, if at all, so the source is configured per deployment.
 
-- Studio/tenant identifiers configured privately; no owner's gym in source.
-- GET `https://www.mysports.com/nox/public/v1/studios/{studio_id}/utilization/v2/active-checkin`
-- Header `x-tenant: {tenant}`; captured response shape `{"value":7}`.
-- No SESSION cookie needed. Code neither accepts nor stores one.
-- Response supplies no observation time, cache age, capacity or checkout semantics.
-- Undocumented observed route, not guaranteed stable API. Unit tests use fixtures.
+## Sources
 
-## Local activation
+Private JSON at `data/crowd-config.json` (or the path in `GYMCLAW_CROWD_CONFIG`). Pick one:
 
-Owner approved live reads. Narrow MySports GET policy in
-an ignored local policy generated from
-`config/gymclaw-crowd-read-policy.example.yaml` applied to dedicated sandbox. Count and
-`today` live requests returned 200; no Age/Cache-Control/Last-Modified provided.
-No cache duration inferred. App stored first real count with retrieval timestamp,
-not fabricated observation time. `today` exposes 24 items with start/end/current/
-percentage; relative series is **not yet periodically collected**.
+```jsonc
+// A JSON API: dot path to the number (list indices are numbers)
+{"kind": "http", "url": "https://…", "headers": {"x-tenant": "…"}, "json_path": "data.0.count"}
 
-Count timer runs every 15 minutes around the clock (the full daily curve matters, not just
-training hours). The watcher sends one Telegram alert when no reading arrives for 45 minutes,
-and one when data flows again; the dashboard shows the same health. Scheduled callback tested:
-healthy, skipped outside that window; manual live acquisition succeeded. Calendar
-writes remain off. Polling depends on local Mac/VM/Gateway staying awake/running.
+// A web page or other text: the regex's first group is the number
+{"kind": "http", "url": "https://…", "regex": "(\\d+) people"}
 
-Existing `today` date-selection probes were ignored by server, so no dated lookback
-claim. Historical weekdays are not an archive. Our persisted count samples build
-our own dated history from activation forward, subject to unknown backend lag.
+// Anything else (login, several requests, a page that needs parsing): a script you provide.
+// Runs from the repo root, no shell, 30 s timeout. Print the count, alone or as {"value": 12}.
+{"kind": "command", "argv": [".venv/bin/python", "data/crowd-source.py"]}
 
-Reference investigation: September 30, 2026, private endpoint research.
-Original gym-specific captures are not included in public source.
-Tests reproduce response contract synthetically; they are not fabricated historical
-live requests. Research capture timestamps are not reused as current observations.
-
-## Private gym configuration
-
-Set both `GYMCLAW_MYSPORTS_STUDIO_ID` and `GYMCLAW_MYSPORTS_TENANT`, or create
-ignored `data/crowd-config.json` (mode 0600) in active sandbox repo:
-
-```json
-{"studio_id":"YOUR_NUMERIC_STUDIO_ID","tenant":"YOUR_TENANT"}
+// MySports gyms, built in. A file without "kind" means this.
+{"kind": "mysports", "studio_id": "123456", "tenant": "my-gym"}
 ```
 
-Optional `GYMCLAW_CROWD_CONFIG` selects another private JSON path. There is no
-hardcoded gym fallback. Callbacks use repo cwd and load this same private config.
-Identifiers are not API credentials, but identify a gym; don't publish config,
-policy exports or runtime backups. Existing private deployment config preserved.
+Only GET, HTTPS, no redirects. The count must be a whole nonnegative number; anything else is
+recorded as a failed read, never stored. Errors never echo the config or response.
 
-## Distinct quantities
+Check it, without storing anything:
 
-1. Reported active count: raw integer, local retrieval timestamp. May lag reality.
-2. `/today`: dated hourly percentages with `current`, unknown aggregation method.
-3. `/historic/week`: undated weekday percentages with no sample counts. All 168
-   observed values were 5%; meaning unknown (possible floor/fallback/baseline).
-4. User felt crowding: EMPTY/FINE/BUSY/PACKED labels define personal score.
+```bash
+scripts/gymclaw-tool crowd test
+```
 
-Only (1) and (4) enter the predictor. Google Popular Times is intentionally not used: there is no
-official API, and our own 15-minute check-in polling is more direct for this gym.
+Then enable polling with `runtime sync … --with-crowd-poll`. The DB binds to the first source it
+reads from; switching sources later needs a fresh DB.
+
+**Docker:** the egress proxy only allows known hosts. Add your source's host(s) to
+`EGRESS_EXTRA_HOSTS` and redeploy. Put command scripts in `data/` so they live in the persistent
+volume. `.venv/bin/python` has `requests` available.
+
+## Finding your gym's source
+
+Most gyms with a "how busy is it" number in their app or website get it from a public endpoint.
+Finding it is a one-off job for whatever coding agent you use, or for you with browser dev tools.
+A prompt that works:
+
+> My gym is **NAME, ADDRESS** (website/app: …). Find out whether it publishes a live check-in or
+> occupancy count: its website, its member app's backend, or the booking platform it uses
+> (MySports, Eversports, Virtuagym, PerfectGym, …). I need the current number of people, not a
+> percentage if a count exists. Then write a GymClaw crowd source config following
+> https://github.com/ignoxx/gymclaw/blob/main/docs/crowd.md: prefer `http` with `json_path`, use a
+> `command` script in `data/` only if one request isn't enough. Tell me which hosts to add to
+> `EGRESS_EXTRA_HOSTS`, and verify with `scripts/gymclaw-tool crowd test`.
+
+No public count? Skip it. Planning still works, and your answers after each workout teach it
+which hours feel busy.
+
+## MySports notes
+
+`GET https://www.mysports.com/nox/public/v1/studios/{studio_id}/utilization/v2/active-checkin` with
+header `x-tenant`, response `{"value": 7}`. No session cookie needed. Undocumented route, no
+observation time or cache age, so freshness stays unknown. `GYMCLAW_MYSPORTS_STUDIO_ID` and
+`GYMCLAW_MYSPORTS_TENANT` override the file.
+
+## What the forecast uses
+
+1. Reported count: a whole number with local retrieval time. May lag reality.
+2. Felt crowding: the owner's Empty/Fine/Busy/Packed answers after workouts, a personal score.
+
+Percentages, capacity guesses and undated "typical week" profiles are never treated as counts.
+Without a source, (2) alone still learns which hours feel quiet.
 
 ## Calendar "Expected crowd"
 

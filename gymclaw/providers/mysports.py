@@ -3,9 +3,6 @@
 Only active-checkin is collected. Dated /today percentages and undated weekly
 profiles are intentionally not used as headcounts or measured future attendance.
 """
-import json
-import os
-from pathlib import Path
 import re
 from typing import Protocol
 
@@ -34,26 +31,6 @@ class MySportsConfig(BaseModel):
 class MySportsProvider:
     source = "GYM_API"
     demo = False
-
-    @classmethod
-    def from_environment(cls, *, transport: Transport = requests):
-        """Load non-secret gym identifiers from env or ignored private config."""
-        studio_id = os.environ.get("GYMCLAW_MYSPORTS_STUDIO_ID")
-        tenant = os.environ.get("GYMCLAW_MYSPORTS_TENANT")
-        try:
-            values = {}
-            if not (studio_id and tenant):
-                path = Path(os.environ.get("GYMCLAW_CROWD_CONFIG", "data/crowd-config.json"))
-                values = json.loads(path.read_text())
-                if not isinstance(values, dict):
-                    raise ValueError("Invalid crowd config")
-            config = MySportsConfig.model_validate({
-                "studio_id": studio_id or values.get("studio_id"),
-                "tenant": tenant or values.get("tenant"),
-            })
-        except (OSError, ValueError):
-            raise DomainError("GYM_API_NOT_CONFIGURED", "Configure private MySports studio ID and tenant; see docs/crowd.md") from None
-        return cls(studio_id=config.studio_id, tenant=config.tenant, transport=transport)
 
     def __init__(self, *, studio_id: str, tenant: str, transport: Transport = requests):
         if not re.fullmatch(r"[0-9]{1,20}", studio_id) or not re.fullmatch(r"[a-zA-Z0-9-]{1,100}", tenant):
