@@ -18,4 +18,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: node --test openclaw/plugins/*/runtime.test.mjs
+      - run: node --test openclaw/plugins/*/*.test.mjs

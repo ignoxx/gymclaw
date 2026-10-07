@@ -320,7 +320,7 @@ def begin(db: Session, ref: str, *, now: datetime, request_id: str) -> dict:
     planned = db.scalar(select(PlannedSession).where(PlannedSession.id.startswith(ref)))
     if planned is None or planned.status not in {"TENTATIVE", "COMMITTED"} or not planned.workout_template_id:
         return {"handled": True, "ack": "⌛ This session can't be started anymore.", "cards": []}
-    start(db, planned.workout_template_id, now=now, request_id=request_id, planned_session_id=planned.id)
+    start(db, planned.workout_template_id, now=now, request_id=request_id, planned_session_id=planned.id, by_button=True)
     return {"handled": True, "ack": "▶️ Started.", "cards": [exercise_card(db, active_workout(db), now)]}
 
 

@@ -68,7 +68,8 @@ def parser():
     calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "move", "skip", "pending-writes", "publish",
         "personal-connect", "personal-sync", "personal-status", "personal-disconnect"])
     calendar.add_argument("--session-id", help="move/skip: the session")
-    calendar.add_argument("--to", type=datetime.fromisoformat, help="move: exact start with offset; omit to pick the quietest valid slot")
+    calendar.add_argument("--to", type=datetime.fromisoformat, help="move: exact start with offset; omit to pick the best valid slot (quiet first, then habits)")
+    calendar.add_argument("--after", type=datetime.fromisoformat, help="move: without --to, only consider starts at/after this instant (with offset); implies its day unless --day")
     calendar.add_argument("--day", type=date.fromisoformat, help="move: keep it on this date (YYYY-MM-DD)")
     calendar.add_argument("--calendar-id")
     calendar.add_argument("--url", help="Read-only personal ICS feed (webcal:// or https://)")
