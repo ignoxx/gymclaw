@@ -24,6 +24,9 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
   so chat requests produce the same cards. `switch` and `relabel` take any exercise the owner names; the
   result carries the card text the owner now sees.
 
+- **Send guard** (`guard.mjs`): one `message send` per agent run. A second one is blocked with a reason
+  telling the model to stop with `NO_REPLY`, so a confused run can't spam the same question.
+
 All workout logic lives in Python (`gymclaw/services/coach.py`, `gymclaw-tool coach …`). This plugin
 only moves messages. Button data is `gc:<action>:<exercise-ref>…`; old buttons answer "⌛ Old button."
 

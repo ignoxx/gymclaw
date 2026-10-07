@@ -43,7 +43,8 @@ class SlotSignal(DomainType):
 class PlannerConfig(DomainType):
     step_minutes: Annotated[int, Field(ge=1, le=60)] = 15
     adherence_weight: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 1
-    preferred_time_weight: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 1
+    # Below crowd_preference_weight (default 1): habits break ties, a quiet slot still beats a busy habitual one.
+    preferred_time_weight: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0.4
     uncertainty_weight: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0.5
     shortened_duration_penalty: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 1
 

@@ -85,6 +85,18 @@ def test_move_session_picks_valid_slot_or_explains(engine, capsys):
     # Thursday would leave no rest day after Wednesday.
     code, refused = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-3-move", "--day", "2026-10-15")
     assert code == 1 and refused["error"]["code"] == "NO_VALID_SLOT"
+    # "Later today": best slot at/after the bound, plus spread-out alternatives for buttons.
+    code, later = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-4-move", "--after", "2026-10-16T14:00:00+02:00")
+    starts = [datetime.fromisoformat(t) for t in (later["data"]["to"], *(a["start"] for a in later["data"]["alternatives"]))]
+    assert code == 0 and later["data"]["alternatives"]
+    assert all(t >= datetime.fromisoformat("2026-10-16T12:00:00+00:00") and t.date().isoformat() == "2026-10-16" for t in starts)
+    assert all(abs(x - y) >= timedelta(minutes=60) for i, x in enumerate(starts) for y in starts[i + 1:])
+    # The owner's explicit pick (12:00) is liked; the slot it was first planned at is not.
+    from gymclaw.services.habits import affinity, evidence
+    with Session(engine) as db:
+        points = evidence(db, now=SUNDAY, zone=ZoneInfo("Europe/Berlin"))
+    first = datetime.fromisoformat(friday["start"]).astimezone(ZoneInfo("Europe/Berlin"))
+    assert affinity(points, 12 * 60) > 0.5 > affinity(points, first.hour * 60 + first.minute)
 
 
 def test_profile_window_change_moves_sessions_that_no_longer_fit(engine, capsys):
