@@ -240,3 +240,18 @@ def test_swapped_away_exercise_comes_back_first(db):
     assert "↩ Back to Machine incline press" in buttons(again[0])
     back = coach.handle_tap(db, buttons(again[0])["↩ Back to Machine incline press"], now=at(4), request_id="cb-4")["cards"][0]
     assert back["text"].startswith("**Machine incline press**")
+
+
+def test_only_button_starts_count_as_gym_arrivals_for_habits(db):
+    from zoneinfo import ZoneInfo
+    from gymclaw.models import PlannedSession
+    from gymclaw.services.habits import evidence
+    zone = ZoneInfo("Europe/Berlin")
+    assert evidence(db, now=at(60), zone=zone) == []  # the fixture's workout was started from chat
+    coach.handle_action(db, "end", now=at(60), request_id="end")
+    tomorrow = NOW + timedelta(days=1)
+    planned = PlannedSession(week_id="2026-10-12", workout_template_id="push", status="COMMITTED", planned_start_at=tomorrow, planned_end_at=tomorrow + timedelta(hours=1),
+        prep_start_at=tomorrow - timedelta(minutes=30), leave_home_at=tomorrow - timedelta(minutes=15), expected_finish_at=tomorrow + timedelta(hours=1))
+    db.add(planned); db.flush()
+    coach.begin(db, planned.id[:8], now=tomorrow, request_id="begin")
+    assert evidence(db, now=tomorrow, zone=zone) == [(20 * 60, 1.0)]  # 18:00 UTC = 20:00 Berlin

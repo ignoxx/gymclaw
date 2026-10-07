@@ -146,14 +146,16 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
     return {"changed": changed, "warnings": list(dict.fromkeys(warnings))}
 
 
-def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None) -> dict:
+def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None, after: datetime | None = None) -> dict:
     """Owner-requested move of one session that hasn't ended (a no-show can still be moved). `to` is an
-    exact start; otherwise the planner picks the best-scoring (quietest) valid slot, on `day` if given,
-    else anywhere in the session's week. The new slot must satisfy the same rules as planning:
-    workout window, calendar, rest days."""
+    exact start; otherwise the planner picks the best-scoring valid slot (quiet first, then the owner's
+    habits) starting at or after `after`, on `day` if given, else anywhere in the session's week.
+    The new slot must satisfy the same rules as planning: workout window, calendar, rest days.
+    `alternatives` lists the next-best starts (spread apart) so the owner can pick another in one tap."""
     now = utc(now)
-    if to is not None and (to.tzinfo is None or to.utcoffset() is None):
-        raise ValueError("--to must include a UTC offset")
+    for name, value in (("--to", to), ("--after", after)):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError(f"{name} must include a UTC offset")
 
     def action():
         session = db.get(PlannedSession, session_id)
@@ -163,7 +165,7 @@ def move_session(db: Session, session_id: str, *, now: datetime, request_id: str
             raise DomainError("SESSION_LOCKED", "Session was edited in the calendar; move the calendar event instead")
         profile = get_profile(db)
         zone = ZoneInfo(profile.timezone)
-        target_day = to.astimezone(zone).date() if to else day
+        target_day = to.astimezone(zone).date() if to else day or (after.astimezone(zone).date() if after else None)
         week = week_of(datetime.combine(target_day, datetime.min.time(), zone) if target_day else session.planned_start_at, zone)
         window_start = datetime.combine(week - timedelta(days=1), datetime.min.time(), zone)
         others = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(ACTIVE), PlannedSession.id != session.id)))
@@ -171,7 +173,7 @@ def move_session(db: Session, session_id: str, *, now: datetime, request_id: str
         from gymclaw.services.crowd import CrowdModel, planning_signals
         signals = planning_signals(db, week, now=now)
         candidates = [c for c in generate_candidates(profile, week, busy=busy_intervals(db, window_start, window_start + timedelta(days=9)), unavailable=deleted, existing=others, signals=signals, now=now)
-            if target_day is None or c.start.astimezone(zone).date() == target_day]
+            if (target_day is None or c.start.astimezone(zone).date() == target_day) and (after is None or c.start >= utc(after))]
         if to is not None:
             matching = [c for c in candidates if c.start == utc(to)]
             if not matching:
@@ -181,15 +183,22 @@ def move_session(db: Session, session_id: str, *, now: datetime, request_id: str
             candidates = matching
         if not candidates:
             raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window, calendar or rest days)")
-        slot = max(candidates, key=lambda c: c.score)
+        ranked = sorted(candidates, key=lambda c: c.score, reverse=True)
+        slot = ranked[0]
+        alternatives: list[Candidate] = []
+        for c in ranked[1:]:
+            if len(alternatives) < 2 and all(abs(c.start - other.start) >= timedelta(minutes=60) for other in (slot, *alternatives)):
+                alternatives.append(c)
         old_start = session.planned_start_at
         if slot.start != old_start or slot.end != session.planned_end_at:
             cancel_session_jobs(db, session.id, now=now)
         session.source_revision += 1
         place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
-        return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence}
+        return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence,
+            "alternatives": [{"start": c.start.isoformat(), "crowd": c.crowd} for c in sorted(alternatives, key=lambda c: c.start)]}
 
-    return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}, now, action)
+    return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}
+        | ({"after": after.isoformat()} if after else {}), now, action)
 
 
 def retire_session(db: Session, session: PlannedSession, status: str, *, now: datetime):

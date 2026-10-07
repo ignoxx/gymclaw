@@ -149,6 +149,8 @@ class WorkoutSession(Base):
     last_action_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     arrived_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Started from the reminder's ▶️ button at the gym (not via chat), so arrived_at is a real arrival.
+    started_by_button: Mapped[bool] = mapped_column(default=False)
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     status: Mapped[str] = mapped_column(default="SCHEDULED")
     initial_eta: Mapped[datetime | None] = mapped_column(UTCDateTime)

@@ -319,8 +319,12 @@ def polling_alert(db: Session, *, now: datetime) -> dict | None:
 
 
 def planning_signals(db: Session, week_start: date, *, now: datetime, step_minutes: int = 15) -> tuple[SlotSignal, ...]:
+    """Per-slot crowd forecast plus learned time-of-day habit (see `habits`). Empty without either."""
+    from gymclaw.services.habits import affinity, evidence
     model = CrowdModel(db, now=now)
-    if not model.observations and not model.labels:
+    has_crowd = bool(model.observations or model.labels)
+    habits = evidence(db, now=utc(now), zone=model.zone)
+    if not has_crowd and not habits:
         return ()
     profile = get_profile(db)
     result = []
@@ -328,8 +332,10 @@ def planning_signals(db: Session, week_start: date, *, now: datetime, step_minut
         start = datetime.combine(day, profile.earliest_workout_start, model.zone).astimezone(timezone.utc)
         end = datetime.combine(day, profile.latest_workout_finish, model.zone).astimezone(timezone.utc)
         while start < end:
-            prediction = model.predict(start)
-            if prediction["score"] is not None:
-                result.append(SlotSignal(start=start, crowd=prediction["score"], confidence=prediction["confidence"]))
+            prediction = model.predict(start) if has_crowd else {"score": None, "confidence": 0}
+            local = start.astimezone(model.zone)
+            preferred = affinity(habits, local.hour * 60 + local.minute) if habits else 0
+            if prediction["score"] is not None or habits:
+                result.append(SlotSignal(start=start, crowd=prediction["score"], confidence=prediction["confidence"] if prediction["score"] is not None else 0, preferred_time=preferred))
             start += timedelta(minutes=step_minutes)
     return tuple(result)

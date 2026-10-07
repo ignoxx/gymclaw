@@ -65,7 +65,7 @@ def calendar_command(db: Session, args) -> dict:
     if args.operation == "skip":
         return skip_session(db, needed(args.session_id, "--session-id"), now=now, request_id=needed(args.request_id, "--request-id"))
     if args.operation == "move":
-        return move_session(db, needed(args.session_id, "--session-id"), now=now, request_id=needed(args.request_id, "--request-id"), to=args.to, day=args.day)
+        return move_session(db, needed(args.session_id, "--session-id"), now=now, request_id=needed(args.request_id, "--request-id"), to=args.to, day=args.day, after=args.after)
     provider = provider_for(db, args)
     synced = sync_calendar(db, provider, now=now)
     if args.operation == "sync":

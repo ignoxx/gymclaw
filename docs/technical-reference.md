@@ -177,8 +177,11 @@ ID/times/bodies in `pending-writes` before approving publication. `schedule plan
 remains the provider-free local operation; optional `--template-id` adds compression plan.
 `calendar get-week --week-start ...` reads local state; `calendar replan --week-start ...`
 syncs then repairs it. `planning replan --week-start ...` repairs cached state without API.
-`calendar move --session-id ... [--day ... | --to ...]` moves one upcoming session to the
-quietest valid slot or an exact valid start, without a provider sync. `profile update`
+`calendar move --session-id ... [--day ... | --to ... | --after ...]` moves one upcoming session to the
+best valid slot (at/after `--after` if given) or an exact valid start, without a provider sync, and
+returns up to two spread-out `alternatives`. Slot score = crowd first, then a learned time-of-day
+habit (`services/habits.py`: arrival times of workouts started with the ▶️ button, and owner moves, decayed over ~6 weeks) at a
+lower weight, so a habitual busy hour still loses to a quiet one. `profile update`
 repairs upcoming weeks right away, so a narrower time window moves sessions that no longer fit.
 
 Sync accepts manual edits, recalculates prep/leave/finish, replaces local reminder jobs,
