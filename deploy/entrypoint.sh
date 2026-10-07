@@ -97,14 +97,17 @@ settings = {
     "messages.ackReaction": "👀",
     "messages.ackReactionScope": "direct",
     "messages.removeAckAfterReply": True,
-    "plugins.allow": ["telegram", "openrouter", "memory-core", "gymclaw-failure-details", "gymclaw-coach"],
-    "plugins.load.paths": [f"{e['PLUGINS']}/failure-details", f"{e['PLUGINS']}/coach"],
+    "plugins.allow": ["telegram", "openrouter", "memory-core", "gymclaw-failure-details", "gymclaw-coach", "gymclaw-turn-log"],
+    "plugins.load.paths": [f"{e['PLUGINS']}/failure-details", f"{e['PLUGINS']}/coach", f"{e['PLUGINS']}/turn-log"],
     "plugins.entries.bonjour.enabled": False,
     "plugins.entries.telegram.enabled": True,
     "plugins.entries.gymclaw-failure-details.enabled": True,
     "plugins.entries.gymclaw-failure-details.hooks.allowConversationAccess": True,
     "plugins.entries.gymclaw-coach.enabled": True,
     "plugins.entries.gymclaw-coach.config": {"ownerId": owner, "tool": f"{e['ROOT']}/scripts/gymclaw-tool"},
+    # Writes to $GYMCLAW_TURN_LOG_DIR (set in the Dockerfile); needs conversation hooks like failure-details.
+    "plugins.entries.gymclaw-turn-log.enabled": True,
+    "plugins.entries.gymclaw-turn-log.hooks.allowConversationAccess": True,
 }
 print(json.dumps([{"path": k, "value": v} for k, v in settings.items()]))
 PY

@@ -31,6 +31,9 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
 - **Send guard** (`guard.mjs`): one `message send` per agent run. A second one is blocked with a reason
   telling the model to stop with `NO_REPLY`, so a confused run can't spam the same question.
 
+- **Turn log:** taps and typed sets are logged as `fast` events with CLI and total latency (see
+  [turn-log](../turn-log/README.md)), so the model-free flows show up next to model turns.
+
 All workout logic lives in Python (`gymclaw/services/coach.py`, `gymclaw-tool coach …`). This plugin
 only moves messages. Button data is `gc:<action>:<exercise-ref>…`; old buttons answer "⌛ Old button."
 

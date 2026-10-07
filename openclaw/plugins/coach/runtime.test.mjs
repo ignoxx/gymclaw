@@ -38,7 +38,7 @@ function fakeTimers() {
   };
 }
 
-function plugin(run, { coaches = new Map(), telegram = fakeTelegram() } = {}) {
+function plugin(run, { coaches = new Map(), telegram = fakeTelegram(), turnLog } = {}) {
   const { calls, api } = telegram;
   const registered = { hooks: new Map() };
   registerCoach(
@@ -49,7 +49,7 @@ function plugin(run, { coaches = new Map(), telegram = fakeTelegram() } = {}) {
       registerTool: (t) => (registered.tool = t),
       on: (name, fn) => registered.hooks.set(name, fn),
     },
-    { run, telegram: async () => api, coaches },
+    { run, telegram: async () => api, coaches, turnLog },
   );
   return { calls, registered };
 }
@@ -135,9 +135,10 @@ test("standalone preview is sent without touching the live card", async () => {
   assert.equal(coach.state().live.card.text, "Bench · set 1");
 });
 
-test("hooks ignore non-owners and non-set chat; owner sets and taps go to the CLI", async () => {
+test("hooks ignore non-owners and non-set chat; owner sets and taps go to the CLI and the turn log", async () => {
   const seen = [];
-  const { calls, registered } = plugin(async (args) => (seen.push(args), { handled: true, react: "👍", cards: [card("Next")] }));
+  const logged = [];
+  const { calls, registered } = plugin(async (args) => (seen.push(args), { handled: true, react: "👍", cards: [card("Next")] }), { turnLog: (event) => logged.push(event) });
   registered.hooks.get("message_received")({ content: "12x40kg", messageId: "77" });
   const claim = registered.hooks.get("before_dispatch");
   assert.equal(await claim({ channel: "telegram", isGroup: false, senderId: "1", content: "9x80", timestamp: 5 }), undefined);
@@ -149,6 +150,10 @@ test("hooks ignore non-owners and non-set chat; owner sets and taps go to the CL
   assert.ok(seen.some((args) => args[0] === "runtime" && args[1] === "sync"), "rest timers are synced after a logged set");
   assert.ok(seen.some((args) => args.join(" ") === "coach tap --data next:abcd1234 --request-id tg-cb:cb1"));
   assert.ok(calls.some((c) => c[0] === "react" && c[2] === "77"), "typed set gets its 👍");
+  assert.deepEqual(logged.map((e) => [e.flow, e.action ?? e.text, e.msg, e.ok, Number.isFinite(e.ms)]), [
+    ["text", "12x40kg", "77", true, true],
+    ["tap", "next", 100, true, true],
+  ]);
 });
 
 test("unhandled CLI result falls through to the agent", async () => {

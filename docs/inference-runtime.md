@@ -67,6 +67,18 @@ in the same `extra_body`, with fallbacks allowed if it's down. Override with `GY
 (`auto` = OpenRouter's default routing). Workout taps and typed
 sets skip the model entirely (see the [coach plugin](../openclaw/plugins/coach/README.md)).
 
+## Turn logs
+
+Every agent turn and coach fast-path action is appended to `data/turns/YYYY-MM-DD.jsonl` by the
+[turn-log plugin](../openclaw/plugins/turn-log/README.md): inbound text, per-call tokens (context,
+output, reasoning, cache), model call latency and first byte, tool calls with duration and result
+size, the reply, and failures. Local only; it feeds a replay/eval set and hard latency numbers
+for a future runtime. Summary inside the container:
+
+```bash
+node /opt/gymclaw/openclaw.dist/plugins/turn-log/summarize.mjs --since 2026-10-08
+```
+
 ## Apply / revert
 
 These scripts target the exact pinned installation and refuse other revisions.
