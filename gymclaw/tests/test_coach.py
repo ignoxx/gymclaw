@@ -116,9 +116,11 @@ def test_next_end_crowd_and_baseline_weight(db):
     assert moved["cards"][0]["text"].startswith("**Shoulder press**")
     done = coach.handle_action(db, "end", now=at(600), request_id="end")["cards"][0]
     assert "🏁 **Push done** · 1 sets · 10 min" in done["text"]
-    rating = coach.handle_tap(db, buttons(done)["Busy"], now=at(601), request_id="cb-2")
-    assert rating["ack"] == "Saved: Busy. Thanks."
-    assert db.query(CrowdFeedback).one().rating == "BUSY"
+    assert list(buttons(done)) == ["Empty", "A few", "Busy", "Packed"]
+    # "A few" is the old FINE rating under a clearer name; stored values don't change.
+    rating = coach.handle_tap(db, buttons(done)["A few"], now=at(601), request_id="cb-2")
+    assert rating["ack"] == "Saved: A few. Thanks."
+    assert db.query(CrowdFeedback).one().rating == "FINE"
     # Unknown starting weight becomes the logged baseline for next time.
     assert db.get(ExerciseProgression, "incline").next_weight == 90
 

@@ -75,3 +75,9 @@ def test_db_live_mode_serves_state_only_to_allowed_hosts(tmp_path):
         client.close()
         server.shutdown()
         server.server_close()
+
+
+def test_one_rep_max_makes_different_rep_counts_comparable():
+    from gymclaw.dashboard_state import one_rep_max
+    assert one_rep_max(50, 8) == 63.5 and one_rep_max(40, 12) == 56
+    assert one_rep_max(100, 1) == 100 and one_rep_max(0, 15) == 0
