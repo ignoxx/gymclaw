@@ -15,7 +15,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from gymclaw.models import AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, PlannedSession, RuntimeSettings, SetLog, UserProfile, WorkoutExercise, WorkoutSession, WorkoutTemplate
-from gymclaw.services.crowd import polling_health
+from gymclaw.services.crowd import LABELS, polling_health
 from gymclaw.services.illustrations import for_exercise, primary_muscle, search
 from gymclaw.services.preview import last_set
 from gymclaw.services.profile import Profile
@@ -122,7 +122,7 @@ def history(db: Session, zone: ZoneInfo, now: datetime) -> list[dict]:
     earlier session of that exercise."""
     workouts = list(db.scalars(select(WorkoutSession).where(WorkoutSession.status == "PLAN_UPDATED", WorkoutSession.completed_at.is_not(None))
         .order_by(WorkoutSession.completed_at)))
-    ratings = {f.workout_session_id: f.rating.title() for f in db.scalars(select(CrowdFeedback))}
+    ratings = {f.workout_session_id: LABELS[f.rating] for f in db.scalars(select(CrowdFeedback))}
     # Early workouts predate guide_ids; current templates know each exercise's illustration/muscle.
     guides = {spec["id"]: spec.get("guide_id") for row in db.scalars(select(WorkoutTemplate))
         for spec in row.definition_json["exercises"] + row.definition_json.get("alternatives", [])}
@@ -157,6 +157,11 @@ def history(db: Session, zone: ZoneInfo, now: datetime) -> list[dict]:
     return list(reversed(result))
 
 
+def one_rep_max(weight: float, reps: int) -> float:
+    """Estimated 1-rep max (Epley), to the nearest 0.5 kg. 0 for bodyweight sets."""
+    return round(weight * (1 + reps / 30) * 2) / 2 if reps > 1 else weight
+
+
 def insights(db: Session, zone: ZoneInfo, now: datetime, profile: Profile, done: list[dict]) -> dict:
     """Numbers that answer: am I consistent, am I progressing, what am I training, when is it quiet."""
     today = now.astimezone(zone).date()
@@ -170,9 +175,11 @@ def insights(db: Session, zone: ZoneInfo, now: datetime, profile: Profile, done:
     progress: dict[str, dict] = {}
     for workout in reversed(done):
         for exercise in workout["exercises"]:
-            top = max(exercise["sets"], key=lambda s: (s["weight"], s["reps"]))
+            # Best set by estimated 1-rep max, so 12 × 40 and 8 × 50 compare on one line.
+            top = max(exercise["sets"], key=lambda s: (one_rep_max(s["weight"], s["reps"]), s["reps"]))
             entry = progress.setdefault(exercise["id"], {"name": exercise["name"], "points": []})
-            entry["points"].append({"date": workout["date"], "label": workout["label"], "weight": top["weight"], "reps": top["reps"]})
+            entry["points"].append({"date": workout["date"], "label": workout["label"], "weight": top["weight"], "reps": top["reps"],
+                "e1rm": one_rep_max(top["weight"], top["reps"])})
     muscles: dict[str, dict] = defaultdict(lambda: {"volume": 0.0, "sets": 0})
     for workout in done:
         if date.fromisoformat(workout["date"]) >= today - timedelta(days=28):

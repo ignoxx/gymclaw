@@ -293,7 +293,7 @@ def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     return {"week_start": next_week.isoformat(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week), "event_id": event.id}
 
 
-CROWD_EMOJI = {"Empty": "🟢", "Fine": "🟡", "Busy": "🟠", "Packed": "🔴"}
+CROWD_EMOJI = {"Empty": "🟢", "A few": "🟡", "Busy": "🟠", "Packed": "🔴"}
 # Below this the crowd model is mostly guessing; the briefing leaves crowd out instead.
 CROWD_MIN_CONFIDENCE = 0.5
 

@@ -19,6 +19,8 @@ from gymclaw.services.profile import get_profile
 from gymclaw.services.workout import emit, load_workout, mutate, utc
 
 RATINGS = {"EMPTY": 0.0, "FINE": 1 / 3, "BUSY": 2 / 3, "PACKED": 1.0}
+# How each rating reads to the owner. FINE is stored as before; it shows as "A few" (a few people, no bother).
+LABELS = {"EMPTY": "Empty", "FINE": "A few", "BUSY": "Busy", "PACKED": "Packed"}
 MAX_PAIR_AGE = timedelta(minutes=30)
 HISTORY = timedelta(days=90)
 
@@ -128,11 +130,11 @@ def calibrated_count(count: float, pairs: list[tuple[float, float]]) -> tuple[fl
     return score, min(0.8, len(pairs) / (len(pairs) + 10)) * extrapolation_penalty, "personalized_isotonic"
 
 
-FEELS = (("Empty", 1 / 6), ("Fine", 0.5), ("Busy", 5 / 6), ("Packed", float("inf")))
+FEELS = ((LABELS["EMPTY"], 1 / 6), (LABELS["FINE"], 0.5), (LABELS["BUSY"], 5 / 6), (LABELS["PACKED"], float("inf")))
 
 
 def feel(score: float | None) -> str | None:
-    """Personal 0–1 score as the owner's own words (Empty/Fine/Busy/Packed)."""
+    """Personal 0–1 score as the owner's own words (Empty/A few/Busy/Packed)."""
     return None if score is None else next(label for label, limit in FEELS if score < limit)
 
 
