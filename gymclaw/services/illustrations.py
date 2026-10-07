@@ -39,9 +39,19 @@ def primary_muscle(guide_id: str | None) -> str | None:
     return item["primaryMuscle"] if item else None
 
 
+def bodyweight(guide_id: str | None) -> bool:
+    """Reps are the whole set (dips, push-ups): no weight to log or ask for."""
+    item = catalog().get(guide_id) if guide_id else None
+    return bool(item and item["exerciseType"].startswith("bodyweight"))
+
+
 # Gym shorthand the owner types ("DB RDL"), spelled out the way catalog names are.
 ALIASES = {"db": "dumbbell", "bb": "barbell", "kb": "kettlebell", "rdl": "romanian deadlift", "sldl": "stiff leg deadlift",
-    "ohp": "overhead press", "ext": "extension", "tri": "tricep", "bi": "bicep"}
+    "ohp": "overhead press", "ext": "extension", "tri": "tricep", "bi": "bicep",
+    # A pec deck ("butterfly") is a machine fly.
+    "butterfly": "fly", "deck": "fly"}
+# Name words that say where an exercise is done, not what the movement is.
+EQUIPMENT_WORDS = {"cable", "dumbbell", "barbell", "machine", "kettlebell", "smith", "band", "plate"}
 
 
 def words(text: str) -> set[str]:
@@ -86,12 +96,12 @@ def artwork(slug: str) -> str:
 
 def similar(guide_id: str, *, exclude: set[str] = frozenset(), prefer: set[str] = frozenset(), limit: int = 3) -> list[dict]:
     """Same primary muscle and exercise type, no stretches, never the same artwork as the original or an
-    excluded entry. `prefer` slugs (e.g. owner history) rank first, then shared movement words (press,
-    fly, incline), then different equipment (the original may be occupied)."""
+    excluded entry. Shared movement words (press, fly, incline; not equipment) rank first, then `prefer`
+    slugs (e.g. owner history), then different equipment (the original may be occupied)."""
     original = catalog().get(guide_id)
     if original is None:
         return []
-    base = words(original["name"])
+    base = words(original["name"]) - EQUIPMENT_WORDS
     taken = {artwork(slug) for slug in exclude | {guide_id} if slug in catalog()}
     options = []
     for item in catalog().values():
@@ -99,7 +109,7 @@ def similar(guide_id: str, *, exclude: set[str] = frozenset(), prefer: set[str] 
             continue
         if item["primaryMuscle"] != original["primaryMuscle"] or item["exerciseType"] != original["exerciseType"]:
             continue
-        rank = (item["slug"] not in prefer, -len(base & words(item["name"])), item["equipment"] == original["equipment"], item["name"])
+        rank = (-len(base & words(item["name"])), item["slug"] not in prefer, item["equipment"] == original["equipment"], item["name"])
         options.append((rank, entry(item)))
     ranked = [option for _, option in sorted(options, key=lambda o: o[0])]
     # The catalog has near-duplicates (e.g. "Rear Delt Fly" vs "Bent-Over Rear Delt Raise"): pick

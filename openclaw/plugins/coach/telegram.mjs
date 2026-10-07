@@ -38,8 +38,9 @@ export async function loadTelegram(getConfig) {
       });
       return Number(result.messageId);
     },
-    edit(chatId, messageId, text, buttons) {
-      return mod.editMessageTelegram(String(chatId), messageId, text, { cfg: getConfig(), textMode: "markdown", buttons, editMode: "auto" });
+    // caption: the message is a photo. Unknown (false) tries a text edit, then the caption.
+    edit(chatId, messageId, text, buttons, { caption = false } = {}) {
+      return mod.editMessageTelegram(String(chatId), messageId, text, { cfg: getConfig(), textMode: "markdown", buttons, editMode: caption ? "caption" : "auto" });
     },
     remove(chatId, messageId) {
       return mod.deleteMessageTelegram(String(chatId), messageId, { cfg: getConfig() });

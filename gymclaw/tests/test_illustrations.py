@@ -53,3 +53,10 @@ def test_swap_never_offers_the_same_movement_under_another_name():
     # Leg Curl and Lying Leg Curl share one picture: swapping one for the other isn't a swap.
     assert "leg-curl" not in [o["guide_id"] for o in similar("lying-leg-curl")]
     assert "lying-leg-curl" not in [o["guide_id"] for o in similar("dumbbell-romanian-deadlift", exclude={"leg-curl"})]
+
+
+def test_swap_offers_the_same_movement_on_other_equipment_first():
+    from gymclaw.services.illustrations import similar
+    # Cable station taken: a fly elsewhere (pec deck = machine fly), not a press, even one done before.
+    options = [o["guide_id"] for o in similar("cable-fly", prefer={"bench-press"})]
+    assert options[:2] == ["dumbbell-fly", "pec-deck"]
