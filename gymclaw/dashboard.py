@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 from gymclaw.demo import build_demo_snapshot
 from gymclaw.services.illustrations import public_assets
 
-ASSETS = {"/": ("index.html", "text/html"), "/styles.css": ("styles.css", "text/css"), "/app.js": ("app.js", "text/javascript")}
+ASSETS = {"/": ("index.html", "text/html"), "/styles.css": ("styles.css", "text/css"), "/app.js": ("app.js", "text/javascript"),
+          "/favicon.svg": ("favicon.svg", "image/svg+xml")}
 
 
 def live_snapshot(db_url: str | None = None) -> dict:

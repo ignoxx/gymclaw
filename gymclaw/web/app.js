@@ -7,6 +7,9 @@ let selectedExercise = null;
 // Snapshot clock minus browser clock: the demo is frozen in time, live is ~0.
 let clockOffset = 0;
 const now = () => Date.now() + clockOffset;
+// CSS class from a data value, always prefixed: ('crowd', 'A few') → 'crowd-a-few'. A bare value can
+// collide with a layout class (crowd "Empty" picked up the `.empty` placeholder margin).
+const dataClass = (kind, value) => `${kind}-${String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -116,10 +119,10 @@ function renderWeek(days, range) {
     const session = day.session;
     const slot = el('div', 'slot');
     if (session) {
-      slot.classList.add('training', session.status.toLowerCase());
+      slot.classList.add('training', dataClass('status', session.status));
       slot.append(el('b', '', session.start), el('span', '', session.template));
       const crowd = crowdLabel(session);
-      if (crowd) slot.append(el('em', `crowd ${crowdClass(session.crowd)}`, crowd));
+      if (crowd) slot.append(el('em', `crowd ${dataClass('crowd', session.crowd)}`, crowd));
     } else {
       slot.classList.add('rest');
       slot.setAttribute('aria-label', 'Rest day');
@@ -328,7 +331,7 @@ function renderWorkout(focus, workout) {
   }
   const queue = el('div', 'queue');
   for (const exercise of workout.exercises) {
-    const item = el('div', `exercise ${exercise.status.toLowerCase()}${exercise.id === active?.id ? ' current' : ''}`);
+    const item = el('div', `exercise ${dataClass('status', exercise.status)}${exercise.id === active?.id ? ' current' : ''}`);
     item.append(thumb(exercise.svg_url), el('span', '', exercise.name), el('small', '', `${exercise.done}/${exercise.sets}`));
     queue.append(item);
   }
@@ -544,8 +547,6 @@ function renderInsights(data) {
 
 /* ---------- History ---------- */
 
-// Crowd label as a CSS class: "A few" → "a-few".
-const crowdClass = label => String(label || '').toLowerCase().replace(/\s+/g, '-');
 
 function renderHistory(history) {
   const box = document.getElementById('history');
@@ -568,7 +569,7 @@ function renderHistory(history) {
     what.append(el('strong', '', workout.template), el('span', '', [`${workout.minutes} min`, `${workout.sets} sets`, tonnes(workout.volume)].join(' · ')));
     const tags = el('div', 'tags');
     if (workout.prs.length) tags.append(el('em', 'tag pr', `${workout.prs.length} PR${workout.prs.length > 1 ? 's' : ''}`));
-    if (workout.crowd) tags.append(el('em', `tag crowd ${crowdClass(workout.crowd)}`, workout.crowd));
+    if (workout.crowd) tags.append(el('em', `tag ${dataClass('crowd', workout.crowd)}`, workout.crowd));
     summary.append(when, what, tags);
     const table = el('div', 'sets');
     for (const exercise of workout.exercises) {
