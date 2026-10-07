@@ -67,6 +67,9 @@ settings = {
     "tools.deny": ["cron", "gateway", "nodes", "process", "apply_patch", "tts", "skill_workshop",
         "image_generate", "video_generate", "music_generate", "agents_list", "subagents", "sessions_spawn",
         "sessions_list", "sessions_send", "sessions_history", "sessions_yield", "create_goal", "update_goal", "get_goal"],
+    # Off by default. A run once called the same failing tool ~170 times in 5 minutes; this blocks the
+    # same call with the same result after a few tries and tells the model to stop.
+    "tools.loopDetection": {"enabled": True, "warningThreshold": 2, "criticalThreshold": 4, "globalCircuitBreakerThreshold": 6},
     "agents.defaults.compaction": {"mode": "safeguard", "timeoutSeconds": 120, "maxHistoryShare": 0.35,
         "recentTurnsPreserve": 1, "qualityGuard": {"enabled": True, "maxRetries": 0},
         "notifyUser": True, "truncateAfterCompaction": True},

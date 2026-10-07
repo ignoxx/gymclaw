@@ -24,6 +24,7 @@ from gymclaw.models import PlannedSession, WorkoutExercise, WorkoutSession
 from gymclaw.services import adaptation, audit
 from gymclaw.services.crowd import record_feedback
 from gymclaw.services.errors import DomainError
+from gymclaw.services.illustrations import bodyweight
 from gymclaw.services.profile import update_profile
 from gymclaw.services.set_parser import SetInput, parse_set
 from gymclaw.services.templates import ExerciseSpec, remember_swap
@@ -69,9 +70,10 @@ def exercise_card(db: Session, workout: WorkoutSession, now: datetime) -> dict:
         return card(f"Only **{waiting.config_json['name']}** left. It was taken earlier.",
             [[button("✅ It's free now", "free", ref), button("🔄 Swap", "swap", ref)], [button("⏭ Skip it", "drop", ref)]])
     ref = active["id"][:8]
-    if data["rest_job"] and not active["new_exercise"]:
-        # Between sets there is nothing to log yet: just the countdown and ways to shorten it.
-        return card(f"until **{active['name']}** set {active['set_number']}/{active['working_sets']}",
+    if data["rest_job"]:
+        # Resting there is nothing to log yet: just the countdown and ways to shorten it.
+        upcoming = f"next: **{active['name']}**" if active["new_exercise"] else f"**{active['name']}** set {active['set_number']}/{active['working_sets']}"
+        return card(f"until {upcoming}",
             [[button("−15s", "cut", ref, "15"), button("−30s", "cut", ref, "30"), button("⏭ Skip", "skip", ref)]],
             rest_until=data["rest_job"]["due_at"], kind="rest")
     head = f"**{active['name']}**" + (f" · {active['primary_muscle']}" if active["primary_muscle"] else "")
@@ -146,13 +148,15 @@ def after_change(db: Session, workout: WorkoutSession, now: datetime, request_id
 
 
 def handle_text(db: Session, text: str, *, now: datetime, request_id: str) -> dict:
-    """Typed '10x40' during a workout logs a working set. Anything else goes to the agent."""
+    """Typed '10x40' (or '13 reps' on a bodyweight exercise) during a workout logs a working set.
+    Anything else goes to the agent."""
     now = utc(now)
     workout = active_workout(db)
     if workout is None or workout.status not in {"SET_ACTIVE", "RESTING"}:
         return {"handled": False}
+    active = next((e for e in exercises(db, workout) if e.status == "ACTIVE"), None)
     try:
-        value = parse_set(text, expected_weight=expected_weight(db, workout.id))
+        value = parse_set(text, expected_weight=expected_weight(db, workout.id), bodyweight=bool(active and bodyweight(active.config_json.get("guide_id"))))
     except DomainError:
         return {"handled": False}
     log_set(db, workout.id, value, now=now, request_id=request_id)

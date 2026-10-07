@@ -103,6 +103,11 @@ def test_set_parser_uses_expected_weight_when_order_is_unclear():
     assert parse_set("8x22,5") == SetInput(weight=22.5, reps=8)
 
 
+@pytest.mark.parametrize("text", ["13", "13 reps", "13x", "13 ×"])
+def test_bodyweight_set_is_reps_alone(text):
+    assert parse_set(text, bodyweight=True) == SetInput(weight=0, reps=13)
+
+
 def test_working_set_skips_pending_warmup(engine):
     workout_id = begin(engine)
     with Session(engine) as db, db.begin():
