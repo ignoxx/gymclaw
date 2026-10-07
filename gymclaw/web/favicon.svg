@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- GymClaw mark: three claw scratches in the dashboard's lime on ink. -->
+  <rect width="64" height="64" rx="14" fill="#242824"/>
+  <g fill="none" stroke="#d7f580" stroke-width="7" stroke-linecap="round">
+    <path d="M17 44 Q22 30 31 16"/>
+    <path d="M27 49 Q32 34 41 19"/>
+    <path d="M37 51 Q42 38 49 26"/>
+  </g>
+</svg>
