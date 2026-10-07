@@ -1,9 +1,18 @@
 import { execFile } from "node:child_process";
 
-// Cheap pre-check so ordinary chat never pays for a Python start-up.
-export const SET_LIKE = /^\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*[x×*]\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*$|^\s*\d+\s*reps?\s*(?:at|@)\s*\d+(?:[.,]\d+)?\s*(?:kg)?\s*$/i;
+// Cheap pre-check so ordinary chat never pays for a Python start-up. Reps alone ("13 reps") only log
+// on a bodyweight exercise; otherwise Python returns unhandled and the agent gets the message.
+export const SET_LIKE = /^\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*[x×*]\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*$|^\s*\d+\s*reps?\s*(?:at|@)\s*\d+(?:[.,]\d+)?\s*(?:kg)?\s*$|^\s*\d+\s*(?:reps?|[x×*])?\s*$/i;
 export const TICK_MS = 5000;
 const ACTIONS = ["status", "preview", "start", "log", "card", "swap", "switch", "relabel", "rest", "later", "next", "end"];
+// Arguments an action can't do without. Checked before the CLI so the model gets an example to copy.
+const REQUIRED = {
+  start: ["template_id", '{"action":"start","template_id":"push"}'],
+  log: ["text", '{"action":"log","text":"10x40"}'],
+  switch: ["exercise", '{"action":"switch","exercise":"pec-deck"}'],
+  relabel: ["exercise", '{"action":"relabel","exercise":"pec-deck"}'],
+  rest: ["seconds", '{"action":"rest","seconds":90}'],
+};
 
 /** Run `gymclaw-tool coach ...`; resolves the JSON `data` or rejects with the CLI error code. */
 export function cliRunner(toolPath, { timeoutMs = 20000 } = {}) {
@@ -57,15 +66,26 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
     }
   }
 
+  function stop(entry) {
+    if (entry.timer) timers.clearTimeout(entry.timer);
+    entry.timer = null;
+    entry.countdown = null;
+  }
+
   async function remove(entry) {
-    if (entry.timer) timers.clearInterval(entry.timer);
+    stop(entry);
     await quietly((await telegram()).remove(chatId, entry.messageId));
+  }
+
+  // Photo cards are edited as captions; a text edit on them fails first and costs a round trip.
+  async function edit(entry, text, buttons) {
+    return (await telegram()).edit(chatId, entry.messageId, text, buttons, { caption: Boolean(entry.card.photo) });
   }
 
   async function retire(entry, ack) {
     if (throwaway(entry)) return remove(entry);
-    if (entry.timer) timers.clearInterval(entry.timer);
-    await quietly((await telegram()).edit(chatId, entry.messageId, entry.card.text + (ack ? `\n${ack}` : ""), []));
+    stop(entry);
+    await quietly(edit(entry, entry.card.text + (ack ? `\n${ack}` : ""), []));
   }
 
   async function clearExtras() {
@@ -73,26 +93,38 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
     extras = [];
   }
 
+  // Edits the countdown every TICK_MS and fires exactly at rest_until (not on the next tick), so the
+  // next card isn't up to a tick late. Restart it when rest_until changes.
   function startCountdown(entry) {
-    entry.timer = timers.setInterval(async () => {
+    stop(entry);
+    // Identifies this countdown: a step whose edit was in flight during a restart or stop ends there.
+    const countdown = (entry.countdown = {});
+    const running = () => entry.countdown === countdown && live === entry;
+    // The last step lands just after rest_until (ms here, µs in Python), so Python sees the rest as due.
+    const schedule = () => {
+      entry.timer = timers.setTimeout(step, Math.max(0, Math.min(TICK_MS, Date.parse(entry.card.rest_until) - now() + 50)));
+    };
+    const step = async () => {
+      entry.timer = null;
       if (Date.parse(entry.card.rest_until) > now()) {
         try {
-          await (await telegram()).edit(chatId, entry.messageId, withRest(entry.card, now()), keyboard(entry.card.buttons));
+          await edit(entry, withRest(entry.card, now()), keyboard(entry.card.buttons));
         } catch (error) {
-          if (!GONE.test(String(error?.message ?? error))) return log.debug?.(`gymclaw-coach edit skipped: ${error?.message ?? error}`);
-          // The countdown is gone, so is its job: stop, and never announce the rest it was showing.
-          timers.clearInterval(entry.timer);
-          entry.timer = null;
-          if (live === entry) live = null;
+          if (GONE.test(String(error?.message ?? error))) {
+            // The countdown is gone, so is its job: stop, and never announce the rest it was showing.
+            if (live === entry) live = null;
+            return;
+          }
+          log.debug?.(`gymclaw-coach edit skipped: ${error?.message ?? error}`);
         }
+        if (running()) schedule();
         return;
       }
-      timers.clearInterval(entry.timer);
-      entry.timer = null;
       // A fresh set card (not an edit) so the phone notifies; the countdown message is deleted.
-      const result = live === entry && onRestOver ? await onRestOver().catch(() => null) : null;
+      const result = running() && onRestOver ? await onRestOver().catch(() => null) : null;
       if (result?.cards?.length) await apply(result);
-    }, TICK_MS);
+    };
+    schedule();
   }
 
   /** Apply one coach result. `tapped` is the pressed message; `inboundMessageId` is a typed set to react to. */
@@ -106,7 +138,7 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
     }
     if (result.live_buttons) {
       // Swap: the current card's buttons become wait/later, options go below it.
-      if (live) await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(result.live_buttons)));
+      if (live) await quietly(edit(live, withRest(live.card, now()), keyboard(result.live_buttons)));
       await clearExtras();
       for (const card of result.cards ?? []) extras.push({ messageId: await api.send(chatId, card.text, { photo: card.photo, buttons: keyboard(card.buttons) }), card });
       return;
@@ -114,13 +146,14 @@ export function createCoach({ telegram, chatId, now = () => Date.now(), timers =
     if (result.refresh && live && result.cards?.length) {
       // Same message, new content (rest shortened): the running countdown picks up the new time.
       live.card = result.cards[0];
-      await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(live.card.buttons)));
+      await quietly(edit(live, withRest(live.card, now()), keyboard(live.card.buttons)));
+      if (live.card.rest_until) startCountdown(live);
       return;
     }
     if (result.keep && !result.cards?.length) return;
     if (result.restore) {
       await clearExtras();
-      if (live) await quietly(api.edit(chatId, live.messageId, withRest(live.card, now()), keyboard(live.card.buttons)));
+      if (live) await quietly(edit(live, withRest(live.card, now()), keyboard(live.card.buttons)));
       return;
     }
     const known = [live, ...extras].find((entry) => entry && tapped && entry.messageId === tapped.messageId);
@@ -283,6 +316,11 @@ export function registerCoach(api, { run, telegram, coaches = COACHES } = {}) {
       },
     },
     async execute(toolCallId, params) {
+      const reply = (body) => ({ content: [{ type: "text", text: JSON.stringify(body) }] });
+      const [field, example] = REQUIRED[params.action] ?? [];
+      if (field && (params[field] === undefined || params[field] === "")) {
+        return reply({ ok: false, code: "ARGUMENT_REQUIRED", message: `${params.action} needs ${field}, e.g. ${example}. Don't call it again without it; if you don't know the value, ask the owner.` });
+      }
       const requestId = `tool:${toolCallId}`;
       const args =
         params.action === "status"
@@ -302,14 +340,18 @@ export function registerCoach(api, { run, telegram, coaches = COACHES } = {}) {
                 ...(params.remember ? ["--remember"] : [])];
       try {
         const result = await cli(args);
-        if (params.action === "status") return { content: [{ type: "text", text: JSON.stringify({ ok: true, workout: result }) }] };
+        if (params.action === "status") return reply({ ok: true, workout: result });
+        if (result.handled === false) {
+          // "log" text that isn't a set, or no workout in a loggable state: nothing happened.
+          return reply({ ok: false, code: "NOT_LOGGED", message: "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps). Check status, then ask the owner." });
+        }
         await coach.apply(result);
         if (changed(result)) sync();
         // Exactly what the owner sees now, so replies describe the real card, not a guess.
         const shown = (result.cards ?? []).map((card) => card.text);
-        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ack: result.ack ?? null, ...(result.live_buttons ? { swap_options: shown } : { card: shown[0] ?? null }) }) }] };
+        return reply({ ok: true, ack: result.ack ?? null, ...(result.live_buttons ? { swap_options: shown } : { card: shown[0] ?? null }) });
       } catch (error) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, code: error.code, message: error.message }) }] };
+        return reply({ ok: false, code: error.code, message: error.message });
       }
     },
   });

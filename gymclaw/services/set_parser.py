@@ -1,4 +1,5 @@
-"""Parse a whole-message set in either order ("9x80", "80kgx9", "9 reps at 80"). Reps first is the default."""
+"""Parse a whole-message set in either order ("9x80", "80kgx9", "9 reps at 80"). Reps first is the default.
+Bodyweight exercises also take reps alone ("13", "13 reps", "13x")."""
 import re
 from typing import Annotated, Literal
 
@@ -18,12 +19,16 @@ class SetInput(BaseModel):
 NUMBER = r"\d+(?:[.,]\d+)?"
 PAIR = re.compile(rf"({NUMBER})\s*(kg|reps?)?\s*[x×*]\s*({NUMBER})\s*(kg|reps?)?")
 AT = re.compile(rf"(\d+)\s*reps?\s*(?:at|@)\s*({NUMBER})\s*(?:kg)?")
+REPS_ONLY = re.compile(r"(\d+)\s*(?:reps?|[x×*])?")
 MAX_PLAUSIBLE_REPS = 30
 
 
-def parse_set(text: str, *, set_type: Literal["WARMUP", "WORKING"] = "WORKING", expected_weight: float | None = None) -> SetInput:
+def parse_set(text: str, *, set_type: Literal["WARMUP", "WORKING"] = "WORKING", expected_weight: float | None = None,
+              bodyweight: bool = False) -> SetInput:
     """Order is decided by unit words, then closeness to expected_weight, then rep plausibility, then reps-first."""
     clean = text.strip().lower()
+    if bodyweight and (match := REPS_ONLY.fullmatch(clean)) and int(match[1]) > 0:
+        return SetInput(weight=0, reps=int(match[1]), set_type=set_type)
     if match := AT.fullmatch(clean):
         return SetInput(weight=float(match[2].replace(",", ".")), reps=int(match[1]), set_type=set_type)
     match = PAIR.fullmatch(clean)

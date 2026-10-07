@@ -12,21 +12,29 @@ function fakeTelegram() {
     calls,
     api: {
       send: async (chat, text, opts) => (calls.push(["send", chat, text, opts]), next++),
-      edit: async (chat, id, text, buttons) => calls.push(["edit", chat, id, text, buttons]),
+      edit: async (chat, id, text, buttons, opts) => calls.push(["edit", chat, id, text, buttons, ...(opts?.caption ? ["caption"] : [])]),
       react: async (chat, id, emoji) => calls.push(["react", chat, id, emoji]),
       remove: async (chat, id) => calls.push(["remove", chat, id]),
     },
   };
 }
 
+// One-shot timers; tick() runs whatever is pending (callers advance `now` first). delays has each wait.
 function fakeTimers() {
-  const intervals = new Map();
+  const pending = new Map();
+  const delays = [];
   let id = 0;
   return {
-    intervals,
-    setInterval: (fn) => (intervals.set(++id, fn), id),
-    clearInterval: (key) => intervals.delete(key),
-    tick: async () => { for (const fn of [...intervals.values()]) await fn(); },
+    pending,
+    delays,
+    setTimeout: (fn, ms) => (delays.push(ms), pending.set(++id, fn), id),
+    clearTimeout: (key) => pending.delete(key),
+    tick: async () => {
+      for (const [key, fn] of [...pending]) {
+        pending.delete(key);
+        await fn();
+      }
+    },
   };
 }
 
@@ -47,7 +55,7 @@ function plugin(run, { coaches = new Map(), telegram = fakeTelegram() } = {}) {
 }
 
 test("set pre-check only matches whole set messages", () => {
-  for (const text of ["80x9", "12x40kg", "90kgx10 reps", "9 reps at 80", "22,5 × 8"]) assert.match(text, SET_LIKE);
+  for (const text of ["80x9", "12x40kg", "90kgx10 reps", "9 reps at 80", "22,5 × 8", "13 reps", "13x", "13"]) assert.match(text, SET_LIKE);
   for (const text of ["how long do I rest?", "it's occupied", "80x9 then 80x10", "x"]) assert.doesNotMatch(text, SET_LIKE);
 });
 
@@ -78,7 +86,7 @@ test("typed set: react, ack on the set card, countdown, then countdown deleted a
   assert.deepEqual(calls.at(-2), ["remove", OWNER, 101]);
   assert.equal(calls.at(-1)[0], "send");
   assert.equal(coach.state().live.card.text, "Bench · set 2");
-  assert.equal(timers.intervals.size, 0);
+  assert.equal(timers.pending.size, 0);
 });
 
 test("shortened rest edits the same countdown and keeps counting to the new time", async () => {
@@ -185,9 +193,45 @@ test("a countdown whose message is gone stops instead of sending a second set ca
   const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers, onRestOver: async () => (restOvers++, { cards: [card("Leg extension · set 1")] }) });
   await coach.apply({ cards: [card("until Leg press set 2/2", { rest_until: "2026-10-05T11:08:16Z", kind: "rest" })] });
   await timers.tick();
-  assert.equal(timers.intervals.size, 0);
+  assert.equal(timers.pending.size, 0);
   now += 180_000;
   await timers.tick();
   assert.equal(restOvers, 0);
   assert.equal(calls.filter((c) => c[0] === "send").length, 1);
+});
+
+test("the next card comes at rest_until, not on the following countdown tick", async () => {
+  const { calls, api } = fakeTelegram();
+  const timers = fakeTimers();
+  let now = Date.parse("2026-10-07T10:33:47Z");
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, now: () => now, timers, onRestOver: async () => ({ cleanup: "delete", cards: [card("Bench · set 2")] }) });
+  await coach.apply({ cards: [card("until Bench set 2/2", { rest_until: "2026-10-07T10:33:54Z", kind: "rest" })] });
+  assert.equal(timers.delays.at(-1), 5000);
+  now += 5000;
+  await timers.tick();
+  assert.equal(timers.delays.at(-1), 2050, "last wait ends just past rest_until");
+  now += 2050;
+  await timers.tick();
+  assert.equal(calls.at(-1)[0], "send");
+  assert.equal(coach.state().live.card.text, "Bench · set 2");
+});
+
+test("photo cards are edited as captions", async () => {
+  const { calls, api } = fakeTelegram();
+  const coach = createCoach({ telegram: async () => api, chatId: OWNER, timers: fakeTimers() });
+  await coach.apply({ cards: [card("Bench · set 1", { photo: "/x/bench.png" })] });
+  await coach.apply({ ack: "✅ 10 × 40 kg", cards: [card("until Bench set 2/2", { rest_until: "2099-01-01T00:00:00Z", kind: "rest" })] });
+  assert.deepEqual(calls[1], ["edit", OWNER, 100, "Bench · set 1\n✅ 10 × 40 kg", [], "caption"]);
+});
+
+test("agent tool: missing argument or nothing logged is an error, not a silent ok", async () => {
+  const seen = [];
+  const { registered } = plugin(async (args) => (seen.push(args), { handled: false }));
+  const parse = (result) => JSON.parse(result.content[0].text);
+  const missing = parse(await registered.tool.execute("t1", { action: "switch" }));
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /"exercise":"pec-deck"/);
+  assert.equal(seen.length, 0, "the CLI is not called without the argument");
+  const notLogged = parse(await registered.tool.execute("t2", { action: "log", text: "13" }));
+  assert.deepEqual([notLogged.ok, notLogged.code], [false, "NOT_LOGGED"]);
 });

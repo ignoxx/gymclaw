@@ -68,11 +68,14 @@ def test_rest_over_closes_job_once_and_returns_fresh_card(db):
     assert "rest_over" not in again and again["cards"][0]["kind"] == "set"
 
 
-def test_finishing_an_exercise_goes_straight_to_the_next(db):
+def test_finishing_an_exercise_rests_before_the_next(db):
     coach.handle_text(db, "10x90", now=at(10), request_id="m1")
     coach.handle_tap(db, "skip:" + coach.exercise_card(db, coach.active_workout(db), at(11))["buttons"][0][0]["data"].split(":")[2], now=at(12), request_id="cb")
-    nxt = coach.handle_text(db, "10x90", now=at(60), request_id="m2")["cards"][0]
-    assert nxt["kind"] == "set" and nxt["text"].startswith("**Shoulder press**") and nxt["rest_until"] is None
+    rest = coach.handle_text(db, "10x90", now=at(60), request_id="m2")["cards"][0]
+    # The finished exercise's rest (90 s), and the countdown says what comes next.
+    assert rest["kind"] == "rest" and rest["text"] == "until next: **Shoulder press**" and rest["rest_until"] == at(150).isoformat()
+    nxt = coach.handle_rest_over(db, now=at(151))["cards"][0]
+    assert nxt["kind"] == "set" and nxt["text"].startswith("**Shoulder press**") and "🔄 Swap" in buttons(nxt)
 
 
 def test_swap_menu_on_card_wait_later_and_free(db):
@@ -226,9 +229,12 @@ def test_start_button_bodyweight_sets_and_no_blind_warmup(db):
     # Unknown weight: straight to the working set, no "8 × 0 kg" warm-up.
     assert "**? kg**" in started["cards"][0]["text"]
     assert coach.handle_tap(db, f"begin:{planned.id[:8]}", now=at(71), request_id="cb-again")["ack"] == "Already running."
-    crunch = coach.handle_text(db, "10x80", now=at(80), request_id="m1")["cards"][0]
+    rest = coach.handle_text(db, "10x80", now=at(80), request_id="m1")["cards"][0]
+    crunch = coach.handle_tap(db, buttons(rest)["⏭ Skip"], now=at(85), request_id="cb-skip")["cards"][0]
     assert "Set 1/1 · 12–15 reps" in crunch["text"] and "✅ 12 reps" in buttons(crunch)
-    assert coach.handle_tap(db, buttons(crunch)["✅ 12 reps"], now=at(90), request_id="cb-crunch")["ack"] == "✅ 12 reps"
+    # Bodyweight: reps alone are a set. Last exercise: no rest, straight to the summary.
+    done = coach.handle_text(db, "13 reps", now=at(90), request_id="m2")
+    assert done["ack"] == "✅ 13 reps" and not any(c["rest_until"] for c in done["cards"])
 
 
 def test_swapped_away_exercise_comes_back_first(db):
