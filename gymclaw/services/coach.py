@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from gymclaw.models import PlannedSession, WorkoutExercise, WorkoutSession
 from gymclaw.services import adaptation, audit
-from gymclaw.services.crowd import record_feedback
+from gymclaw.services.crowd import LABELS, record_feedback
 from gymclaw.services.errors import DomainError
 from gymclaw.services.illustrations import bodyweight
 from gymclaw.services.profile import update_profile
@@ -30,7 +30,6 @@ from gymclaw.services.set_parser import SetInput, parse_set
 from gymclaw.services.templates import ExerciseSpec, remember_swap
 from gymclaw.services.workout import UNRESOLVED, current, cut_rest, exercises, expected_weight, format_target, log_set, logs, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, utc
 
-RATINGS = (("Empty", "EMPTY"), ("Fine", "FINE"), ("Busy", "BUSY"), ("Packed", "PACKED"))
 
 
 def active_workout(db: Session) -> WorkoutSession | None:
@@ -137,7 +136,7 @@ def summary_card(result: dict) -> dict:
     lines += [f"↑ {e['name']}: next {kg(p['next_weight'])}" for e, p in zip(report["exercises"], report["progressions"]) if p["progressed"]]
     lines.append("How busy was the gym?")
     ref = report["workout_id"][:8]
-    return card("\n".join(lines), [[button(label, "crowd", value, ref) for label, value in RATINGS]])
+    return card("\n".join(lines), [[button(label, "crowd", value, ref) for value, label in LABELS.items()]])
 
 
 def after_change(db: Session, workout: WorkoutSession, now: datetime, request_id: str) -> list[dict]:
@@ -173,7 +172,7 @@ def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> 
         if workout is None:
             return {"handled": True, "ack": "⌛ Old button.", "cards": []}
         record_feedback(db, workout.id, rating=rating, now=now, request_id=request_id)
-        return {"handled": True, "ack": f"Saved: {rating.title()}. Thanks.", "cards": []}
+        return {"handled": True, "ack": f"Saved: {LABELS[rating]}. Thanks.", "cards": []}
     if action == "begin":
         return begin(db, args[0], now=now, request_id=request_id)
     workout = active_workout(db)

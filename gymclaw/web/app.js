@@ -119,7 +119,7 @@ function renderWeek(days, range) {
       slot.classList.add('training', session.status.toLowerCase());
       slot.append(el('b', '', session.start), el('span', '', session.template));
       const crowd = crowdLabel(session);
-      if (crowd) slot.append(el('em', `crowd ${String(session.crowd || '').toLowerCase()}`, crowd));
+      if (crowd) slot.append(el('em', `crowd ${crowdClass(session.crowd)}`, crowd));
     } else {
       slot.classList.add('rest');
       slot.setAttribute('aria-label', 'Rest day');
@@ -427,19 +427,23 @@ function renderProgress(insights) {
   }
   select.replaceChildren(...series.map(s => { const option = el('option', '', s.name); option.value = s.id; option.selected = s.id === selectedExercise; return option; }));
   const points = series.find(s => s.id === selectedExercise).points;
-  const weights = points.map(p => p.weight);
-  const low = Math.max(0, Math.floor((Math.min(...weights) * 0.9) / 5) * 5);
-  const top = Math.ceil(Math.max(...weights) * 1.05 / 5) * 5 || 5;
-  const chart = frame(box, top - low, { label: 'Top set weight per session' });
+  // Bodyweight exercises have no weight to estimate from: plot reps instead.
+  const bodyweight = points.every(p => !p.weight);
+  const value = p => bodyweight ? p.reps : p.e1rm;
+  const values = points.map(value);
+  const low = Math.max(0, Math.floor((Math.min(...values) * 0.9) / 5) * 5);
+  const top = Math.ceil(Math.max(...values) * 1.05 / 5) * 5 || 5;
+  const chart = frame(box, top - low, { label: bodyweight ? 'Best set reps per session' : 'Estimated 1-rep max per session' });
   // Shift labels: the axis starts at `low`, not 0, so small progress stays visible.
   chart.svg.querySelectorAll('text.label').forEach((label, i) => { label.textContent = Math.round(low + [0, (top - low) / 2, top - low][i]); });
-  const y = weight => chart.y(weight - low);
+  const y = v => chart.y(v - low);
   const xs = points.map((_, i) => points.length === 1 ? (chart.L + chart.W - chart.R) / 2 : chart.L + 12 + i * (chart.W - chart.L - chart.R - 24) / (points.length - 1));
-  chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${xs[i]},${y(p.weight)}`).join(' ') }));
-  points.forEach((p, i) => chart.svg.append(svgEl('circle', { cx: xs[i], cy: y(p.weight), r: 4, class: 'point' })));
+  chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${xs[i]},${y(value(p))}`).join(' ') }));
+  points.forEach((p, i) => chart.svg.append(svgEl('circle', { cx: xs[i], cy: y(value(p)), r: 4, class: 'point' })));
   const every = Math.ceil(points.length / (chart.W < 420 ? 4 : 7));
   points.forEach((p, i) => { if (i % every === 0 || i === points.length - 1) chart.svg.append(svgText(xs[i], chart.H - 6, p.label.replace(/^\w+ /, ''), { 'text-anchor': 'middle' })); });
-  crosshair(chart, xs, i => ({ title: points[i].label, rows: [[`${points[i].reps} × ${kgs(points[i].weight)}`, 'top set']], y: y(points[i].weight) }));
+  crosshair(chart, xs, i => ({ title: points[i].label, y: y(value(points[i])),
+    rows: bodyweight ? [[`${points[i].reps} reps`, 'best set']] : [[`≈ ${kgs(points[i].e1rm)}`, '1RM'], [`${points[i].reps} × ${kgs(points[i].weight)}`, 'best set']] }));
 }
 
 function renderMuscles(insights) {
@@ -540,8 +544,13 @@ function renderInsights(data) {
 
 /* ---------- History ---------- */
 
+// Crowd label as a CSS class: "A few" → "a-few".
+const crowdClass = label => String(label || '').toLowerCase().replace(/\s+/g, '-');
+
 function renderHistory(history) {
   const box = document.getElementById('history');
+  // Keep expanded workouts expanded when new data re-renders the list.
+  const open = new Set([...box.querySelectorAll('details[open]')].map(item => item.dataset.key));
   box.replaceChildren();
   document.getElementById('history-count').textContent = `${history.length} workout${history.length === 1 ? '' : 's'}`;
   if (!history.length) {
@@ -550,6 +559,8 @@ function renderHistory(history) {
   }
   for (const workout of history) {
     const item = el('details', 'workout');
+    item.dataset.key = `${workout.date} ${workout.time}`;
+    item.open = open.has(item.dataset.key);
     const summary = el('summary');
     const when = el('div', 'when');
     when.append(el('strong', '', workout.label), el('span', '', workout.time));
@@ -557,7 +568,7 @@ function renderHistory(history) {
     what.append(el('strong', '', workout.template), el('span', '', [`${workout.minutes} min`, `${workout.sets} sets`, tonnes(workout.volume)].join(' · ')));
     const tags = el('div', 'tags');
     if (workout.prs.length) tags.append(el('em', 'tag pr', `${workout.prs.length} PR${workout.prs.length > 1 ? 's' : ''}`));
-    if (workout.crowd) tags.append(el('em', `tag crowd ${workout.crowd.toLowerCase()}`, workout.crowd));
+    if (workout.crowd) tags.append(el('em', `tag crowd ${crowdClass(workout.crowd)}`, workout.crowd));
     summary.append(when, what, tags);
     const table = el('div', 'sets');
     for (const exercise of workout.exercises) {
@@ -591,23 +602,23 @@ function showTab() {
   if (tab === 'history') renderHistory(state.history);
 }
 
+let rendered = '';
 function render(data) {
   if (typeof data.demo !== 'boolean' || data.live_database_accessed !== !data.demo) throw new Error('Invalid state');
-  state = data;
   const zone = { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false };
-  const mode = document.getElementById('mode');
-  mode.textContent = data.demo ? 'Demo' : 'Live';
-  mode.classList.toggle('live', !data.demo);
-  document.getElementById('updated').textContent = `Updated ${new Date(data.captured_at).toLocaleTimeString('en-GB', zone)}`;
-  document.getElementById('data-notice').textContent = data.demo ? 'Synthetic demo data, generated by the real planner and workout code.' : 'Read-only view of your GymClaw sandbox.';
+  document.getElementById('updated').textContent = `${data.demo ? 'Demo · ' : ''}Updated ${new Date(data.captured_at).toLocaleTimeString('en-GB', zone)}`;
+  // Auto-refresh mostly returns the same data: then only the time changes, and open rows, the
+  // tooltip and the scroll position stay as they are.
+  const content = JSON.stringify({ ...data, captured_at: null });
+  if (content === rendered) return;
+  rendered = content;
+  state = data;
   renderGym(data.crowd);
   showTab();
 }
 
 let live = false;
 async function refresh() {
-  const button = document.getElementById('refresh');
-  button.disabled = true;
   try {
     const response = await fetch('/api/state');
     if (!response.ok) throw new Error('State unavailable');
@@ -618,8 +629,6 @@ async function refresh() {
     document.getElementById('load-error').hidden = true;
   } catch {
     document.getElementById('load-error').hidden = false;
-  } finally {
-    button.disabled = false;
   }
 }
 
@@ -628,12 +637,13 @@ document.getElementById('exercise-select').addEventListener('change', event => {
 window.addEventListener('hashchange', showTab);
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(showTab, 150); });
-document.getElementById('refresh').addEventListener('click', refresh);
 document.querySelectorAll('.segmented button').forEach(button => button.addEventListener('click', () => {
   crowdView.view = button.dataset.view; crowdView.back = 0; renderAttendance(state.crowd);
 }));
 document.getElementById('crowd-prev').addEventListener('click', () => { crowdView.back += 1; renderAttendance(state.crowd); });
 document.getElementById('crowd-next').addEventListener('click', () => { crowdView.back = Math.max(0, crowdView.back - 1); renderAttendance(state.crowd); });
 refresh();
-// Live state refreshes itself; the demo is static.
-setInterval(() => live && !document.hidden && refresh(), 60000);
+// Live state refreshes itself every 10 s while the page is visible (a refresh is ~70 ms server-side),
+// and at once when you come back to the tab. The demo is static.
+setInterval(() => live && !document.hidden && refresh(), 10000);
+document.addEventListener('visibilitychange', () => live && !document.hidden && refresh());
