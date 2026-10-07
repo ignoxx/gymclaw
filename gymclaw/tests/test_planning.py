@@ -109,3 +109,12 @@ def test_dst_elapsed_duration(week):
         local = c.start.astimezone(ZONE)
         assert local.astimezone(timezone.utc) == c.start
         assert c.end.astimezone(ZONE).hour <= 5
+
+
+def test_habit_breaks_ties_but_a_quiet_slot_beats_a_busy_habitual_one():
+    p = Profile(weekly_min_sessions=1, weekly_target_sessions=1, weekly_max_sessions=1, weekdays_allowed=[0])
+    busy_habit = SlotSignal(start=instant(12, 13), crowd=2 / 3, confidence=0.9, preferred_time=0.9)
+    quiet = SlotSignal(start=instant(12, 16), crowd=1 / 3, confidence=0.9, preferred_time=0.2)
+    assert plan_week(p, WEEK, signals=(busy_habit, quiet), now=NOW).sessions[0].start == quiet.start
+    same_crowd = quiet.model_copy(update={"crowd": 2 / 3})
+    assert plan_week(p, WEEK, signals=(busy_habit, same_crowd), now=NOW).sessions[0].start == busy_habit.start

@@ -1,4 +1,5 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { registerSendGuard } from "./guard.mjs";
 import { registerCoach } from "./runtime.mjs";
 import { loadTelegram } from "./telegram.mjs";
 
@@ -9,6 +10,7 @@ export default definePluginEntry({
     let telegram;
     const getTelegram = () => (telegram ??= loadTelegram(() => api.config));
     registerCoach(api, { telegram: getTelegram });
+    registerSendGuard(api);
     // Fail at startup, not on the owner's first tap.
     api.on("gateway_start", () =>
       getTelegram().then(
