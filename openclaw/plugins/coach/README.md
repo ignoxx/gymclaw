@@ -8,21 +8,25 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
   has the same movement or a similar exercise (same muscle and equipment), a one-tap guess `✅ 8 × 40 kg?`.
   No warm-up while the weight is unknown. Bodyweight exercises show reps only (`✅ 12 reps`).
 - **Typed sets:** `10x40`, `12x40kg`, `9 reps at 80` are claimed in `before_dispatch`, before the agent
-  sees them (`inbound_claim` only fires for plugin-bound chats). The message gets 👍 (its ID comes from
+  sees them (`inbound_claim` only fires for plugin-bound chats). On a bodyweight exercise reps alone
+  count (`13`, `13 reps`, `13x`). The message gets 👍 (its ID comes from
   `message_received`), the set card gets `✅ 10 × 40 kg`. Order comes from units, then the expected weight, then reps-first.
-- **Rest** (between sets of one exercise only): a small `⏱ 1:25 until Bench set 2/2` message with
-  `−15s` / `−30s` (edit the same message) and `⏭ Skip`, edited every 5 s. At zero (or Skip) it is deleted and a fresh set card is sent, which
-  notifies the phone. A new exercise starts right away. The runtime cron ping is only a fallback 30 s
-  later, e.g. after a gateway restart mid-rest.
+- **Rest** (after every working set, also before the next exercise): a small `⏱ 1:25 until Bench set 2/2`
+  (or `until next: Cable fly`) message with `−15s` / `−30s` (edit the same message) and `⏭ Skip`, edited
+  every 5 s. Exactly at zero (or on Skip) it is deleted and a fresh set card is sent, which notifies the
+  phone. No rest after the last exercise. The runtime cron ping is only a fallback 30 s later, e.g. after
+  a gateway restart mid-rest.
 - **Swap:** the card's buttons become `↩ Keep <exercise>` / `↪ Do it later` and up to three same-muscle
-  alternatives appear below it (never the same movement under another name; an exercise swapped away
-  earlier comes back first as `↩ Back to …`). Choosing one deletes the
+  alternatives appear below it, same movement on other equipment first (a fly for a fly; pec deck counts),
+  never the same exercise under another name. An exercise swapped away
+  earlier comes back first as `↩ Back to …`. Choosing one deletes the
   options and the old card, and the swap is saved in the template (the old exercise stays as an
   alternative). Keep restores the card. Not after the first set: the owner is on that machine.
 - **Start:** the session reminder carries `▶️ Start workout` (`gc:begin:<planned-session-ref>`).
 - **Agent tool:** `gymclaw_workout` (status, start, log, card, swap, switch, relabel, rest, later, next, end),
   so chat requests produce the same cards. `switch` and `relabel` take any exercise the owner names; the
-  result carries the card text the owner now sees.
+  result carries the card text the owner now sees. A missing required argument or a `log` that logged
+  nothing returns `ok: false` with an example call, never a silent `ok`.
 
 - **Send guard** (`guard.mjs`): one `message send` per agent run. A second one is blocked with a reason
   telling the model to stop with `NO_REPLY`, so a confused run can't spam the same question.

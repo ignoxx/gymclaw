@@ -217,9 +217,8 @@ def current(db: Session, workout_id: str, *, now: datetime) -> dict:
     active_data = None
     if active:
         is_warmup = warmup_pending(db, active)
-        from gymclaw.services.illustrations import catalog, for_exercise, primary_muscle
+        from gymclaw.services.illustrations import bodyweight, for_exercise, primary_muscle
         last = last_working_set(db, active)
-        guide = catalog().get(active.config_json.get("guide_id") or "")
         active_data = {
             "illustration": for_exercise(active.config_json["name"], active.config_json.get("guide_id")),
             "id": active.id, "exercise_id": active.exercise_id, "name": active.config_json["name"],
@@ -229,7 +228,7 @@ def current(db: Session, workout_id: str, *, now: datetime) -> dict:
             "set_type": "WARMUP" if is_warmup else "WORKING",
             "set_number": 1 if is_warmup else len(logs(db, active, "WORKING")) + 1,
             "working_sets": active.planned_working_sets,
-            "bodyweight": bool(guide and guide["exerciseType"].startswith("bodyweight")),
+            "bodyweight": bodyweight(active.config_json.get("guide_id")),
             "target_weight": warmup_weight(active) if is_warmup else active.target_weight,
             "rep_min": active.config_json["warmup_reps"] if is_warmup else active.rep_min,
             "rep_max": active.config_json["warmup_reps"] if is_warmup else active.rep_max,
@@ -342,8 +341,9 @@ def log_set(db: Session, workout_id: str, value: SetInput, *, now: datetime, req
                 transition(db, workout, "EXERCISE_COMPLETE", now)
                 transition(db, workout, "NEXT_EXERCISE", now)
                 choose_next(db, workout, now)
-            # Rest only between sets of the same exercise; a new exercise starts right away.
-            if not completed and workout.status != "WORKOUT_COMPLETE":
+            # Rest after every working set, also before the next exercise (with the finished one's rest
+            # time). None after the last exercise, or when only deferred exercises are left.
+            if (not completed and workout.status != "WORKOUT_COMPLETE") or workout.status == "SET_ACTIVE":
                 row.rest_started_at = now
                 row.rest_due_at = now + timedelta(seconds=active.rest_seconds)
                 job = NotificationJob(kind="REST", workout_session_id=workout.id, set_log_id=row.id, due_at=row.rest_due_at, payload_json={"workout_id": workout.id})
