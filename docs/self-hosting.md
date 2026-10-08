@@ -59,7 +59,7 @@ with a host allowlist, and the read-only dashboard. Details, Coolify steps, back
    The token now lives in the server's DB; delete the local copy.
 2. **Say hi to your bot.** It runs a short setup interview: goal, experience, days, time window, gym
    and travel time, equipment, injuries. Send a photo of your plan or let it build one.
-   See [onboarding](onboarding.md).
+   See [onboarding](technical-reference.md#onboarding).
 3. **Turn on the runtime.** Reminders, rest timers and the Sunday plan are scheduled jobs. They stay
    off until you enable them:
 

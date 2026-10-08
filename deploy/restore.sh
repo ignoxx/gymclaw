@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restore an archive from backup.sh or export-nemoclaw.sh into this deployment's
+# Restore an archive from backup.sh into this deployment's
 # volumes. Run in a one-off container while the gymclaw service is stopped:
 #
 #   docker run --rm -i --network none --volumes-from <stopped gymclaw container> \
@@ -24,7 +24,7 @@ rm -f "$ROOT"/data/gymclaw.db-wal "$ROOT"/data/gymclaw.db-shm
 cp "$TMP/gymclaw.db" "$ROOT/data/gymclaw.db"
 [[ -d "$TMP/data" ]] && cp -R "$TMP/data/." "$ROOT/data/"
 [[ -d "$TMP/openclaw" ]] && cp -R "$TMP/openclaw/." "$ROOT/openclaw/"
-# OpenClaw state only exists in container backups; a NemoClaw export starts fresh.
+# Older archives may lack OpenClaw state; then it starts fresh.
 if [[ -d "$TMP/.openclaw-gymclaw" ]]; then
   cp -R "$TMP/.openclaw-gymclaw/." "$STATE/"
   if [[ -f "$TMP/openclaw.sqlite" ]]; then
