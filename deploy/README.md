@@ -70,29 +70,20 @@ tailscale set --advertise-routes=<public-ip>/32 --advertise-exit-node   # keep e
 Approve the route in the Tailscale admin console. Linux clients also need
 `--accept-routes`; macOS, iOS and Android accept routes by default.
 
-## Moving from a NemoClaw sandbox (or another host)
+## Moving hosts
 
 Only one instance may run at a time. Two pollers on one bot token conflict, and
 two runtimes would send every reminder twice.
 
-1. Old host: pause the runtime, then stop the sandbox after the export.
-
-   ```bash
-   nemoclaw gymclaw exec -- sh -c 'cd /sandbox/.openclaw/workspace/gymclaw && scripts/gymclaw-tool runtime pause'
-   deploy/export-nemoclaw.sh gymclaw-export.tar.gz
-   nemoclaw gymclaw snapshot create --name before-vps   # rollback point
-   nemoclaw gymclaw stop
-   ```
-
-   From another container host, use the newest `/backups` archive instead (after
-   `runtime pause`).
+1. Old host: `runtime pause`, run `backup.sh`, copy the newest `/backups` archive
+   off-host, then stop the old deployment.
 
 2. New host: deploy once so the volumes exist, then stop `gymclaw` and restore:
 
    ```bash
    docker stop <gymclaw container>
    docker run --rm -i --network none --volumes-from <gymclaw container> \
-     --entrypoint restore.sh <gymclaw image> - --replace < gymclaw-export.tar.gz
+     --entrypoint restore.sh <gymclaw image> - --replace < gymclaw-backup.tar.gz
    docker start <gymclaw container>
    ```
 
@@ -107,9 +98,7 @@ two runtimes would send every reminder twice.
      --allow-runtime-changes --allow-messages --with-crowd-poll [--allow-calendar-writes]
    ```
 
-   `pause` revokes calendar writes, so grant them again explicitly if wanted. Chat
-   history doesn't move from NemoClaw; everything GymClaw needs is in the DB and
-   workspace.
+   `pause` revokes calendar writes, so grant them again explicitly if wanted.
 
 4. Check: message the bot, check `runtime deliveries`, and confirm the calendar
    watcher runs (`openclaw cron list --all`).

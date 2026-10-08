@@ -20,21 +20,6 @@ def test_cli_json_rejects_partial_or_unstructured_output(output):
         cli_json(output)
 
 
-@pytest.mark.parametrize("managed", [False, True])
-def test_only_managed_cli_ignores_inherited_gateway_override(monkeypatch, managed):
-    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", "/sandbox/.openclaw/openclaw.json" if managed else "/local/config.json")
-    monkeypatch.setenv("OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:18789")
-    monkeypatch.setattr("gymclaw.providers.openclaw.shutil.which", lambda _: "/openclaw")
-    captured = {}
-    def command(argv, **kwargs):
-        captured.update(kwargs["env"])
-        return subprocess.CompletedProcess(argv, 0, '{"jobs":[]}', "")
-    monkeypatch.setattr("gymclaw.providers.openclaw.subprocess.run", command)
-    assert run_json(["openclaw", "cron", "list"]) == {"jobs": []}
-    assert ("OPENCLAW_GATEWAY_URL" not in captured) == managed
-    assert captured["OPENCLAW_CONFIG_PATH"]
-
-
 def test_cli_pairing_failure_is_actionable_without_child_output(monkeypatch):
     monkeypatch.setattr("gymclaw.providers.openclaw.shutil.which", lambda _: "/openclaw")
     monkeypatch.setattr("gymclaw.providers.openclaw.subprocess.run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "scope upgrade pending approval; private-output-sentinel"))
@@ -63,19 +48,19 @@ def test_legacy_cron_command_and_managed_config_path(wrapped):
         return {"id": "timer", "jobs": []}
     provider = OpenClawProvider(transport=transport)
     provider.list_jobs()
-    spec = AutomationSpec(name="test", argv=("/python", "-m", "gymclaw.cli"), cwd="/repo", every="60s", env=(("OPENCLAW_CONFIG_PATH", "/sandbox/.openclaw/openclaw.json"),))
+    spec = AutomationSpec(name="test", argv=("/python", "-m", "gymclaw.cli"), cwd="/repo", every="60s", env=(("OPENCLAW_CONFIG_PATH", "/state/openclaw.json"),))
     assert provider.create(spec) == "timer"
     assert calls[0][3:5] == ["cron", "list"]
-    assert "OPENCLAW_CONFIG_PATH=/sandbox/.openclaw/openclaw.json" in calls[1]
+    assert "OPENCLAW_CONFIG_PATH=/state/openclaw.json" in calls[1]
     assert "--no-deliver" in calls[1]
 
 
 def test_managed_callback_retains_config_without_recreation(engine, monkeypatch):
-    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", "/sandbox/.openclaw/openclaw.json")
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", "/state/openclaw.json")
     provider = FakeRuntime()
     kwargs = dict(now=NOW, recipient="123", project_root=Path.cwd(), allow_runtime_changes=True, allow_messages=True)
     runtime.sync_automations(engine, provider, **kwargs)
     count = len(provider.created)
-    assert all(dict(spec.env) == {"OPENCLAW_CONFIG_PATH": "/sandbox/.openclaw/openclaw.json"} for spec in provider.created)
+    assert all(dict(spec.env) == {"OPENCLAW_CONFIG_PATH": "/state/openclaw.json"} for spec in provider.created)
     runtime.sync_automations(engine, provider, **kwargs)
     assert len(provider.created) == count

@@ -43,37 +43,7 @@ fails loudly on first use.
 
 ## Activation
 
-```bash
-openclaw plugins install --link /sandbox/.openclaw/workspace/gymclaw/openclaw/plugins/coach
-```
-
-Hash-checked `config.patch` (preserve existing entries):
-
-```json
-{
-  "plugins": {
-    "allow": ["…existing…", "gymclaw-coach"],
-    "entries": {
-      "gymclaw-coach": {
-        "enabled": true,
-        "config": { "ownerId": "OWNER_TELEGRAM_ID", "tool": "/sandbox/.openclaw/workspace/gymclaw/scripts/gymclaw-tool" }
-      }
-    }
-  },
-  "tools": { "alsoAllow": ["gymclaw_workout"] },
-  "channels": {
-    "telegram": {
-      "capabilities": { "inlineButtons": "dm" },
-      "actions": { "reactions": true },
-      "reactionLevel": "extensive",
-      "streaming": { "mode": "off" }
-    }
-  }
-}
-```
-
-Restart the Gateway, then `openclaw plugins inspect gymclaw-coach --runtime --json`. To undo,
-disable the entry and restart. Workout data is untouched.
+[deploy/entrypoint.sh](../../../deploy/entrypoint.sh) installs and configures it on every start. To undo, disable the plugin entry and restart the Gateway. Workout data is untouched.
 
 ## Tests
 

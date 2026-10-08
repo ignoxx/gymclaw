@@ -8,10 +8,7 @@ build
 data
 backups
 assets
-videos
-scripts/reel
 docs
-index.html
 .env
 .env.*
 config/*.yaml

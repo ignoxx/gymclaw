@@ -150,7 +150,7 @@ def automation_plan(db: Session, engine, *, now: datetime, recipient: str, profi
             argv=base + ("runtime", "fire", "--job-id", job.id, "--allow-messages") + route))
     config = os.environ.get("OPENCLAW_CONFIG_PATH")
     if config:
-        # Managed NemoClaw owns config; callbacks retain its path, never credentials.
+        # Callbacks keep the Gateway config path, never credentials.
         config = str(Path(config).absolute())
         specs = [replace(spec, env=(("OPENCLAW_CONFIG_PATH", config),)) for spec in specs]
     return specs

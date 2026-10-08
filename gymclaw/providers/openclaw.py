@@ -6,7 +6,6 @@ requires the locally installed version. Transport injection keeps tests offline.
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -66,12 +65,7 @@ def run_json(argv: list[str]) -> dict:
     if shutil.which(argv[0]) is None:
         raise DomainError("OPENCLAW_NOT_INSTALLED", "OpenClaw CLI unavailable; setup: docs/self-hosting.md")
     try:
-        env = dict(os.environ)
-        if env.get("OPENCLAW_CONFIG_PATH") == "/sandbox/.openclaw/openclaw.json":
-            # Cron inherits a URL override, which intentionally disables config auth.
-            # Use this sandbox's managed config route, not the inherited override.
-            env.pop("OPENCLAW_GATEWAY_URL", None)
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False, env=env)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False)
         if result.returncode != 0:
             # Classify known failures without exposing child output or credentials.
             failure = "\n".join(line for line in (result.stdout + "\n" + result.stderr).lower().splitlines() if "undici-ehpa" not in line and "envhttpproxyagent is experimental" not in line)

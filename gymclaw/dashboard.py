@@ -2,8 +2,6 @@
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import shutil
-import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,26 +12,10 @@ ASSETS = {"/": ("index.html", "text/html"), "/styles.css": ("styles.css", "text/
           "/favicon.svg": ("favicon.svg", "image/svg+xml")}
 
 
-def live_snapshot(db_url: str | None = None) -> dict:
-    """Live state: read-only from `db_url` (same host/container), else via the NemoClaw
-    sandbox. The sandbox route consumes app output in memory, never copying DB files."""
-    if db_url:
-        from gymclaw.dashboard_state import read_snapshot
-        return read_snapshot(db_url)
-    from gymclaw.providers.openclaw import cli_json
-    launcher = Path.home() / ".local/bin/nemoclaw"
-    binary = str(launcher) if launcher.is_file() else shutil.which("nemoclaw")
-    if not binary:
-        raise RuntimeError("NemoClaw unavailable")
-    result = subprocess.run([binary, "gymclaw", "exec", "--timeout", "12", "--workdir",
-        "/sandbox/.openclaw/workspace/gymclaw", "--", ".venv/bin/python", "-m", "gymclaw.dashboard_state"],
-        capture_output=True, text=True, timeout=20)
-    if result.returncode:
-        raise RuntimeError("Sandbox state unavailable")
-    value = cli_json(result.stdout)
-    if value.get("demo") is not False:
-        raise RuntimeError("Live state unavailable")
-    return value
+def live_snapshot(db_url: str) -> dict:
+    """Live state, read-only from `db_url` (same host/container)."""
+    from gymclaw.dashboard_state import read_snapshot
+    return read_snapshot(db_url)
 
 
 def demo_handler(snapshot: dict | None, *, live: bool = False, db_url: str | None = None,
@@ -92,16 +74,15 @@ def demo_handler(snapshot: dict | None, *, live: bool = False, db_url: str | Non
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int)
-    parser.add_argument("--live", action="store_true", help="Read authoritative sandbox state, no writes or additional poller")
-    parser.add_argument("--db-url", help="Live state from this SQLite DB (read-only) instead of the NemoClaw sandbox; implies --live")
+    parser.add_argument("--db-url", help="Live state from this SQLite DB (read-only) instead of the synthetic demo")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address; only widen it behind a private network/proxy")
     parser.add_argument("--allowed-host", action="append", default=[], help="Extra accepted Host header in live mode (repeatable)")
     args = parser.parse_args()
-    live = args.live or bool(args.db_url)
+    live = bool(args.db_url)
     port = args.port or (8766 if live else 8765)
     handler = demo_handler(None if live else build_demo_snapshot(), live=live, db_url=args.db_url, allowed_hosts=frozenset(args.allowed_host))
     server = ThreadingHTTPServer((args.host, port), handler)
-    mode = ("read-only DB state" if args.db_url else "read-only sandbox state") if live else "synthetic demo"
+    mode = "read-only DB state" if live else "synthetic demo"
     print(f"GymClaw: http://{args.host}:{port}, {mode}", flush=True)
     try:
         server.serve_forever()

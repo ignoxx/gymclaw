@@ -46,16 +46,7 @@ model call latency and first byte, tool latency, model vs fast-path counts, and 
 
 ## Activation
 
-The Docker entrypoint enables it. In a NemoClaw sandbox:
-
-```bash
-openclaw plugins install --link /sandbox/.openclaw/workspace/gymclaw/openclaw/plugins/turn-log
-```
-
-Add `gymclaw-turn-log` to `plugins.allow`, set `plugins.entries.gymclaw-turn-log` to
-`{ "enabled": true, "hooks": { "allowConversationAccess": true } }` (needed for `llm_input`,
-`llm_output`, `agent_end`), set `GYMCLAW_TURN_LOG_DIR` for the Gateway, and restart it. Disable the
-entry to stop; delete the directory to drop the data.
+[deploy/entrypoint.sh](../../../deploy/entrypoint.sh) installs and configures it on every start. To undo, disable the plugin entry and restart the Gateway. Delete the log directory to drop the data.
 
 ## Tests
 

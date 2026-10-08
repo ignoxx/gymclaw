@@ -1,49 +1,6 @@
 # Technical reference
 
-Detailed CLI/setup reference. Run commands from repository root. See [project overview](../README.md) for current demo and verification status, and [onboarding](onboarding.md) for the new resumable setup flow.
-
-Product source of truth: [SPEC.md](../SPEC.md).
-
-## Implemented slice
-
-- SQLite schema for all 10 spec domain entities; versioned Alembic initialization.
-- Validated, persistent single-user profile.
-- Deterministic weekly candidate planner: prep/travel conflict checks, travel blocks,
-  local-date recovery across week boundaries, weekly caps, weighted scores, DST.
-- Persistent tentative plans and durable planning events; retry-safe request IDs.
-- Persisted workout templates/snapshots and guarded workout execution.
-- Explicit first-primary warm-up, set parser/logging, durable rest outbox, dynamic ETA.
-- Busy-machine reorder/defer/retry, same-role substitution, explicit skips.
-- Double progression, persisted next weights, completion audit and replan events.
-- Google desktop OAuth, incremental calendar sync, durable managed-event write outbox.
-- User move/resize/delete reconciliation, recovery-aware repair, workout compression.
-- Persistent get-ready/leave/start jobs with cancellation/replacement after calendar edits.
-- Guarded OpenClaw CLI adapter: exact one-shot timers, cheap 60s watcher, cancellation
-  and stable declaration-key reconciliation; repo-local workspace/skill and setup guide.
-- Durable Telegram delivery outbox: commit before send, confirmed receipts, stale suppression,
-  fail-closed ambiguous sends. Synthetic runtime/provider tests; activation not performed.
-- MySports reported active counts, durable retrieval health/change windows, arrival labels,
-  conservative personalized calibration/source reliability, crowd-aware future slot selection.
-- Sunday audit/briefing and rolling maintenance: mark unstarted expired slots missed,
-  fill valid horizon, reconsider distant tentative slots after labels, preserve locks.
-- No-show nudge: 30 min into a committed slot with no workout started, the watcher asks once
-  (skip or move). `calendar skip` keeps the week's count (no make-up); `calendar move` works
-  until the slot ends. Unanswered, the slot still ends MISSED and gets a make-up as before.
-- Body weight: weigh-ins read from scale photos by the agent (`body log`), backfill dated from
-  photo EXIF (files, not compressed photos), trend in the Sunday briefing (also its only nudge)
-  and on the dashboard.
-- Proactive calendar consequence messages through durable outbox; explicit pause/resume
-  and independently revocable continuing calendar-write authority.
-- JSON CLI, independent of OpenClaw; external providers replaceable with explicit fixtures.
-
-This is **not yet the complete MVP**. Local NemoClaw/Telegram tool access and
-scheduled private delivery work; real workout onboarding/rest acceptance remains. `calendar publish --allow-writes` can
-create/update/delete owned Google events; ordinary planning/sync never write remotely.
-Runtime watcher/weekly publication stays disabled unless continuing write authority is
-separately granted with `runtime sync --allow-calendar-writes`. `notifications due` is local-only debug dispatch. Activated
-`runtime fire --allow-messages` uses OpenClaw to send Telegram and persist receipts.
-Live OAuth/read-only sync and timed Telegram delivery verified. Calendar publication
-remains unapproved/untested. Setup messages are labelled tests, not workout history.
+Detailed CLI and setup reference. Run commands from the repository root.
 
 ## Setup
 
@@ -78,6 +35,43 @@ Fixtures explicitly contain demo free/busy and crowd predictions, never live obs
 Fixture inputs and planning results are recorded in SQLite's agent event log. Fixture
 availability applies to that invocation only. Ongoing availability comes from persisted
 calendar/provider state. No external API behavior is simulated as real.
+
+## Onboarding
+
+Setup is a short interview in Telegram, one question at a time. Nothing is assumed: defaults never
+count as answers, and GymClaw works for any owner, schedule and gym.
+
+1. **Interview:** goal, training experience, days per week and which days, session length, time
+   window, gym address with prep and travel time, equipment (full gym / basic / home), injuries or exercises to avoid.
+   Answers that shape scheduling also write the matching profile fields.
+2. **Plan:** the owner sends a photo of their plan, or GymClaw builds one from the interview. Every
+   exercise is mapped to an illustrated catalog entry (`catalog search`). Unknown weights start at 0
+   and are learned from the first session. Several templates form a split that rotates over
+   sessions in order (e.g. Push → Pull → Legs).
+3. **Review:** one short summary; the owner confirms.
+4. **Ready:** later profile or plan edits don't restart setup.
+
+```text
+onboarding status
+onboarding answer --answers '{"experience":"2 years"}' --request-id ID
+onboarding answer --answers '{"schedule":"3x Mon/Wed/Fri"}' \
+  --profile '{"weekly_target_sessions":3,"weekdays_allowed":[0,2,4]}' --request-id ID
+onboarding confirm-plan --template-id push --template-id pull --template-id legs --request-id ID
+onboarding finish --fingerprint REVIEW_FINGERPRINT --request-id ID
+```
+
+Profile-backed questions and their fields:
+
+| Question | Profile fields |
+| --- | --- |
+| schedule | `weekly_target_sessions`, `weekdays_allowed` (Monday=0) |
+| session_length | `preferred_workout_minutes` |
+| time_window | `earliest_workout_start`, `latest_workout_finish` (local "HH:MM") |
+| travel | `gym_address`, `prep_minutes`, `commute_to_gym_minutes` |
+
+Mutations are request-idempotent and survive chat resets. Finishing setup grants no runtime or
+calendar authority. Template import fails with `ILLUSTRATION_REQUIRED` until every exercise has a
+`guide_id`. Migration `7b3e9d2c4f10` keeps an existing goal and template, and asks for the rest.
 
 ## Planner decisions
 
@@ -142,15 +136,12 @@ times, no titles or notes.
 
 1. In Apple Calendar: right-click the calendar → **Share Calendar…** → tick
    **Public Calendar** → copy the `webcal://pNN-caldav.icloud.com/published/2/…` link.
-2. From the repo root on the host, run `scripts/connect-personal-calendar` and paste the
-   link at the hidden prompt. It resolves iCloud's redirect, applies a GET-only policy for
-   that one host (`config/gymclaw-personal-calendar-policy.example.yaml`), hands the link
-   to the sandbox as a temp file (never argv), then fetches once and replans.
-   `calendar personal-status` shows health afterwards.
+2. On the Docker host, run `scripts/connect-personal-calendar` and paste the link at the
+   hidden prompt. It resolves iCloud's redirect, checks the feed host is in
+   `EGRESS_EXTRA_HOSTS`, passes the link to the container over stdin (never argv), then
+   fetches once and replans. `calendar personal-status` shows health afterwards.
 
-Google's **Secret address in iCal format** also works with `calendar personal-connect
---url-file PATH`. The host helper and its `/published/**` network policy are for iCloud;
-for Google, configure a GET-only policy for the feed's host and path separately.
+Google's **Secret address in iCal format** works the same way.
 
 The 60 s watcher refreshes the feed at most every 5 minutes and the Sunday plan
 always does. Busy events block slots; events marked **Free** (`TRANSP:TRANSPARENT`)

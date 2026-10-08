@@ -1,6 +1,6 @@
 """Read-only projection for the localhost dashboard. Same code for live state and the demo DB.
 
-Run inside the sandbox (`python -m gymclaw.dashboard_state`); opens SQLite read-only, prints JSON.
+`python -m gymclaw.dashboard_state` prints the live snapshot as JSON (SQLite opened read-only).
 """
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
