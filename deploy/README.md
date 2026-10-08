@@ -20,7 +20,7 @@ as a non-root user with a read-only root filesystem, no capabilities and
 
 | Volume | Mounted at | Contents |
 | --- | --- | --- |
-| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, Google OAuth token), crowd config, previews |
+| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, Google OAuth token), crowd config, previews, `turns/` [turn logs](../openclaw/plugins/turn-log/README.md) |
 | `gymclaw-workspace` | `/opt/gymclaw/openclaw` | Agent workspace: `USER.md` notes, `memory/`, inbound `media/` |
 | `openclaw-state` | `/home/node/.openclaw-gymclaw` | OpenClaw config, gateway token, chat sessions, scheduled jobs |
 | `gymclaw-backups` | `/backups` | `backup.sh` archives |

@@ -1,0 +1,7 @@
+{
+  "id": "gymclaw-turn-log",
+  "name": "GymClaw turn log",
+  "description": "Local JSONL log of every agent turn: inbound, model calls, usage, tools, reply. Never sent anywhere.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

@@ -39,6 +39,7 @@ USER node
 # GymClaw's job declarations are identical whether synced from a shell or a callback.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     GYMCLAW_DB_URL=sqlite:////opt/gymclaw/data/gymclaw.db \
+    GYMCLAW_TURN_LOG_DIR=/opt/gymclaw/data/turns \
     GYMCLAW_OPENCLAW_PROFILE=gymclaw \
     OPENCLAW_PROFILE=gymclaw \
     OPENCLAW_STATE_DIR=/home/node/.openclaw-gymclaw \

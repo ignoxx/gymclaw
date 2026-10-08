@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createTurnLog } from "../turn-log/log.mjs";
 
 // Cheap pre-check so ordinary chat never pays for a Python start-up. Reps alone ("13 reps") only log
 // on a bodyweight exercise; otherwise Python returns unhandled and the agent gets the message.
@@ -207,8 +208,12 @@ export function createSyncer(cli, ownerId, log) {
   };
 }
 
-/** Wire hooks, the callback namespace and the agent tool. `deps` lets tests inject fakes. */
-export function registerCoach(api, { run, telegram, coaches = COACHES } = {}) {
+/**
+ * Wire hooks, the callback namespace and the agent tool. `deps` lets tests inject fakes.
+ * Taps and typed sets are logged as `fast` turn-log events (see the turn-log plugin), since they
+ * never reach the agent hooks.
+ */
+export function registerCoach(api, { run, telegram, coaches = COACHES, turnLog = createTurnLog(process.env.GYMCLAW_TURN_LOG_DIR), now = Date.now } = {}) {
   const config = api.pluginConfig ?? {};
   const ownerId = String(config.ownerId ?? "");
   if (!/^[1-9]\d{0,19}$/.test(ownerId) || !(run || config.tool)) {
@@ -244,13 +249,18 @@ export function registerCoach(api, { run, telegram, coaches = COACHES } = {}) {
     namespace: "gc",
     handler: async (ctx) => {
       if (!ctx.auth?.isAuthorizedSender || ctx.isGroup || String(ctx.senderId) !== ownerId) return { handled: true };
+      const started = now();
+      const entry = { ev: "fast", flow: "tap", action: String(ctx.callback.payload).split(":")[0], msg: ctx.callback.messageId };
       try {
         const result = await cli(["coach", "tap", "--data", ctx.callback.payload, "--request-id", `tg-cb:${ctx.callbackId}`]);
+        entry.cliMs = now() - started;
         await coach.apply(result, { tapped: { messageId: ctx.callback.messageId, text: ctx.callback.messageText } });
         if (changed(result)) sync();
       } catch (error) {
+        entry.error = error.code ?? "ERROR";
         await report(error);
       }
+      turnLog({ ...entry, ok: !entry.error, ms: now() - started });
       return { handled: true };
     },
   });
@@ -272,17 +282,26 @@ export function registerCoach(api, { run, telegram, coaches = COACHES } = {}) {
     if (!text) return;
     const messageId = recentIds.get(text);
     recentIds.delete(text);
+    const started = now();
+    // handled: false means the agent gets the message after all; cliMs is what the pre-check cost it.
+    const entry = { ev: "fast", flow: "text", text, msg: messageId };
     let result;
     try {
       result = await cli(["coach", "text", "--text", text, "--request-id", `tg-msg:${messageId ?? `${event.timestamp ?? Date.now()}:${text}`}`]);
     } catch (error) {
       // Let the agent explain anything unexpected (e.g. no workout in a loggable state).
       api.logger.warn(`gymclaw-coach: typed set not handled: ${error.code ?? error.message}`);
+      turnLog({ ...entry, handled: false, error: error.code ?? "ERROR", ms: now() - started });
       return;
     }
-    if (!result.handled) return;
+    entry.cliMs = now() - started;
+    if (!result.handled) {
+      turnLog({ ...entry, handled: false, ms: entry.cliMs });
+      return;
+    }
     await coach.apply(result, { inboundMessageId: messageId });
     sync();
+    turnLog({ ...entry, handled: true, ok: true, ms: now() - started });
     return { handled: true };
   });
 

@@ -23,6 +23,8 @@ for name, src in {"gymclaw.db": "/opt/gymclaw/data/gymclaw.db",
             s.backup(d)
 PY
 
+# data/turns (turn logs, openclaw/plugins/turn-log) is included on purpose: it is the eval/latency
+# dataset and small (a few KB per turn). Same privacy class as the chat history above.
 tar -czf "$DEST/gymclaw-$STAMP.tar.gz" \
   -C "$TMP" . \
   -C "$ROOT" --exclude='data/gymclaw.db*' --exclude='data/backups' data openclaw \
