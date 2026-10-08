@@ -14,34 +14,7 @@ Telegram delivery failures or failures where the Gateway cannot send any reply.
 
 ## Activation
 
-Linked installation in the managed sandbox:
-
-```bash
-openclaw plugins install --link /sandbox/.openclaw/workspace/gymclaw/openclaw/plugins/failure-details
-```
-
-Use hash-checked Gateway `config.patch` to add `gymclaw-failure-details` to the
-existing `plugins.allow` list (preserve other entries), and set:
-
-```json
-{
-  "plugins": {
-    "entries": {
-      "gymclaw-failure-details": {
-        "enabled": true,
-        "hooks": { "allowConversationAccess": true }
-      }
-    }
-  }
-}
-```
-
-Conversation permission is required for `llm_input`, `llm_output`, and `agent_end`
-even though the plugin consumes only run/usage/error metadata, not prompt text.
-Restart through `nemoclaw gymclaw gateway restart`, then verify
-`openclaw plugins inspect gymclaw-failure-details --runtime --json`: six typed
-hooks, no blocked-hook diagnostics. Disable the plugin entry and restart to undo;
-no transcript edits or deletion needed.
+[deploy/entrypoint.sh](../../../deploy/entrypoint.sh) installs and configures it on every start. To undo, disable the plugin entry and restart the Gateway.
 
 ## Tests
 

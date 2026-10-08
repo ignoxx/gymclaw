@@ -3,11 +3,6 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-# In managed NemoClaw, logical gymclaw profile uses this sandbox's owned Gateway.
-# Metadata check only; config/credential contents are never read by wrapper.
-if [[ "$ROOT" == /sandbox/.openclaw/workspace/* && -f /sandbox/.openclaw/openclaw.json ]]; then
-  export OPENCLAW_CONFIG_PATH=/sandbox/.openclaw/openclaw.json
-fi
 # The container entrypoint runs a warm worker on this socket (see gymclaw/warm.py). Without one,
 # the CLI runs in-process as before.
 export GYMCLAW_WARM_SOCKET="${GYMCLAW_WARM_SOCKET:-/tmp/gymclaw-tool.sock}"

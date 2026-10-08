@@ -136,15 +136,12 @@ times, no titles or notes.
 
 1. In Apple Calendar: right-click the calendar → **Share Calendar…** → tick
    **Public Calendar** → copy the `webcal://pNN-caldav.icloud.com/published/2/…` link.
-2. From the repo root on the host, run `scripts/connect-personal-calendar` and paste the
-   link at the hidden prompt. It resolves iCloud's redirect, applies a GET-only policy for
-   that one host (`config/gymclaw-personal-calendar-policy.example.yaml`), hands the link
-   to the sandbox as a temp file (never argv), then fetches once and replans.
-   `calendar personal-status` shows health afterwards.
+2. On the Docker host, run `scripts/connect-personal-calendar` and paste the link at the
+   hidden prompt. It resolves iCloud's redirect, checks the feed host is in
+   `EGRESS_EXTRA_HOSTS`, passes the link to the container over stdin (never argv), then
+   fetches once and replans. `calendar personal-status` shows health afterwards.
 
-Google's **Secret address in iCal format** also works with `calendar personal-connect
---url-file PATH`. The host helper and its `/published/**` network policy are for iCloud;
-for Google, configure a GET-only policy for the feed's host and path separately.
+Google's **Secret address in iCal format** works the same way.
 
 The 60 s watcher refreshes the feed at most every 5 minutes and the Sunday plan
 always does. Busy events block slots; events marked **Free** (`TRANSP:TRANSPARENT`)
