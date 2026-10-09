@@ -208,6 +208,44 @@ def test_calendar_resize_watch_proactively_sends_once_without_publication(engine
     assert len(provider.sent) == 1
 
 
+def test_start_without_template_starts_todays_session_even_when_late(engine):
+    from gymclaw.services import workout
+    with Session(engine) as db, db.begin():
+        weekly.weekly_plan(db, "short", now=SUNDAY)
+        session = first_session(db)
+        with pytest.raises(DomainError, match="No planned workout today"):
+            workout.start(db, None, now=session.planned_start_at - timedelta(days=1), request_id="yesterday")
+        # Its slot is already over; the owner is just late.
+        workout.start(db, None, now=session.planned_end_at + timedelta(minutes=10), request_id="late")
+        assert session.status == "STARTED"
+
+
+def test_watch_survives_lost_calendar_auth_and_alerts_once(engine, monkeypatch):
+    """Expired Google auth used to fail the whole tick: no reminder timers, no nudges, no word to the owner."""
+    from gymclaw.runtime_cli import runtime_command
+    class FakeGoogle(FixtureCalendarProvider):
+        source = "google"
+    calendar, provider = FakeGoogle("unit-calendar"), FakeRuntime()
+    with Session(engine) as db, db.begin():
+        db.add(CalendarSyncState(id=1, calendar_id=calendar.calendar_id, timezone="Europe/Berlin", source="google"))
+        schedule_week(db, datetime(2026, 10, 12).date(), now=SUNDAY, template_id="short")
+        commit_upcoming(db, now=SUNDAY)
+        runtime.configure_runtime(db, profile="gymclaw", recipient="123", project_root=Path.cwd(), python=__import__("sys").executable)
+    def expired(*a):
+        raise DomainError("CALENDAR_AUTH_REQUIRED", "Google credentials expired or invalid; run calendar auth again")
+    monkeypatch.setattr("gymclaw.runtime_cli.google_provider", expired)
+    monkeypatch.setattr("gymclaw.runtime_cli.OpenClawProvider", lambda *a: provider)
+    args = parser().parse_args(["--db-url", str(engine.url), "runtime", "watch", "--telegram-id", "123", "--allow-runtime-changes", "--allow-messages"])
+    result = runtime_command(engine, args, now_override=SUNDAY + timedelta(minutes=1))
+    assert result["data"]["calendar_error"] == "CALENDAR_AUTH_REQUIRED"
+    assert any(spec.name.endswith("GET_READY") or "notification:" in spec.name for spec in provider.created)
+    runtime_command(engine, args, now_override=SUNDAY + timedelta(minutes=2))
+    assert [text for _, text in provider.sent] == [provider.sent[0][1]] and "Lost access to Google Calendar" in provider.sent[0][1]
+    monkeypatch.setattr("gymclaw.runtime_cli.google_provider", lambda *a: calendar)
+    runtime_command(engine, args, now_override=SUNDAY + timedelta(minutes=3))
+    assert provider.sent[-1][1] == "✅ Google Calendar is connected again." and len(provider.sent) == 2
+
+
 def test_new_arrival_label_reconsiders_tentative_slot_but_not_user_lock(engine):
     from gymclaw.models import WorkoutSession
     from gymclaw.services.crowd import record_feedback

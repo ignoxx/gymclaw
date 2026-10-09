@@ -62,7 +62,7 @@ def coach_command(db, args):
             result = coach.handle_action(db, needed(args.action, "--action"), now=now, request_id=request_id,
                 exercise=args.exercise, which=args.which, seconds=args.seconds, remember=args.remember)
         else:
-            workout.start(db, needed(args.template_id, "--template-id"), now=now, request_id=request_id, planned_session_id=args.planned_session_id)
+            workout.start(db, args.template_id, now=now, request_id=request_id, planned_session_id=args.planned_session_id)
             result = coach.handle_action(db, "card", now=now, request_id=request_id)
     settings = db.get(RuntimeSettings, 1)
     # The plugin sends cards to the single verified owner chat.

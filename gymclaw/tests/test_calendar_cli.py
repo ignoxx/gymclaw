@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from gymclaw.cli import main
 from gymclaw.db import make_engine
 from gymclaw.models import CalendarCredential, CalendarSyncState, NotificationJob
 from gymclaw.services import weekly
+from gymclaw.services.profile import get_profile
 from gymclaw.tests.test_cli import run
 from gymclaw.tests.test_calendar_reconcile import NOW, at, clock
 from gymclaw.tests.test_weekly import SUNDAY, engine  # noqa: F401  (engine is a fixture)
@@ -79,9 +80,6 @@ def test_move_session_picks_valid_slot_or_explains(engine, capsys):
     assert call(*move, "--to", "2026-10-16T12:00:00+02:00")[1] == moved
     writes = call("calendar", "pending-writes")[1]["data"]["writes"]
     assert any(w["session_id"] == friday["id"] and w["body"]["start"]["dateTime"] == "2026-10-16T12:00:00+02:00" for w in writes)
-    # Past the workout window: the error lists what does fit that day.
-    code, refused = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-2-move", "--to", "2026-10-16T23:00:00+02:00")
-    assert code == 1 and refused["error"]["code"] == "SLOT_NOT_VALID" and "12:00" in refused["error"]["message"]
     # Thursday would leave no rest day after Wednesday.
     code, refused = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-3-move", "--day", "2026-10-15")
     assert code == 1 and refused["error"]["code"] == "NO_VALID_SLOT"
@@ -97,6 +95,23 @@ def test_move_session_picks_valid_slot_or_explains(engine, capsys):
         points = evidence(db, now=SUNDAY, zone=ZoneInfo("Europe/Berlin"))
     first = datetime.fromisoformat(friday["start"]).astimezone(ZoneInfo("Europe/Berlin"))
     assert affinity(points, 12 * 60) > 0.5 > affinity(points, first.hour * 60 + first.minute)
+    # A time the owner names is kept even off-grid and outside the window: locked against replanning,
+    # still published, and the broken rule named.
+    code, kept = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-5-move", "--to", "2026-10-16T21:07:00+02:00")
+    assert code == 0 and kept["data"]["to"] == "2026-10-16T19:07:00+00:00" and kept["data"]["warnings"] == ["outside your workout window (07:00–22:00)"]
+    writes = call("calendar", "pending-writes")[1]["data"]["writes"]
+    assert any(w["session_id"] == friday["id"] and w["body"]["start"]["dateTime"] == "2026-10-16T21:07:00+02:00" for w in writes)
+    from gymclaw.models import PlannedSession
+    from gymclaw.services.replanning import replan_weeks
+    with Session(engine) as db, db.begin():
+        replan_weeks(db, {date(2026, 10, 12)}, now=SUNDAY)
+        row = db.get(PlannedSession, friday["id"])
+        assert row.user_locked and row.planned_start_at == datetime.fromisoformat(kept["data"]["to"])
+    # "I can leave at 13:00": start is leave + commute, and a valid slot unlocks it again.
+    code, left = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-6-move", "--leave-at", "2026-10-16T13:00:00+02:00")
+    with Session(engine) as db:
+        commute = get_profile(db).commute_to_gym_minutes
+    assert code == 0 and datetime.fromisoformat(left["data"]["to"]) == datetime.fromisoformat("2026-10-16T13:00:00+02:00") + timedelta(minutes=commute)
 
 
 def test_profile_window_change_moves_sessions_that_no_longer_fit(engine, capsys):

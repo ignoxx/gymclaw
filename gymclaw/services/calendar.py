@@ -197,6 +197,20 @@ def sync_calendar(db: Session, provider: CalendarProvider, *, now: datetime) -> 
     return {"data": {"calendar_id": provider.calendar_id, "source": provider.source, "full_sync": batch.full, "events_received": len(batch.events), "changes": replanned["changed"], "warnings": replanned["warnings"], "weeks": sorted(w.isoformat() for w in affected), "calendar_writes_queued": db.scalar(select(func.count()).select_from(CalendarWrite).where(CalendarWrite.status == "PENDING")), "remote_events_changed": False}, "events": emitted, "user_message_hint": hint}
 
 
+def auth_alert(db: Session, *, ok: bool, now: datetime) -> dict | None:
+    """One owner message when Google Calendar access is lost, one when it's back. Never repeats."""
+    from gymclaw.services.events import outage_open
+    lost = outage_open(db, "calendar.auth_lost", "calendar.auth_restored")
+    if not ok and not lost:
+        event = emit(db, "calendar.auth_lost", now, {})
+        return {"event_id": event.id, "message": "⚠️ Lost access to Google Calendar, so I can't see calendar edits or update events. "
+            "Moves via chat still work. Reconnect with `calendar auth` on the server."}
+    if ok and lost:
+        event = emit(db, "calendar.auth_restored", now, {})
+        return {"event_id": event.id, "message": "✅ Google Calendar is connected again."}
+    return None
+
+
 def workout_name(session: PlannedSession) -> str:
     return session.workout_plan_json.get("template", {}).get("name") or (session.workout_template_id or "Workout").title()
 

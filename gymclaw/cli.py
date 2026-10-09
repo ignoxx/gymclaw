@@ -69,6 +69,7 @@ def parser():
         "personal-connect", "personal-sync", "personal-status", "personal-disconnect"])
     calendar.add_argument("--session-id", help="move/skip: the session")
     calendar.add_argument("--to", type=datetime.fromisoformat, help="move: exact start with offset; omit to pick the best valid slot (quiet first, then habits)")
+    calendar.add_argument("--leave-at", type=datetime.fromisoformat, help="move: when the owner can leave (with offset); start = this + commute")
     calendar.add_argument("--after", type=datetime.fromisoformat, help="move: without --to, only consider starts at/after this instant (with offset); implies its day unless --day")
     calendar.add_argument("--day", type=date.fromisoformat, help="move: keep it on this date (YYYY-MM-DD)")
     calendar.add_argument("--calendar-id")
@@ -137,7 +138,7 @@ def workout_command(db, args):
         return {"data": adaptation.alternatives(db, required(args.workout_id, "--workout-id"), args.exercise_id), "events": [], "user_message_hint": None}
     request_id = required(args.request_id, "--request-id")
     if args.operation == "start":
-        return workout.start(db, required(args.template_id, "--template-id"), now=now, request_id=request_id, planned_session_id=args.planned_session_id)
+        return workout.start(db, args.template_id, now=now, request_id=request_id, planned_session_id=args.planned_session_id)
     if args.operation == "rest-complete":
         return workout.rest_complete(db, required(args.job_id, "--job-id"), now=now, request_id=request_id)
     workout_id = required(args.workout_id, "--workout-id")

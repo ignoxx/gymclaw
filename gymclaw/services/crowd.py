@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from gymclaw.models import AgentEvent, CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
+from gymclaw.models import CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
 from gymclaw.providers.crowd import CrowdProvider
 from gymclaw.services.errors import DomainError
 from gymclaw.services.planning import SlotSignal
@@ -306,15 +306,15 @@ def polling_health(db: Session, *, now: datetime) -> dict:
 def polling_alert(db: Session, *, now: datetime) -> dict | None:
     """One Telegram message when check-ins stop arriving, one when they're back. Never repeats."""
     health = polling_health(db, now=now)
-    open_alert = db.scalar(select(AgentEvent).where(AgentEvent.type == "crowd.polling_stale", AgentEvent.handled_at.is_(None)))
+    from gymclaw.services.events import outage_open
+    stale = outage_open(db, "crowd.polling_stale", "crowd.polling_recovered")
     zone = ZoneInfo(get_profile(db).timezone)
-    if health["status"] in {"stale", "failing"} and open_alert is None:
+    if health["status"] in {"stale", "failing"} and not stale:
         since = datetime.fromisoformat(health["last_success_at"]).astimezone(zone)
         event = emit(db, "crowd.polling_stale", now, health)
         reason = f" (gym API: {health['error']})" if health["error"] else ""
         return {"event_id": event.id, "message": f"⚠️ No gym check-in data since {since:%a %H:%M}{reason}. Crowd forecasts are going stale."}
-    if health["status"] == "ok" and open_alert is not None:
-        open_alert.handled_at = now
+    if health["status"] == "ok" and stale:
         event = emit(db, "crowd.polling_recovered", now, health)
         return {"event_id": event.id, "message": "✅ Gym check-in data is flowing again."}
     return None

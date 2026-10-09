@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from gymclaw.db import initialize, make_engine
-from gymclaw.models import CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
+from gymclaw.models import AgentEvent, CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference, WorkoutSession
 from gymclaw.providers.crowd import CrowdReading, FixtureCrowdProvider
 from gymclaw.providers import crowd_sources
 from gymclaw.providers.mysports import MySportsProvider
@@ -325,6 +325,7 @@ def test_polling_alert_once_when_stale_and_once_when_back(engine):
         assert crowd.polling_alert(db, now=NOW + timedelta(minutes=30)) is None
         alert = crowd.polling_alert(db, now=NOW + timedelta(hours=1))
         assert alert["message"].startswith("⚠️ No gym check-in data since")
+        db.get(AgentEvent, alert["event_id"]).handled_at = NOW + timedelta(hours=1)  # delivered
         assert crowd.polling_alert(db, now=NOW + timedelta(hours=2)) is None  # no repeats
         crowd.poll(db, provider(9), now=NOW + timedelta(hours=3))
         assert crowd.polling_alert(db, now=NOW + timedelta(hours=3, minutes=1))["message"].startswith("✅")

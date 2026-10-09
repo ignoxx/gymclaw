@@ -8,7 +8,6 @@ export const TICK_MS = 5000;
 const ACTIONS = ["status", "preview", "start", "log", "card", "swap", "switch", "relabel", "rest", "later", "next", "end"];
 // Arguments an action can't do without. Checked before the CLI so the model gets an example to copy.
 const REQUIRED = {
-  start: ["template_id", '{"action":"start","template_id":"push"}'],
   log: ["text", '{"action":"log","text":"10x40"}'],
   switch: ["exercise", '{"action":"switch","exercise":"pec-deck"}'],
   relabel: ["exercise", '{"action":"relabel","exercise":"pec-deck"}'],
@@ -311,8 +310,8 @@ export function registerCoach(api, { run, telegram, coaches = COACHES, turnLog =
       "Drive the live workout in Telegram. Sends exercise cards (image, target, quick buttons) to the owner directly, " +
       "so after calling reply NO_REPLY unless the owner asked a question. Actions: status (read the running workout, sends " +
       "nothing), preview (next or given planned session: one image with every exercise + plan; use for \"what's on today\"), " +
-      "log (text like \"10x40\" = 10 reps at 40 kg: logs a set), start (template_id, optional " +
-      "planned_session_id), card (resend current card), swap (show up to 3 same-muscle alternatives as buttons; only " +
+      "log (text like \"10x40\" = 10 reps at 40 kg: logs a set), start (no args: starts today's planned " +
+      "session; template_id/planned_session_id only to start something else), card (resend current card), swap (show up to 3 same-muscle alternatives as buttons; only " +
       "before the first set), switch (exercise: the owner is doing this exercise now — any exercise, any time; " +
       "finishes or replaces the current one), relabel (exercise: what the owner really did; which: the logged exercise " +
       "to fix, default the latest; works after the workout too), rest (seconds between sets for this workout; " +
@@ -349,7 +348,7 @@ export function registerCoach(api, { run, telegram, coaches = COACHES, turnLog =
             : params.action === "log"
             ? ["coach", "text", "--text", params.text ?? "", "--request-id", requestId]
             : params.action === "start"
-          ? ["coach", "start", "--template-id", params.template_id ?? "", ...(params.planned_session_id ? ["--planned-session-id", params.planned_session_id] : []), "--request-id", requestId]
+          ? ["coach", "start", ...(params.template_id ? ["--template-id", params.template_id] : []), ...(params.planned_session_id ? ["--planned-session-id", params.planned_session_id] : []), "--request-id", requestId]
           : params.action === "card"
             ? ["coach", "card"]
             : ["coach", "act", "--action", params.action, "--request-id", requestId,
