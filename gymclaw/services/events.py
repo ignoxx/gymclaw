@@ -31,3 +31,10 @@ def ack(db: Session, event_id: str, *, now: datetime) -> dict:
     if event.handled_at is None:
         event.handled_at = now
     return {"id": event.id, "handled_at": event.handled_at.isoformat()}
+
+
+def outage_open(db: Session, lost: str, restored: str) -> bool:
+    """Whether the latest of a lost/restored event pair is `lost`. Owner alerts dedupe on this, not on
+    `handled_at`: delivering the alert marks its event handled while the outage is still on."""
+    latest = db.scalar(select(AgentEvent.type).where(AgentEvent.type.in_([lost, restored])).order_by(AgentEvent.created_at.desc(), AgentEvent.id.desc()).limit(1))
+    return latest == lost

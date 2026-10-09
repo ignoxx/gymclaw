@@ -15,7 +15,7 @@ from gymclaw.providers.google_calendar import google_provider
 from gymclaw.providers import crowd_sources
 from gymclaw.providers.openclaw import OpenClawProvider, validate_route
 from gymclaw.services import crowd, personal_calendar, runtime, weekly
-from gymclaw.services.calendar import sync_calendar, week_lineup
+from gymclaw.services.calendar import auth_alert, sync_calendar, week_lineup
 from gymclaw.services.errors import DomainError
 from gymclaw.services.profile import get_profile
 from gymclaw.services.workout import emit, utc
@@ -200,7 +200,20 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                     state = db.get(CalendarSyncState, 1)
                     if state is None or state.source != "google":
                         raise DomainError("LIVE_CALENDAR_REQUIRED", "Watcher requires dedicated Google calendar auth")
-                    synced = sync_calendar(db, google_provider(db, state.calendar_id), now=now)
+                    # A calendar outage must not stall the rest of the tick: reminders, nudges, deliveries.
+                    try:
+                        with db.begin_nested():
+                            synced = sync_calendar(db, google_provider(db, state.calendar_id), now=now)
+                        calendar_error = None
+                    except DomainError as error:
+                        if not error.code.startswith("CALENDAR_"):
+                            raise
+                        calendar_error = error.code
+                        synced = {"data": {"weeks": []}, "events": [], "user_message_hint": None}
+                    if calendar_error != "CALENDAR_UNAVAILABLE":  # transient; says nothing about auth
+                        auth = auth_alert(db, ok=calendar_error is None, now=now)
+                        if auth:
+                            runtime.prepare_event_message(db, auth["event_id"], message=auth["message"], now=now, recipient=recipient, profile=provider.profile)
                     personal = personal_calendar.refresh(db, now=now)
                     rolling = weekly.rolling_plan(db, authority["template_id"], now=now) if authority.get("template_id") else {}
                     for nudge in weekly.no_show_nudges(db, now=now):
@@ -218,9 +231,9 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                         event = emit(db, "calendar.update_briefing", now, {"related_events": [e["id"] for e in synced["events"] + personal["events"]]})
                         runtime.prepare_event_message(db, event.id, message=hint, now=now, recipient=recipient, profile=provider.profile,
                             related_events=tuple(e["id"] for e in synced["events"] + personal["events"]))
-                publication = publish_if_enabled(engine, args, authority, now=now)
+                publication = publish_if_enabled(engine, args, authority, now=now) if calendar_error is None else {"published": False, "reason": calendar_error}
                 data = runtime.sync_automations(engine, provider, now=now, recipient=recipient, project_root=args.project_root,
                     allow_runtime_changes=True, allow_messages=True, include_watcher=not args.no_watcher, configure=False)
-                data |= {"publication": publication, "rolling": rolling}
+                data |= {"publication": publication, "rolling": rolling, "calendar_error": calendar_error}
             data["deliveries"] = deliver_pending(engine, provider, now=now, recipient=recipient)
     return {"data": data, "events": [], "user_message_hint": None}
