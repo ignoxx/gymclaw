@@ -257,10 +257,10 @@ def spec_of(row: WorkoutExercise) -> ExerciseSpec:
     return ExerciseSpec.model_validate({k: v for k, v in row.config_json.items() if k in ExerciseSpec.model_fields})
 
 
-def switch_to(db: Session, workout_id: str, query: str, *, now: datetime, request_id: str) -> dict:
+def switch_to(db: Session, workout_id: str, query: str, *, now: datetime, request_id: str, remember: bool = True) -> dict:
     """Owner says what they're doing now. Any exercise, any time: the current one is finished with the
-    sets done so far, replaced if not started (and the template remembers the replacement), or put back
-    in the queue if the owner just wants another planned exercise first."""
+    sets done so far, replaced if not started (and, if `remember`, the template keeps the replacement),
+    or put back in the queue if the owner just wants another planned exercise first."""
     now = utc(now)
 
     def action():
@@ -293,7 +293,7 @@ def switch_to(db: Session, workout_id: str, query: str, *, now: datetime, reques
         transition(db, workout, "NEXT_EXERCISE", now)
         transition(db, workout, "EXERCISE_ACTIVE", now)
         transition(db, workout, "SET_ACTIVE", now)
-        if result_extra["replaced_exercise_id"] and workout.template_id:
+        if remember and result_extra["replaced_exercise_id"] and workout.template_id:
             remember_swap(db, workout.template_id, current.exercise_id, spec)
         return touch(db, workout, now) | result_extra
 

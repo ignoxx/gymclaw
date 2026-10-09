@@ -41,11 +41,23 @@ def test_cli_restart_plan_and_idempotency(tmp_path):
 
 def test_cli_errors_json_and_rollback(tmp_path):
     run(tmp_path, "db", "init")
-    for args in [("profile", "update", "--data", '{"prep_minutes":-1}'), ("profile", "update", "--data", "[]"), ("unknown",), ("schedule", "plan-week", "--week-start", "2026-10-12", "--now", "2026-10-11T00:00:00")]:
+    for args in [("profile", "update", "--data", '{"prep_minutes":-1}'), ("profile", "update", "--data", "[]"), ("unknown",)]:
         code, result = run(tmp_path, *args)
         assert code == 1 and not result["ok"]
         assert result["error"]["code"] == "INVALID_INPUT"
     assert run(tmp_path, "profile", "get")[1]["data"]["prep_minutes"] == 15
+
+
+def test_cli_forgives_common_guesses(tmp_path):
+    run(tmp_path, "db", "init")
+    # A wrong or missing operation lists every command, so one failed call is enough to fix it.
+    code, lost = run(tmp_path, "calendar")
+    assert code == 1 and "calendar auth|sync" in lost["error"]["message"] and "crowd poll|" in lost["error"]["message"]
+    # Guessed names map to the real operation; a naive time is the owner's local time (Europe/Berlin).
+    code, prediction = run(tmp_path, "crowd", "now", "--fixture", "missing.json")
+    assert code == 1 and "invalid choice" not in prediction["error"]["message"]
+    code, planned = run(tmp_path, "schedule", "plan-week", "--week-start", "2026-10-12", "--now", "2026-10-11T12:00:00")
+    assert code == 0 and planned["data"]["sessions"][0]["start"] > "2026-10-11T10:00:00+00:00"
 
 
 def test_calendar_snapshot_and_locked_session_preserved(tmp_path):

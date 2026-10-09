@@ -80,9 +80,6 @@ def test_move_session_picks_valid_slot_or_explains(engine, capsys):
     assert call(*move, "--to", "2026-10-16T12:00:00+02:00")[1] == moved
     writes = call("calendar", "pending-writes")[1]["data"]["writes"]
     assert any(w["session_id"] == friday["id"] and w["body"]["start"]["dateTime"] == "2026-10-16T12:00:00+02:00" for w in writes)
-    # Thursday would leave no rest day after Wednesday.
-    code, refused = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-3-move", "--day", "2026-10-15")
-    assert code == 1 and refused["error"]["code"] == "NO_VALID_SLOT"
     # "Later today": best slot at/after the bound, plus spread-out alternatives for buttons.
     code, later = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-4-move", "--after", "2026-10-16T14:00:00+02:00")
     starts = [datetime.fromisoformat(t) for t in (later["data"]["to"], *(a["start"] for a in later["data"]["alternatives"]))]
@@ -107,11 +104,40 @@ def test_move_session_picks_valid_slot_or_explains(engine, capsys):
         replan_weeks(db, {date(2026, 10, 12)}, now=SUNDAY)
         row = db.get(PlannedSession, friday["id"])
         assert row.user_locked and row.planned_start_at == datetime.fromisoformat(kept["data"]["to"])
-    # "I can leave at 13:00": start is leave + commute, and a valid slot unlocks it again.
+    # "I can leave at 13:00": start is leave + commute.
     code, left = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-6-move", "--leave-at", "2026-10-16T13:00:00+02:00")
     with Session(engine) as db:
         commute = get_profile(db).commute_to_gym_minutes
     assert code == 0 and datetime.fromisoformat(left["data"]["to"]) == datetime.fromisoformat("2026-10-16T13:00:00+02:00") + timedelta(minutes=commute)
+    # A day the owner asks for wins over the rest-day rule (Thursday follows Wednesday); the warning says so.
+    code, thursday = call("calendar", "move", "--session-id", friday["id"], "--request-id", "tg-7-move", "--day", "2026-10-15")
+    assert code == 0 and thursday["data"]["to"].startswith("2026-10-15") and thursday["data"]["warnings"] == ["skips a rest day"]
+
+
+def test_owner_adds_sessions_and_picks_workouts(engine, capsys):
+    def call(*args):
+        code = main(["--db-url", str(engine.url), *args, "--now", SUNDAY.isoformat()])
+        return code, json.loads(capsys.readouterr().out)
+
+    from gymclaw.models import PlannedSession
+    from gymclaw.services.replanning import replan_weeks
+    from gymclaw.services.templates import ExerciseSpec, Template, import_template
+    with Session(engine) as db, db.begin():
+        sessions = weekly.weekly_plan(db, "short", now=SUNDAY)["plan"]["sessions"]
+        import_template(db, Template(id="legs", name="Legs", exercises=[ExerciseSpec(id="squat", name="Squat", role="squat", target_weight=100)]))
+    # Naive times are the owner's local time. The extra session is kept beyond the weekly maximum.
+    code, added = call("calendar", "add", "--to", "2026-10-17T10:00", "--template-id", "short", "--request-id", "tg-1-add")
+    assert code == 0 and added["data"]["to"] == "2026-10-17T08:00:00+00:00" and added["data"]["warnings"] == ["outside your workout window (07:00–22:00)", "skips a rest day"]
+    with Session(engine) as db, db.begin():
+        replan_weeks(db, {date(2026, 10, 12)}, now=SUNDAY)
+        assert db.get(PlannedSession, added["data"]["session_id"]).status in {"TENTATIVE", "COMMITTED"}
+    # "Legs today instead": the session gets that workout and keeps it.
+    code, legs = call("calendar", "set-workout", "--session-id", sessions[0]["id"], "--template-id", "legs", "--request-id", "tg-2-set")
+    assert code == 0 and legs["data"]["to"] == "legs"
+    with Session(engine) as db, db.begin():
+        weekly.assign_rotation(db, now=SUNDAY)
+        row = db.get(PlannedSession, sessions[0]["id"])
+        assert row.user_locked and row.workout_template_id == "legs" and row.workout_plan_json["template"]["id"] == "legs"
 
 
 def test_profile_window_change_moves_sessions_that_no_longer_fit(engine, capsys):

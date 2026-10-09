@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import sys
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
@@ -24,14 +25,31 @@ from gymclaw.services.scheduling import PlanningFixture, schedule_week
 from gymclaw.services import adaptation, audit, events, notifications, weekly, workout, onboarding
 from gymclaw.services.errors import DomainError
 from gymclaw.services.set_parser import SetInput, parse_set
-from gymclaw.services.templates import Template, get_template, import_template, require_illustrations
+from gymclaw.services.templates import Template, edit_exercise, get_template, import_template, require_illustrations
+
+
+# Operation names the agent guesses → the real ones.
+ALIASES = {"calendar": {"move-session": "move", "reschedule": "move", "add-session": "add"}, "crowd": {"now": "poll", "live": "poll"}}
+# "group op1|op2; …", filled in by parser(). Shown when the group or operation is wrong or missing.
+COMMANDS = ""
 
 
 class Parser(argparse.ArgumentParser):
     """Bad input becomes a JSON error that carries usage, so the agent can fix the call without exploring.
     `--help` prints plain-text help and exits 0."""
     def error(self, message):
-        raise ValueError(f"{message}. {' '.join(self.format_usage().split())}")
+        lost = "invalid choice" in message or "required: group" in message or "required: operation" in message
+        raise ValueError(f"{message}. {' '.join(self.format_usage().split())}" + (f" Commands: {COMMANDS}" if lost else ""))
+
+
+def localize(engine, args):
+    """Timestamps without an offset are the owner's local time (profile timezone)."""
+    naive = {k: v for k, v in vars(args).items() if isinstance(v, datetime) and v.tzinfo is None}
+    if naive:
+        with Session(engine) as db:
+            zone = ZoneInfo(get_profile(db).timezone)
+        for key, value in naive.items():
+            setattr(args, key, value.replace(tzinfo=zone))
 
 
 def parser():
@@ -65,13 +83,13 @@ def parser():
     planning.add_argument("--request-id")
     planning.add_argument("--template-id")
     calendar = groups.add_parser("calendar")
-    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "move", "skip", "pending-writes", "publish",
+    calendar.add_argument("operation", choices=["auth", "sync", "get-week", "plan-week", "replan", "move", "add", "set-workout", "skip", "pending-writes", "publish",
         "personal-connect", "personal-sync", "personal-status", "personal-disconnect"])
-    calendar.add_argument("--session-id", help="move/skip: the session")
-    calendar.add_argument("--to", type=datetime.fromisoformat, help="move: exact start with offset; omit to pick the best valid slot (quiet first, then habits)")
-    calendar.add_argument("--leave-at", type=datetime.fromisoformat, help="move: when the owner can leave (with offset); start = this + commute")
-    calendar.add_argument("--after", type=datetime.fromisoformat, help="move: without --to, only consider starts at/after this instant (with offset); implies its day unless --day")
-    calendar.add_argument("--day", type=date.fromisoformat, help="move: keep it on this date (YYYY-MM-DD)")
+    calendar.add_argument("--session-id", help="move/skip/set-workout: the session")
+    calendar.add_argument("--to", type=datetime.fromisoformat, help="move/add: exact start (local time unless an offset is given); omit to pick the best slot (quiet first, then habits)")
+    calendar.add_argument("--leave-at", type=datetime.fromisoformat, help="move/add: when the owner can leave; start = this + commute")
+    calendar.add_argument("--after", type=datetime.fromisoformat, help="move/add: without --to, only consider starts at/after this time; implies its day unless --day")
+    calendar.add_argument("--day", type=date.fromisoformat, help="move/add: on this date (YYYY-MM-DD)")
     calendar.add_argument("--calendar-id")
     calendar.add_argument("--url", help="Read-only personal ICS feed (webcal:// or https://)")
     calendar.add_argument("--url-file", type=Path, help="File holding the feed link; keeps it out of argv/history")
@@ -83,12 +101,18 @@ def parser():
     calendar.add_argument("--fixture", type=Path)
     calendar.add_argument("--allow-writes", action="store_true")
     template = groups.add_parser("template")
-    template.add_argument("operation", choices=["import", "get"])
+    template.add_argument("operation", choices=["import", "get", "edit-exercise", "add-exercise", "remove-exercise"])
     template.add_argument("--file", type=Path)
     template.add_argument("--template-id")
+    template.add_argument("--exercise", help="*-exercise: ID, guide_id or name (add: from the catalog)")
+    template.add_argument("--data", type=json.loads, help='edit/add-exercise: spec fields, e.g. {"target_weight":85,"working_sets":4,"rep_min":6,"rep_max":8}')
+    template.add_argument("--position", type=int, help="edit/add-exercise: 0-based place in the order")
+    template.add_argument("--now", type=datetime.fromisoformat)
     training = groups.add_parser("workout")
-    training.add_argument("operation", choices=["start", "current", "alternatives", "log-set", "rest-complete", "machine-busy", "machine-free", "substitute", "next-exercise", "skip-warmup", "skip-exercise", "finish"])
+    training.add_argument("operation", choices=["start", "current", "alternatives", "log-set", "rest-complete", "machine-busy", "machine-free", "substitute", "next-exercise", "skip-warmup", "skip-exercise", "finish", "log-past"])
     training.add_argument("--template-id")
+    training.add_argument("--at", type=datetime.fromisoformat, help="log-past: when it started")
+    training.add_argument("--sets", type=json.loads, help='log-past: in order done, e.g. [{"exercise":"bench-press","reps":8,"weight":80}]')
     training.add_argument("--planned-session-id")
     training.add_argument("--workout-id")
     training.add_argument("--exercise-id")
@@ -117,6 +141,9 @@ def parser():
     jobs.add_argument("--now", type=datetime.fromisoformat)
     for command in (db, profile, setup, planning, calendar, template, training, report, inbox, jobs):
         command.add_argument("--json", action="store_true")
+    global COMMANDS
+    unique = {id(sub): (name, sub) for name, sub in groups.choices.items()}.values()
+    COMMANDS = "; ".join(f"{name} " + "|".join(next(a for a in sub._actions if a.dest == "operation").choices) for name, sub in unique)
     return root
 
 
@@ -137,6 +164,9 @@ def workout_command(db, args):
     if args.operation == "alternatives":
         return {"data": adaptation.alternatives(db, required(args.workout_id, "--workout-id"), args.exercise_id), "events": [], "user_message_hint": None}
     request_id = required(args.request_id, "--request-id")
+    if args.operation == "log-past":
+        from gymclaw.services.backfill import log_past
+        return log_past(db, required(args.sets, "--sets"), at=required(args.at, "--at"), now=now, request_id=request_id, template_id=args.template_id)
     if args.operation == "start":
         return workout.start(db, args.template_id, now=now, request_id=request_id, planned_session_id=args.planned_session_id)
     if args.operation == "rest-complete":
@@ -169,8 +199,13 @@ def workout_command(db, args):
 def main(argv=None) -> int:
     engine = None
     try:
+        argv = list(sys.argv[1:] if argv is None else argv)
+        group = next((i for i, a in enumerate(argv) if a in ALIASES), None)
+        if group is not None and group + 1 < len(argv):
+            argv[group + 1] = ALIASES[argv[group]].get(argv[group + 1], argv[group + 1])
         args = parser().parse_args(argv)
         engine = make_engine(args.db_url)
+        localize(engine, args)
         emitted_events = []
         message_hint = None
         if args.group == "catalog":
@@ -227,6 +262,12 @@ def main(argv=None) -> int:
                     if args.operation == "import":
                         definition = require_illustrations(Template.model_validate_json(required(args.file, "--file").read_text()))
                         data = import_template(db, definition)
+                    elif args.operation.endswith("-exercise"):
+                        template_id = required(args.template_id, "--template-id")
+                        definition = edit_exercise(db, template_id, required(args.exercise, "--exercise"), changes=args.data,
+                            add=args.operation == "add-exercise", remove=args.operation == "remove-exercise", position=args.position)
+                        # Upcoming sessions (and their calendar events) follow the edited plan.
+                        data = {"template": definition, "refreshed_sessions": weekly.refresh_plans(db, now=args.now or datetime.now(timezone.utc))}
                     else:
                         data = get_template(db, required(args.template_id, "--template-id")).model_dump(mode="json")
                 elif args.group == "workout":

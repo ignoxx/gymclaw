@@ -131,3 +131,44 @@ def get_template(db: Session, template_id: str) -> Template:
     if row is None:
         raise ValueError(f"Unknown workout template: {template_id}")
     return Template.model_validate(row.definition_json)
+
+
+def edit_exercise(db: Session, template_id: str, exercise: str, *, changes: dict | None = None, add: bool = False, remove: bool = False, position: int | None = None) -> dict:
+    """Change one exercise of a saved plan without re-importing it. `exercise` is an ID, guide_id or
+    name. Edit: `changes` are ExerciseSpec fields (e.g. target_weight, working_sets, rep_min); a new
+    target_weight also resets the learned next weight. Add: `exercise` is a catalog guide_id or name,
+    `changes` override the defaults, `position` is its 0-based place (default last). Remove: drops it
+    and any dependency on it. Upcoming planned sessions pick the change up via `refresh_plans`."""
+    from gymclaw.models import ExerciseProgression
+    from gymclaw.services.illustrations import catalog, search
+    definition = get_template(db, template_id).model_dump(mode="json")
+    rows = definition["exercises"]
+    key = exercise.strip().casefold()
+    index = next((i for i, e in enumerate(rows) if key in {e["id"].casefold(), e["name"].casefold(), (e.get("guide_id") or "").casefold()}), None)
+    changes = changes or {}
+    if add:
+        item = catalog().get(key) or next((i for i in catalog().values() if i["name"].casefold() == key), None)
+        if item is None:
+            options = ", ".join(f"{o['guide_id']} ({o['name']})" for o in search(exercise, limit=5))
+            raise DomainError("EXERCISE_UNKNOWN", f"No exact match for '{exercise}'. Pass one guide_id: {options or 'try catalog search'}")
+        if index is not None:
+            raise DomainError("EXERCISE_EXISTS", f"{rows[index]['name']} is already in {definition['name']}; edit it instead")
+        spec = {"id": item["slug"], "name": item["name"], "role": "accessory", "guide_id": item["slug"], "target_weight": 0} | changes
+        rows.insert(len(rows) if position is None else position, spec)
+    else:
+        if index is None:
+            names = ", ".join(e["name"] for e in rows)
+            raise DomainError("EXERCISE_NOT_FOUND", f"'{exercise}' isn't in {definition['name']} ({names})")
+        spec = rows[index]
+        if remove:
+            rows.pop(index)
+            for row in rows:
+                row["requires_completed"] = [r for r in row["requires_completed"] if r != spec["id"]]
+        else:
+            rows[index] = spec = spec | changes
+            if position is not None:
+                rows.insert(position, rows.pop(index))
+            progression = db.get(ExerciseProgression, spec["id"])
+            if "target_weight" in changes and progression is not None:
+                progression.next_weight = changes["target_weight"]
+    return import_template(db, Template.model_validate(definition))
