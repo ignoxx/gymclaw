@@ -71,7 +71,8 @@ def event_body(db: Session, session: PlannedSession) -> dict:
 
 
 def queue_session_write(db: Session, session: PlannedSession, *, now: datetime, metadata_only: bool = False) -> CalendarWrite | None:
-    if session.user_locked and not metadata_only or session.status in {"STARTED", "COMPLETED", "SKIPPED", "MISSED"}:
+    # Locked sessions still publish: their times come from the owner (calendar edit or chat move), never the planner.
+    if session.status in {"STARTED", "COMPLETED", "SKIPPED", "MISSED"}:
         return None
     action = "DELETE" if session.status == "CANCELLED" else "UPDATE" if session.calendar_event_id else "CREATE"
     if action == "DELETE" and not session.calendar_event_id:
@@ -113,8 +114,8 @@ def apply_write(db: Session, provider: CalendarProvider, write_id: str, *, now: 
     if write.status != "PENDING":
         return {"write_id": write.id, "status": write.status, "retried": True}
     session = db.get(PlannedSession, write.planned_session_id)
-    metadata_only = write.action == "UPDATE" and not {"start", "end"} & write.body_json.keys()
-    if session.user_locked and not metadata_only or write.revision != session.source_revision:
+    # A calendar edit after queueing bumps the revision, so a stale write never overwrites it.
+    if write.revision != session.source_revision:
         write.status = "CANCELLED"
         write.handled_at = now
         return {"write_id": write.id, "status": write.status}

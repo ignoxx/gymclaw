@@ -267,8 +267,25 @@ def make_exercise(db: Session, workout: WorkoutSession, spec: ExerciseSpec, posi
     return row
 
 
-def start(db: Session, template_id: str, *, now: datetime, request_id: str, planned_session_id: str | None = None, by_button: bool = False) -> dict:
+def todays_session(db: Session, now: datetime) -> PlannedSession | None:
+    """The startable planned session on the owner's local today closest to now, even if its slot already passed."""
+    from zoneinfo import ZoneInfo
+    zone = ZoneInfo(get_profile(db).timezone)
+    today = now.astimezone(zone).date()
+    rows = [s for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]), PlannedSession.workout_template_id.is_not(None)))
+        if s.planned_start_at.astimezone(zone).date() == today]
+    return min(rows, key=lambda s: abs(s.planned_start_at - now), default=None)
+
+
+def start(db: Session, template_id: str | None, *, now: datetime, request_id: str, planned_session_id: str | None = None, by_button: bool = False) -> dict:
+    """Start a workout. Without `template_id` it starts the given planned session, else today's one."""
     now = utc(now)
+    intent = {"template_id": template_id, "planned_session_id": planned_session_id}
+    if template_id is None:
+        planned = db.get(PlannedSession, planned_session_id) if planned_session_id else todays_session(db, now)
+        if planned is None or not planned.workout_template_id:
+            raise DomainError("NO_PLANNED_SESSION", "No planned workout today; pass template_id")
+        template_id, planned_session_id = planned.workout_template_id, planned.id
 
     def action():
         from gymclaw.services.availability import blocks
@@ -311,7 +328,7 @@ def start(db: Session, template_id: str, *, now: datetime, request_id: str, plan
         workout.initial_eta = estimate_finish(db, workout, now)
         return touch(db, workout, now)
 
-    return mutate(db, "workout.started", request_id, {"template_id": template_id, "planned_session_id": planned_session_id}, now, action)
+    return mutate(db, "workout.started", request_id, intent, now, action)
 
 
 def log_set(db: Session, workout_id: str, value: SetInput, *, now: datetime, request_id: str) -> dict:

@@ -1,6 +1,6 @@
 """Calendar CLI adapter, separate from deterministic domain services."""
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +12,7 @@ from gymclaw.services import personal_calendar
 from gymclaw.services.calendar import get_week, sync_calendar
 from gymclaw.services.calendar_writes import apply_write, pending_writes, queue_session_write
 from gymclaw.services.errors import DomainError
+from gymclaw.services.profile import get_profile
 from gymclaw.services.replanning import commit_upcoming, move_session, replan_weeks, skip_session
 from gymclaw.services.scheduling import schedule_week
 from gymclaw.services.workout import utc
@@ -65,7 +66,8 @@ def calendar_command(db: Session, args) -> dict:
     if args.operation == "skip":
         return skip_session(db, needed(args.session_id, "--session-id"), now=now, request_id=needed(args.request_id, "--request-id"))
     if args.operation == "move":
-        return move_session(db, needed(args.session_id, "--session-id"), now=now, request_id=needed(args.request_id, "--request-id"), to=args.to, day=args.day, after=args.after)
+        to = args.to or (args.leave_at + timedelta(minutes=get_profile(db).commute_to_gym_minutes) if args.leave_at else None)
+        return move_session(db, needed(args.session_id, "--session-id"), now=now, request_id=needed(args.request_id, "--request-id"), to=to, day=args.day, after=args.after)
     provider = provider_for(db, args)
     synced = sync_calendar(db, provider, now=now)
     if args.operation == "sync":

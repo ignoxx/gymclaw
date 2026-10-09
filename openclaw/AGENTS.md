@@ -76,8 +76,8 @@ Never interrupt a running workout with setup.
 
 Use the `gymclaw_workout` tool. It sends cards (image, target, buttons) itself; reply `NO_REPLY` after.
 
-- Owner arrives / says start → `{"action":"start","template_id":…, "planned_session_id":…}`
-  (the template is on the planned session in `calendar get-week`).
+- Owner arrives / says start → `{"action":"start"}` starts today's planned session. Add `template_id`
+  only when they want a different workout.
 - Owner names an exercise ("let's do DB RDL now", "I'm on the hack squat instead", "back to X") →
   `{"action":"switch","exercise":"dumbbell-romanian-deadlift"}`. Any exercise, any time, even after sets:
   it finishes or replaces the current one. Never use `later` or `swap` for this.
@@ -102,22 +102,27 @@ use `status` first. Only these actions exist; don't invent others.
 ### Calendar and availability
 
 - `calendar sync`, `calendar get-week --week-start YYYY-MM-DD`. Week starts Monday.
-- Move one session that hasn't ended (also today's missed one): `calendar move --session-id ID
-  [--day YYYY-MM-DD | --to 2026-10-09T11:30:00+02:00]`.
+- Move one session that hasn't ended (also today's missed one, or one the owner edited in the
+  calendar): `calendar move --session-id ID [--day YYYY-MM-DD | --to 2026-10-09T11:30:00+02:00]`.
   Without `--to` it picks the best valid slot: quietest first, then the owner's habits (learned from
   when they really train and where they move sessions). `--after 2026-10-07T12:00:00+02:00` keeps it
-  at/after that time (and on that day unless `--day`). An invalid `--to` fails with the valid start
-  times for that day; offer those.
+  at/after that time (and on that day unless `--day`).
+- A time the owner names is final: `--to` it, any minute, even outside the planner's rules. If
+  `data.warnings` lists broken rules, mention them in a few words; don't argue.
+- "I can leave in 10 min" / "leaving now" → `calendar move --session-id ID --leave-at <now + N min>`
+  (start = leave + commute).
 - "Later" / "not now" without a time: don't ask first. `calendar move --after <now + 1h, or the current
   start if that's later>`, then send one message naming the new time with `data.alternatives` as buttons.
   A named time → `--to` it directly.
 - Lasting preferences (time window, weekdays, session length, rest days, default rest seconds): `profile update --data
   '{"latest_workout_finish":"17:00"}'` (fields: `profile get`). It moves sessions that no longer fit
   and returns them in `data.replanning.changed`. Don't toggle the profile to steer one session; use `calendar move`.
+- `CALENDAR_AUTH_REQUIRED`: Google access is gone and the owner already got an alert. Calendar edits
+  aren't visible; trust what the owner tells you and act on it with `calendar move`.
 - Personal calendar is read-only busy time, refreshed by the watcher. `calendar personal-status`
   shows health; `calendar personal-sync` forces a refresh. Never connect/disconnect it unless the owner asks.
-- No-show nudge ("… hasn't started. Skip it or move it?"): find the session in `calendar get-week`.
-  Skip → `calendar skip --session-id ID` (no make-up). Move → `calendar move --session-id ID [--day …]`.
+- Skip a session, today's or upcoming (also the no-show nudge "… hasn't started. Skip it or move it?"):
+  `calendar skip --session-id ID` (no make-up). Move → `calendar move` as above.
 - Travel/illness: `availability add --kind TRAVEL|SICK --through YYYY-MM-DD` (inclusive); ask before
   `--cancel-locked`. `availability remove --block-id ID`.
 - Keep owner-locked events. Publication (`calendar publish --allow-writes`) and

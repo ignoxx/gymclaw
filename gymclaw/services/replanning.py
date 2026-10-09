@@ -146,12 +146,30 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
     return {"changed": changed, "warnings": list(dict.fromkeys(warnings))}
 
 
+def rule_breaks(db: Session, session: PlannedSession, slot: Candidate, profile) -> list[str]:
+    """Planner rules an owner-chosen slot breaks, as short reasons for the owner."""
+    zone = ZoneInfo(profile.timezone)
+    start, end = slot.start.astimezone(zone), slot.end.astimezone(zone)
+    reasons = []
+    if start.weekday() not in profile.weekdays_allowed or start.date() != end.date() or start.time() < profile.earliest_workout_start or end.time() > profile.latest_workout_finish:
+        reasons.append(f"outside your workout window ({profile.earliest_workout_start:%H:%M}–{profile.latest_workout_finish:%H:%M})")
+    day = datetime.combine(start.date(), datetime.min.time(), zone)
+    if any(overlaps(slot.prep_start, slot.home_at, b) for b in busy_intervals(db, day - timedelta(days=1), day + timedelta(days=2))):
+        reasons.append("overlaps a calendar event")
+    others = db.scalars(select(PlannedSession).where(PlannedSession.status.in_(ACTIVE), PlannedSession.id != session.id))
+    if any(not recovery_ok(slot.start, slot.end, interval(other), profile) for other in others):
+        reasons.append("skips a rest day")
+    return reasons
+
+
 def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None, after: datetime | None = None) -> dict:
-    """Owner-requested move of one session that hasn't ended (a no-show can still be moved). `to` is an
-    exact start; otherwise the planner picks the best-scoring valid slot (quiet first, then the owner's
-    habits) starting at or after `after`, on `day` if given, else anywhere in the session's week.
-    The new slot must satisfy the same rules as planning: workout window, calendar, rest days.
-    `alternatives` lists the next-best starts (spread apart) so the owner can pick another in one tap."""
+    """Owner-requested move of one session that hasn't ended (a no-show can still be moved), including
+    one the owner edited in the calendar. `to` is an exact start the owner named: a valid planner slot
+    if there is one at that time, otherwise it is kept anyway, locked against replanning, and
+    `warnings` names the rules it breaks. Without `to` the planner picks the best-scoring valid slot
+    (quiet first, then the owner's habits) starting at or after `after`, on `day` if given, else
+    anywhere in the session's week. `alternatives` lists the next-best starts (spread apart) so the
+    owner can pick another in one tap."""
     now = utc(now)
     for name, value in (("--to", to), ("--after", after)):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
@@ -161,8 +179,6 @@ def move_session(db: Session, session_id: str, *, now: datetime, request_id: str
         session = db.get(PlannedSession, session_id)
         if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_end_at <= now:
             raise DomainError("SESSION_NOT_MOVABLE", "Only tentative or committed sessions that haven't ended can be moved")
-        if session.user_locked:
-            raise DomainError("SESSION_LOCKED", "Session was edited in the calendar; move the calendar event instead")
         profile = get_profile(db)
         zone = ZoneInfo(profile.timezone)
         target_day = to.astimezone(zone).date() if to else day or (after.astimezone(zone).date() if after else None)
@@ -174,28 +190,37 @@ def move_session(db: Session, session_id: str, *, now: datetime, request_id: str
         signals = planning_signals(db, week, now=now)
         candidates = [c for c in generate_candidates(profile, week, busy=busy_intervals(db, window_start, window_start + timedelta(days=9)), unavailable=deleted, existing=others, signals=signals, now=now)
             if (target_day is None or c.start.astimezone(zone).date() == target_day) and (after is None or c.start >= utc(after))]
-        if to is not None:
-            matching = [c for c in candidates if c.start == utc(to)]
-            if not matching:
-                starts = sorted({c.start.astimezone(zone).strftime("%H:%M") for c in candidates})
-                raise DomainError("SLOT_NOT_VALID", f"{to.astimezone(zone):%a %H:%M} breaks the workout window ({profile.earliest_workout_start:%H:%M}–{profile.latest_workout_finish:%H:%M}), "
-                    f"a calendar event or rest days. Valid starts that day: {', '.join(starts) or 'none'}")
-            candidates = matching
-        if not candidates:
-            raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window, calendar or rest days)")
-        ranked = sorted(candidates, key=lambda c: c.score, reverse=True)
-        slot = ranked[0]
+        warnings: list[str] = []
         alternatives: list[Candidate] = []
-        for c in ranked[1:]:
-            if len(alternatives) < 2 and all(abs(c.start - other.start) >= timedelta(minutes=60) for other in (slot, *alternatives)):
-                alternatives.append(c)
+        if to is not None:
+            slot = next((c for c in candidates if c.start == utc(to)), None)
+            if slot is None:
+                # The owner leads: keep their time even off the planner's grid or rules.
+                start = utc(to)
+                end = start + (session.planned_end_at - session.planned_start_at)
+                if end <= now:
+                    raise DomainError("SLOT_IN_PAST", f"{to.astimezone(zone):%a %H:%M} would already be over")
+                slot = Candidate(start=start, end=end, prep_start=start - timedelta(minutes=profile.prep_minutes + profile.commute_to_gym_minutes),
+                    leave_home=start - timedelta(minutes=profile.commute_to_gym_minutes), home_at=end + timedelta(minutes=profile.commute_home_minutes),
+                    crowd=None, confidence=0, score=0, score_parts={})
+                warnings = rule_breaks(db, session, slot, profile)
+        else:
+            if not candidates:
+                raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window, calendar or rest days); offer a time and move with --to")
+            ranked = sorted(candidates, key=lambda c: c.score, reverse=True)
+            slot = ranked[0]
+            for c in ranked[1:]:
+                if len(alternatives) < 2 and all(abs(c.start - other.start) >= timedelta(minutes=60) for other in (slot, *alternatives)):
+                    alternatives.append(c)
         old_start = session.planned_start_at
         if slot.start != old_start or slot.end != session.planned_end_at:
             cancel_session_jobs(db, session.id, now=now)
         session.source_revision += 1
+        # A slot that breaks the rules would be "repaired" by the next replan; the lock keeps the owner's choice.
+        session.user_locked = bool(warnings)
         place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
         return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence,
-            "alternatives": [{"start": c.start.isoformat(), "crowd": c.crowd} for c in sorted(alternatives, key=lambda c: c.start)]}
+            "warnings": warnings, "alternatives": [{"start": c.start.isoformat(), "crowd": c.crowd} for c in sorted(alternatives, key=lambda c: c.start)]}
 
     return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}
         | ({"after": after.isoformat()} if after else {}), now, action)
@@ -211,7 +236,7 @@ def retire_session(db: Session, session: PlannedSession, status: str, *, now: da
 
 
 def skip_session(db: Session, session_id: str, *, now: datetime, request_id: str) -> dict:
-    """Owner skips a session whose time has come (e.g. answering the no-show nudge). It still counts
+    """Owner skips a session, upcoming or due (e.g. answering the no-show nudge). It still counts
     toward the week, so no make-up session is added; `move_session` is the make-up path."""
     now = utc(now)
 
@@ -219,8 +244,6 @@ def skip_session(db: Session, session_id: str, *, now: datetime, request_id: str
         session = db.get(PlannedSession, session_id)
         if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_end_at <= now:
             raise DomainError("SESSION_NOT_SKIPPABLE", "Only tentative or committed sessions that haven't ended can be skipped")
-        if now < session.prep_start_at:
-            raise DomainError("SESSION_NOT_DUE", "Skip works once it's time to get ready; move upcoming sessions or add availability instead")
         retire_session(db, session, "SKIPPED", now=now)
         return {"session_id": session.id, "status": session.status}
 
