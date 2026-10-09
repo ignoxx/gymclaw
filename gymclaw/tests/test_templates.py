@@ -69,3 +69,19 @@ def test_upgrade_preserves_existing_workout_and_logs(tmp_path):
         assert db.get(WorkoutExercise, "e").config_json == {}
         assert db.get(SetLog, "s").reps == 9
         assert db.connection().exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+
+def test_edit_one_exercise_without_reimport(tmp_path):
+    from gymclaw.tests.test_cli import run
+    run(tmp_path, "db", "init")
+    run(tmp_path, "template", "import", "--file", "config/exercises.seed.json")
+    edit = ("template", "edit-exercise", "--template-id", "upper-a")
+    code, edited = run(tmp_path, *edit, "--exercise", "bench press", "--data", '{"target_weight":85,"working_sets":4}')
+    bench = edited["data"]["template"]["exercises"][0]
+    assert code == 0 and bench["target_weight"] == 85 and bench["working_sets"] == 4
+    code, added = run(tmp_path, "template", "add-exercise", "--template-id", "upper-a", "--exercise", "face-pull", "--position", "2")
+    assert code == 0 and [e["id"] for e in added["data"]["template"]["exercises"]] == ["bench", "row", "face-pull", "pec-deck", "lateral-raise"]
+    code, removed = run(tmp_path, "template", "remove-exercise", "--template-id", "upper-a", "--exercise", "Pec Deck")
+    assert code == 0 and "pec-deck" not in [e["id"] for e in removed["data"]["template"]["exercises"]]
+    code, missing = run(tmp_path, *edit, "--exercise", "squat", "--data", "{}")
+    assert code == 1 and missing["error"]["code"] == "EXERCISE_NOT_FOUND" and "Bench Press" in missing["error"]["message"]

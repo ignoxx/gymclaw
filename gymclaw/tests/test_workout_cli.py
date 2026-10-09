@@ -88,3 +88,27 @@ def test_cli_workout_errors_are_json(tmp_path):
     ]:
         code, response = run(tmp_path, *args)
         assert code == 1 and response["error"]["code"] == expected
+
+
+def test_log_past_workout_counts_for_plan_and_progression(tmp_path):
+    run(tmp_path, "db", "init")
+    run(tmp_path, "template", "import", "--file", "config/exercises.seed.json")
+    plan = run(tmp_path, "schedule", "plan-week", "--week-start", "2026-10-12", "--now", "2026-10-11T12:00:00+02:00", "--template-id", "upper-a")[1]["data"]
+    monday = plan["sessions"][0]
+    # The owner trained Monday without the bot, did face pulls instead of pec deck, and tells us Tuesday.
+    sets = [{"exercise": "bench", "reps": 10, "weight": 80}, {"exercise": "bench", "reps": 10, "weight": 80}, {"exercise": "bench", "reps": 10, "weight": 80},
+        {"exercise": "face-pull", "reps": 15, "weight": 20}]
+    args = ("workout", "log-past", "--at", monday["start"][:16], "--sets", json.dumps(sets), "--now", "2026-10-13T09:00:00+02:00", "--request-id", "tg-9-past")
+    code, logged = run(tmp_path, *args)
+    assert code == 0 and logged["data"]["sets"] == 4 and logged["data"]["planned_session_id"] == monday["id"]
+    assert run(tmp_path, *args)[1] == logged
+    engine = make_engine(f"sqlite:///{tmp_path / 'state.db'}")
+    with Session(engine) as db:
+        assert db.get(PlannedSession, monday["id"]).status == "COMPLETED"
+        assert db.get(ExerciseProgression, "bench").next_weight > 80
+        assert len(db.scalars(select(SetLog)).all()) == 4
+        assert db.scalar(select(NotificationJob).where(NotificationJob.status == "PENDING", NotificationJob.kind == "REST")) is None
+    engine.dispose()
+    # The saved plan still has pec deck: a one-off past swap doesn't rewrite it.
+    template = run(tmp_path, "template", "get", "--template-id", "upper-a")[1]["data"]
+    assert "pec-deck" in [e["id"] for e in template["exercises"]]

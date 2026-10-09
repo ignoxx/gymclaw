@@ -13,6 +13,7 @@ from gymclaw.services.notifications import cancel_session_jobs, schedule_session
 from gymclaw.services.errors import DomainError
 from gymclaw.services.planning import Candidate, Interval, generate_candidates, overlaps, plan_week, recovery_ok
 from gymclaw.services.profile import get_profile
+from gymclaw.services.templates import get_template
 from gymclaw.services.workout import emit, mutate, utc
 
 ACTIVE = {"TENTATIVE", "COMMITTED", "STARTED", "COMPLETED"}
@@ -162,68 +163,134 @@ def rule_breaks(db: Session, session: PlannedSession, slot: Candidate, profile) 
     return reasons
 
 
-def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None, after: datetime | None = None) -> dict:
-    """Owner-requested move of one session that hasn't ended (a no-show can still be moved), including
-    one the owner edited in the calendar. `to` is an exact start the owner named: a valid planner slot
-    if there is one at that time, otherwise it is kept anyway, locked against replanning, and
-    `warnings` names the rules it breaks. Without `to` the planner picks the best-scoring valid slot
-    (quiet first, then the owner's habits) starting at or after `after`, on `day` if given, else
-    anywhere in the session's week. `alternatives` lists the next-best starts (spread apart) so the
-    owner can pick another in one tap."""
-    now = utc(now)
+def pick_slot(db: Session, session: PlannedSession, *, now: datetime, minutes: int, anchor: datetime, to: datetime | None = None, day: date | None = None, after: datetime | None = None):
+    """Where an owner-requested session goes → (slot, week, warnings, alternatives, signals). `to` is an
+    exact start the owner named: a planner slot if one matches, otherwise kept anyway (`minutes` long).
+    Without `to`, the best-scoring slot at/after `after`, on `day` (else in `anchor`'s week); if rest days
+    leave none, the best slot ignoring them. `warnings` names the planner rules the slot breaks."""
     for name, value in (("--to", to), ("--after", after)):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError(f"{name} must include a UTC offset")
+    profile = get_profile(db)
+    zone = ZoneInfo(profile.timezone)
+    target_day = to.astimezone(zone).date() if to else day or (after.astimezone(zone).date() if after else None)
+    week = week_of(datetime.combine(target_day, datetime.min.time(), zone) if target_day else anchor, zone)
+    window_start = datetime.combine(week - timedelta(days=1), datetime.min.time(), zone)
+    others = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(ACTIVE), PlannedSession.id != session.id)))
+    deleted = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status == "CANCELLED")) if s.workout_plan_json.get("deleted_by_user"))
+    from gymclaw.services.crowd import planning_signals
+    signals = planning_signals(db, week, now=now)
+    busy = busy_intervals(db, window_start, window_start + timedelta(days=9))
+
+    def candidates(existing):
+        return [c for c in generate_candidates(profile, week, busy=busy, unavailable=deleted, existing=existing, signals=signals, now=now)
+            if (target_day is None or c.start.astimezone(zone).date() == target_day) and (after is None or c.start >= utc(after))]
+
+    found = candidates(others)
+    alternatives: list[Candidate] = []
+    if to is not None:
+        slot = next((c for c in found if c.start == utc(to)), None)
+        if slot is None:
+            # The owner leads: keep their time even off the planner's grid or rules.
+            start = utc(to)
+            end = start + timedelta(minutes=minutes)
+            if end <= now:
+                raise DomainError("SLOT_IN_PAST", f"{to.astimezone(zone):%a %H:%M} would already be over")
+            slot = Candidate(start=start, end=end, prep_start=start - timedelta(minutes=profile.prep_minutes + profile.commute_to_gym_minutes),
+                leave_home=start - timedelta(minutes=profile.commute_to_gym_minutes), home_at=end + timedelta(minutes=profile.commute_home_minutes),
+                crowd=None, confidence=0, score=0, score_parts={})
+        return slot, week, rule_breaks(db, session, slot, profile), alternatives, signals
+    # A day the owner asked for beats the rest-day rule; the warning says so.
+    found = found or (candidates(()) if target_day else [])
+    if not found:
+        raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window or calendar); offer a time and use --to")
+    ranked = sorted(found, key=lambda c: c.score, reverse=True)
+    slot = ranked[0]
+    for c in ranked[1:]:
+        if len(alternatives) < 2 and all(abs(c.start - other.start) >= timedelta(minutes=60) for other in (slot, *alternatives)):
+            alternatives.append(c)
+    return slot, week, rule_breaks(db, session, slot, profile), alternatives, signals
+
+
+def slot_data(session: PlannedSession, slot: Candidate, warnings: list[str], alternatives: list[Candidate]) -> dict:
+    return {"session_id": session.id, "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence,
+        "workout_template_id": session.workout_template_id, "warnings": warnings,
+        "alternatives": [{"start": c.start.isoformat(), "crowd": c.crowd} for c in sorted(alternatives, key=lambda c: c.start)]}
+
+
+def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None, after: datetime | None = None) -> dict:
+    """Owner-requested move of one session that hasn't ended (a no-show can still be moved), including
+    one the owner edited in the calendar. Placement follows `pick_slot`; a slot that breaks the rules is
+    locked against replanning. `alternatives` lists the next-best starts (spread apart) so the owner can
+    pick another in one tap."""
+    now = utc(now)
 
     def action():
         session = db.get(PlannedSession, session_id)
         if session is None or session.status not in {"TENTATIVE", "COMMITTED"} or session.planned_end_at <= now:
             raise DomainError("SESSION_NOT_MOVABLE", "Only tentative or committed sessions that haven't ended can be moved")
-        profile = get_profile(db)
-        zone = ZoneInfo(profile.timezone)
-        target_day = to.astimezone(zone).date() if to else day or (after.astimezone(zone).date() if after else None)
-        week = week_of(datetime.combine(target_day, datetime.min.time(), zone) if target_day else session.planned_start_at, zone)
-        window_start = datetime.combine(week - timedelta(days=1), datetime.min.time(), zone)
-        others = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(ACTIVE), PlannedSession.id != session.id)))
-        deleted = tuple(interval(s) for s in db.scalars(select(PlannedSession).where(PlannedSession.status == "CANCELLED")) if s.workout_plan_json.get("deleted_by_user"))
-        from gymclaw.services.crowd import CrowdModel, planning_signals
-        signals = planning_signals(db, week, now=now)
-        candidates = [c for c in generate_candidates(profile, week, busy=busy_intervals(db, window_start, window_start + timedelta(days=9)), unavailable=deleted, existing=others, signals=signals, now=now)
-            if (target_day is None or c.start.astimezone(zone).date() == target_day) and (after is None or c.start >= utc(after))]
-        warnings: list[str] = []
-        alternatives: list[Candidate] = []
-        if to is not None:
-            slot = next((c for c in candidates if c.start == utc(to)), None)
-            if slot is None:
-                # The owner leads: keep their time even off the planner's grid or rules.
-                start = utc(to)
-                end = start + (session.planned_end_at - session.planned_start_at)
-                if end <= now:
-                    raise DomainError("SLOT_IN_PAST", f"{to.astimezone(zone):%a %H:%M} would already be over")
-                slot = Candidate(start=start, end=end, prep_start=start - timedelta(minutes=profile.prep_minutes + profile.commute_to_gym_minutes),
-                    leave_home=start - timedelta(minutes=profile.commute_to_gym_minutes), home_at=end + timedelta(minutes=profile.commute_home_minutes),
-                    crowd=None, confidence=0, score=0, score_parts={})
-                warnings = rule_breaks(db, session, slot, profile)
-        else:
-            if not candidates:
-                raise DomainError("NO_VALID_SLOT", "No valid slot for that day/week (workout window, calendar or rest days); offer a time and move with --to")
-            ranked = sorted(candidates, key=lambda c: c.score, reverse=True)
-            slot = ranked[0]
-            for c in ranked[1:]:
-                if len(alternatives) < 2 and all(abs(c.start - other.start) >= timedelta(minutes=60) for other in (slot, *alternatives)):
-                    alternatives.append(c)
+        minutes = int((session.planned_end_at - session.planned_start_at).total_seconds() // 60)
+        slot, week, warnings, alternatives, signals = pick_slot(db, session, now=now, minutes=minutes, anchor=session.planned_start_at, to=to, day=day, after=after)
         old_start = session.planned_start_at
         if slot.start != old_start or slot.end != session.planned_end_at:
             cancel_session_jobs(db, session.id, now=now)
         session.source_revision += 1
         # A slot that breaks the rules would be "repaired" by the next replan; the lock keeps the owner's choice.
-        session.user_locked = bool(warnings)
+        # An existing lock (calendar edit, owner-chosen workout) stays.
+        session.user_locked = session.user_locked or bool(warnings)
+        from gymclaw.services.crowd import CrowdModel
         place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
-        return {"session_id": session.id, "from": old_start.isoformat(), "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence,
-            "warnings": warnings, "alternatives": [{"start": c.start.isoformat(), "crowd": c.crowd} for c in sorted(alternatives, key=lambda c: c.start)]}
+        return {"from": old_start.isoformat()} | slot_data(session, slot, warnings, alternatives)
 
     return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}
         | ({"after": after.isoformat()} if after else {}), now, action)
+
+
+def add_session(db: Session, *, now: datetime, request_id: str, template_id: str | None = None, to: datetime | None = None, day: date | None = None, after: datetime | None = None) -> dict:
+    """Owner wants an extra session on top of the week's plan. Placement follows `pick_slot` (default:
+    this week). It is locked, so replanning never drops it for exceeding the weekly maximum. Without
+    `template_id` it takes its place in the rotation."""
+    now = utc(now)
+
+    def action():
+        from gymclaw.services.crowd import CrowdModel
+        from gymclaw.services.weekly import assign_rotation
+        if template_id:
+            get_template(db, template_id)
+        profile = get_profile(db)
+        session = PlannedSession(workout_template_id=template_id, user_locked=True)
+        slot, week, warnings, alternatives, signals = pick_slot(db, session, now=now, minutes=profile.preferred_workout_minutes, anchor=now, to=to, day=day, after=after)
+        db.add(session)
+        place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
+        if template_id is None:
+            assign_rotation(db, now=now)
+        return slot_data(session, slot, warnings, alternatives)
+
+    return mutate(db, "planning.session_added", request_id, {"template_id": template_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}
+        | ({"after": after.isoformat()} if after else {}), now, action)
+
+
+def set_workout(db: Session, session_id: str, template_id: str, *, now: datetime, request_id: str) -> dict:
+    """Owner picks the workout for one session ("legs today instead of pull"). The session is locked so
+    rotation keeps it; later sessions rotate on from it."""
+    now = utc(now)
+
+    def action():
+        from gymclaw.services.weekly import assign_rotation
+        session = db.get(PlannedSession, session_id)
+        if session is None or session.status not in {"TENTATIVE", "COMMITTED"}:
+            raise DomainError("SESSION_NOT_EDITABLE", "Only tentative or committed sessions can change workout; a running one switches exercises instead")
+        get_template(db, template_id)
+        old = session.workout_template_id
+        session.workout_template_id = template_id
+        session.user_locked = True
+        session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
+        session.source_revision += 1
+        allocation(db, session)
+        queue_session_write(db, session, now=now)
+        return {"session_id": session.id, "from": old, "to": template_id, "rotation": assign_rotation(db, now=now)}
+
+    return mutate(db, "planning.workout_set", request_id, {"session_id": session_id, "template_id": template_id}, now, action)
 
 
 def retire_session(db: Session, session: PlannedSession, status: str, *, now: datetime):

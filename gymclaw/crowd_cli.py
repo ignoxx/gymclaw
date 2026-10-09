@@ -20,7 +20,7 @@ def register_parser(groups):
     command.add_argument("--fixture", type=Path)
     command.add_argument("--during-gym-hours", action="store_true")
     command.add_argument("--now", type=datetime.fromisoformat)
-    command.add_argument("--at", type=datetime.fromisoformat)
+    command.add_argument("--at", type=datetime.fromisoformat, help="predict: when (default now)")
     command.add_argument("--observed-at", type=datetime.fromisoformat)
     command.add_argument("--workout-id")
     command.add_argument("--rating", type=str.upper, choices=list(crowd.RATINGS))
@@ -61,8 +61,8 @@ def crowd_command(engine, args) -> dict:
                 if state and state.source != "fixture":
                     raise DomainError("FIXTURE_DB_REQUIRED", "Do not add synthetic observations to live Google calendar DB")
         else:
-            if args.now:
-                raise DomainError("LIVE_TIME_REQUIRED", "Live crowd reads use actual retrieval time; --now requires fixture")
+            # A live read is always "now": a passed --now is ignored, never stored as the reading time.
+            args.now = None
             provider = crowd_sources.from_environment()
         with Session(engine) as db, db.begin():
             result = crowd.poll(db, provider, now=args.now)
@@ -77,5 +77,5 @@ def crowd_command(engine, args) -> dict:
             return crowd.record_feedback(db, needed(args.workout_id, "--workout-id"), rating=needed(args.rating, "--rating"),
                 now=now, observed_at=args.observed_at, waited_count=args.waited_count, notes=args.notes,
                 request_id=needed(args.request_id, "--request-id"))
-        data = crowd.source_health(db, now=now) if args.operation == "get-source-health" else crowd.CrowdModel(db, now=now).predict(needed(args.at, "--at"))
+        data = crowd.source_health(db, now=now) if args.operation == "get-source-health" else crowd.CrowdModel(db, now=now).predict(utc(args.at) if args.at else now)
         return {"data": data, "events": [], "user_message_hint": None}
