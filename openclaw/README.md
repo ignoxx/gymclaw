@@ -11,6 +11,7 @@ running workspace on every start, except `USER.md`.
 | `USER.md` | Owner preferences. Seeded once on first start, then owned by the agent. |
 | `plugins/coach` | Model-free workout flow in Telegram: set cards, typed sets, rest timer, swaps. [README](plugins/coach/README.md) |
 | `plugins/failure-details` | Replaces OpenClaw's generic failure reply with a sanitized cause. [README](plugins/failure-details/README.md) |
+| `plugins/one-reply` | At most one owner message per agent run; drops leftover narration after the reply went out. [README](plugins/one-reply/README.md) |
 | `plugins/turn-log` | Appends every agent turn and coach action to `data/turns/YYYY-MM-DD.jsonl` for latency numbers and replay. [README](plugins/turn-log/README.md) |
 
 Every action goes through `scripts/gymclaw-tool`, which validates it and writes to SQLite. Scheduled
