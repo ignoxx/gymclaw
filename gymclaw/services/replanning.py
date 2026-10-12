@@ -81,9 +81,11 @@ def replan_weeks(db: Session, weeks: set[date], *, now: datetime, reconsider_ten
             if session in fixed or session.status not in ACTIVE:
                 continue
             prep, home = expanded(session, profile)
-            valid = within_bounds(session, profile) and not any(overlaps(prep, home, b) for b in busy) and all(recovery_ok(session.planned_start_at, session.planned_end_at, interval(other), profile) for other in kept)
+            # A rule the owner broke on purpose (rest day, weekly max) is theirs to resolve: other sessions stay.
+            planner_kept = [s for s in kept if not s.user_locked]
+            valid = within_bounds(session, profile) and not any(overlaps(prep, home, b) for b in busy) and all(recovery_ok(session.planned_start_at, session.planned_end_at, interval(other), profile) for other in planner_kept)
             reconsider = reconsider_tentative and session.status == "TENTATIVE" and session.planned_start_at > now + timedelta(hours=48)
-            if valid and not reconsider and sum(week_of(s.planned_start_at, zone) == week for s in kept) < profile.weekly_max_sessions:
+            if valid and not reconsider and sum(week_of(s.planned_start_at, zone) == week for s in planner_kept) < profile.weekly_max_sessions:
                 kept.append(session)
             else:
                 invalid.append(session)
@@ -212,6 +214,20 @@ def pick_slot(db: Session, session: PlannedSession, *, now: datetime, minutes: i
     return slot, week, rule_breaks(db, session, slot, profile), alternatives, signals
 
 
+def upcoming(db: Session) -> dict[str, tuple]:
+    return {s.id: (s.status, s.planned_start_at, s.workout_template_id) for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"])))}
+
+
+def side_effects(db: Session, before: dict[str, tuple], session_id: str) -> list[dict]:
+    """Other upcoming sessions an owner edit changed (from `upcoming` taken before it), so a reply never claims they stayed."""
+    changed = []
+    for other_id, old in before.items():
+        other = db.get(PlannedSession, other_id)
+        if other_id != session_id and (other.status, other.planned_start_at, other.workout_template_id) != old:
+            changed.append({"session_id": other_id, "status": other.status, "start": other.planned_start_at.isoformat(), "workout_template_id": other.workout_template_id})
+    return changed
+
+
 def slot_data(session: PlannedSession, slot: Candidate, warnings: list[str], alternatives: list[Candidate]) -> dict:
     return {"session_id": session.id, "to": slot.start.isoformat(), "end": slot.end.isoformat(), "crowd": slot.crowd, "confidence": slot.confidence,
         "workout_template_id": session.workout_template_id, "warnings": warnings,
@@ -220,8 +236,8 @@ def slot_data(session: PlannedSession, slot: Candidate, warnings: list[str], alt
 
 def move_session(db: Session, session_id: str, *, now: datetime, request_id: str, to: datetime | None = None, day: date | None = None, after: datetime | None = None) -> dict:
     """Owner-requested move of one session that hasn't ended (a no-show can still be moved), including
-    one the owner edited in the calendar. Placement follows `pick_slot`; a slot that breaks the rules is
-    locked against replanning. `alternatives` lists the next-best starts (spread apart) so the owner can
+    one the owner edited in the calendar. Placement follows `pick_slot`; the session is locked, so
+    replanning neither moves it nor "repairs" other sessions around it. `alternatives` lists the next-best starts (spread apart) so the owner can
     pick another in one tap."""
     now = utc(now)
 
@@ -231,16 +247,14 @@ def move_session(db: Session, session_id: str, *, now: datetime, request_id: str
             raise DomainError("SESSION_NOT_MOVABLE", "Only tentative or committed sessions that haven't ended can be moved")
         minutes = int((session.planned_end_at - session.planned_start_at).total_seconds() // 60)
         slot, week, warnings, alternatives, signals = pick_slot(db, session, now=now, minutes=minutes, anchor=session.planned_start_at, to=to, day=day, after=after)
-        old_start = session.planned_start_at
+        old_start, before = session.planned_start_at, upcoming(db)
         if slot.start != old_start or slot.end != session.planned_end_at:
             cancel_session_jobs(db, session.id, now=now)
         session.source_revision += 1
-        # A slot that breaks the rules would be "repaired" by the next replan; the lock keeps the owner's choice.
-        # An existing lock (calendar edit, owner-chosen workout) stays.
-        session.user_locked = session.user_locked or bool(warnings)
+        session.user_locked = True
         from gymclaw.services.crowd import CrowdModel
         place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
-        return {"from": old_start.isoformat()} | slot_data(session, slot, warnings, alternatives)
+        return {"from": old_start.isoformat()} | slot_data(session, slot, warnings, alternatives) | {"side_effects": side_effects(db, before, session.id)}
 
     return mutate(db, "planning.session_moved", request_id, {"session_id": session_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}
         | ({"after": after.isoformat()} if after else {}), now, action)
@@ -257,14 +271,15 @@ def add_session(db: Session, *, now: datetime, request_id: str, template_id: str
         from gymclaw.services.weekly import assign_rotation
         if template_id:
             get_template(db, template_id)
-        profile = get_profile(db)
+        profile, before = get_profile(db), upcoming(db)
         session = PlannedSession(workout_template_id=template_id, user_locked=True)
         slot, week, warnings, alternatives, signals = pick_slot(db, session, now=now, minutes=profile.preferred_workout_minutes, anchor=now, to=to, day=day, after=after)
+        crowd_model = CrowdModel(db, now=now) if signals else None  # Queries before `add`: autoflush can't insert a session without times.
         db.add(session)
-        place(db, session, slot, week=week, now=now, crowd_model=CrowdModel(db, now=now) if signals else None)
+        place(db, session, slot, week=week, now=now, crowd_model=crowd_model)
         if template_id is None:
             assign_rotation(db, now=now)
-        return slot_data(session, slot, warnings, alternatives)
+        return slot_data(session, slot, warnings, alternatives) | {"side_effects": side_effects(db, before, session.id)}
 
     return mutate(db, "planning.session_added", request_id, {"template_id": template_id, "to": to.isoformat() if to else None, "day": day.isoformat() if day else None}
         | ({"after": after.isoformat()} if after else {}), now, action)

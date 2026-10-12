@@ -63,7 +63,7 @@ def setup(tmp_path):
     engine.dispose()
 
 
-def test_move_kept_reminders_replaced_other_sessions_replanned(setup):
+def test_move_kept_reminders_replaced_other_sessions_stay(setup):
     engine, provider, ids = setup
     wed_id = event_id_for(ids[1])
     with Session(engine) as db, db.begin():
@@ -86,8 +86,10 @@ def test_move_kept_reminders_replaced_other_sessions_replanned(setup):
         assert all(db.get(NotificationJob, i).status == "CANCELLED" for i in old_job_ids)
         new_jobs = list(db.scalars(select(NotificationJob).where(NotificationJob.planned_session_id == moved.id, NotificationJob.status == "PENDING")))
         assert len(new_jobs) == 3 and all(j.due_at.date() == at(15).date() for j in new_jobs)
-        assert db.get(PlannedSession, ids[2]).status == "CANCELLED"
-        assert result["user_message_hint"] == "Long moved to Thu 19:00. Long on Fri dropped: no slot left this week that fits your rest days and calendar."
+        # Thu now skips the rest day before Fri; that's the owner's call, so Fri stays as planned.
+        friday = db.get(PlannedSession, ids[2])
+        assert friday.status == "TENTATIVE" and not friday.user_locked
+        assert result["user_message_hint"] == "Long moved to Thu 19:00."
         assert not result["data"]["remote_events_changed"]
     publish(engine, provider, NOW + timedelta(minutes=4))
     with Session(engine) as db, db.begin():
@@ -97,7 +99,7 @@ def test_move_kept_reminders_replaced_other_sessions_replanned(setup):
     remote = provider.get_event(wed_id)
     assert remote.start == at(15)
     assert "Get ready 18:25" in provider.events[wed_id]["description"] and "1. Bench" in provider.events[wed_id]["description"]
-    assert provider.get_event(event_id_for(ids[2])).status == "cancelled"
+    assert provider.get_event(event_id_for(ids[2])).status != "cancelled"
 
 
 def test_delete_tombstone_not_recreated_valid_replacement_found(setup):
