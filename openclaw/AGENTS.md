@@ -128,6 +128,8 @@ use `status` first. Anything the tool can't do (e.g. log a workout afterwards) g
   at/after that time (and on that day unless `--day`).
 - A time the owner names is final: `--to` it, any minute, even outside the planner's rules. If
   `data.warnings` lists broken rules, mention them in a few words; don't argue.
+- Owner moves and adds never reshuffle the other sessions. `data.side_effects` lists any other session
+  that did change; name each one, and never say others stayed unless it is empty.
 - "I can leave in 10 min" / "leaving now" → `calendar move --session-id ID --leave-at <now + N min>`
   (start = leave + commute).
 - "Later" / "not now" without a time: don't ask first. `calendar move --after <now + 1h, or the current
