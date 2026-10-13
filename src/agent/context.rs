@@ -167,3 +167,22 @@ pub fn history(db: &Connection) -> Result<Vec<Value>> {
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Prompt size on a copy of a real DB (~4 chars per token):
+    /// `GYMCLAW_COMPAT_DB=/tmp/copy.db cargo test -- --ignored --nocapture context_size`
+    #[test]
+    #[ignore]
+    fn context_size() {
+        let path = std::env::var("GYMCLAW_COMPAT_DB").expect("GYMCLAW_COMPAT_DB");
+        let mut db = crate::db::open(std::path::Path::new(&path)).unwrap();
+        crate::db::migrate(&mut db).unwrap();
+        let system = system(&db, Ts::now()).unwrap();
+        let history = Value::Array(history(&db).unwrap()).to_string();
+        let tools = Value::Array(crate::agent::tool_specs()).to_string();
+        println!("{system}\n---\nsystem {} chars, history {} chars, tools {} chars, ≈{} tokens", system.len(), history.len(), tools.len(), (system.len() + history.len() + tools.len()) / 4);
+    }
+}
