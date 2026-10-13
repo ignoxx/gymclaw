@@ -11,7 +11,6 @@ Python training domain behind an OpenClaw agent the owner talks to on Telegram. 
   `node --test openclaw/plugins/*/*.test.mjs`. CI runs both, plus shellcheck and gitleaks.
 - **Dashboard**: `.venv/bin/python -m gymclaw.dashboard` serves a synthetic demo on :8765. Verify UI
   changes with `scripts/shot <url> <out.png> [width height] [--full]`; width 390 for phone.
-- **Prod** (Coolify): the `gymclaw-prod` skill (`.agents/skills/`).
 - **Public repo**: run `git config core.hooksPath .githooks` once per clone. The pre-commit hook
   blocks private strings (owner IDs, hostnames, deployment IDs).
 - **Review** against `CODING_STANDARDS.md`.
