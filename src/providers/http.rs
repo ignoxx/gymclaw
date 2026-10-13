@@ -51,10 +51,7 @@ impl Request {
     }
 
     pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
 }
 
@@ -95,29 +92,21 @@ impl Net {
     pub fn new() -> Result<Net> {
         Ok(Net {
             follow: reqwest::blocking::Client::builder().build()?,
-            no_follow: reqwest::blocking::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?,
+            no_follow: reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?,
         })
     }
 }
 
 impl Transport for Net {
     fn send(&self, request: &Request) -> Result<Response> {
-        let client = if request.follow_redirects {
-            &self.follow
-        } else {
-            &self.no_follow
-        };
+        let client = if request.follow_redirects { &self.follow } else { &self.no_follow };
         let method = match request.method {
             Method::Get => reqwest::Method::GET,
             Method::Post => reqwest::Method::POST,
             Method::Patch => reqwest::Method::PATCH,
             Method::Delete => reqwest::Method::DELETE,
         };
-        let mut builder = client
-            .request(method, &request.url)
-            .timeout(request.timeout);
+        let mut builder = client.request(method, &request.url).timeout(request.timeout);
         if !request.query.is_empty() {
             builder = builder.query(&request.query);
         }
