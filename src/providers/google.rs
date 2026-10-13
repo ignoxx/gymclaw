@@ -6,7 +6,8 @@
 //!
 //! Credentials are the google-auth `Credentials.to_json()` dict in `calendar_credential.credentials_json`.
 //! A refreshed token is written back in that format, so the Python app can still read it.
-//! The interactive consent flow (`gymclaw calendar auth`) is not ported; the stored refresh token is used.
+//! Consent (`gymclaw calendar-auth`) is a paste flow: the owner opens the URL anywhere, approves, and
+//! pastes back the loopback URL the browser lands on, so it also works inside the container.
 use std::collections::HashSet;
 
 use rusqlite::Connection;
@@ -154,13 +155,113 @@ impl Credentials {
     }
 }
 
+const AUTH_URI: &str = "https://accounts.google.com/o/oauth2/auth";
+
+/// A Desktop-app OAuth client (`installed` in Google's client JSON) plus this attempt's PKCE verifier and state.
+pub struct Consent {
+    client_id: String,
+    client_secret: String,
+    token_uri: String,
+    redirect_uri: String,
+    verifier: String,
+    state: String,
+}
+
+impl Consent {
+    /// Parse the downloaded client JSON. Only Desktop clients allow the loopback redirect.
+    pub fn new(client_json: &[u8]) -> Result<Consent> {
+        let client: Value = serde_json::from_slice(client_json).map_err(|_| Error::domain("CALENDAR_AUTH_FAILED", "Client file is not JSON"))?;
+        let Some(installed) = client.get("installed") else { bail!("CALENDAR_AUTH_FAILED", "Desktop app OAuth client required") };
+        let text = |k: &str| installed.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let random = || uuid::Uuid::new_v4().simple().to_string();
+        Ok(Consent {
+            client_id: text("client_id"),
+            client_secret: text("client_secret"),
+            token_uri: Some(text("token_uri")).filter(|t| !t.is_empty()).unwrap_or_else(|| TOKEN_URI.into()),
+            // Nothing listens here: the browser shows an error page whose URL the owner pastes back.
+            redirect_uri: "http://127.0.0.1:1".into(),
+            verifier: format!("{}{}", random(), random()),
+            state: random(),
+        })
+    }
+
+    /// Where the owner approves offline access to `calendar.events.owned`.
+    pub fn url(&self) -> String {
+        use base64::Engine;
+        use sha2::Digest;
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(self.verifier.as_bytes()));
+        let params = [
+            ("response_type", "code"), ("client_id", &self.client_id), ("redirect_uri", &self.redirect_uri), ("scope", SCOPES[0]),
+            ("state", &self.state), ("code_challenge", &challenge), ("code_challenge_method", "S256"), ("access_type", "offline"),
+            ("prompt", "consent"), ("include_granted_scopes", "false"),
+        ];
+        let query: Vec<String> = params.iter().map(|(k, v)| format!("{k}={}", quote(v))).collect();
+        format!("{AUTH_URI}?{}", query.join("&"))
+    }
+
+    /// Exchange the code from the pasted redirect URL and store the credentials (google-auth format).
+    /// Errors never echo the URL, code or tokens.
+    pub fn finish(&self, db: &Connection, calendar_id: &str, pasted: &str, transport: &dyn Transport, now: Ts) -> Result<Value> {
+        bind_calendar(db, calendar_id, "google")?;
+        private_storage(db)?;
+        let failed = || Error::domain("CALENDAR_AUTH_FAILED", "Google authorization failed. Check desktop client, test-user access and browser consent; retry.");
+        let query = pasted.trim().split_once('?').map_or("", |(_, q)| q).split('#').next().unwrap_or_default();
+        let param = |key: &str| query.split('&').find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| unquote(v)));
+        if param("state").as_deref() != Some(self.state.as_str()) {
+            return Err(failed());
+        }
+        let code = param("code").ok_or_else(failed)?;
+        let mut request = Request::new(Method::Post, &self.token_uri, 120);
+        request.body = Body::Form(
+            [("grant_type", "authorization_code"), ("code", &code), ("client_id", &self.client_id), ("client_secret", &self.client_secret),
+                ("redirect_uri", &self.redirect_uri), ("code_verifier", &self.verifier)]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .to_vec(),
+        );
+        let response = transport.send(&request).map_err(|_| failed())?;
+        let data = response.json().ok().filter(|_| response.status == 200).ok_or_else(failed)?;
+        let (Some(token), Some(refresh_token)) = (data.get("access_token").and_then(Value::as_str), data.get("refresh_token").and_then(Value::as_str)) else {
+            return Err(failed());
+        };
+        let granted: HashSet<&str> = data.get("scope").and_then(Value::as_str).unwrap_or(SCOPES[0]).split(' ').collect();
+        if !SCOPES.iter().all(|s| granted.contains(s)) {
+            return Err(failed());
+        }
+        let mut credentials = json!({"token": token, "refresh_token": refresh_token, "token_uri": self.token_uri, "client_id": self.client_id,
+            "client_secret": self.client_secret, "scopes": SCOPES, "universe_domain": "googleapis.com", "account": ""});
+        if let Some(secs) = data.get("expires_in").and_then(Value::as_i64) {
+            credentials["expiry"] = json!(format!("{}Z", (now + jiff::SignedDuration::from_secs(secs)).iso().trim_end_matches("+00:00")));
+        }
+        let row = CalendarCredential { id: 1, credentials_json: Json(credentials) };
+        if CalendarCredential::get(db, 1)?.is_some() { row.update(db)? } else { row.insert(db)? }
+        Ok(json!({"authorized": true, "calendar_id": calendar_id, "scopes": SCOPES, "storage": "private_sqlite", "calendar_events_changed": false}))
+    }
+}
+
+/// Percent-decode a query value (`+` is a space).
+fn unquote(text: &str) -> String {
+    let mut out = Vec::new();
+    let mut bytes = text.bytes();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hex: String = bytes.by_ref().take(2).map(char::from).collect();
+                out.push(u8::from_str_radix(&hex, 16).unwrap_or(b'?'));
+            }
+            b => out.push(b),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Stored credentials, refreshed (and written back) when expired. Fails with CALENDAR_AUTH_REQUIRED.
 pub fn load_credentials(db: &Connection, transport: &dyn Transport) -> Result<Credentials> {
     let Some(mut row) = CalendarCredential::get(db, 1)? else {
-        bail!("CALENDAR_AUTH_REQUIRED", "Run calendar auth before Google sync")
+        bail!("CALENDAR_AUTH_REQUIRED", "Run `gymclaw calendar-auth` before Google sync")
     };
     private_storage(db)?;
-    let expired = || Error::domain("CALENDAR_AUTH_REQUIRED", "Google credentials expired or invalid; run calendar auth again");
+    let expired = || Error::domain("CALENDAR_AUTH_REQUIRED", "Google credentials expired or invalid; run `gymclaw calendar-auth` again");
     let mut credentials = match &row.credentials_json.0 {
         Value::Object(map) => Credentials(map.clone()),
         _ => return Err(expired()),
@@ -268,7 +369,7 @@ impl<'a> GoogleCalendarProvider<'a> {
     fn check(response: &Response) -> Result<()> {
         match response.status {
             412 => Err(conflict()),
-            401 => bail!("CALENDAR_AUTH_REQUIRED", "Google authorization expired; run calendar auth"),
+            401 => bail!("CALENDAR_AUTH_REQUIRED", "Google authorization expired; run `gymclaw calendar-auth`"),
             s if s >= 400 => bail!("CALENDAR_UNAVAILABLE", "Google Calendar request failed (HTTP {s}); retry later"),
             _ => Ok(()),
         }
@@ -597,5 +698,27 @@ mod tests {
         let error = provider.delete_gym_event("owned", "\"v1\"", "s").unwrap_err();
         assert!(error.to_string().contains("ownership"), "{error}");
         assert_eq!(script.calls.borrow().len(), 1); // only the GET, no DELETE
+    }
+
+    #[test]
+    fn consent_paste_stores_loadable_credentials() {
+        let dir = std::env::temp_dir().join(format!("gymclaw-consent-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = crate::db::open(&dir.join("gymclaw.db")).unwrap();
+        crate::db::migrate(&mut db).unwrap();
+        let consent = Consent::new(br#"{"installed": {"client_id": "cid", "client_secret": "cs", "token_uri": "https://oauth2.googleapis.com/token"}}"#).unwrap();
+        let url = consent.url();
+        assert!(url.contains("code_challenge_method=S256") && url.contains("access_type=offline") && !url.contains(&consent.verifier));
+        let now = Ts::now();
+        let script = Script::new(vec![ok(200, json!({"access_token": "a1", "refresh_token": "r1", "expires_in": 3599, "scope": SCOPES[0]}))]);
+        let wrong_state = format!("http://127.0.0.1:1/?state=other&code=c%2F1&scope={}", quote(SCOPES[0]));
+        assert_eq!(consent.finish(&db, "cal@group", &wrong_state, &script, now).unwrap_err().code(), "CALENDAR_AUTH_FAILED");
+        let pasted = format!("http://127.0.0.1:1/?state={}&code=4%2F0Ab&scope={}", consent.state, quote(SCOPES[0]));
+        assert_eq!(consent.finish(&db, "cal@group", &pasted, &script, now).unwrap()["authorized"], true);
+        let Body::Form(form) = &script.calls.borrow()[0].body else { panic!("form body") };
+        assert!(form.contains(&("code".into(), "4/0Ab".into())) && form.contains(&("code_verifier".into(), consent.verifier.clone())));
+        // Fresh token: loading needs no network.
+        assert_eq!(load_credentials(&db, &Script::new(vec![])).unwrap().token(), "a1");
+        std::fs::remove_dir_all(dir).ok();
     }
 }

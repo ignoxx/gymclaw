@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::db::Connection;
 use crate::db::models::{PlannedSession, SetLog};
-use crate::domain::illustrations::{asset_root, for_exercise};
+use crate::domain::illustrations::for_exercise;
 use crate::domain::profile::get_profile;
 use crate::domain::templates::get_template;
 use crate::domain::view::{Card, CardKind};
@@ -84,10 +84,9 @@ pub(crate) fn ensure_ascii(json: &str) -> String {
     out
 }
 
+/// DM Sans, embedded so previews never depend on the deploy layout.
 fn font() -> Result<FontVec> {
-    let candidates = [asset_root().join("../fonts/DM-Sans.ttf"), "assets/fonts/DM-Sans.ttf".into(), "gymclaw/web/fonts/DM-Sans.ttf".into()];
-    let path = candidates.iter().find(|p| p.exists()).ok_or_else(|| Error::domain("ASSET_MISSING", "DM-Sans.ttf not found (assets/fonts)"))?;
-    FontVec::try_from_vec(std::fs::read(path)?).map_err(|e| Error::domain("ASSET_MISSING", format!("Bad font {}: {e}", path.display())))
+    FontVec::try_from_vec(include_bytes!("../../web/fonts/DM-Sans.ttf").to_vec()).map_err(|e| Error::domain("ASSET_MISSING", format!("Bad font: {e}")))
 }
 
 /// items: (label, png path). Returns a cached PNG path under `root`; same content renders once.

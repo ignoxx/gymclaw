@@ -22,7 +22,7 @@ RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/s
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin gymclaw
 WORKDIR /opt/gymclaw
 COPY --from=build /usr/local/bin/gymclaw /usr/local/bin/gymclaw
-COPY gymclaw/assets/workout-guide ./assets/workout-guide
+COPY assets/workout-guide ./assets/workout-guide
 COPY config ./config
 COPY deploy/entrypoint.sh deploy/backup.sh deploy/restore.sh /usr/local/bin/
 RUN mkdir -p data openclaw /backups && chown gymclaw:gymclaw data openclaw /backups

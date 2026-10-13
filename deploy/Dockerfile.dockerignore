@@ -5,7 +5,7 @@
 !src
 !web
 !config
-!gymclaw/assets/workout-guide
+!assets/workout-guide
 !deploy/entrypoint.sh
 !deploy/backup.sh
 !deploy/restore.sh

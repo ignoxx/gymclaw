@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# Repo-local CLI entrypoint. Does not read secrets or install dependencies.
-set -euo pipefail
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
-# The container entrypoint runs a warm worker on this socket (see gymclaw/warm.py). Without one,
-# the CLI runs in-process as before.
-export GYMCLAW_WARM_SOCKET="${GYMCLAW_WARM_SOCKET:-/tmp/gymclaw-tool.sock}"
-exec "$ROOT/.venv/bin/python" -m gymclaw.warm "$@"

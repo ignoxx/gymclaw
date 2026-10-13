@@ -25,7 +25,7 @@ enum Command {
     /// Run one tool, exactly as the agent would: `gymclaw call move_session '{"session_id":"…"}'`.
     Call {
         tool: String,
-        /// JSON arguments (default `{}`).
+        /// JSON arguments (default `{}`); `-` reads them from stdin, so secrets stay out of argv.
         args: Option<String>,
         /// Pretend it is this time (ISO 8601 with offset).
         #[arg(long)]
@@ -38,6 +38,16 @@ enum Command {
     Tools,
     /// Consistent copy of the database (default `data/backups/manual-<time>.db`).
     Backup { dest: Option<PathBuf> },
+    /// Authorize Google Calendar (first time, or after CALENDAR_AUTH_REQUIRED). Prints a URL; open it in
+    /// any browser, approve, then paste the URL the browser ends up on (an error page on 127.0.0.1).
+    CalendarAuth {
+        /// The dedicated calendar's ID (never `primary`).
+        #[arg(long, env = "GOOGLE_CALENDAR_ID")]
+        calendar_id: String,
+        /// Desktop-app OAuth client JSON downloaded from Google Cloud.
+        #[arg(long, default_value = "data/google-client.json")]
+        client_file: PathBuf,
+    },
     /// Serve the read-only dashboard.
     Dashboard {
         #[arg(long, default_value = "127.0.0.1:8766")]
@@ -45,6 +55,17 @@ enum Command {
         #[arg(long, default_value = "gymclaw.localhost")]
         allowed_host: String,
     },
+}
+
+fn calendar_auth(calendar_id: &str, client_file: &std::path::Path) -> Result<Value> {
+    use gymclaw::providers::google::Consent;
+    let consent = Consent::new(&std::fs::read(client_file).map_err(|_| Error::domain("CALENDAR_AUTH_FAILED", format!("Client file not found: {}", client_file.display())))?)?;
+    eprintln!("Open this URL, approve access, then paste the address your browser ends up on (it won't load):\n\n{}\n", consent.url());
+    eprint!("Pasted URL: ");
+    let mut pasted = String::new();
+    std::io::stdin().read_line(&mut pasted)?;
+    let conn = db::open(&Config::paths().1)?;
+    consent.finish(&conn, calendar_id, &pasted, &gymclaw::providers::http::Net::new()?, Ts::now())
 }
 
 fn print(value: &Value) {
@@ -58,6 +79,10 @@ fn call(tool: &str, args: Option<String>, now: Option<String>, request_id: Optio
     if def.as_ref().is_some_and(|d| d.snapshot) {
         db::snapshot(&conn, &data_dir.join("backups").join(format!("cli-{}.db", Ts::now().0.as_second())))?;
     }
+    let args = match args.as_deref() {
+        Some("-") => Some(std::io::read_to_string(std::io::stdin())?),
+        _ => args,
+    };
     let args: Value = match args {
         Some(text) => serde_json::from_str(&text).map_err(|e| Error::domain("INVALID_JSON", e.to_string()))?,
         None => json!({}),
@@ -104,6 +129,10 @@ async fn main() -> ExitCode {
             let dest = dest.unwrap_or_else(|| data_dir.join("backups").join(format!("manual-{}.db", Ts::now().0.as_second())));
             db::open(&path).and_then(|conn| db::snapshot(&conn, &dest)).map(|_| Some(json!({"ok": true, "path": dest})))
         }
+        Command::CalendarAuth { calendar_id, client_file } => tokio::task::spawn_blocking(move || calendar_auth(&calendar_id, &client_file))
+            .await
+            .expect("calendar auth thread")
+            .map(Some),
         Command::Dashboard { addr, allowed_host } => gymclaw::web::dashboard(Config::paths().1, addr, allowed_host).await.map(|_| None),
     };
     match result {

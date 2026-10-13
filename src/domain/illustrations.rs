@@ -11,7 +11,7 @@ pub fn asset_root() -> PathBuf {
     if let Ok(dir) = std::env::var("GYMCLAW_ASSETS_DIR") {
         return dir.into();
     }
-    ["assets/workout-guide", "gymclaw/assets/workout-guide"].iter().map(PathBuf::from).find(|p| p.join("manifest.json").exists()).unwrap_or_else(|| "assets/workout-guide".into())
+    "assets/workout-guide".into()
 }
 
 #[derive(Clone, Debug, Deserialize)]

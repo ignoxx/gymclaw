@@ -55,7 +55,7 @@ pub fn auth_alert(db: &Connection, ok: bool, now: Ts) -> Result<Option<(String, 
     let lost = outage_open(db, "calendar.auth_lost", "calendar.auth_restored")?;
     if !ok && !lost {
         let event = emit(db, "calendar.auth_lost", now, json!({}))?;
-        return Ok(Some((event.id, "⚠️ Lost access to Google Calendar, so I can't see calendar edits or update events. Moves via chat still work. Reconnect with `calendar auth` on the server.".into())));
+        return Ok(Some((event.id, "⚠️ Lost access to Google Calendar, so I can't see calendar edits or update events. Moves via chat still work. Reconnect with `gymclaw calendar-auth` on the server.".into())));
     }
     if ok && lost {
         let event = emit(db, "calendar.auth_restored", now, json!({}))?;
