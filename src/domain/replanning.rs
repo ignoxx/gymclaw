@@ -430,3 +430,36 @@ pub fn skip_session(db: &Connection, session_id: &str, now: Ts, request_id: &str
         Ok(json!({"session_id": session.id, "status": session.status}))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::scheduling::schedule_week;
+    use crate::domain::workout::tests::db;
+
+    /// 2026-10-12: "move today's workout to tomorrow, don't update the others". The owner's move skips a
+    /// rest day; replanning must not cancel or move the other sessions to "repair" that.
+    #[test]
+    fn owner_move_leaves_other_sessions_alone() {
+        let db = db();
+        let tz = get_profile(&db).unwrap().tz();
+        let week = jiff::civil::date(2026, 10, 12);
+        let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
+        let planned = schedule_week(&db, week, now, None, None).unwrap();
+        let ids: Vec<String> = planned["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
+        let before: Vec<PlannedSession> = ids.iter().map(|id| PlannedSession::get(&db, id).unwrap().unwrap()).collect();
+        assert_eq!(before.iter().map(|s| weekday(s.planned_start_at.local(&tz).date())).collect::<Vec<_>>(), [0, 2, 4]);
+
+        let tuesday = before[0].planned_start_at + SignedDuration::from_hours(24);
+        let moved = move_session(&db, &ids[0], now, "move-1", Some(tuesday), None, None).unwrap();
+        assert_eq!(moved["data"]["warnings"], json!(["skips a rest day"]));
+        assert_eq!(moved["data"]["side_effects"], json!([]));
+
+        let repaired = replan_weeks(&db, &BTreeSet::from([week]), now, false).unwrap();
+        assert_eq!(repaired["changed"], json!([]));
+        for other in &before[1..] {
+            let after = PlannedSession::get(&db, &other.id).unwrap().unwrap();
+            assert_eq!((after.status, after.planned_start_at), (other.status, other.planned_start_at));
+        }
+    }
+}

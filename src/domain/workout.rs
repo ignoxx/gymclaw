@@ -450,11 +450,9 @@ pub fn todays_session(db: &Connection, now: Ts) -> Result<Option<PlannedSession>
     Ok(rows.into_iter().filter(|s| s.planned_start_at.local(&zone).date() == today).min_by_key(|s| (s.planned_start_at - now).abs()))
 }
 
-/// Active availability blocks (travel, sick) at `now`. Same query as `availability::blocks`.
+/// An availability block (travel, sick) is in effect at `now`.
 fn blocked_at(db: &Connection, now: Ts) -> Result<bool> {
-    let end = now + SignedDuration::from_micros(1);
-    let count: i64 = db.query_row("SELECT count(*) FROM availability_block WHERE status = 'ACTIVE' AND start_at < ?1 AND end_at > ?2", rusqlite::params![end, now], |r| r.get(0))?;
-    Ok(count > 0)
+    Ok(!crate::domain::availability::blocks(db, now, now + SignedDuration::from_micros(1))?.is_empty())
 }
 
 /// Start a workout. Without `template_id` it starts the given planned session, else today's one.
