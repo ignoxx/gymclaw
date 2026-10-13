@@ -547,4 +547,15 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn http_identity_covers_headers_not_key_order() {
+        let transport = body(json!({"n": 1}));
+        let id = |config: Value| HttpCountProvider::new(serde_json::from_value(config).unwrap(), &transport).unwrap().provider_id().to_string();
+        let a = id(json!({"url": "https://gym.example/live", "headers": {"x-tenant": "gym-a"}, "json_path": "n"}));
+        let b = id(json!({"url": "https://gym.example/live", "headers": {"x-tenant": "gym-b"}, "json_path": "n"}));
+        let first = id(json!({"url": "https://gym.example/live", "headers": {"b": "2", "x-tenant": "gym-b"}, "json_path": "n"}));
+        let reordered = id(json!({"json_path": "n", "headers": {"x-tenant": "gym-b", "b": "2"}, "url": "https://gym.example/live"}));
+        assert!(a != b && first == reordered);
+    }
 }

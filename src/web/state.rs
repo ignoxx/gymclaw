@@ -340,4 +340,9 @@ mod tests {
         assert_eq!(one_rep_max(40.0, 12), 56.0);
         assert_eq!(round(2.5, 0), 2.0);
     }
+
+    #[test]
+    fn one_rep_max_makes_different_rep_counts_comparable() {
+        assert_eq!((one_rep_max(50.0, 8), one_rep_max(100.0, 1), one_rep_max(0.0, 15)), (63.5, 100.0, 0.0));
+    }
 }

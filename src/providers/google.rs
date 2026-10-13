@@ -589,4 +589,13 @@ mod tests {
         assert_eq!(bind_calendar(&db, "different", "google").unwrap_err().code(), "CALENDAR_SCOPE_MISMATCH");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn delete_guard_refuses_events_gymclaw_does_not_own() {
+        let script = Script::new(vec![ok(200, raw_event("other", json!({})))]);
+        let mut provider = GoogleCalendarProvider::new("calendar", &script, "Europe/Berlin").unwrap();
+        let error = provider.delete_gym_event("owned", "\"v1\"", "s").unwrap_err();
+        assert!(error.to_string().contains("ownership"), "{error}");
+        assert_eq!(script.calls.borrow().len(), 1); // only the GET, no DELETE
+    }
 }
