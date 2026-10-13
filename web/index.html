@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GymClaw</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="dashboard">
+    <header class="header">
+      <a class="brand" href="/">gymclaw<span>.</span></a>
+      <span class="updated" id="updated"></span>
+    </header>
+    <div class="page-heading"><h1>Training</h1>
+      <nav class="tabs" aria-label="Views"><button data-tab="today" aria-current="page">Today</button><button data-tab="progress">Progress</button><button data-tab="history">History</button></nav></div>
+    <div id="load-error" role="alert" hidden>Can't reach GymClaw right now.</div>
+    <div id="polling-alert" class="alert" role="alert" hidden></div>
+    <div class="layout tab" id="tab-today" hidden>
+      <div class="column">
+        <section class="panel" aria-labelledby="week-title">
+          <div class="section-heading"><h2 id="week-title">Next 7 days</h2><span><span id="range"></span> · <span id="session-count"></span></span></div>
+          <div class="week" id="week"></div>
+        </section>
+        <section class="panel" aria-labelledby="gym-title">
+          <div class="section-heading"><h2 id="gym-title">Gym</h2><span id="polling"></span></div>
+          <div class="count"><strong id="count">—</strong><div><span>checked in</span><small id="count-time"></small></div>
+            <div class="legend"><span class="key today" id="legend-day">Today</span><span class="key typical" id="legend-typical"></span></div></div>
+          <div class="crowd-nav">
+            <div class="segmented" role="group" aria-label="Range"><button data-view="today" aria-pressed="true">Day</button><button data-view="24h" aria-pressed="false">24h</button><button data-view="week" aria-pressed="false">Week</button><button data-view="month" aria-pressed="false">Month</button></div>
+            <div class="pager"><button id="crowd-prev" aria-label="Earlier">‹</button><span id="crowd-title"></span><button id="crowd-next" aria-label="Later">›</button></div>
+          </div>
+          <p class="crowd-stats" id="crowd-stats"></p>
+          <div id="chart" class="chart"></div>
+        </section>
+        <section class="activity" aria-labelledby="activity-title"><h2 id="activity-title">Activity</h2><div id="events"></div></section>
+      </div>
+      <section class="panel focus" id="focus" aria-live="polite"></section>
+    </div>
+    <div class="tab" id="tab-progress" hidden>
+      <div class="kpis" id="kpis"></div>
+      <div class="grid-2">
+        <section class="panel"><div class="section-heading"><h2>Sessions per week</h2><span id="target-label"></span></div><div class="chart" id="weeks-chart"></div></section>
+        <section class="panel"><div class="section-heading"><h2 title="Estimated 1-rep max: the heaviest single rep your best set suggests">Estimated 1RM</h2><select id="exercise-select" aria-label="Exercise"></select></div><div class="chart" id="progress-chart"></div></section>
+        <section class="panel"><div class="section-heading"><h2>Volume by muscle</h2><span>Last 4 weeks</span></div><div id="muscle-chart" class="bars"></div></section>
+        <section class="panel"><div class="section-heading"><h2>When the gym is quiet</h2><span id="quiet-label"></span></div><div id="heatmap" class="heatmap"></div></section>
+      </div>
+      <section class="panel weight"><div class="section-heading"><h2>Body weight</h2><span class="legend" id="weight-legend"><span class="key">7-day average</span><span class="key weigh-in">Weigh-in</span></span></div><div class="chart" id="weight-chart"></div></section>
+    </div>
+    <div class="tab" id="tab-history" hidden>
+      <section class="panel"><div class="section-heading"><h2>Workouts</h2><span id="history-count"></span></div><div id="history"></div></section>
+    </div>
+    <div class="tooltip" id="tooltip" role="status" hidden></div>
+    <footer class="credits">Exercise art: <a href="https://github.com/bryllim/workout-guide">Workout Guide</a>, Bryl Lim / Everkinetic, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></footer>
+  </main>
+</body>
+</html>
