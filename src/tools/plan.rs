@@ -10,7 +10,9 @@ use super::{Ctx, Tool, ToolDef, def};
 use crate::db::models::{BlockKind, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
-use crate::domain::{availability, calendar_writes, crowd, events, replanning, scheduling};
+use crate::domain::{availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling};
+use crate::providers::google::google_provider;
+use crate::providers::http::Net;
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -28,6 +30,10 @@ pub fn tools() -> Vec<ToolDef> {
         def::<AvailabilityAdd>(),
         def::<AvailabilityList>(),
         def::<AvailabilityRemove>(),
+        def::<CalendarSync>(),
+        def::<PersonalCalendarConnect>(),
+        def::<PersonalCalendarStatus>(),
+        def::<PersonalCalendarDisconnect>(),
         def::<CrowdFeedback>(),
         def::<CrowdStatus>(),
         def::<CrowdForecast>(),
@@ -413,5 +419,58 @@ impl Tool for CalendarPendingWrites {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         Ok(json!({"writes": calendar_writes::pending_writes(cx.db)?}))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CalendarSync {}
+
+impl Tool for CalendarSync {
+    const NAME: &'static str = "calendar_sync";
+    const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and replan around them. Runs every minute anyway.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        let net = Net::new()?;
+        let mut provider = google_provider(cx.db, None, &net)?;
+        calendar::sync_calendar(cx.db, &mut provider, cx.now)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PersonalCalendarConnect {
+    /// The owner's published calendar link (webcal:// or https://, e.g. iCloud "Public Calendar").
+    pub url: String,
+}
+
+impl Tool for PersonalCalendarConnect {
+    const NAME: &'static str = "personal_calendar_connect";
+    const DESCRIPTION: &'static str = "Use the owner's personal calendar feed as read-only busy time. Fetches it now and replans affected weeks. Never repeat the URL back.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        personal_calendar::connect(cx.db, &self.url, cx.now, &Net::new()?)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PersonalCalendarStatus {}
+
+impl Tool for PersonalCalendarStatus {
+    const NAME: &'static str = "personal_calendar_status";
+    const DESCRIPTION: &'static str = "Whether a personal calendar feed is connected, its host, last fetch and blocker count.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        personal_calendar::status(cx.db)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PersonalCalendarDisconnect {}
+
+impl Tool for PersonalCalendarDisconnect {
+    const NAME: &'static str = "personal_calendar_disconnect";
+    const DESCRIPTION: &'static str = "Stop using the personal calendar feed; its blockers are dropped and affected weeks replanned.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        personal_calendar::disconnect(cx.db, cx.now)
     }
 }
