@@ -8,6 +8,7 @@ pub mod fixture_calendar;
 pub mod google;
 pub mod http;
 pub mod ics;
+pub mod photo;
 pub mod recurrence;
 
 use serde_json::Value;
