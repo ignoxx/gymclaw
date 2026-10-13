@@ -19,7 +19,7 @@ as a non-root user with a read-only root filesystem, no capabilities and
 
 | Volume | Mounted at | Contents |
 | --- | --- | --- |
-| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, chat history, agent notes, Google OAuth token), crowd config, inbound `media/`, `turns/` [turn logs](../openclaw/plugins/turn-log/README.md), `heartbeat` |
+| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, chat history, agent notes, Google OAuth token), crowd config, inbound `media/`, `turns/` turn logs (JSONL, format in [`src/agent/turnlog.rs`](../src/agent/turnlog.rs)), `heartbeat` |
 | `gymclaw-workspace` | `/opt/gymclaw/openclaw` (read-only) | Old OpenClaw workspace. Its `USER.md` "Owner notes" are imported into the DB once on first start |
 | `gymclaw-backups` | `/backups` | `backup.sh` archives |
 
@@ -41,7 +41,7 @@ for a while.
    Without this, `gymclaw` would have direct internet access, and it refuses to
    start.
 3. Set the environment variables: `GYMCLAW_TELEGRAM_USER_ID`, `TELEGRAM_BOT_TOKEN`,
-   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL`,
+   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL`, `TZ`,
    `GYMCLAW_PROVIDER` (default `inference-net/fp4`) and `EGRESS_EXTRA_HOSTS` (for example the personal calendar feed host).
 4. Turn off **Escape special characters in labels** (Advanced settings) so the
    dashboard's Traefik labels get `GYMCLAW_DASHBOARD_HOST` filled in.
@@ -72,7 +72,7 @@ Approve the route in the Tailscale admin console. Linux clients also need
 Only one instance may run at a time. Two pollers on one bot token conflict, and
 two runtimes would send every reminder twice.
 
-1. Old host: `runtime pause`, run `backup.sh`, copy the newest `/backups` archive
+1. Old host: `gymclaw call runtime_pause` (or ask the bot to pause), run `backup.sh`, copy the newest `/backups` archive
    off-host, then stop the old deployment.
 
 2. New host: deploy once so the volumes exist, then stop `gymclaw` and restore:
@@ -93,6 +93,10 @@ two runtimes would send every reminder twice.
    `pause` revokes calendar writes; add `"calendar_writes": true` to grant them again if wanted.
 
 4. Check: message the bot, send `/status`, and `gymclaw call deliveries`.
+
+Google auth travels with the DB. If it's gone (`CALENDAR_AUTH_REQUIRED`), re-run
+`docker compose exec -it gymclaw gymclaw calendar-auth --calendar-id <id>`
+([setup](../docs/self-hosting.md#first-run)).
 
 ## Backups
 

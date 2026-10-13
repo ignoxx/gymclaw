@@ -33,77 +33,67 @@ docker compose up -d --build
 | `OPENROUTER_API_KEY` | yes | |
 | `TZ` | no | Your IANA timezone. Also seeds the profile timezone on first start. Default `Europe/Berlin`. |
 | `GYMCLAW_MODEL` | no | OpenRouter model ID. Default `z-ai/glm-5.3-flash`. |
-| `GYMCLAW_PROVIDER` | no | Pinned OpenRouter provider, or `auto`. |
+| `GYMCLAW_PROVIDER` | no | Pinned OpenRouter provider. Default `inference-net/fp4`. |
+| `GYMCLAW_MODEL_FAST`, `GYMCLAW_MODEL_VISION` | no | Models for background triage and photos. Default: `GYMCLAW_MODEL`. |
 | `EGRESS_EXTRA_HOSTS` | no | Extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
 | `GYMCLAW_DASHBOARD_HOST` | no | Hostname for the read-only dashboard behind Traefik. |
 
-The stack is three containers: GymClaw (OpenClaw gateway plus the Python domain), an egress proxy
+The stack is three containers: GymClaw (one Rust binary: bot, agent, coach, scheduler), an egress proxy
 with a host allowlist, and the read-only dashboard. Details, Coolify steps, backups and moving hosts:
 [deploy/README.md](../deploy/README.md).
 
 ## First run
 
-1. **Connect Google Calendar.** OAuth needs a browser on loopback, which the container can't
-   open, so authorize on your own machine and ship the DB to the server. Locally, follow
-   [Google Calendar setup](technical-reference.md#google-calendar-setup) (it ends with
-   `calendar auth` and `calendar sync`), then:
+1. **Connect Google Calendar.** Create the OAuth client
+   ([Google Calendar setup](technical-reference.md#google-calendar-setup)), copy its JSON into the
+   data volume and authorize from inside the container:
 
    ```bash
-   tar -czf gymclaw-auth.tar.gz -C data gymclaw.db
-   docker compose stop gymclaw
-   docker compose run --rm -T --no-deps --entrypoint restore.sh gymclaw - --replace < gymclaw-auth.tar.gz
-   docker compose start gymclaw
-   docker compose exec -w /opt/gymclaw gymclaw scripts/gymclaw-tool runtime relocate
+   docker compose exec -T gymclaw sh -c 'cat > data/google-client.json' < google-client.json
+   docker compose exec -it gymclaw gymclaw calendar-auth --calendar-id <dedicated calendar ID>
+   docker compose exec gymclaw gymclaw call calendar_sync
    ```
 
-   The token now lives in the server's DB; delete the local copy.
+   `calendar-auth` prints a URL. Open it in any browser, approve, and paste back the URL the browser
+   ends up on (a `127.0.0.1` page that won't load). If the Google app is in testing mode, its tokens
+   expire after 7 days: re-run `calendar-auth` whenever GymClaw reports `CALENDAR_AUTH_REQUIRED`.
 2. **Say hi to your bot.** It runs a short setup interview: goal, experience, days, time window, gym
    and travel time, equipment, injuries. Send a photo of your plan or let it build one.
    See [onboarding](technical-reference.md#onboarding).
-3. **Turn on the runtime.** Reminders, rest timers and the Sunday plan are scheduled jobs. They stay
-   off until you enable them:
+3. **Turn on the runtime.** Reminders, rest timers and the Sunday plan stay off until you enable
+   them. Ask the bot ("turn on reminders", "and poll the gym's crowd"), or:
 
    ```bash
-   docker compose exec -w /opt/gymclaw gymclaw scripts/gymclaw-tool runtime plan     # preview
-   docker compose exec -w /opt/gymclaw gymclaw scripts/gymclaw-tool runtime sync \
-     --allow-runtime-changes --allow-messages --template-id <first template> [--with-crowd-poll]
+   docker compose exec gymclaw gymclaw call runtime_resume '{"owner_asked": true, "crowd_polling": true}'
    ```
 
-4. **Calendar writes** are a separate opt-in: preview with `calendar publish`, then grant
-   `runtime sync --allow-calendar-writes`. Revoke any time with `runtime revoke-calendar-writes`.
+   Weekly planning uses the first template of the plan you confirmed during setup.
+4. **Calendar writes** are a separate opt-in: check `calendar_pending_writes`, then grant with
+   `runtime_resume` and `"calendar_writes": true` (or ask the bot). Revoke any time with
+   `calendar_writes_revoke`.
 
-`runtime pause` stops all callbacks and messages and revokes calendar writes. Resuming needs
-`runtime resume --allow-runtime-changes --allow-messages`.
+`runtime_pause` stops all reminders and messages and revokes calendar writes. `runtime_resume`
+turns them back on; calendar writes need to be granted again. `runtime_status` shows what's on.
 
 ## Your gym's crowd data
 
 Every gym exposes this differently, if at all. See [crowd data](crowd.md) for what GymClaw
 supports and how to connect yours.
 
-## Installing into an existing OpenClaw
-
-Not supported yet. GymClaw expects its own OpenClaw profile: its workspace files (`AGENTS.md`,
-`SOUL.md`, `HEARTBEAT.md`) define the agent's whole persona and would replace your assistant's, and the
-coach plugin calls the Python tool and SQLite DB from inside the gateway's environment. To try it
-anyway, mirror what [deploy/entrypoint.sh](../deploy/entrypoint.sh) does on a separate
-`--profile gymclaw`: the workspace, the two plugins in [openclaw/plugins](../openclaw/plugins), the
-Telegram settings, and a Python 3.12+ venv with GymClaw installed. Then use `runtime sync` as above.
-
 ## When a message goes missing
 
-Proactive messages go through an outbox with delivery receipts. `runtime deliveries` lists them.
+Proactive messages go through an outbox with delivery receipts. `deliveries` lists them.
 A delivery stuck in SENDING or UNKNOWN is never retried automatically, since Telegram has no
-exactly-once send. Check the chat, then resolve it:
+exactly-once send. The bot asks you whether it arrived; you can also check the chat and resolve it:
 
 ```bash
-scripts/gymclaw-tool runtime resolve --delivery-id ID --outcome sent|not-sent --confirm-sender-stopped
+docker compose exec gymclaw gymclaw call delivery_resolve '{"delivery_id": "ID", "outcome": "not-sent"}'
 ```
 
-`not-sent` queues it again.
+`not-sent` queues it again; `sent` closes it.
 
 ## Things to know
 
-- The OpenClaw image is pinned (`deploy/Dockerfile`). The coach plugin uses OpenClaw's internal
-  Telegram runtime, so check it after upgrading OpenClaw.
+- `gymclaw call <tool> '<json>'` runs any agent tool by hand; `gymclaw tools` lists them.
 - The DB and backups hold your Google OAuth token and chat history. Keep them private.
 - Only one instance per bot token. Two would both poll Telegram and send every reminder twice.

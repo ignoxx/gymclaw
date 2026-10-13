@@ -1,82 +1,64 @@
-# GymClaw in Rust: design and porting rules
+# How GymClaw is built
 
-One binary replaces OpenClaw and the Python domain. It owns Telegram, the agent loop, the
-scheduler, the outbox and the training domain, all over the existing `data/gymclaw.db`.
+One binary owns Telegram, the agent loop, the scheduler, the outbox and the training domain, all
+over one SQLite DB (`data/gymclaw.db`).
 
 ```
 gymclaw serve        # bot: Telegram long-poll, agent, coach, scheduler, outbox
-gymclaw call <tool> '<json>' [--now …] [--request-id …]   # any agent tool, for ops and testing
+gymclaw call <tool> '<json>'|- [--now …] [--request-id …]   # any agent tool, for ops and testing
 gymclaw tools        # tool names, descriptions, JSON schemas
-gymclaw migrate      # schema (baseline = last alembic head, then src/db/migrations)
+gymclaw migrate      # schema (baseline = last alembic head of the old Python schema, then src/db/migrations)
 gymclaw backup [dest]
+gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
 gymclaw dashboard    # read-only dashboard
 ```
 
-## Why
+## Why one binary
 
-On 2026-10-12 the agent was asked to move one session and leave the rest alone. The shell-based
-tool boundary let it read `--help`, grep source and run ad-hoc Python on the prod DB, and it told
-the owner something the state contradicted. The rewrite gives the model typed tools only, a small
-context, and a way past missing verbs that doesn't involve the source code (see "Agent").
+GymClaw used to be a Python package behind OpenClaw, with tools exposed through a shell. On
+2026-10-12 the agent was asked to move one session and leave the rest alone. The shell boundary
+let it read `--help`, grep source and run ad-hoc Python on the prod DB, and it told the owner
+something the state contradicted. Now the model gets typed tools only, a small context, and a way
+past missing verbs that doesn't involve the source code (see "Agent"). Behavior, messages, error
+codes and DB schema were kept, so existing data and habits carried over.
 
-## Layout and ownership
+## Layout
 
-| Path | What | Owner |
-| --- | --- | --- |
-| `src/db/`, `src/time.rs`, `src/error.rs`, `src/config.rs`, `src/main.rs`, `src/lib.rs` | rows, timestamps, errors, CLI | lead |
-| `src/tools/mod.rs`, `src/tools/meta.rs` | tool registry, SQL escape hatch, notes | lead |
-| `src/domain/{core,view,profile,templates,set_parser,illustrations,progression}.rs` | shared domain leaves | lead |
-| `src/domain/{planning,scheduling,replanning,calendar,calendar_writes,calendar_busy,notifications,availability,weekly,habits,compression,personal_calendar,crowd,events,ticks}.rs`, `src/tools/plan.rs` | planning side | lead |
-| `src/domain/{workout,adaptation,coach,audit,backfill,preview,body,onboarding}.rs`, `src/tools/train.rs` | training side | WP-train |
-| `src/providers/` | Google Calendar + OAuth, ICS feed, crowd sources, photo decoding/EXIF | WP-providers |
-| `src/runtime/`, `src/telegram/`, `src/agent/`, `src/web/`, `src/tools/ops.rs`, `deploy/`, `docker-compose.yaml` | serve, dashboard, deploy | WP-runtime |
+| Path | What |
+| --- | --- |
+| `src/main.rs`, `src/config.rs` | CLI and environment |
+| `src/db/` | schema baseline, migrations, typed rows (`models.rs`) |
+| `src/time.rs`, `src/error.rs` | timestamps (naive UTC in the DB), `CODE: message` errors |
+| `src/domain/` | planning, scheduling, calendar sync/writes, crowd model, workout, coach, progression, onboarding, body, ticks |
+| `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries) |
+| `src/providers/` | Google Calendar + OAuth, ICS feed, crowd sources, photo decoding/EXIF |
+| `src/agent/` | OpenRouter client, per-turn context, media, failure handling, turn log |
+| `src/runtime/` | `serve`: bot loop, scheduler, outbox |
+| `src/telegram/` | Bot API client, coach card renderer, Markdown |
+| `src/web/` | the dashboard |
 
-Only edit files you own. Functions other areas call are already declared with their signature and a
-`todo!()` body ("contract"); the owner fills the body and keeps the signature. If you need a new
-cross-area function, declare it in your own file, or ask the lead. `Cargo.toml`: add the crates
-you need; the lead resolves merge conflicts there.
-
-## Porting rules
-
-- **Python is the spec.** Port behavior faithfully, including messages, error codes, JSON field
-  names and event types (`agent_event.type`, payload keys). The owner's habits and the dashboard
-  depend on them. Improve structure, not behavior, unless this doc says otherwise.
-- **Same DB.** Rows go through `crate::db::models` (`get/select/first/insert/update/delete`). No
-  autoflush: after changing a loaded row, call `.update(db)`. Timestamps are `Ts` (naive UTC text
-  in the DB, Python `isoformat()` in JSON). New ids: `db::new_id()` (uuid4).
-- **Types over strings.** Status columns are enums (`SessionStatus`, `WorkoutStatus`, …); match on
-  them. Parse JSON into structs where the shape is fixed (templates, coach views).
-- **Errors.** `crate::bail!("CODE", "message")` for domain failures; keep Python's codes and texts.
-- **Mutations** use `domain::core::mutate(db, operation, request_id, intent, now, || …)` exactly
-  where Python used `mutate`, so retries stay idempotent.
-- **Tests only when they earn it.** The compiler covers shape. Port a Python test when it pins
-  down real behavior that is easy to get subtly wrong (planner choices, set parsing, progression
-  math, rest timing, stale-delivery rules). Keep them short and literal. No smoke tests.
-- Comments: short doc comment on public functions saying how they are used. Keep them true.
-- `cargo clippy --all-targets -- -D warnings` and `cargo test` pass before you hand back.
-- Never touch production or the real DB. Test against copies (`/tmp/...`) only.
+Rows go through `db::models` (`get/select/first/insert/update`). Status columns are enums.
+Mutations run in `domain::core::mutate(db, operation, request_id, intent, now, …)`, which makes
+retries with the same request ID return the first result.
 
 ## Tools
 
-One struct per tool implementing `tools::Tool` (`NAME`, `DESCRIPTION`, `run(self, &mut Ctx)`),
-registered in the owning `tools/*.rs`. The same tool serves the agent and `gymclaw call`.
-Args are `#[derive(Deserialize, JsonSchema)]` with doc comments (they become the schema the model
-reads). Results are JSON the model reads; mutations return the `mutate` envelope.
+One struct per tool implementing `tools::Tool` (`NAME`, `DESCRIPTION`, `run`). Args derive
+`Deserialize + JsonSchema`; their doc comments become the schema the model reads. The same tool
+serves the agent and `gymclaw call`, so anything the agent can do can be reproduced by hand.
+
+Tools are intent-level verbs (`move_session`, `add_session`, `skip_session`,
+`set_session_workout`, `get_week`, `workout`, …). Mutations that touch other sessions return
+`side_effects`, so a reply can't contradict the state. Tools that show something in Telegram push
+`Effect::Coach(CoachView)`; the runtime renders it after the transaction commits.
 
 The runtime derives `request_id` (`tg-<message id>-<call index>`, `tg-cb:<callback id>`), so the
-model never has to. Timestamps without an offset are the owner's local time
-(`Ts::parse(text, Some(&profile.tz()))`).
-
-Tool surface = the old CLI + `gymclaw_workout` actions, as intent-level verbs
-(`move_session`, `add_session`, `skip_session`, `set_session_workout`, `get_week`, `workout`, …).
-Mutations that touch other sessions return `side_effects` so a reply can't contradict the state.
-Tools that show something in Telegram push `Effect::Coach(CoachView)`; the runtime renders it after
-the transaction commits.
+model never has to. Timestamps without an offset are the owner's local time.
 
 ## Agent ("adapt to me")
 
-- System prompt: short. Who the owner is, voice (old `openclaw/SOUL.md`), the few rules that protect
-  data and trust, and the owner's notes. No tool manual: tool descriptions carry that.
+- System prompt: short. Who the owner is, voice, the few rules that protect data and trust, and
+  the owner's notes. No tool manual: tool descriptions carry that.
 - Context per turn: system prompt + state snapshot (local time, profile, this week's sessions,
   running workout, open events) + notes + the last ~30 `chat_message` rows. Target < 15k tokens.
 - Escape hatch: `sql_query` (read anything but secrets) and `sql_write` (DB snapshot first, audited
@@ -87,31 +69,45 @@ the transaction commits.
   back to the model. Step cap (12 calls) and an identical-call breaker; on giving up, one sanitized
   line to the owner.
 - Models via OpenRouter: `GYMCLAW_MODEL` (chat, default GLM), `GYMCLAW_MODEL_FAST`,
-  `GYMCLAW_MODEL_VISION`; `GYMCLAW_PROVIDER` pins the provider like today (`reasoning.effort: minimal`).
+  `GYMCLAW_MODEL_VISION`; `GYMCLAW_PROVIDER` pins the provider (`reasoning.effort: minimal`).
 
-## Telegram parity (everything OpenClaw + plugins did)
+## Telegram
 
-- DM with the owner only (`GYMCLAW_TELEGRAM_USER_ID`); everything else ignored.
+- DMs with the owner only (`GYMCLAW_TELEGRAM_USER_ID`); everything else is ignored.
 - 👀 ack reaction on receipt, removed when the reply is sent; typing indicator while working.
-- Two button kinds: `gc:<action>:<ref>` → coach (`coach::handle_tap`), no model. Agent buttons
-  → `btn:<id>` with the value in `agent_button`; a tap is fed to the agent as the owner's text.
-- Typed sets (`10x40`, `13 reps`) → `coach::handle_text` first; `handled: false` → agent.
-- Coach card renderer: port `openclaw/plugins/coach/runtime.mjs` `createCoach` (live card,
-  extras, 5 s rest countdown edits, retire/delete, `refresh`/`keep`/`restore`/`standalone`/swap).
-- Photos/documents in (HEIC included) → vision; EXIF capture date for scale backfill.
-- `/new` clears the chat window; `/status` shows runtime health.
+- Two button kinds: `gc:<action>:<ref>` → coach, no model. Agent buttons → `btn:<id>` with the
+  value in `agent_button`; a tap is fed to the agent as the owner's text.
+- Typed sets (`10x40`, `13 reps`) → coach first; anything it doesn't handle → agent.
+- Coach card: one live card per exercise with image, target and quick buttons, edited in place;
+  the rest countdown edits every 5 s.
+- Photos/documents in (HEIC included, via libheif ≥ 1.17) → vision model; EXIF capture date for
+  scale backfill.
+- `/new` clears the chat window; `/status` shows runtime health without the model.
 - Every outbound message (agent, coach, reminders, briefings) goes into `chat_message`, so the agent
   sees what the owner sees.
 - Per-owner serialized turns; messages arriving during a turn are collected into the next one.
-- Turn log: same JSONL events as `openclaw/plugins/turn-log` in `data/turns/`.
+- Turn log: JSONL events in `data/turns/YYYY-MM-DD.jsonl`, secrets redacted
+  ([format](../src/agent/turnlog.rs)).
 
 ## Scheduler and outbox
 
-- In-process: `ticks::watch` every 60 s, `ticks::weekly` Sunday 19:00 profile-local, `ticks::poll_crowd`
-  every 15 min when enabled, `ticks::publish` after ticks when calendar writes are enabled.
-- One-off jobs stay in `notification_job` (GET_READY, LEAVE, SESSION_START, REST). One loop sleeps
-  until the next `due_at` (or a wake-up after any write) and fires them like `runtime fire` did.
-  REST jobs fire 30 s late as a fallback; the coach's live countdown normally handles them.
-- Outbox = `notification_delivery`, semantics unchanged: commit PENDING → claim SENDING → send →
-  SENT with the Telegram message id; any send error → UNKNOWN, never retried automatically.
-- `runtime_settings.enabled` still gates sends; calendar writes and crowd polling keep their flags.
+- In-process: `ticks::watch` every 60 s (calendar sync, personal feed, reminders), `ticks::weekly`
+  Sunday from 19:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
+  after ticks when calendar writes are enabled. `serve` touches `data/heartbeat` every minute for
+  the container health check.
+- One-off jobs live in `notification_job` (GET_READY, LEAVE, SESSION_START, REST). One loop sleeps
+  until the next `due_at` (or a wake-up after any write) and fires them. REST jobs fire 30 s late as
+  a fallback; the coach's live countdown normally handles them.
+- Outbox = `notification_delivery`: commit PENDING → claim SENDING → send → SENT with the Telegram
+  message id; any send error → UNKNOWN, never retried automatically, because Telegram has no
+  idempotent send. The owner checks and the agent calls `delivery_resolve`.
+- `runtime_settings` gates it all: `enabled` for sends and ticks, plus separate flags for
+  calendar writes and crowd polling. The row is created by the first `runtime_resume`.
+
+## Testing
+
+`cargo test` and `cargo clippy --all-targets -- -D warnings`. Tests pin down behavior that's easy
+to get subtly wrong (planner choices, set parsing, progression math, rest timing, stale-delivery
+rules); the compiler covers shape. [PARITY.md](../PARITY.md) maps the old Python suite to these
+tests, and `scripts/diff-replay` compares Rust against the last Python release on a copy of a real
+backup. Never test against the production DB; use copies in `/tmp`.

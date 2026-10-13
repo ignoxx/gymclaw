@@ -15,8 +15,9 @@ Private JSON at `data/crowd-config.json` (or the path in `GYMCLAW_CROWD_CONFIG`)
 {"kind": "http", "url": "https://…", "regex": "(\\d+) people"}
 
 // Anything else (login, several requests, a page that needs parsing): a script you provide.
-// Runs from the repo root, no shell, 30 s timeout. Print the count, alone or as {"value": 12}.
-{"kind": "command", "argv": [".venv/bin/python", "data/crowd-source.py"]}
+// Runs from the working directory (/opt/gymclaw in Docker), no shell, 30 s timeout
+// (`timeout_seconds`, up to 120). Print the count, alone or as {"value": 12}.
+{"kind": "command", "argv": ["sh", "data/crowd-source.sh"]}
 
 // MySports gyms, built in. A file without "kind" means this.
 {"kind": "mysports", "studio_id": "123456", "tenant": "my-gym"}
@@ -25,18 +26,26 @@ Private JSON at `data/crowd-config.json` (or the path in `GYMCLAW_CROWD_CONFIG`)
 Only GET, HTTPS, no redirects. The count must be a whole nonnegative number; anything else is
 recorded as a failed read, never stored. Errors never echo the config or response.
 
-Check it, without storing anything:
-
-```bash
-scripts/gymclaw-tool crowd test
-```
-
-Then enable polling with `runtime sync … --with-crowd-poll`. The DB binds to the first source it
-reads from; switching sources later needs a fresh DB.
+Enable polling by asking the bot, or with
+`gymclaw call runtime_resume '{"owner_asked": true, "crowd_polling": true}'`. There is no dry-run
+read: after the next poll (at most 15 minutes), `gymclaw call crowd_status` shows whether readings
+arrive and the source health. The DB binds to the first source it reads from; switching
+sources later needs a fresh DB.
 
 **Docker:** the egress proxy only allows known hosts. Add your source's host(s) to
 `EGRESS_EXTRA_HOSTS` and redeploy. Put command scripts in `data/` so they live in the persistent
-volume. `.venv/bin/python` has `requests` available.
+volume. The image is Debian bookworm-slim with `sh` and `curl`; a command must exist in it, so
+there is no Python. A script that needs a session cookie first:
+
+```sh
+#!/bin/sh
+# data/crowd-source.sh: two requests (session cookie, then the page), print the count.
+set -eu
+jar=$(mktemp)
+curl -fsS -c "$jar" https://gym.example/ >/dev/null
+curl -fsS -b "$jar" https://gym.example/live | sed -n 's/.*[^0-9]\([0-9][0-9]*\) people.*/\1/p' | head -n1
+rm -f "$jar"
+```
 
 ## Finding your gym's source
 
@@ -50,7 +59,7 @@ A prompt that works:
 > percentage if a count exists. Then write a GymClaw crowd source config following
 > https://github.com/ignoxx/gymclaw/blob/main/docs/crowd.md: prefer `http` with `json_path`, use a
 > `command` script in `data/` only if one request isn't enough. Tell me which hosts to add to
-> `EGRESS_EXTRA_HOSTS`, and verify with `scripts/gymclaw-tool crowd test`.
+> `EGRESS_EXTRA_HOSTS`. The image has `sh` and `curl`, no Python.
 
 No public count? Skip it. Planning still works, and your answers after each workout teach it
 which hours feel busy.

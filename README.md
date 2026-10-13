@@ -4,7 +4,7 @@
 
 A Telegram agent that plans my gym week around my calendar and the gym's crowd, tells me when to leave, and coaches me through each workout set by set.
 
-> **Status: work in progress / proof of concept.** I use it daily. Once the UX is nailed down, it gets rewritten from scratch in Rust 🦀. Expect rough edges and breaking changes until then.
+> **Status: work in progress.** I use it daily. Expect rough edges and breaking changes.
 
 ## What it does
 
@@ -20,9 +20,12 @@ Onboarding happens in the same chat: a short interview, then a photo of an exist
 
 ## How it works
 
-- **Python tools** own all state in SQLite (plans, sets, crowd history, outbox) and validate every action.
-- **OpenClaw** runs the agent (GLM via OpenRouter) for conversation and judgment calls, plus a scheduler for deterministic jobs: calendar sync every 60 s, crowd polling every 15 min, reminders, rest timers.
-- **Coach plugin** handles workout taps and typed sets without the model.
+One Rust binary, `gymclaw` ([how it's built](docs/rust-runtime.md)):
+
+- **Typed tools** own all state in SQLite (plans, sets, crowd history, outbox) and validate every action. The agent and `gymclaw call` use the same tools.
+- **The agent** (GLM via OpenRouter) handles conversation and judgment calls with those tools and nothing else.
+- **A native scheduler** runs the deterministic jobs: calendar sync every 60 s, crowd polling every 15 min, reminders, rest timers, the Sunday plan.
+- **The coach** handles workout taps and typed sets without a model.
 - Proactive messages go through an outbox with delivery receipts; actions carry request IDs so retries are safe.
 
 ## Running your own
