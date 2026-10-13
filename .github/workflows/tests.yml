@@ -20,7 +20,7 @@ jobs:
           node-version: '24'
       - run: node --test openclaw/plugins/*/*.test.mjs
       # Syntax-level only; the deploy scripts are replaced by the Rust rewrite.
-      - run: shellcheck -S error deploy/*.sh deploy/egress/*.sh scripts/gymclaw-tool scripts/connect-personal-calendar scripts/render-illustrations scripts/shot .githooks/pre-commit
+      - run: shellcheck -S error deploy/*.sh deploy/egress/*.sh scripts/gymclaw-tool scripts/connect-personal-calendar scripts/render-illustrations scripts/shot .githooks/pre-commit .agents/skills/gymclaw-prod/prod
 
   secrets:
     runs-on: ubuntu-latest
