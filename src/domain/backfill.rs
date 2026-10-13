@@ -33,7 +33,7 @@ pub struct PastSet {
 /// so history, progression and the week's plan count them. Off-plan exercises don't change the saved
 /// plan. Without `template_id` it is that day's planned session (a missed one counts after all).
 pub fn log_past(db: &Connection, sets: &[PastSet], at: Ts, template_id: Option<&str>, now: Ts, request_id: &str) -> Result<Value> {
-    if sets.iter().any(|s| s.exercise.is_empty() || s.reps <= 0 || !(s.weight >= 0.0)) {
+    if sets.iter().any(|s| s.exercise.is_empty() || s.reps <= 0 || !s.weight.is_finite() || s.weight < 0.0) {
         return Err(Error::domain("INVALID_INPUT", "Each set needs an exercise, reps > 0 and weight ≥ 0"));
     }
     let intent = json!({"at": at, "template_id": template_id, "sets": sets});
