@@ -1,0 +1,11 @@
+# Build context for deploy/Dockerfile (BuildKit prefers this over the root .dockerignore).
+*
+!Cargo.toml
+!Cargo.lock
+!src
+!web
+!config
+!gymclaw/assets/workout-guide
+!deploy/entrypoint.sh
+!deploy/backup.sh
+!deploy/restore.sh
