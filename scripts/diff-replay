@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Differential replay: the Rust tool layer vs the Python CLI (the oracle) on a copy of a real DB.
+
+Usage: scripts/diff-replay <backup.db> [--python .venv/bin/python] [--keep]
+
+Each side gets its own fresh copy of the backup in a temp dir (the backup is only read). The same
+owner operations run on both with a fixed --now and fixed request ids; results and the affected
+tables are normalized and compared. New UUIDs become <new:N> in order of appearance, wall-clock
+columns (created_at/updated_at/handled_at) are dropped, key order is ignored. No network: only
+local tools/commands are used. See scripts/diff-replay.md.
+"""
+import argparse
+import collections
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+NOW = "2026-10-12T21:00:00+02:00"  # Monday evening, after the backup was taken.
+# New ids: uuid4 rows and the sha256 calendar event ids derived from them.
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\b[0-9a-f]{64}\b")
+WALL_CLOCK = {"created_at", "updated_at", "handled_at"}
+TABLES = ["planned_session", "availability_block", "user_profile", "workout_session", "workout_exercise", "set_log",
+          "notification_job", "calendar_write", "exercise_progression", "crowd_feedback"]
+PULL, LEGS = "088cac56-9198-40a2-a776-d394e1d9b0ff", "a364a274-e874-40ec-8dbc-8515b636f6b2"
+
+# (label, rust tool, rust args, python argv). {name} placeholders are filled from earlier results
+# (see CAPTURE), separately per side.
+STEPS = [
+    ("get week", "get_week", {"day": "2026-10-12"}, ["calendar", "get-week", "--week-start", "2026-10-12"]),
+    ("move session", "move_session", {"session_id": PULL, "to": "2026-10-16T17:00"},
+     ["calendar", "move", "--session-id", PULL, "--to", "2026-10-16T17:00", "--request-id", "dr-move"]),
+    ("add session", "add_session", {"template_id": "push", "to": "2026-10-15T11:00"},
+     ["calendar", "add", "--template-id", "push", "--to", "2026-10-15T11:00", "--request-id", "dr-add"]),
+    ("skip", "skip_session", {"session_id": LEGS}, ["calendar", "skip", "--session-id", LEGS, "--request-id", "dr-skip"]),
+    ("set workout", "set_session_workout", {"session_id": "{added}", "template_id": "legs"},
+     ["calendar", "set-workout", "--session-id", "{added}", "--template-id", "legs", "--request-id", "dr-set"]),
+    ("plan week", "plan_week", {"day": "2026-10-19", "template_id": "push"},
+     ["schedule", "plan-week", "--week-start", "2026-10-19", "--template-id", "push", "--request-id", "dr-plan"]),
+    ("profile get", "profile_get", {}, ["profile", "get"]),
+    ("profile update", "profile_update", {"changes": {"prep_minutes": 20}}, ["profile", "update", "--data", '{"prep_minutes": 20}']),
+    ("availability add", "availability_add", {"kind": "TRAVEL", "from_date": "2026-10-27", "through": "2026-10-28"},
+     ["availability", "add", "--kind", "TRAVEL", "--from-date", "2026-10-27", "--through", "2026-10-28", "--request-id", "dr-away"]),
+    ("availability list", "availability_list", {}, ["availability", "list"]),
+    ("availability remove", "availability_remove", {"block_id": "{block}"},
+     ["availability", "remove", "--block-id", "{block}", "--request-id", "dr-back"]),
+    ("crowd status", "crowd_status", {}, ["crowd", "get-source-health"]),
+    ("crowd forecast", "crowd_forecast", {"at": "2026-10-13T18:00"}, ["crowd", "predict", "--at", "2026-10-13T18:00"]),
+    ("events pending", "events_pending", {}, ["events", "pending"]),
+    ("workout start", "workout", {"action": "start", "template_id": "legs"},
+     ["coach", "start", "--template-id", "legs", "--request-id", "dr-start"]),
+    ("log set 1", "workout", {"action": "log", "text": "10x60"}, ["coach", "text", "--text", "10x60", "--request-id", "dr-set-1"]),
+    ("log set 2", "workout", {"action": "log", "text": "9x60"}, ["coach", "text", "--text", "9x60", "--request-id", "dr-set-2"]),
+    ("finish", "workout", {"action": "end"}, ["coach", "act", "--action", "end", "--request-id", "dr-end"]),
+]
+# Step label -> placeholder its new id fills.
+CAPTURE = {"add session": "added", "availability add": "block"}
+# Rust request ids mirror the Python ones (reads get a dummy one).
+REQUEST_IDS = {}
+for i, (label, _, _, argv) in enumerate(STEPS):
+    REQUEST_IDS[label] = argv[argv.index("--request-id") + 1] if "--request-id" in argv else f"dr-read-{i}"
+
+
+def fill(value, ids):
+    if isinstance(value, str):
+        return re.sub(r"\{(added|block)\}", lambda m: ids[m.group(1)], value)
+    if isinstance(value, list):
+        return [fill(v, ids) for v in value]
+    if isinstance(value, dict):
+        return {k: fill(v, ids) for k, v in value.items()}
+    return value
+
+
+def find_id(result, key):
+    """The new session/block id in a step result, wherever the side puts it."""
+    data = result.get("data", result) if isinstance(result, dict) else result
+    for name in ("session_id", "block_id", "id"):
+        if isinstance(data, dict) and isinstance(data.get(name), str):
+            return data[name]
+    raise SystemExit(f"no id for {key} in {json.dumps(result)[:300]}")
+
+
+def run_rust(binary, db, data_dir, label, tool, args):
+    env = os.environ | {"GYMCLAW_DB": str(db), "GYMCLAW_DATA_DIR": str(data_dir)}
+    out = subprocess.run([binary, "call", tool, json.dumps(args), "--now", NOW, "--request-id", REQUEST_IDS[label]],
+                         capture_output=True, text=True, env=env, cwd=ROOT)
+    return parse(out)
+
+
+def run_python(python, db, argv):
+    argv = [*argv, "--now", NOW]
+    out = subprocess.run([python, "-m", "gymclaw.cli", "--db-url", f"sqlite:///{db}", *argv], capture_output=True, text=True, cwd=ROOT)
+    return parse(out)
+
+
+def parse(out):
+    try:
+        return json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else {"stderr": out.stderr.strip()[-500:]}
+    except json.JSONDecodeError:
+        return {"unparsed": out.stdout[-500:], "stderr": out.stderr[-500:]}
+
+
+class Normalizer:
+    """Known ids stay; new UUIDs map to <new:N> in order of first appearance on that side."""
+
+    def __init__(self, known):
+        self.known, self.new = known, {}
+
+    def __call__(self, value):
+        if isinstance(value, dict):
+            return {k: self(v) for k, v in value.items() if k not in WALL_CLOCK}
+        if isinstance(value, list):
+            return [self(v) for v in value]
+        if isinstance(value, str):
+            if value.startswith(("{", "[")):
+                try:
+                    return self(json.loads(value))
+                except json.JSONDecodeError:
+                    pass
+            return UUID.sub(lambda m: m.group(0) if m.group(0) in self.known else self.new.setdefault(m.group(0), f"<new:{len(self.new)}>"), value)
+        return value
+
+
+def known_ids(db):
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    ids = set()
+    for (table,) in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
+        for row in con.execute(f'SELECT * FROM "{table}"'):
+            for cell in row:
+                if isinstance(cell, str):
+                    ids.update(UUID.findall(cell))
+    con.close()
+    return ids
+
+
+def dump(db, norm):
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    tables = {}
+    for table in TABLES:
+        rows = [norm(dict(r)) for r in con.execute(f'SELECT * FROM "{table}"')]
+        tables[table] = sorted(rows, key=lambda r: json.dumps(r, sort_keys=True))
+    tables["agent_event (types)"] = sorted(r[0] for r in con.execute("SELECT type FROM agent_event"))
+    con.close()
+    return tables
+
+
+def flatten(value, path=""):
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            out.update(flatten(v, f"{path}.{k}" if path else k))
+        return out or {path: {}}
+    if isinstance(value, list):
+        out = {}
+        for i, v in enumerate(value):
+            out.update(flatten(v, f"{path}[{i}]"))
+        return out or {path: []}
+    return {path: value}
+
+
+def compare(rust, py):
+    a, b = flatten(rust), flatten(py)
+    lines = [f"  only rust:   {k} = {json.dumps(a[k])[:120]}" for k in sorted(a.keys() - b.keys())]
+    lines += [f"  only python: {k} = {json.dumps(b[k])[:120]}" for k in sorted(b.keys() - a.keys())]
+    lines += [f"  differs:     {k}: rust {json.dumps(a[k])[:80]} | python {json.dumps(b[k])[:80]}" for k in sorted(a.keys() & b.keys()) if a[k] != b[k]]
+    return lines
+
+
+def compare_rows(rust, py):
+    """Rows as multisets: a row that differs shows up once per side."""
+    canon = lambda rows: collections.Counter(json.dumps(r, sort_keys=True, ensure_ascii=False) for r in rows)
+    a, b = canon(rust), canon(py)
+    return [f"  only rust:   {r}" for r in sorted((a - b).elements())] + [f"  only python: {r}" for r in sorted((b - a).elements())]
+
+
+def unwrap(result):
+    """Compare payloads: the Python CLI wraps everything in {ok, data, events, user_message_hint}."""
+    if not isinstance(result, dict):
+        return result
+    out = {k: v for k, v in result.items() if k != "ok"}
+    if out.get("events") == [] and out.get("user_message_hint") is None:
+        out.pop("events", None)
+        out.pop("user_message_hint", None)
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("backup", type=Path)
+    parser.add_argument("--python", default=str(Path.home() / "Projects/gymclaw/.venv/bin/python"))
+    parser.add_argument("--keep", action="store_true", help="Keep the temp dir with both DB copies")
+    opts = parser.parse_args()
+    subprocess.run(["cargo", "build", "-q"], cwd=ROOT, check=True)
+    binary = str(ROOT / "target/debug/gymclaw")
+    work = Path(tempfile.mkdtemp(prefix="gymclaw-diff-replay-"))
+    try:
+        rust_db, py_db = work / "rust.db", work / "python.db"
+        for copy in (rust_db, py_db):
+            shutil.copyfile(opts.backup, copy)
+            copy.chmod(0o644)
+        (work / "data").mkdir()
+        # Deploys run `migrate` first: the Rust-only tables (agent notes, chat log, …).
+        subprocess.run([binary, "migrate"], env=os.environ | {"GYMCLAW_DB": str(rust_db), "GYMCLAW_DATA_DIR": str(work / "data")}, check=True, cwd=ROOT, capture_output=True)
+        known = known_ids(py_db)
+        norm_rust, norm_py = Normalizer(known), Normalizer(known)
+        ids_rust, ids_py = {}, {}
+        report = []
+        for label, tool, args, argv in STEPS:
+            rust = run_rust(binary, rust_db, work / "data", label, tool, fill(args, ids_rust))
+            py = run_python(opts.python, py_db, fill(argv, ids_py))
+            if label in CAPTURE:
+                ids_rust[CAPTURE[label]] = find_id(rust, label)
+                ids_py[CAPTURE[label]] = find_id(unwrap(py), label)
+            diff = compare(norm_rust(unwrap(rust)), norm_py(unwrap(py)))
+            report.append(f"## {label}: {'same' if not diff else f'{len(diff)} differences'}")
+            report += diff
+        rust_tables, py_tables = dump(rust_db, norm_rust), dump(py_db, norm_py)
+        for table in rust_tables:
+            diff = compare_rows(rust_tables[table], py_tables[table])
+            report.append(f"## table {table}: {'same' if not diff else f'{len(diff)} differences'}")
+            report += diff
+        print("\n".join(report))
+        if opts.keep:
+            print(f"\nkept: {work}", file=sys.stderr)
+    finally:
+        if not opts.keep:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
