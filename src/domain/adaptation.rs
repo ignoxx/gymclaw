@@ -478,3 +478,157 @@ pub fn relabel(db: &Connection, workout_id: &str, query: &str, which: Option<&st
         Ok(json!({"workout_id": workout.id, "exercise_id": row.id, "from": old, "to": spec.id, "name": spec.name}))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::{ExerciseProgression, NotificationJob};
+    use crate::domain::audit::{finish, get_audit};
+    use crate::domain::set_parser::SetInput;
+    use crate::domain::templates::{Template, get_template, import_template};
+    use crate::domain::workout::tests::{at, db, spec};
+    use crate::domain::workout::{current, log_set, start};
+
+    fn adapt(db: &Connection) {
+        let template = Template {
+            id: "adapt".into(),
+            name: "Adapt".into(),
+            exercises: vec![
+                spec(json!({"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 1, "target_weight": 80, "warmup_weight": 50})),
+                spec(json!({"id": "fly", "name": "Fly", "role": "fly", "working_sets": 2, "target_weight": 50, "rep_max": 12, "substitutes": ["db-fly"]})),
+                spec(json!({"id": "raise", "name": "Raise", "role": "delts", "working_sets": 1, "target_weight": 10, "increment": 1})),
+            ],
+            alternatives: vec![spec(json!({"id": "db-fly", "name": "DB Fly", "role": "fly", "working_sets": 2, "target_weight": 12, "rep_max": 12, "increment": 1}))],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(db, &template).unwrap();
+    }
+
+    fn set(weight: f64, reps: i64) -> SetInput {
+        SetInput { weight, reps, set_type: SetType::Working, rir: None }
+    }
+
+    fn bench_done(db: &Connection) -> String {
+        adapt(db);
+        let id = start(db, Some("adapt"), None, false, at(0), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        log_set(db, &id, &SetInput { set_type: SetType::Warmup, ..set(50.0, 8) }, at(0), "warmup").unwrap();
+        log_set(db, &id, &set(80.0, 10), at(40), "bench").unwrap();
+        id
+    }
+
+    fn progression(db: &Connection, id: &str) -> Option<f64> {
+        ExerciseProgression::get(db, id).unwrap().map(|p| p.next_weight)
+    }
+
+    #[test]
+    fn reorder_retry_deferred_and_audit() {
+        let db = db();
+        let id = bench_done(&db);
+        let result = machine_busy(&db, &id, None, at(60), "busy").unwrap();
+        let deferred = result["data"]["deferred_exercise_id"].as_str().unwrap().to_string();
+        assert_eq!(result["data"]["active_exercise"]["exercise_id"], "raise");
+        assert_eq!(result["data"]["substitution_options"], json!(["db-fly"]));
+        assert_eq!(WorkoutExercise::get(&db, &deferred).unwrap().unwrap().status, ExerciseStatus::Deferred);
+        // Finishing an exercise starts the next one without a rest timer.
+        assert!(NotificationJob::first(&db, "WHERE status = 'PENDING'", []).unwrap().is_none());
+        log_set(&db, &id, &set(10.0, 10), at(100), "raise").unwrap();
+        assert_eq!(finish(&db, &id, at(110), "bad-finish").unwrap_err().code(), "UNRESOLVED_EXERCISES");
+        let result = machine_free(&db, &id, &deferred, at(120), "free").unwrap();
+        assert_eq!(result["data"]["active_exercise"]["exercise_id"], "fly");
+        for n in 0..2 {
+            log_set(&db, &id, &set(50.0, 12), at(160 + 120 * n), &format!("fly-{n}")).unwrap();
+        }
+        let result = finish(&db, &id, at(300), "finish").unwrap();
+        let data = &result["data"];
+        assert_eq!((data["planned_sets"].as_i64(), data["completed_sets"].as_i64(), data["warmup_sets"].as_i64()), (Some(4), Some(4), Some(1)));
+        assert_eq!((data["equipment_waits"].as_i64(), data["progression_count"].as_i64()), (Some(1), Some(3)));
+        assert_eq!((progression(&db, "bench"), progression(&db, "fly")), (Some(82.5), Some(52.5)));
+        assert_eq!(finish(&db, &id, at(310), "finish").unwrap(), result);
+        assert_eq!(get_audit(&db, &id).unwrap(), result["data"]);
+        let second = start(&db, Some("adapt"), None, false, at(2 * 86400), "next").unwrap();
+        assert_eq!(second["data"]["active_exercise"]["target_weight"], 50.0); // warm-up unchanged
+        let row = second["data"]["active_exercise"]["id"].as_str().unwrap();
+        assert_eq!(WorkoutExercise::get(&db, row).unwrap().unwrap().target_weight, 82.5);
+        let replans: i64 = db.query_row("SELECT count(*) FROM agent_event WHERE type = 'planning.replan_required'", [], |r| r.get(0)).unwrap();
+        assert_eq!(replans, 1);
+    }
+
+    #[test]
+    fn substitute_only_remaining_volume_and_hold_partial_target() {
+        let db = db();
+        let id = bench_done(&db);
+        let fly = log_set(&db, &id, &set(50.0, 12), at(100), "fly-1").unwrap()["data"]["active_exercise"]["id"].as_str().unwrap().to_string();
+        assert_eq!(machine_busy(&db, &id, None, at(120), "busy").unwrap()["data"]["active_exercise"]["exercise_id"], "raise");
+        let replacement = substitute(&db, &id, &fly, "db-fly", at(130), "swap").unwrap()["data"]["replacement_exercise_id"].as_str().unwrap().to_string();
+        assert_eq!(WorkoutExercise::get(&db, &replacement).unwrap().unwrap().planned_working_sets, 1);
+        log_set(&db, &id, &set(10.0, 10), at(160), "raise").unwrap();
+        assert_eq!(current(&db, &id, at(160)).unwrap()["active_exercise"]["exercise_id"], "db-fly");
+        log_set(&db, &id, &set(12.0, 12), at(200), "db-fly").unwrap();
+        let audit = finish(&db, &id, at(210), "finish").unwrap()["data"].clone();
+        assert_eq!((audit["planned_sets"].as_i64(), audit["completed_sets"].as_i64(), audit["substitutions"].as_i64()), (Some(4), Some(4), Some(1)));
+        assert_eq!((progression(&db, "db-fly"), progression(&db, "fly")), (Some(12.0), None));
+    }
+
+    #[test]
+    fn dependency_blocks_unsafe_reordering_and_explicit_skips() {
+        let db = db();
+        let a = spec(json!({"id": "a", "name": "A", "role": "press", "target_weight": 10, "working_sets": 1}));
+        let b = spec(json!({"id": "b", "name": "B", "role": "press", "target_weight": 10, "working_sets": 1, "requires_completed": ["a"]}));
+        import_template(&db, &Template { id: "dependent".into(), name: "Dependent".into(), exercises: vec![a, b], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: "user".into() }).unwrap();
+        let id = start(&db, Some("dependent"), None, false, at(0), "dependent").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        let blocked = machine_busy(&db, &id, None, at(0), "busy").unwrap()["data"].clone();
+        assert!(blocked["active_exercise"].is_null());
+        let queue = blocked["queue"].as_array().unwrap().clone();
+        let skipped = skip_exercise(&db, &id, queue[0]["id"].as_str().unwrap(), "equipment unavailable", at(0), "skip-a").unwrap();
+        assert!(skipped["data"]["active_exercise"].is_null());
+        skip_exercise(&db, &id, queue[1]["id"].as_str().unwrap(), "dependency skipped", at(0), "skip-b").unwrap();
+        let result = finish(&db, &id, at(0), "finish").unwrap()["data"].clone();
+        assert_eq!((result["skips"].as_i64(), result["completed_sets"].as_i64()), (Some(2), Some(0)));
+        assert!(ExerciseProgression::select(&db, "", []).unwrap().is_empty());
+    }
+
+    #[test]
+    fn eta_includes_deferred_volume_and_elapsed_time() {
+        let db = db();
+        let id = bench_done(&db);
+        let blocked = machine_busy(&db, &id, None, at(60), "busy").unwrap()["data"].clone();
+        assert!(blocked["queue"].as_array().unwrap().iter().any(|e| e["exercise_id"] == "fly" && e["remaining_sets"] == 2));
+        // Cancelling rest may improve ETA; unresolved sets still count, not disappear.
+        let eta = Ts::parse(blocked["eta"].as_str().unwrap(), None).unwrap();
+        assert!((eta - at(60)).as_secs() >= 3 * 40);
+        let later = Ts::parse(current(&db, &id, at(120)).unwrap()["eta"].as_str().unwrap(), None).unwrap();
+        assert!(later > eta);
+    }
+
+    #[test]
+    fn replacement_prerequisites_are_preserved() {
+        let db = db();
+        adapt(&db);
+        let mut template = get_template(&db, "adapt").unwrap();
+        template.alternatives[0].requires_completed = vec!["raise".into()];
+        import_template(&db, &template).unwrap();
+        let id = start(&db, Some("adapt"), None, false, at(0), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        log_set(&db, &id, &SetInput { set_type: SetType::Warmup, ..set(50.0, 8) }, at(0), "warmup").unwrap();
+        log_set(&db, &id, &set(80.0, 10), at(40), "bench").unwrap();
+        let fly = current(&db, &id, at(40)).unwrap()["active_exercise"]["id"].as_str().unwrap().to_string();
+        let result = substitute(&db, &id, &fly, "db-fly", at(50), "swap").unwrap()["data"].clone();
+        assert_eq!(result["active_exercise"]["exercise_id"], "raise");
+        let replacement = WorkoutExercise::get(&db, result["replacement_exercise_id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(replacement.status, ExerciseStatus::Pending);
+        assert_eq!(replacement.config_json["requires_completed"], json!(["raise"]));
+    }
+
+    #[test]
+    fn invalid_substitution_preserves_state() {
+        let db = db();
+        let id = bench_done(&db);
+        let fly = current(&db, &id, at(40)).unwrap()["active_exercise"]["id"].as_str().unwrap().to_string();
+        let tx = db.unchecked_transaction().unwrap();
+        let error = substitute(&tx, &id, &fly, "bench", at(50), "bad").unwrap_err();
+        assert!(error.to_string().contains("template alternative or a catalog exercise"), "{error}");
+        drop(tx);
+        assert_eq!(WorkoutExercise::get(&db, &fly).unwrap().unwrap().status, ExerciseStatus::Active);
+    }
+}

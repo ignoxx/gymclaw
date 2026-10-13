@@ -816,4 +816,74 @@ pub(crate) mod tests {
     fn python_g_format() {
         assert_eq!([g(80.0), g(22.5), g(0.5), g(102.25), g(-1.2)], ["80", "22.5", "0.5", "102.25", "-1.2"]);
     }
+
+    #[test]
+    fn pose_follows_active_exercise_not_previous_set() {
+        let db = db();
+        let press = spec(json!({"id": "press", "name": "Owner press", "role": "press", "guide_id": "bench-press", "working_sets": 1, "target_weight": 80}));
+        let row = spec(json!({"id": "row", "name": "Owner row", "role": "pull", "guide_id": "seated-row", "working_sets": 1, "target_weight": 60}));
+        import_template(&db, &Template { id: "poses".into(), name: "Poses".into(), exercises: vec![press, row], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: "user".into() }).unwrap();
+        let data = start(&db, Some("poses"), None, false, at(0), "start").unwrap()["data"].clone();
+        assert_eq!(data["active_exercise"]["illustration"]["guide_id"], "bench-press");
+        let after = log_set(&db, data["workout_id"].as_str().unwrap(), &set(80.0, 9, SetType::Working), at(40), "set").unwrap()["data"].clone();
+        assert_eq!(after["active_exercise"]["illustration"]["guide_id"], "seated-row");
+        assert_eq!(after["active_exercise"]["target_weight"], 60.0);
+    }
+
+    #[test]
+    fn rest_complete_retry_returns_the_first_result() {
+        let db = db();
+        let id = short(&db);
+        log_set(&db, &id, &set(50.0, 8, SetType::Warmup), at(0), "warmup").unwrap();
+        let job = log_set(&db, &id, &set(80.0, 9, SetType::Working), at(0), "one").unwrap()["data"]["rest_job"]["id"].as_str().unwrap().to_string();
+        let due = rest_complete(&db, &job, at(100), "due").unwrap();
+        assert!(due["data"]["rest_job"].is_null() && due["user_message_hint"].as_str().unwrap().contains("Bench"));
+        assert_eq!(rest_complete(&db, &job, at(101), "due").unwrap(), due);
+        let events: i64 = db.query_row("SELECT count(*) FROM agent_event WHERE type = 'workout.rest_completed'", [], |r| r.get(0)).unwrap();
+        assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn guardrails_rollback_and_id_conflict() {
+        let db = db();
+        let id = short(&db);
+        let actions: [&dyn Fn(&Connection) -> Result<Value>; 4] = [
+            &|db| start(db, Some("short"), None, false, at(0), "duplicate-active"),
+            &|db| start(db, Some("unknown"), None, false, at(0), "start"),
+            &|db| transition(db, &mut load_workout(db, &id, None)?, WorkoutStatus::PlanUpdated, at(0)).map(|_| Value::Null),
+            &|db| log_set(db, &id, &set(50.0, 8, SetType::Warmup), at(-1), "past"),
+        ];
+        for action in actions {
+            let tx = db.unchecked_transaction().unwrap();
+            assert!(action(&tx).is_err());
+            drop(tx); // rolled back, like the tool layer does on error
+        }
+        assert!(SetLog::select(&db, "", []).unwrap().is_empty());
+        assert_eq!(load_workout(&db, &id, None).unwrap().status, WorkoutStatus::SetActive);
+    }
+
+    #[test]
+    fn template_edits_do_not_mutate_active_workout() {
+        let db = db();
+        let id = short(&db);
+        let mut template = get_template(&db, "short").unwrap();
+        template.exercises[0].working_sets = 1;
+        template.exercises[0].warmup_weight = Some(20.0);
+        import_template(&db, &template).unwrap();
+        let active = current(&db, &id, at(0)).unwrap()["active_exercise"].clone();
+        assert_eq!((active["working_sets"].as_i64(), active["target_weight"].as_f64()), (Some(2), Some(50.0)));
+    }
+
+    #[test]
+    fn only_first_primary_gets_warmup() {
+        let db = db();
+        let a = spec(json!({"id": "a", "name": "A", "role": "press", "primary": true, "working_sets": 1, "target_weight": 10, "warmup_weight": 5}));
+        let b = spec(json!({"id": "b", "name": "B", "role": "pull", "primary": true, "working_sets": 1, "target_weight": 10}));
+        import_template(&db, &Template { id: "two".into(), name: "Two".into(), exercises: vec![a, b], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: "user".into() }).unwrap();
+        let id = start(&db, Some("two"), None, false, at(0), "two").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        log_set(&db, &id, &set(5.0, 8, SetType::Warmup), at(0), "warmup").unwrap();
+        let result = log_set(&db, &id, &set(10.0, 9, SetType::Working), at(0), "working").unwrap()["data"].clone();
+        assert_eq!((result["active_exercise"]["exercise_id"].as_str(), result["active_exercise"]["set_type"].as_str()), (Some("b"), Some("WORKING")));
+        assert_eq!(exercises(&db, &id).unwrap().len(), 2);
+    }
 }
