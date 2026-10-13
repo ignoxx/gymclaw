@@ -254,4 +254,34 @@ mod tests {
         assert_eq!(status(&db).unwrap()["step"], "READY");
     }
 
+    #[test]
+    fn interview_is_mandatory_idempotent_and_finish_grants_no_authority() {
+        let db = db();
+        let current = status(&db).unwrap();
+        assert_eq!(current["step"], "INTERVIEW");
+        assert_eq!(current["missing"].as_array().unwrap().len(), QUESTIONS.len());
+        assert!(current["instruction"].as_str().unwrap().starts_with("What's your main goal"));
+        assert!(update(&db, Update::Finish(None), at(0), "too-soon").unwrap_err().to_string().contains("Finish the interview"));
+        let goal = object(json!({"goal": "Fitness"}));
+        let first = update(&db, Update::Answer { answers: &goal, profile: None }, at(0), "one").unwrap();
+        assert_eq!(update(&db, Update::Answer { answers: &goal, profile: None }, at(0), "one").unwrap(), first);
+        let events: i64 = db.query_row("SELECT count(*) FROM agent_event", [], |r| r.get(0)).unwrap();
+        assert_eq!(events, 1);
+        let other = object(json!({"goal": "Strength"}));
+        assert_eq!(update(&db, Update::Answer { answers: &other, profile: None }, at(0), "one").unwrap_err().code(), "IDEMPOTENCY_CONFLICT");
+        let rest = object(json!({"experience": "2 years", "equipment": "full gym", "limitations": "none", "schedule": "3x", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"}));
+        let profile = object(json!({"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60, "earliest_workout_start": "10:30", "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15, "gym_address": "Example Str. 1, Berlin"}));
+        update(&db, Update::Answer { answers: &rest, profile: Some(&profile) }, at(0), "rest").unwrap();
+        template(&db, "push", "user");
+        template(&db, "pull", "user");
+        let review = update(&db, Update::ConfirmPlan(&["push".into(), "pull".into()]), at(0), "plan").unwrap()["data"].clone();
+        assert_eq!(review["split"], json!(["push", "pull"]));
+        update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
+        let settings: i64 = db.query_row("SELECT count(*) FROM runtime_settings", [], |r| r.get(0)).unwrap();
+        let workouts: i64 = db.query_row("SELECT count(*) FROM workout_session", [], |r| r.get(0)).unwrap();
+        assert_eq!((settings, workouts), (0, 0));
+        // A later profile tweak (e.g. a sleep floor) doesn't send the owner back into setup.
+        crate::domain::profile::update_profile(&db, &object(json!({"earliest_workout_start": "11:00"}))).unwrap();
+        assert_eq!(status(&db).unwrap()["step"], "READY");
+    }
 }
