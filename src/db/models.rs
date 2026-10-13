@@ -368,6 +368,51 @@ table!(AgentButton = "agent_button" {
     created_at: Ts,
 });
 
+impl PlannedSession {
+    /// A new, unplaced session; `replanning::place` sets its times.
+    pub fn new(week_id: String, workout_template_id: Option<String>, user_locked: bool) -> PlannedSession {
+        let now = Ts::now();
+        PlannedSession {
+            id: crate::db::new_id(), week_id, workout_template_id, workout_plan_json: Json(Value::Object(Default::default())),
+            status: SessionStatus::Tentative, planned_start_at: now, planned_end_at: now, prep_start_at: now, leave_home_at: now,
+            expected_finish_at: now, calendar_event_id: None, crowd_prediction: None, crowd_confidence: None, user_locked,
+            source_revision: 1, created_at: now, updated_at: now,
+        }
+    }
+
+    /// Write back a changed row (`updated_at` is wall-clock, like SQLAlchemy's onupdate).
+    pub fn save(&mut self, db: &rusqlite::Connection) -> crate::error::Result<()> {
+        self.updated_at = Ts::now();
+        self.update(db)
+    }
+
+    pub fn plan(&self, key: &str) -> Option<&Value> {
+        self.workout_plan_json.get(key)
+    }
+
+    /// Set (or overwrite) top-level keys of `workout_plan_json`.
+    pub fn merge_plan(&mut self, extra: Value) {
+        if !self.workout_plan_json.is_object() {
+            self.workout_plan_json = Json(Value::Object(Default::default()));
+        }
+        let plan = self.workout_plan_json.as_object_mut().expect("object");
+        if let Value::Object(extra) = extra {
+            plan.extend(extra);
+        }
+    }
+
+    /// Keep only the `crowd_*` keys of the plan (`keep = true`) or drop them (`keep = false`).
+    pub fn crowd_keys(&self, keep: bool) -> Value {
+        let plan = self.workout_plan_json.as_object().cloned().unwrap_or_default();
+        Value::Object(plan.into_iter().filter(|(k, _)| k.starts_with("crowd_") == keep).collect())
+    }
+
+    pub fn deleted_by_user(&self) -> bool {
+        self.plan("deleted_by_user").and_then(Value::as_bool).unwrap_or(false)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

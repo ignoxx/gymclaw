@@ -1,4 +1,13 @@
-//! Pure week planner: candidate slots, recovery, scoring (port of planning.py). Owner: lead.
+//! Pure week planner (port of planning.py): deterministic slots; maximize session count first, then
+//! aggregate score. Recovery uses local calendar dates, not elapsed 24-hour periods. The search keeps
+//! the best slot per day, then considers all weekday combinations (at most 128 per week). No provider
+//! data means unknown crowd, never fabricated occupancy. Owner: lead.
+use jiff::SignedDuration;
+use jiff::civil::Date;
+use serde::Serialize;
+
+use crate::domain::profile::Profile;
+use crate::error::Result;
 use crate::time::Ts;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -10,4 +19,229 @@ pub struct Interval {
 /// Half-open intervals [start, end) overlap.
 pub fn overlaps(start: Ts, end: Ts, other: &Interval) -> bool {
     start < other.end && other.start < end
+}
+
+/// Planner inputs for one slot start. Missing signals score neutral.
+#[derive(Clone, Debug)]
+pub struct SlotSignal {
+    pub start: Ts,
+    pub crowd: Option<f64>,
+    pub confidence: f64,
+    pub calendar_convenience: f64,
+    pub adherence: f64,
+    pub preferred_time: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlannerConfig {
+    pub step_minutes: i64,
+    pub adherence_weight: f64,
+    /// Below crowd_preference_weight (default 1): habits break ties, a quiet slot still beats a busy habitual one.
+    pub preferred_time_weight: f64,
+    pub uncertainty_weight: f64,
+    pub shortened_duration_penalty: f64,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        PlannerConfig { step_minutes: 15, adherence_weight: 1.0, preferred_time_weight: 0.4, uncertainty_weight: 0.5, shortened_duration_penalty: 1.0 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScoreParts {
+    pub crowd: f64,
+    pub calendar: f64,
+    pub adherence: f64,
+    pub preferred_time: f64,
+    pub uncertainty: f64,
+    pub duration: f64,
+}
+
+impl ScoreParts {
+    fn total(&self) -> f64 {
+        self.crowd + self.calendar + self.adherence + self.preferred_time + self.uncertainty + self.duration
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Candidate {
+    pub start: Ts,
+    pub end: Ts,
+    pub prep_start: Ts,
+    pub leave_home: Ts,
+    pub home_at: Ts,
+    pub crowd: Option<f64>,
+    pub confidence: f64,
+    pub score: f64,
+    pub score_parts: Option<ScoreParts>,
+}
+
+impl Candidate {
+    /// An owner-chosen slot off the planner grid: times only, no score.
+    pub fn manual(start: Ts, end: Ts, profile: &Profile) -> Candidate {
+        Candidate {
+            start,
+            end,
+            prep_start: start.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes)),
+            leave_home: start.mins(-profile.commute_to_gym_minutes),
+            home_at: end.mins(profile.commute_home_minutes),
+            crowd: None,
+            confidence: 0.0,
+            score: 0.0,
+            score_parts: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Plan {
+    pub week_start: Date,
+    pub sessions: Vec<Candidate>,
+    pub existing_count: i64,
+    pub minimum_met: bool,
+    pub shortfall: i64,
+}
+
+#[derive(Default)]
+pub struct Inputs<'a> {
+    pub busy: &'a [Interval],
+    pub unavailable: &'a [Interval],
+    pub existing: &'a [Interval],
+    pub signals: &'a [SlotSignal],
+}
+
+pub fn monday(day: Date) -> bool {
+    day.weekday() == jiff::civil::Weekday::Monday
+}
+
+pub fn weekday(day: Date) -> i64 {
+    day.weekday().to_monday_zero_offset() as i64
+}
+
+pub fn recovery_ok(start: Ts, end: Ts, other: &Interval, profile: &Profile) -> bool {
+    let tz = profile.tz();
+    let (first, last) = (start.local(&tz).date(), end.local(&tz).date());
+    let (other_first, other_last) = (other.start.local(&tz).date(), other.end.local(&tz).date());
+    let required = profile.minimum_full_rest_days_between_sessions + 1;
+    let days = |a: Date, b: Date| (a - b).get_days() as i64;
+    days(first, other_last) >= required || days(other_first, last) >= required
+}
+
+pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts, config: &PlannerConfig) -> Result<Vec<Candidate>> {
+    if !monday(week_start) {
+        crate::bail!("INVALID_WEEK", "week_start must be Monday");
+    }
+    let tz = profile.tz();
+    let blockers: Vec<&Interval> = inputs.busy.iter().chain(inputs.unavailable).collect();
+    let mut durations = vec![profile.preferred_workout_minutes, profile.minimum_workout_minutes];
+    durations.sort_unstable_by(|a, b| b.cmp(a));
+    durations.dedup();
+    let step = SignedDuration::from_mins(config.step_minutes);
+    let signals: std::collections::HashMap<Ts, &SlotSignal> = inputs.signals.iter().map(|s| (s.start, s)).collect();
+    let neutral = SlotSignal { start: now, crowd: None, confidence: 0.0, calendar_convenience: 0.0, adherence: 0.0, preferred_time: 0.0 };
+    let mut result = Vec::new();
+    for offset in 0..7 {
+        let day = week_start.checked_add(jiff::Span::new().days(offset))?;
+        if !profile.weekdays_allowed.contains(&weekday(day)) {
+            continue;
+        }
+        let earliest = Ts(day.to_datetime(profile.earliest_workout_start).to_zoned(tz.clone())?.timestamp());
+        let latest = Ts(day.to_datetime(profile.latest_workout_finish).to_zoned(tz.clone())?.timestamp());
+        // Iterate real instants: skips nonexistent spring times, keeps both fall folds.
+        let mut start = earliest;
+        while start < latest {
+            let local = start.local(&tz);
+            if local.date() != day || local.time() < profile.earliest_workout_start {
+                start = start + step;
+                continue;
+            }
+            for &duration in &durations {
+                let end = start.mins(duration);
+                let prep = start.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes));
+                let home = end.mins(profile.commute_home_minutes);
+                if prep < now || end > latest {
+                    continue;
+                }
+                if blockers.iter().any(|b| overlaps(prep, home, b)) {
+                    continue;
+                }
+                if inputs.existing.iter().any(|s| !recovery_ok(start, end, s, profile)) {
+                    continue;
+                }
+                let signal = signals.get(&start).copied().unwrap_or(&neutral);
+                let confidence = if signal.crowd.is_some() { signal.confidence } else { 0.0 };
+                let parts = ScoreParts {
+                    crowd: signal.crowd.map_or(0.0, |c| profile.crowd_preference_weight * (1.0 - c)),
+                    calendar: profile.calendar_preference_weight * signal.calendar_convenience,
+                    adherence: config.adherence_weight * signal.adherence,
+                    preferred_time: config.preferred_time_weight * signal.preferred_time,
+                    uncertainty: -config.uncertainty_weight * (1.0 - confidence),
+                    duration: -config.shortened_duration_penalty * (profile.preferred_workout_minutes - duration) as f64 / profile.preferred_workout_minutes as f64,
+                };
+                result.push(Candidate {
+                    start,
+                    end,
+                    prep_start: prep,
+                    leave_home: start.mins(-profile.commute_to_gym_minutes),
+                    home_at: home,
+                    crowd: signal.crowd,
+                    confidence,
+                    score: parts.total(),
+                    score_parts: Some(parts),
+                });
+            }
+            start = start + step;
+        }
+    }
+    Ok(result)
+}
+
+pub fn plan_week(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts, config: &PlannerConfig) -> Result<Plan> {
+    let tz = profile.tz();
+    let week_end = week_start.checked_add(jiff::Span::new().days(7))?;
+    let existing_count = inputs.existing.iter().filter(|s| (week_start..week_end).contains(&s.start.local(&tz).date())).count() as i64;
+    let capacity = (profile.weekly_target_sessions.min(profile.weekly_max_sessions) - existing_count).max(0) as usize;
+    let candidates = generate_candidates(profile, week_start, inputs, now, config)?;
+    let mut by_day: std::collections::BTreeMap<Date, Candidate> = Default::default();
+    for candidate in candidates {
+        let day = candidate.start.local(&tz).date();
+        if by_day.get(&day).is_none_or(|current| candidate.score > current.score) {
+            by_day.insert(day, candidate);
+        }
+    }
+    let days: Vec<Date> = by_day.keys().copied().collect();
+    let rest = profile.minimum_full_rest_days_between_sessions;
+    let mut best: Vec<Date> = Vec::new();
+    let mut best_key = (-1i64, f64::NEG_INFINITY);
+    for size in 0..=capacity.min(days.len()) {
+        for selected in combinations(&days, size) {
+            if selected.windows(2).any(|w| ((w[1] - w[0]).get_days() as i64) <= rest) {
+                continue;
+            }
+            let key = (size as i64, selected.iter().fold(0.0, |sum, d| sum + by_day[d].score));
+            if key.0 > best_key.0 || key.0 == best_key.0 && key.1 > best_key.1 {
+                best = selected;
+                best_key = key;
+            }
+        }
+    }
+    let sessions: Vec<Candidate> = best.iter().map(|d| by_day[d].clone()).collect();
+    let total = existing_count + sessions.len() as i64;
+    Ok(Plan { week_start, sessions, existing_count, minimum_met: total >= profile.weekly_min_sessions, shortfall: (profile.weekly_target_sessions - total).max(0) })
+}
+
+/// All `size`-subsets in lexicographic order, like itertools.combinations.
+fn combinations<T: Copy>(items: &[T], size: usize) -> Vec<Vec<T>> {
+    if size == 0 {
+        return vec![vec![]];
+    }
+    let mut out = Vec::new();
+    for (i, &first) in items.iter().enumerate() {
+        for mut rest in combinations(&items[i + 1..], size - 1) {
+            rest.insert(0, first);
+            out.push(rest);
+        }
+    }
+    out
 }
