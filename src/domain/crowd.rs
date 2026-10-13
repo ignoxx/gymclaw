@@ -15,6 +15,7 @@ use crate::domain::events::outage_open;
 use crate::domain::planning::SlotSignal;
 use crate::domain::profile::get_profile;
 use crate::error::Result;
+use crate::providers::crowd::{CrowdProvider, METRIC};
 use crate::time::Ts;
 
 /// Felt-crowd ratings the owner can pick, in order. FINE is stored as before and reads "A few".
@@ -241,6 +242,80 @@ impl CrowdModel {
     }
 }
 
+/// The crowd source row, created on first use. A DB bound to another gym/provider refuses to mix data.
+fn bind_source(db: &Connection, source: &str, provider_id: &str) -> Result<CrowdSourceState> {
+    match CrowdSourceState::get(db, source)? {
+        Some(state) if state.provider_id != provider_id => crate::bail!("CROWD_SOURCE_MISMATCH", "DB is bound to another crowd studio/provider; use separate DB"),
+        Some(state) => Ok(state),
+        None => {
+            let state = CrowdSourceState {
+                source: source.into(), provider_id: provider_id.into(), last_success_at: None, last_failure_at: None, last_error_code: None,
+                last_change_at: None, last_raw_value: None, consecutive_failures: 0, reliability: 0.5, evidence_count: 0,
+            };
+            state.insert(db)?;
+            Ok(state)
+        }
+    }
+}
+
+/// Take one reading and store it as an observation. A failed read is recorded (health, event) and
+/// returned as unavailable, so the caller commits it. `now` is taken after the fetch when None.
+pub fn poll(db: &Connection, provider: &dyn CrowdProvider, now: Option<Ts>) -> Result<Value> {
+    if let Some(existing) = CrowdSourceState::get(db, provider.source())?
+        && existing.provider_id != provider.provider_id()
+    {
+        crate::bail!("CROWD_SOURCE_MISMATCH", "DB is bound to another crowd studio/provider; use separate DB");
+    }
+    // Fetch before writing so a slow gym API holds no SQLite write lock.
+    let reading = provider.get_reading();
+    let now = now.unwrap_or_else(Ts::now);
+    let mut state = bind_source(db, provider.source(), provider.provider_id())?;
+    if state.last_success_at.is_some_and(|last| now < last) {
+        crate::bail!("TIME_REVERSED", "Poll precedes last successful retrieval");
+    }
+    let reading = match reading {
+        Ok(reading) => reading,
+        Err(error @ crate::error::Error::Domain { .. }) => {
+            state.last_failure_at = Some(now);
+            state.last_error_code = Some(error.code().to_string());
+            state.consecutive_failures += 1;
+            state.update(db)?;
+            let event = emit(db, "crowd.source_unavailable", now, json!({"source": provider.source(), "code": error.code()}))?;
+            return Ok(json!({"data": {"available": false, "source": provider.source(), "error_code": error.code(), "count_stored": false},
+                "events": [{"id": event.id, "type": event.r#type}], "user_message_hint": null}));
+        }
+        Err(other) => return Err(other),
+    };
+    let raw_value = reading.raw_value as f64;
+    let previous_at = state.last_success_at;
+    let changed = state.last_raw_value.is_some_and(|last| last != raw_value);
+    if state.last_raw_value.is_none() || changed {
+        state.last_change_at = Some(now);
+    }
+    let unchanged_for = state.last_change_at.map_or(0, |at| (now - at).as_secs());
+    let window = match previous_at {
+        Some(after) if changed => json!({"after": after, "by": now}),
+        _ => Value::Null,
+    };
+    let metadata = json!({"provider_id": provider.provider_id(), "metric": METRIC, "demo": provider.demo(), "retrieved_at": now,
+        "provider_timestamp": null, "freshness_known": reading.freshness_seconds.is_some(),
+        "changed_since_previous": if previous_at.is_some() { json!(changed) } else { Value::Null },
+        "unchanged_for_seconds": unchanged_for, "possible_change_window": window});
+    let row = CrowdObservation {
+        id: new_id(), observed_at: now, source: provider.source().into(), raw_value, normalized_value: None,
+        freshness_seconds: reading.freshness_seconds.map(|s| s as i64), metadata_json: Json(metadata.clone()),
+    };
+    row.insert(db)?;
+    state.last_success_at = Some(now);
+    state.last_raw_value = Some(raw_value);
+    state.last_error_code = None;
+    state.consecutive_failures = 0;
+    state.update(db)?;
+    Ok(json!({"data": {"available": true, "observation_id": row.id, "source": row.source, "metric": METRIC, "raw_value": reading.raw_value,
+        "normalized_value": null, "retrieved_at": now, "provider_freshness_seconds": row.freshness_seconds, "metadata": metadata},
+        "events": [], "user_message_hint": null}))
+}
+
 /// Crowd source health per source, for `crowd status`.
 pub fn source_health(db: &Connection, now: Ts) -> Result<Value> {
     let mut sources = Vec::new();
@@ -401,4 +476,191 @@ pub fn planning_signals(db: &Connection, week_start: Date, now: Ts, step_minutes
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::{AgentEvent, WorkoutSession};
+    use crate::providers::crowd::{CrowdReading, FixtureCrowdProvider, MySportsProvider};
+    use crate::providers::http::{Request, Response};
+
+    /// Wednesday 20:00 Berlin.
+    fn now(minutes: i64) -> Ts {
+        Ts::parse("2026-10-14T18:00:00+00:00", None).unwrap().mins(minutes)
+    }
+
+    fn provider(count: u64) -> FixtureCrowdProvider {
+        FixtureCrowdProvider { reading: CrowdReading::count(count) }
+    }
+
+    fn visit(db: &Connection, at: Ts) -> String {
+        let id = new_id();
+        db.execute(
+            "INSERT INTO workout_session (id, status, started_at, arrived_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?2, ?3, 0, '{\"id\": \"historical-test-visit\"}')",
+            (&id, at, at.mins(60)),
+        )
+        .unwrap();
+        id
+    }
+
+    fn db() -> Connection {
+        crate::domain::workout::tests::db()
+    }
+
+    #[test]
+    fn unknown_freshness_change_window_and_restart() {
+        let db = db();
+        let first = poll(&db, &provider(7), Some(now(0))).unwrap();
+        let again = poll(&db, &provider(7), Some(now(15))).unwrap();
+        let changed = poll(&db, &provider(9), Some(now(30))).unwrap();
+        assert_eq!(first["data"]["provider_freshness_seconds"], Value::Null);
+        assert_eq!(again["data"]["metadata"]["unchanged_for_seconds"], 900);
+        assert_eq!(changed["data"]["metadata"]["possible_change_window"], json!({"after": now(15).iso(), "by": now(30).iso()}));
+        assert_eq!(CrowdObservation::select(&db, "", []).unwrap().len(), 3);
+        let health = &source_health(&db, now(31)).unwrap()["sources"][0];
+        assert_eq!((&health["retrieval_age_seconds"], &health["provider_freshness_known"]), (&json!(60), &json!(false)));
+        let prediction = CrowdModel::new(&db, now(31)).unwrap().predict(now(31));
+        assert_eq!(prediction.score, None); // A count alone is not personalized occupancy.
+        assert_eq!(prediction.json["features"]["GYM_API"]["raw_value"], 9.0);
+    }
+
+    struct Broken;
+
+    impl CrowdProvider for Broken {
+        fn provider_id(&self) -> &str {
+            "fixture:GYM_API"
+        }
+        fn get_reading(&self) -> Result<CrowdReading> {
+            crate::bail!("GYM_API_UNAVAILABLE", "No source")
+        }
+    }
+
+    #[test]
+    fn unavailable_source_keeps_history_and_health() {
+        let db = db();
+        poll(&db, &provider(7), Some(now(0))).unwrap();
+        assert_eq!(poll(&db, &Broken, Some(now(15))).unwrap()["data"]["available"], false);
+        assert_eq!(CrowdObservation::select(&db, "", []).unwrap().len(), 1);
+        let health = &source_health(&db, now(16)).unwrap()["sources"][0];
+        assert_eq!(health["consecutive_failures"], 1);
+        assert_eq!(health["last_raw_value"], 7.0);
+        assert_eq!(health["last_success_at"], now(0).iso());
+        assert_eq!(health["last_error_code"], "GYM_API_UNAVAILABLE");
+    }
+
+    #[test]
+    fn feedback_uses_only_prearrival_signals_and_is_idempotent() {
+        let db = db();
+        poll(&db, &provider(40), Some(now(-5))).unwrap();
+        let workout = visit(&db, now(0));
+        poll(&db, &provider(100), Some(now(30))).unwrap(); // A later poll is not evidence at arrival.
+        let original = record_feedback(&db, &workout, "BUSY", now(60), "arrival").unwrap();
+        assert_eq!(record_feedback(&db, &workout, "BUSY", now(120), "arrival").unwrap(), original);
+        let label = CrowdFeedback::first(&db, "", []).unwrap().unwrap();
+        assert_eq!(label.observed_at, now(0));
+        assert_eq!(label.features_json["GYM_API"]["raw_value"], 40.0);
+        assert_eq!(label.features_json["GYM_API"]["prediction_before_label"], Value::Null);
+        assert_eq!(label.features_json["demo"], true);
+        assert_eq!(WorkoutSession::get(&db, &workout).unwrap().unwrap().crowd_feedback.as_deref(), Some("BUSY"));
+        let prediction = CrowdModel::new(&db, now(60)).unwrap().predict(now(7 * 24 * 60));
+        assert!((prediction.score.unwrap() - 2.0 / 3.0).abs() < 1e-9);
+        assert!(0.0 < prediction.confidence && prediction.confidence < 0.5);
+        assert!(prediction.demo && prediction.json["forecast_accuracy_established"] == false);
+        assert!(record_feedback(&db, &workout, "EMPTY", now(120), "different").unwrap_err().to_string().contains("already has"));
+        assert!(record_feedback(&db, &workout, "EMPTY", now(120), "arrival").unwrap_err().to_string().contains("different intent"));
+    }
+
+    #[test]
+    fn old_signal_not_paired_and_future_labels_do_not_leak() {
+        let db = db();
+        poll(&db, &provider(7), Some(now(-120))).unwrap();
+        let workout = visit(&db, now(0));
+        record_feedback(&db, &workout, "FINE", now(60), "late").unwrap();
+        assert!(CrowdFeedback::first(&db, "", []).unwrap().unwrap().features_json.get("GYM_API").is_none());
+        assert_eq!(CrowdModel::new(&db, now(0)).unwrap().predict(now(0)).score, None);
+        let score = CrowdModel::new(&db, now(60)).unwrap().predict(now(7 * 24 * 60)).score.unwrap();
+        assert!((score - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn discomfort_evidence_from_labels() {
+        let db = db();
+        for index in 0..3 {
+            let at = now(-(2 - index) * 7 * 24 * 60);
+            poll(&db, &provider(60 + index as u64), Some(at)).unwrap();
+            let workout = visit(&db, at);
+            record_feedback(&db, &workout, "PACKED", at.mins(60), &format!("label-{index}")).unwrap();
+        }
+        assert_eq!(CrowdSourceState::get(&db, "GYM_API").unwrap().unwrap().evidence_count, 2);
+        let preference = LearnedPreference::first(&db, "WHERE key = 'crowd_discomfort_reported_count'", []).unwrap().unwrap();
+        assert_eq!(preference.evidence_count, 3);
+        assert_eq!(preference.value_json["median_reported_count"], 61.0);
+        assert!(preference.value_json["meaning"].as_str().unwrap().contains("not capacity"));
+    }
+
+    #[test]
+    fn calibration_monotonic_after_ten_labels_not_capacity_conversion() {
+        let pairs = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.3), (30.0, 0.2), (40.0, 0.6), (50.0, 0.7), (60.0, 0.5), (70.0, 0.8), (80.0, 1.0), (90.0, 1.0)];
+        let values: Vec<f64> = (0..100).map(|x| calibrated_count(x as f64, &pairs).0.unwrap()).collect();
+        assert!(values.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(calibrated_count(30.0, &pairs).2, "personalized_isotonic");
+        assert!(calibrated_count(500.0, &pairs).1 < calibrated_count(50.0, &pairs).1);
+        assert_eq!(calibrated_count(100.0, &[]).0, None);
+    }
+
+    #[test]
+    fn many_polls_do_not_inflate_independent_evidence_days() {
+        let db = db();
+        for minute in 0..15 {
+            poll(&db, &provider(7), Some(now(minute))).unwrap();
+        }
+        let predicted = CrowdModel::new(&db, now(60)).unwrap().predict(now(7 * 24 * 60));
+        assert_eq!(predicted.json["features"]["GYM_API"]["evidence_days"], 1);
+        assert_eq!(predicted.score, None);
+    }
+
+    #[test]
+    fn calendar_planning_uses_arrival_labels() {
+        let db = db();
+        let changes = json!({"weekly_min_sessions": 1, "weekly_target_sessions": 1, "weekly_max_sessions": 1, "weekdays_allowed": [2],
+            "earliest_workout_start": "19:00", "latest_workout_finish": "22:00"});
+        crate::domain::profile::update_profile(&db, changes.as_object().unwrap()).unwrap();
+        for (hour, rating) in [(17, "PACKED"), (18, "EMPTY")] {
+            let at = Ts::parse(&format!("2026-10-07T{hour}:00:00+00:00"), None).unwrap();
+            let workout = visit(&db, at);
+            record_feedback(&db, &workout, rating, at.mins(60), &format!("label-{hour}")).unwrap();
+        }
+        let plan = crate::domain::scheduling::schedule_week(&db, Date::constant(2026, 10, 19), now(0), Some("future-week"), None, &[]).unwrap();
+        assert_eq!(plan["created_count"], 1);
+        assert_eq!(Ts::parse(plan["sessions"][0]["start"].as_str().unwrap(), None).unwrap().0.strftime("%H").to_string(), "18");
+        assert_eq!(plan["sessions"][0]["crowd"], 0.0);
+        assert_eq!(plan["sessions"][0]["workout_plan"]["crowd_score_kind"], "personal_perceived_crowd_proxy");
+    }
+
+    #[test]
+    fn fixture_source_cannot_replace_live_studio() {
+        let db = db();
+        poll(&db, &provider(7), Some(now(0))).unwrap();
+        let transport = |_: &Request| Ok(Response { status: 200, body: br#"{"value": 7}"#.to_vec() });
+        let live = MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap();
+        assert_eq!(poll(&db, &live, Some(now(0))).unwrap_err().code(), "CROWD_SOURCE_MISMATCH");
+    }
+
+    #[test]
+    fn polling_alert_once_when_stale_and_once_when_back() {
+        let db = db();
+        poll(&db, &provider(7), Some(now(0))).unwrap();
+        assert_eq!(polling_health(&db, now(30)).unwrap()["status"], "ok");
+        assert_eq!(polling_alert(&db, now(30)).unwrap(), None);
+        let (event_id, message) = polling_alert(&db, now(60)).unwrap().unwrap();
+        assert!(message.starts_with("⚠️ No gym check-in data since"), "{message}");
+        let mut event = AgentEvent::get(&db, &event_id).unwrap().unwrap();
+        event.handled_at = Some(now(60)); // Delivered.
+        event.update(&db).unwrap();
+        assert_eq!(polling_alert(&db, now(120)).unwrap(), None); // No repeats.
+        poll(&db, &provider(9), Some(now(180))).unwrap();
+        assert!(polling_alert(&db, now(181)).unwrap().unwrap().1.starts_with('✅'));
+        assert_eq!(polling_alert(&db, now(182)).unwrap(), None);
+    }
 }
