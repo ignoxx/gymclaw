@@ -245,3 +245,103 @@ fn combinations<T: Copy>(items: &[T], size: usize) -> Vec<Vec<T>> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::time::zone;
+
+    const WEEK: Date = jiff::civil::date(2026, 10, 12);
+
+    fn at(day: i8, hour: i8, minute: i8) -> Ts {
+        Ts(jiff::civil::date(2026, 10, day).at(hour, minute, 0, 0).to_zoned(zone("Europe/Berlin").unwrap()).unwrap().timestamp())
+    }
+
+    fn signal(start: Ts, crowd: f64, confidence: f64) -> SlotSignal {
+        SlotSignal { start, crowd: Some(crowd), confidence, calendar_convenience: 0.0, adherence: 0.0, preferred_time: 0.0 }
+    }
+
+    fn days(plan: &Plan) -> Vec<i64> {
+        plan.sessions.iter().map(|c| weekday(c.start.local(&zone("Europe/Berlin").unwrap()).date())).collect()
+    }
+
+    fn plan(profile: &Profile, inputs: Inputs) -> Plan {
+        plan_week(profile, WEEK, &inputs, at(11, 0, 0), &PlannerConfig::default()).unwrap()
+    }
+
+    fn one_a_week() -> Profile {
+        Profile { weekly_min_sessions: 1, weekly_target_sessions: 1, weekly_max_sessions: 1, ..Profile::default() }
+    }
+
+    #[test]
+    fn target_with_rest_days() {
+        let p = plan(&Profile::default(), Inputs::default());
+        assert_eq!(days(&p), [0, 2, 4]);
+        assert!(p.minimum_met && p.shortfall == 0);
+        assert_eq!(p.sessions[0].start - p.sessions[0].prep_start, SignedDuration::from_mins(35));
+    }
+
+    #[test]
+    fn prep_and_travel_must_clear_blockers_but_may_touch() {
+        let p = Profile { earliest_workout_start: jiff::civil::time(19, 0, 0, 0), latest_workout_finish: jiff::civil::time(20, 10, 0, 0), weekdays_allowed: vec![0], minimum_workout_minutes: 70, ..Profile::default() };
+        let candidates = |busy: &[Interval]| generate_candidates(&p, WEEK, &Inputs { busy, ..Inputs::default() }, at(11, 0, 0), &PlannerConfig::default()).unwrap().len();
+        assert_eq!(candidates(&[Interval { start: at(12, 18, 40), end: at(12, 19, 0) }]), 0);
+        assert_eq!(candidates(&[Interval { start: at(12, 20, 20), end: at(12, 21, 0) }]), 0);
+        assert_eq!(candidates(&[Interval { start: at(12, 18, 0), end: at(12, 18, 25) }, Interval { start: at(12, 20, 30), end: at(12, 21, 0) }]), 1);
+    }
+
+    #[test]
+    fn recovery_crosses_weeks() {
+        let sunday = [Interval { start: at(11, 0, 0), end: at(11, 0, 20) }];
+        let p = plan(&Profile::default(), Inputs { existing: &sunday, ..Inputs::default() });
+        assert_eq!(p.sessions.len(), 2);
+        assert!(!days(&p).contains(&0));
+    }
+
+    #[test]
+    fn session_count_beats_one_great_slot() {
+        let tuesday = [SlotSignal { adherence: 1.0, ..signal(at(13, 12, 0), 0.0, 1.0) }];
+        assert_eq!(days(&plan(&Profile::default(), Inputs { signals: &tuesday, ..Inputs::default() })), [0, 2, 4]);
+    }
+
+    #[test]
+    fn quiet_slot_wins() {
+        let quiet = [signal(at(14, 12, 0), 0.2, 0.9)];
+        let p = plan(&one_a_week(), Inputs { signals: &quiet, ..Inputs::default() });
+        assert_eq!(p.sessions[0].start, quiet[0].start);
+        assert!((p.sessions[0].score - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn habit_breaks_ties_but_quiet_beats_habitual() {
+        let p = Profile { weekdays_allowed: vec![0], ..one_a_week() };
+        let busy_habit = SlotSignal { preferred_time: 0.9, ..signal(at(12, 13, 0), 2.0 / 3.0, 0.9) };
+        let quiet = SlotSignal { preferred_time: 0.2, ..signal(at(12, 16, 0), 1.0 / 3.0, 0.9) };
+        assert_eq!(plan(&p, Inputs { signals: &[busy_habit.clone(), quiet.clone()], ..Inputs::default() }).sessions[0].start, quiet.start);
+        let same_crowd = SlotSignal { crowd: Some(2.0 / 3.0), ..quiet };
+        assert_eq!(plan(&p, Inputs { signals: &[busy_habit.clone(), same_crowd], ..Inputs::default() }).sessions[0].start, busy_habit.start);
+    }
+
+    #[test]
+    fn shortened_workout_when_only_minimum_fits() {
+        let p = Profile { earliest_workout_start: jiff::civil::time(19, 0, 0, 0), latest_workout_finish: jiff::civil::time(19, 45, 0, 0), weekdays_allowed: vec![0], ..Profile::default() };
+        let plan = plan(&p, Inputs::default());
+        assert_eq!(plan.sessions[0].end - plan.sessions[0].start, SignedDuration::from_mins(45));
+        assert!(!plan.minimum_met);
+    }
+
+    #[test]
+    fn dst_durations_are_elapsed_time() {
+        let tz = zone("Europe/Berlin").unwrap();
+        for week in [jiff::civil::date(2026, 3, 23), jiff::civil::date(2026, 10, 19)] {
+            let p = Profile { weekdays_allowed: vec![6], earliest_workout_start: jiff::civil::time(1, 0, 0, 0), latest_workout_finish: jiff::civil::time(5, 0, 0, 0), ..Profile::default() };
+            let now = Ts(week.to_zoned(tz.clone()).unwrap().timestamp());
+            let candidates = generate_candidates(&p, week, &Inputs::default(), now, &PlannerConfig::default()).unwrap();
+            assert!(!candidates.is_empty());
+            for c in candidates {
+                assert!([70, 45].contains(&(c.end - c.start).as_mins()));
+                assert!(c.end.local(&tz).hour() <= 5);
+            }
+        }
+    }
+}
