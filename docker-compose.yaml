@@ -12,6 +12,8 @@ services:
       GYMCLAW_TELEGRAM_USER_ID: ${GYMCLAW_TELEGRAM_USER_ID:?}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?}
+      # Only `gymclaw calendar-auth` reads it; afterwards the DB stays bound to that calendar.
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-}
       GYMCLAW_MODEL: ${GYMCLAW_MODEL:-z-ai/glm-5.3-flash}
       GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-inference-net/fp4}
       GYMCLAW_MODEL_FAST: ${GYMCLAW_MODEL_FAST:-}
