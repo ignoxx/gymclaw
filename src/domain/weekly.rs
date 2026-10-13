@@ -508,3 +508,295 @@ pub fn briefing(db: &Connection, week_start: Date, report: &Value, published: bo
     }
     Ok(lines.join("\n"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::models::{CalendarWrite, NotificationDelivery};
+    use crate::domain::calendar::allocation;
+    use crate::domain::calendar_writes::{describe_crowd, event_body, pending_writes};
+    use crate::domain::crowd::record_feedback;
+    use crate::domain::profile::update_profile;
+    use crate::domain::replanning::{move_session, skip_session};
+    use crate::domain::templates::{Template, import_template};
+    use crate::domain::workout::start;
+    use crate::runtime::outbox::{event_stale_reason, prepare_event_message};
+
+    fn ts(text: &str) -> Ts {
+        Ts::parse(text, None).unwrap()
+    }
+
+    /// Sunday 2026-10-11 19:00 Berlin, plus `minutes`.
+    fn sunday(minutes: i64) -> Ts {
+        ts("2026-10-11T17:00:00+00:00").mins(minutes)
+    }
+
+    fn template(db: &Connection, value: Value) {
+        import_template(db, &serde_json::from_value::<Template>(value).unwrap()).unwrap();
+    }
+
+    /// Fresh DB with the one-exercise "short" template.
+    fn db() -> Connection {
+        let db = crate::domain::workout::tests::db();
+        template(&db, json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}));
+        db
+    }
+
+    fn sessions(db: &Connection) -> Vec<PlannedSession> {
+        PlannedSession::select(db, "ORDER BY planned_start_at", []).unwrap()
+    }
+
+    fn count(db: &Connection, sql: &str) -> i64 {
+        db.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    fn row(db: &Connection, week: &str, template: Option<&str>, status: SessionStatus, start: Ts, minutes: i64) -> PlannedSession {
+        let mut session = PlannedSession::new(week.into(), template.map(String::from), false);
+        session.status = status;
+        (session.planned_start_at, session.planned_end_at, session.prep_start_at, session.leave_home_at, session.expected_finish_at) = (start, start.mins(minutes), start, start, start.mins(minutes));
+        session.insert(db).unwrap();
+        session
+    }
+
+    fn split(db: &Connection, templates: &[&str]) {
+        db.execute("INSERT INTO onboarding_state (id, interview_json, split_json) VALUES (1, '{}', ?1)", [json!(templates).to_string()]).unwrap();
+    }
+
+    #[test]
+    fn weekly_plan_retry_one_briefing_and_no_duplicate_calendar_intent() {
+        let db = db();
+        let result = weekly_plan(&db, "short", sunday(0)).unwrap();
+        assert_eq!(result["week_start"], "2026-10-12");
+        assert_eq!(result["plan"]["sessions"].as_array().unwrap().len(), 3);
+        assert_eq!(result["audit"]["completed_workouts"], 0);
+        assert_eq!(pending_writes(&db).unwrap().len(), 3);
+        let text = briefing(&db, Date::constant(2026, 10, 12), &result["audit"], false, sunday(0)).unwrap();
+        assert!(text.contains("Local plan only") && text.contains("Mon") && text.contains("Last week 0/3"), "{text}");
+        let retry = weekly_plan(&db, "short", sunday(1)).unwrap();
+        assert_eq!(retry["event_id"], result["event_id"]);
+        assert_eq!(sessions(&db).len(), 3);
+        assert_eq!(pending_writes(&db).unwrap().len(), 3);
+        assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'planning.weekly_briefing'"), 1);
+    }
+
+    #[test]
+    fn briefing_hides_uncertain_crowd_and_lists_new_targets() {
+        let db = db();
+        let result = weekly_plan(&db, "short", sunday(0)).unwrap();
+        let mut rows = sessions(&db);
+        (rows[0].crowd_prediction, rows[0].crowd_confidence) = (Some(0.9), Some(0.7));
+        (rows[1].crowd_prediction, rows[1].crowd_confidence) = (Some(0.1), Some(0.3));
+        rows[0].save(&db).unwrap();
+        rows[1].save(&db).unwrap();
+        emit(&db, "progression.updated", sunday(-2 * 24 * 60), json!({"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"})).unwrap();
+        let text = briefing(&db, Date::constant(2026, 10, 12), &result["audit"], true, sunday(0)).unwrap();
+        assert!(text.starts_with("🏋️ Your week · Oct 12–18"), "{text}");
+        assert!(text.contains("🔴 Packed") && !text.contains("Empty") && !text.contains("score"), "{text}");
+        assert!(text.contains("can still move if your calendar changes"));
+        assert!(text.contains("\n🎯 New targets: bench 82.5 kg (+2.5)\n"), "{text}");
+        assert!(text.ends_with("⚖️ Snap a photo of your scale anytime and I'll track your weight."));
+    }
+
+    #[test]
+    fn rolling_watch_marks_elapsed_unstarted_session_missed_not_completed() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let later = sunday(26 * 60);
+        let result = rolling_plan(&db, "short", later).unwrap();
+        let missed = result["missed"].as_array().unwrap();
+        assert_eq!(missed.len(), 1);
+        let missed = PlannedSession::get(&db, missed[0].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(missed.status, SessionStatus::Missed);
+        assert!(CalendarWrite::select(&db, "WHERE planned_session_id = ?1 AND status = 'PENDING'", [&missed.id]).unwrap().is_empty());
+        let report = audit_week(&db, Date::constant(2026, 10, 12), later, false).unwrap();
+        assert_eq!((&report["missed_sessions"], &report["completed_workouts"]), (&json!(1), &json!(0)));
+        let before = count(&db, "SELECT count(*) FROM agent_event WHERE type = 'workout.missed'");
+        rolling_plan(&db, "short", later.mins(1)).unwrap();
+        assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'workout.missed'"), before);
+    }
+
+    #[test]
+    fn start_without_template_starts_todays_session_even_when_late() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let first = sessions(&db).remove(0);
+        let error = start(&db, None, None, false, first.planned_start_at.mins(-24 * 60), "yesterday").unwrap_err();
+        assert!(error.to_string().contains("No planned workout today"), "{error}");
+        // Its slot is already over; the owner is just late.
+        start(&db, None, None, false, first.planned_end_at.mins(10), "late").unwrap();
+        assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Started);
+    }
+
+    #[test]
+    fn new_arrival_label_reconsiders_tentative_slot_but_not_user_lock() {
+        let db = db();
+        let changes = json!({"weekly_min_sessions": 1, "weekly_target_sessions": 1, "weekly_max_sessions": 1, "weekdays_allowed": [2],
+            "earliest_workout_start": "19:00", "latest_workout_finish": "22:00"});
+        update_profile(&db, changes.as_object().unwrap()).unwrap();
+        let original = weekly_plan(&db, "short", sunday(0)).unwrap()["plan"]["sessions"][0].clone();
+        assert_eq!(ts(original["start"].as_str().unwrap()).0.strftime("%H").to_string(), "17"); // 19:00 local cold start.
+        let visit = new_id();
+        db.execute("INSERT INTO workout_session (id, status, arrived_at, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?2, ?3, 0, '{\"demo\": true}')",
+            (&visit, ts("2026-10-07T18:00:00+00:00"), ts("2026-10-07T19:00:00+00:00"))).unwrap();
+        record_feedback(&db, &visit, "EMPTY", sunday(1), "quiet-visit").unwrap();
+        let result = rolling_plan(&db, "short", sunday(2)).unwrap();
+        let id = original["id"].as_str().unwrap();
+        let mut updated = PlannedSession::get(&db, id).unwrap().unwrap();
+        assert_eq!(updated.planned_start_at.0.strftime("%H").to_string(), "18"); // 20:00 local, the learned quiet slot.
+        assert!(!result["changed"].as_array().unwrap().is_empty() && updated.status == SessionStatus::Tentative);
+        updated.user_locked = true;
+        updated.save(&db).unwrap();
+        let event = emit(&db, "planning.replan_required", sunday(0), json!({"reason": "crowd_feedback"})).unwrap();
+        rolling_plan(&db, "short", sunday(3)).unwrap();
+        assert_eq!(PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at, updated.planned_start_at);
+        assert!(AgentEvent::get(&db, &event.id).unwrap().unwrap().handled_at.is_some());
+    }
+
+    #[test]
+    fn split_rotates_after_last_started_workout_and_respects_locks() {
+        let db = crate::domain::workout::tests::db();
+        let base = ts("2026-10-05T10:00:00+00:00");
+        for name in ["push", "pull", "legs"] {
+            let mut title = name.to_string();
+            title[..1].make_ascii_uppercase();
+            template(&db, json!({"id": name, "name": title, "exercises": [{"id": format!("{name}-x"), "name": "X", "role": "x", "guide_id": "bench-press", "target_weight": 0}]}));
+        }
+        split(&db, &["push", "pull", "legs"]);
+        let workout = |template: &str, status: &str, at: Ts| {
+            db.execute("INSERT INTO workout_session (id, template_id, status, template_snapshot, started_at, waited_for_equipment_count) VALUES (?1, ?2, ?3, '{\"x\": 1}', ?4, 0)",
+                (new_id(), template, status, at)).unwrap();
+        };
+        workout("push", "PLAN_UPDATED", base.mins(-3 * 24 * 60));
+        let mut ids = Vec::new();
+        for day in 0..4 {
+            let mut session = row(&db, "2026-10-05", Some("push"), SessionStatus::Tentative, base.mins(day * 2 * 24 * 60), 60);
+            if day == 1 {
+                session.user_locked = true; // The owner pinned Push here.
+                session.save(&db).unwrap();
+            }
+            ids.push(session.id);
+        }
+        let templates = |db: &Connection| ids.iter().map(|id| PlannedSession::get(db, id).unwrap().unwrap().workout_template_id.unwrap()).collect::<Vec<_>>();
+        assign_rotation(&db, base.mins(-24 * 60)).unwrap();
+        // Last done: Push → Pull, then the locked Push, then Pull again, then Legs.
+        assert_eq!(templates(&db), ["pull", "push", "pull", "legs"]);
+        assert_eq!(PlannedSession::get(&db, &ids[0]).unwrap().unwrap().workout_plan_json["template"]["id"], "pull");
+        assert!(assign_rotation(&db, base.mins(-24 * 60)).unwrap().is_empty());
+        // A running workout counts: starting Pull doesn't hand Pull to the next session again.
+        workout("pull", "SET_ACTIVE", base.mins(-60));
+        let changes = assign_rotation(&db, base.mins(-24 * 60)).unwrap();
+        assert_eq!(templates(&db), ["legs", "push", "pull", "legs"]);
+        let third = PlannedSession::get(&db, &ids[2]).unwrap().unwrap().planned_start_at;
+        let moved = json!({"session_id": ids[2], "from": third, "to": third.mins(30), "action": "moved"});
+        assert_eq!(plan_changes(&db, &json!({"rotation": changes, "changed": [moved]})).unwrap().as_deref(), Some("📅 Plan updated: Fri moved to 12:30 (was 12:00) · Mon is now Legs"));
+        let mut forecast = moved.clone();
+        forecast["action"] = json!("forecast_updated");
+        assert_eq!(plan_changes(&db, &json!({"changed": [forecast]})).unwrap(), None);
+    }
+
+    #[test]
+    fn crowd_forecast_text_and_significant_changes() {
+        let start = ts("2026-10-09T19:00:00+00:00").local(&jiff::tz::TimeZone::UTC);
+        assert_eq!(describe_crowd(None, &start), "not enough data yet");
+        assert_eq!(describe_crowd(Some(&json!({"count": 13, "basis": "weekday_hour", "days": 2, "feel": "Busy"})), &start), "Busy · ~13 people checked in (Fridays 19:00, 2 wk)");
+        assert_eq!(describe_crowd(Some(&json!({"count": 8, "basis": "hour", "days": 1, "feel": null})), &start), "~8 people checked in (19:00 on other days)");
+        let old = json!({"count": 12, "feel": "Busy"});
+        assert!(significant(None, Some(&json!({"count": 5, "feel": null}))));
+        assert!(!significant(Some(&old), Some(&json!({"count": 14, "feel": "Busy"})))); // +2: noise
+        assert!(significant(Some(&old), Some(&json!({"count": 16, "feel": "Busy"})))); // +4 and +33%
+        assert!(significant(Some(&old), Some(&json!({"count": 12, "feel": "Packed"}))));
+        assert!(!significant(Some(&old), None));
+    }
+
+    #[test]
+    fn refresh_crowd_fills_unknown_then_respects_window() {
+        let db = crate::domain::workout::tests::db();
+        let now = ts("2026-10-02T12:00:00+00:00");
+        db.execute("INSERT INTO crowd_observation (id, observed_at, source, raw_value, metadata_json) VALUES ('o', ?1, 'GYM_API', 13, '{}')", [now.mins(-7 * 24 * 60 + 360)]).unwrap();
+        let soon = row(&db, "2026-09-28", None, SessionStatus::Committed, now.mins(360), 60);
+        let imminent = row(&db, "2026-09-28", None, SessionStatus::Committed, now.mins(30), 30);
+        let changed = refresh_crowd(&db, now).unwrap();
+        assert_eq!(changed.iter().map(|c| c["session_id"].clone()).collect::<Vec<_>>(), [json!(soon.id)]);
+        let soon = PlannedSession::get(&db, &soon.id).unwrap().unwrap();
+        assert_eq!((&soon.workout_plan_json["crowd_forecast"]["count"], soon.source_revision), (&json!(13), 2));
+        assert!(PlannedSession::get(&db, &imminent.id).unwrap().unwrap().plan("crowd_forecast").is_none());
+        assert!(refresh_crowd(&db, now.mins(10)).unwrap().is_empty()); // Throttled.
+    }
+
+    #[test]
+    fn refresh_plans_replaces_stale_copy_once() {
+        let db = crate::domain::workout::tests::db();
+        let now = ts("2026-10-03T08:00:00+00:00");
+        let pull = |sets: i64| json!({"id": "pull", "name": "Pull", "exercises": [{"id": "row", "name": "Row", "role": "pull", "guide_id": "seated-row", "target_weight": 0, "working_sets": sets}]});
+        template(&db, pull(3));
+        let mut session = row(&db, "2026-10-05", Some("pull"), SessionStatus::Tentative, now.mins(2 * 24 * 60), 60);
+        allocation(&db, &mut session).unwrap();
+        session.save(&db).unwrap();
+        template(&db, pull(2));
+        assert_eq!(refresh_plans(&db, now).unwrap(), [session.id.clone()]);
+        assert_eq!(PlannedSession::get(&db, &session.id).unwrap().unwrap().workout_plan_json["template"]["exercises"][0]["working_sets"], 2);
+        assert!(refresh_plans(&db, now).unwrap().is_empty()); // No churn on the next tick.
+    }
+
+    #[test]
+    fn event_body_has_plan_location_and_split_colour() {
+        let db = crate::domain::workout::tests::db();
+        for name in ["push", "pull"] {
+            let mut title = name.to_string();
+            title[..1].make_ascii_uppercase();
+            template(&db, json!({"id": name, "name": title, "exercises": [{"id": format!("{name}-row"), "name": "Row", "role": "x", "guide_id": "seated-row", "working_sets": 2, "rep_min": 8, "rep_max": 12, "target_weight": 0}]}));
+        }
+        split(&db, &["push", "pull"]);
+        update_profile(&db, json!({"gym_address": "Example Str. 1, Berlin"}).as_object().unwrap()).unwrap();
+        let start = ts("2026-10-05T08:30:00+00:00");
+        let mut session = row(&db, "2026-10-05", Some("pull"), SessionStatus::Committed, start, 60);
+        (session.prep_start_at, session.leave_home_at) = (start.mins(-35), start.mins(-20));
+        allocation(&db, &mut session).unwrap();
+        session.save(&db).unwrap();
+        let body = event_body(&db, &session).unwrap();
+        assert_eq!((&body["summary"], &body["location"], &body["colorId"]), (&json!("🏋️ Pull"), &json!("Example Str. 1, Berlin"), &json!("6")));
+        let description = body["description"].as_str().unwrap();
+        assert!(description.contains("Get ready 09:55 · Leave 10:10 · Home ~11:50"), "{description}");
+        assert!(description.contains("1. Row · 2 sets of 8–12"), "{description}");
+    }
+
+    #[test]
+    fn no_show_nudges_once_then_skip_counts_toward_the_week() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let first = sessions(&db).remove(0);
+        assert_eq!(first.status, SessionStatus::Committed);
+        assert!(no_show_nudges(&db, first.planned_start_at.mins(29)).unwrap().is_empty());
+        let late = first.planned_start_at.mins(31);
+        let nudges = no_show_nudges(&db, late).unwrap();
+        let [(event_id, session_id, message)] = nudges.as_slice() else { panic!("{nudges:?}") };
+        assert!(session_id == &first.id && message.contains("hasn't started. Skip it or move it?"), "{message}");
+        assert!(no_show_nudges(&db, late.mins(1)).unwrap().is_empty());
+        let delivery = prepare_event_message(&db, event_id, message, late, "123", &[]).unwrap();
+        skip_session(&db, &first.id, late, "tg-1-skip").unwrap();
+        assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Skipped);
+        // The skip is final: rolling replanning keeps the other two sessions, no make-up.
+        rolling_plan(&db, "short", late.mins(5)).unwrap();
+        assert_eq!(count(&db, "SELECT count(*) FROM planned_session WHERE status IN ('TENTATIVE', 'COMMITTED')"), 2);
+        // Answered before the send went out: the question is dropped, not sent.
+        let row = NotificationDelivery::get(&db, delivery["id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(event_stale_reason(&db, &row, late.mins(5)).unwrap(), Some("session_resolved"));
+    }
+
+    #[test]
+    fn no_show_is_quiet_when_a_workout_started_and_can_still_be_moved() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let first = sessions(&db).remove(0);
+        let late = first.planned_start_at.mins(31);
+        let moved = move_session(&db, &first.id, late, "tg-2-move", None, None, None).unwrap();
+        assert!(ts(moved["data"]["to"].as_str().unwrap()) > late, "{moved}");
+        assert!(matches!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Tentative | SessionStatus::Committed));
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let first = sessions(&db).remove(0);
+        // Started from chat without linking the planned session: still counts as showing up.
+        start(&db, Some("short"), None, false, first.planned_start_at, "unlinked").unwrap();
+        assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Committed);
+        assert!(no_show_nudges(&db, first.planned_start_at.mins(31)).unwrap().is_empty());
+    }
+}
