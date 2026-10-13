@@ -58,7 +58,7 @@ Every Python test in `gymclaw/tests` (173) mapped to one category. Regenerate th
 | `test_calendar_cli_safe_defaults_and_scope_errors` | covered elsewhere | write gate: src/domain/calendar.rs::live_write_gate_runs_before_any_provider_call; scope binding: src/providers/google.rs::refresh_writes_google_auth_format_back. FIXTURE_DB_REQUIRED / CALENDAR_ID_REQUIRED belonged to the removed fixture and auth CLI |
 | `test_move_session_picks_valid_slot_or_explains` | ported now | src/tools/plan.rs::move_session_picks_valid_slot_or_explains |
 | `test_owner_adds_sessions_and_picks_workouts` | ported now | src/tools/plan.rs::owner_adds_sessions_and_picks_workouts |
-| `test_profile_window_change_moves_sessions_that_no_longer_fit` | ported now | src/tools/plan.rs::profile_window_change_moves_sessions_that_no_longer_fit (contract change: profile_update no longer replans by itself; the port runs replan_weeks after it) |
+| `test_profile_window_change_moves_sessions_that_no_longer_fit` | ported now | src/tools/plan.rs::profile_window_change_moves_sessions_that_no_longer_fit |
 
 ## gymclaw/tests/test_calendar_provider.py
 
@@ -314,4 +314,3 @@ Nothing in this list is trivial filler: every live behavior has a Rust test. Pyt
 
 ## Behavior differences found while porting
 
-- `profile_update` no longer replans sessions that stop fitting the new window; Python's `profile update` did. The tool description tells the agent to call `replan_week`. Confirm this is intended.
