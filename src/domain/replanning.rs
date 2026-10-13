@@ -445,7 +445,7 @@ mod tests {
         let tz = get_profile(&db).unwrap().tz();
         let week = jiff::civil::date(2026, 10, 12);
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
-        let planned = schedule_week(&db, week, now, None, None).unwrap();
+        let planned = schedule_week(&db, week, now, None, None, &[]).unwrap();
         let ids: Vec<String> = planned["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
         let before: Vec<PlannedSession> = ids.iter().map(|id| PlannedSession::get(&db, id).unwrap().unwrap()).collect();
         assert_eq!(before.iter().map(|s| weekday(s.planned_start_at.local(&tz).date())).collect::<Vec<_>>(), [0, 2, 4]);

@@ -200,7 +200,7 @@ impl Tool for PlanWeek {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let week = monday_of(cx, &Some(self.day))?;
-        let planned = scheduling::schedule_week(cx.db, week, cx.now, Some(&cx.request_id), Some(&self.template_id))?;
+        let planned = scheduling::schedule_week(cx.db, week, cx.now, Some(&cx.request_id), Some(&self.template_id), &[])?;
         replanning::commit_upcoming(cx.db, cx.now)?;
         for data in planned["sessions"].as_array().into_iter().flatten() {
             if let Some(session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {

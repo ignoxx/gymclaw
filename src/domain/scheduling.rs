@@ -8,7 +8,7 @@ use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::compression::compress_template;
 use crate::domain::core::emit;
 use crate::domain::crowd::{CrowdModel, planning_signals};
-use crate::domain::planning::{Inputs, Interval, PlannerConfig, plan_week};
+use crate::domain::planning::{SlotSignal, Inputs, Interval, PlannerConfig, plan_week};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::get_template;
 use crate::domain::workout::historical_set_duration;
@@ -42,9 +42,10 @@ pub fn busy_window(week_start: Date, profile: &crate::domain::profile::Profile) 
     Ok((start, end))
 }
 
-/// Fill a week with new sessions around the existing ones. Idempotent per `request_id`.
-pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Option<&str>, template_id: Option<&str>) -> Result<Value> {
-    let mut request = json!({"week_start": week_start.to_string(), "fixture": {"busy": [], "unavailable": [], "signals": [],
+/// Fill a week with new sessions around the existing ones. Idempotent per `request_id`. `fixture_signals`
+/// replace the crowd model's signals (demos and tests); their crowd values are marked demo.
+pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Option<&str>, template_id: Option<&str>, fixture_signals: &[SlotSignal]) -> Result<Value> {
+    let mut request = json!({"week_start": week_start.to_string(), "fixture": {"busy": [], "unavailable": [], "signals": fixture_signals,
         "config": {"step_minutes": 15, "adherence_weight": 1.0, "preferred_time_weight": 0.4, "uncertainty_weight": 0.5, "shortened_duration_penalty": 1.0}}});
     if let Some(id) = template_id {
         request["template_id"] = json!(id);
@@ -65,8 +66,8 @@ pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Opt
     let busy = busy_intervals(db, start, end)?;
     let deleted = deleted_intervals(db)?;
     let config = PlannerConfig::default();
-    let signals = planning_signals(db, week_start, now, config.step_minutes)?;
-    let model = if signals.is_empty() { None } else { Some(CrowdModel::new(db, now)?) };
+    let signals = if fixture_signals.is_empty() { planning_signals(db, week_start, now, config.step_minutes)? } else { fixture_signals.to_vec() };
+    let model = if signals.is_empty() || !fixture_signals.is_empty() { None } else { Some(CrowdModel::new(db, now)?) };
     let plan = plan_week(&profile, week_start, &Inputs { busy: &busy, unavailable: &deleted, existing: &existing, signals: &signals }, now, &config)?;
     let template = match template_id {
         Some(id) => {
@@ -90,7 +91,7 @@ pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Opt
         row.crowd_prediction = slot.crowd;
         row.crowd_confidence = Some(slot.confidence);
         if slot.crowd.is_some() {
-            let demo = model.as_ref().is_some_and(|m| m.predict(slot.start).demo);
+            let demo = !fixture_signals.is_empty() || model.as_ref().is_some_and(|m| m.predict(slot.start).demo);
             row.merge_plan(json!({"crowd_source": if demo { "demo_fixture" } else { "local_crowd_model" }, "crowd_score_kind": "personal_perceived_crowd_proxy"}));
         }
         row.insert(db)?;
@@ -112,7 +113,7 @@ pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Opt
         "created_count": created.len(),
         "minimum_met": plan.minimum_met,
         "shortfall": plan.shortfall,
-        "source": "local_state",
+        "source": if fixture_signals.is_empty() { "local_state" } else { "fixture" },
         "calendar_events_created": false,
         "choices": plan.sessions,
     });

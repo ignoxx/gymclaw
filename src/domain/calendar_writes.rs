@@ -5,7 +5,11 @@ use sha2::{Digest, Sha256};
 
 use crate::db::models::{CalendarEventSnapshot, CalendarWrite, OnboardingState, PlannedSession, SessionStatus, WriteAction, WriteStatus};
 use crate::db::{Connection, Json, new_id};
+use crate::domain::calendar::{persist_snapshot, reconcile_event, tombstone};
 use crate::domain::core::emit;
+use crate::domain::replanning::replan_weeks;
+use crate::providers::calendar::{CalendarProvider, WRITE_CONFLICT};
+use crate::providers::google::bind_calendar;
 use crate::domain::profile::get_profile;
 use crate::error::Result;
 use crate::time::{Ts, iso};
@@ -139,4 +143,71 @@ pub fn pending_writes(db: &Connection) -> Result<Vec<Value>> {
         .into_iter()
         .map(|w| json!({"id": w.id, "session_id": w.planned_session_id, "action": w.action, "event_id": w.event_id, "revision": w.revision, "body": w.body_json}))
         .collect())
+}
+
+/// Send one queued write. Live Google writes need `allow_writes` (the calendar-write authority). A
+/// write for an older revision is cancelled; ownership/etag conflicts end as CONFLICT plus a sync request.
+pub fn apply_write(db: &Connection, provider: &mut dyn CalendarProvider, write_id: &str, now: Ts, allow_writes: bool) -> Result<Value> {
+    if provider.source() == "google" && !allow_writes {
+        crate::bail!("CALENDAR_WRITES_NOT_APPROVED", "Live writes require explicit --allow-writes; inspect pending-writes first");
+    }
+    bind_calendar(db, provider.calendar_id(), provider.source())?;
+    let Some(mut write) = CalendarWrite::get(db, write_id)? else { crate::bail!("CALENDAR_WRITE_NOT_FOUND", "Unknown queued calendar write") };
+    if write.status != WriteStatus::Pending {
+        return Ok(json!({"write_id": write.id, "status": write.status, "retried": true}));
+    }
+    let Some(mut session) = PlannedSession::get(db, &write.planned_session_id)? else { crate::bail!("SESSION_NOT_FOUND", "Write for unknown session") };
+    // A calendar edit after queueing bumps the revision, so a stale write never overwrites it.
+    if write.revision != session.source_revision {
+        write.status = WriteStatus::Cancelled;
+        write.handled_at = Some(now);
+        write.update(db)?;
+        return Ok(json!({"write_id": write.id, "status": write.status}));
+    }
+    match send(db, provider, &write, &mut session, now) {
+        Ok(()) => {
+            write.status = WriteStatus::Applied;
+            write.handled_at = Some(now);
+            write.update(db)?;
+            let event = emit(db, "calendar.write_applied", now, json!({"write_id": write.id, "session_id": session.id, "action": write.action, "event_id": write.event_id}))?;
+            Ok(json!({"write_id": write.id, "status": write.status, "event": {"id": event.id, "type": event.r#type}}))
+        }
+        Err(error) if matches!(error.code(), WRITE_CONFLICT | "CALENDAR_NOT_OWNED" | "CALENDAR_EVENT_DELETED") => {
+            write.status = WriteStatus::Conflict;
+            write.handled_at = Some(now);
+            write.update(db)?;
+            let event = emit(db, "calendar.sync_required", now, json!({"write_id": write.id, "reason": error.code()}))?;
+            Ok(json!({"write_id": write.id, "status": write.status, "error": error.code(), "event": {"id": event.id, "type": event.r#type}}))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn send(db: &Connection, provider: &mut dyn CalendarProvider, write: &CalendarWrite, session: &mut PlannedSession, now: Ts) -> Result<()> {
+    let etag = write.expected_etag.as_deref().unwrap_or_default();
+    let remote = match write.action {
+        WriteAction::Create => provider.create_gym_event(&write.body_json)?,
+        WriteAction::Update => provider.update_gym_event(&write.event_id, &write.body_json, etag)?,
+        WriteAction::Delete => {
+            provider.delete_gym_event(&write.event_id, etag, &session.id)?;
+            persist_snapshot(db, &tombstone(&write.event_id), now, false)?;
+            return Ok(());
+        }
+    };
+    if !remote.managed || remote.session_id.as_deref() != Some(&session.id) || remote.id != write.event_id {
+        crate::bail!("CALENDAR_NOT_OWNED", "Provider returned unexpected event ownership; sync required");
+    }
+    session.calendar_event_id = Some(remote.id.clone());
+    session.save(db)?;
+    // A retry may find an event created earlier and since edited by the owner.
+    if remote.start != Some(session.planned_start_at) || remote.end != Some(session.planned_end_at) {
+        let (affected, _) = reconcile_event(db, &remote, now)?;
+        replan_weeks(db, &affected, now, false)?;
+    } else {
+        persist_snapshot(db, &remote, now, false)?;
+        if write.action == WriteAction::Create && remote.revision != Some(session.source_revision) {
+            queue_session_write(db, session, now, false)?;
+        }
+    }
+    Ok(())
 }
