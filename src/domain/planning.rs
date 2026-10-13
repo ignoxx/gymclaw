@@ -22,7 +22,7 @@ pub fn overlaps(start: Ts, end: Ts, other: &Interval) -> bool {
 }
 
 /// Planner inputs for one slot start. Missing signals score neutral.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct SlotSignal {
     pub start: Ts,
     pub crowd: Option<f64>,

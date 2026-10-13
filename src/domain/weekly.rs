@@ -345,7 +345,7 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
         }
         if PlannedSession::first(db, "WHERE week_id = ?1", [week.to_string()])?.is_none() {
             let key = first_plan_key(db, week, now, template_id)?;
-            let data = schedule_week(db, week, now, Some(&key), Some(template_id))?;
+            let data = schedule_week(db, week, now, Some(&key), Some(template_id), &[])?;
             created.extend(data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)));
         }
     }
@@ -372,7 +372,7 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     let previous = if now.local(&tz).date().weekday() == jiff::civil::Weekday::Sunday { current_week } else { current_week.checked_sub(days(7))? };
     let rolling = rolling_plan(db, template_id, now)?;
     let report = audit_week(db, previous, now, true)?;
-    schedule_week(db, next_week, now, Some(&format!("weekly-plan:{next_week}:{template_id}")), Some(template_id))?;
+    schedule_week(db, next_week, now, Some(&format!("weekly-plan:{next_week}:{template_id}")), Some(template_id), &[])?;
     assign_rotation(db, now)?;
     commit_upcoming(db, now)?;
     for session in PlannedSession::select(db, "WHERE week_id = ?1 AND status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [next_week.to_string()])? {

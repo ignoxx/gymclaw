@@ -88,7 +88,8 @@ impl FixtureCalendarProvider {
         Ok(provider)
     }
 
-    fn raw(&self, event_id: &str) -> Option<&Value> {
+    /// The stored Google resource, including fields `CalendarEvent` drops (description, …).
+    pub fn raw(&self, event_id: &str) -> Option<&Value> {
         self.events.iter().find(|(id, _)| id == event_id).map(|(_, v)| v)
     }
 
@@ -113,6 +114,15 @@ impl FixtureCalendarProvider {
     pub fn edit(&mut self, event_id: &str, changes: Value) -> Result<CalendarEvent> {
         let merged = merge(self.raw(event_id).cloned().unwrap_or_else(|| json!({})), &changes);
         self.put(merged)
+    }
+
+    /// The event vanishes without a tombstone (only a full sync notices).
+    pub fn forget(&mut self, event_id: &str) {
+        self.events.retain(|(id, _)| id != event_id);
+    }
+
+    pub fn event_count(&self) -> usize {
+        self.events.len()
     }
 
     /// Remote deletion (Google keeps a cancelled stub).
