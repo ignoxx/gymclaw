@@ -34,3 +34,34 @@ pub fn double_progression(exercise_id: &str, target_weight: f64, rep_max: i64, r
     };
     ProgressionDecision { exercise_id: exercise_id.into(), previous_weight: target_weight, next_weight, progressed: achieved, reason }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(target: f64, rep_max: i64, sets: usize, increment: f64, performance: &[(f64, i64)]) -> ProgressionDecision {
+        let performance: Vec<PerformanceSet> = performance.iter().map(|&(weight, reps)| PerformanceSet { weight, reps }).collect();
+        double_progression("bench", target, rep_max, sets, increment, &performance)
+    }
+
+    #[test]
+    fn double_progression_needs_every_set_at_target_and_rep_max() {
+        let cases: [(&[(f64, i64)], bool); 5] = [
+            (&[(80.0, 10), (80.0, 10), (80.0, 10)], true),
+            (&[(80.0, 10), (80.0, 9), (80.0, 10)], false),
+            (&[(80.0, 10), (80.0, 10)], false),
+            (&[(80.0, 10), (75.0, 10), (80.0, 10)], false),
+            (&[(80.0, 12), (80.0, 11), (80.0, 10)], true),
+        ];
+        for (performance, progressed) in cases {
+            let result = run(80.0, 10, 3, 2.5, performance);
+            assert_eq!(result.progressed, progressed, "{performance:?}");
+            assert_eq!(result.next_weight, if progressed { 82.5 } else { 80.0 });
+        }
+    }
+
+    #[test]
+    fn decimal_increment() {
+        assert_eq!(run(0.2, 10, 1, 0.1, &[(0.2, 10)]).next_weight, 0.3);
+    }
+}

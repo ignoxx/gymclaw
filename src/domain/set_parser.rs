@@ -86,3 +86,45 @@ pub fn parse_set(text: &str, set_type: SetType, expected_weight: Option<f64>, bo
     }
     set(weight, reps as i64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> Result<SetInput> {
+        parse_set(text, SetType::Working, None, false)
+    }
+
+    fn set(weight: f64, reps: i64) -> SetInput {
+        SetInput { weight, reps, set_type: SetType::Working, rir: None }
+    }
+
+    #[test]
+    fn either_order_with_units_and_separators() {
+        for text in ["80x9", "80 x 9", "80kg x9", "9 reps at 80", "80 KG × 9", "9 reps at 80kg", "9x80kg", "80kgx9 reps", "9x80"] {
+            assert_eq!(parse(text).unwrap(), set(80.0, 9), "{text}");
+        }
+    }
+
+    #[test]
+    fn uses_expected_weight_when_order_is_unclear() {
+        assert_eq!(parse_set("12x10", SetType::Working, Some(10.0), false).unwrap(), set(10.0, 12));
+        assert_eq!(parse("12x10").unwrap(), set(10.0, 12)); // reps first by default
+        assert_eq!(parse("8x22,5").unwrap(), set(22.5, 8));
+    }
+
+    #[test]
+    fn bodyweight_set_is_reps_alone() {
+        for text in ["13", "13 reps", "13x", "13 ×"] {
+            assert_eq!(parse_set(text, SetType::Working, None, true).unwrap(), set(0.0, 13), "{text}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_set_rejected() {
+        for text in ["80x9 then 80x10", "80", "9 reps", "-80x9", "80x9?", "80/9", "80kg x 9kg"] {
+            let error = parse(text).unwrap_err();
+            assert!(error.to_string().contains("How many reps"), "{text}: {error}");
+        }
+    }
+}
