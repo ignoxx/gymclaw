@@ -42,28 +42,14 @@ impl When {
             }
             part.parse().map_err(|_| bad())
         };
-        let day = civil::Date::new(
-            digits(0..4)? as i16,
-            digits(4..6)? as i8,
-            digits(6..8)? as i8,
-        )
-        .map_err(|_| bad())?;
+        let day = civil::Date::new(digits(0..4)? as i16, digits(4..6)? as i8, digits(6..8)? as i8).map_err(|_| bad())?;
         if value.len() == 8 {
             return Ok(When::Date(day));
         }
-        if date
-            || value.as_bytes().get(8) != Some(&b'T')
-            || !(value.len() == 15 || value.len() == 16 && value.ends_with(['Z', 'z']))
-        {
+        if date || value.as_bytes().get(8) != Some(&b'T') || !(value.len() == 15 || value.len() == 16 && value.ends_with(['Z', 'z'])) {
             return Err(bad());
         }
-        let time = civil::Time::new(
-            digits(9..11)? as i8,
-            digits(11..13)? as i8,
-            digits(13..15)?.min(59) as i8,
-            0,
-        )
-        .map_err(|_| bad())?;
+        let time = civil::Time::new(digits(9..11)? as i8, digits(11..13)? as i8, digits(13..15)?.min(59) as i8, 0).map_err(|_| bad())?;
         let local = day.to_datetime(time);
         if value.len() == 16 {
             return Ok(When::Zoned(local, TimeZone::UTC));
@@ -122,9 +108,7 @@ impl When {
 
     fn add(&self, d: SignedDuration) -> Result<When> {
         Ok(match self {
-            When::Date(day) => {
-                When::Date(day.checked_add((d.as_secs().div_euclid(86_400)).days())?)
-            }
+            When::Date(day) => When::Date(day.checked_add((d.as_secs().div_euclid(86_400)).days())?),
             When::Floating(dt) => When::Floating(dt.checked_add(d)?),
             // Python aware arithmetic: add on the wall clock, keep the zone.
             When::Zoned(dt, tz) => When::Zoned(dt.checked_add(d)?, tz.clone()),
@@ -148,16 +132,12 @@ pub fn compare(a: &When, b: &When) -> Result<Ordering> {
 /// Python `end - start` after `make_comparable`: wall-clock difference within one zone, absolute across zones.
 pub fn difference(end: &When, start: &When) -> Result<SignedDuration> {
     let tz = start.tz().or(end.tz()).cloned();
-    Ok(
-        match (end.with_tz(tz.as_ref())?, start.with_tz(tz.as_ref())?) {
-            (When::Zoned(e, ez), When::Zoned(s, sz))
-                if ez.iana_name() != sz.iana_name() || ez.iana_name().is_none() =>
-            {
-                instant(e, &ez)?.duration_since(instant(s, &sz)?)
-            }
-            (e, s) => e.civil().duration_since(s.civil()),
-        },
-    )
+    Ok(match (end.with_tz(tz.as_ref())?, start.with_tz(tz.as_ref())?) {
+        (When::Zoned(e, ez), When::Zoned(s, sz)) if ez.iana_name() != sz.iana_name() || ez.iana_name().is_none() => {
+            instant(e, &ez)?.duration_since(instant(s, &sz)?)
+        }
+        (e, s) => e.civil().duration_since(s.civil()),
+    })
 }
 
 /// `TZID` → zone. Vendor prefixes (`/mozilla.org/20050126_1/Europe/Berlin`) are stripped.
@@ -175,10 +155,7 @@ pub fn instant(dt: DateTime, tz: &TimeZone) -> Result<Timestamp> {
 fn invalid(detail: impl Into<String>) -> Error {
     Error::domain(
         "CALENDAR_RECURRENCE_INVALID",
-        format!(
-            "Calendar recurrence could not be expanded; plan unchanged ({})",
-            detail.into()
-        ),
+        format!("Calendar recurrence could not be expanded; plan unchanged ({})", detail.into()),
     )
 }
 
@@ -221,9 +198,7 @@ impl<'a> ContentLine<'a> {
 
     /// Comma-separated date/date-time values (DTSTART, EXDATE, RDATE, RECURRENCE-ID).
     pub fn times(&self) -> Result<Vec<When>> {
-        let date = self
-            .param("VALUE")
-            .is_some_and(|v| v.eq_ignore_ascii_case("DATE"));
+        let date = self.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE"));
         self.value
             .split(',')
             .filter(|v| !v.trim().is_empty())
@@ -278,8 +253,6 @@ pub fn parse_duration(text: &str) -> Result<SignedDuration> {
 /// A recurrence set anchored at its first instance.
 pub struct Series {
     start: When,
-    /// Original start/end were all dates (all-day series).
-    all_dates: bool,
     rules: Vec<(Rule, Option<When>)>,
     rdates: Vec<RDate>,
     exdate_ids: HashSet<DateTime>,
@@ -304,22 +277,11 @@ impl Instance {
 
 impl Series {
     /// `end` only helps pick the series zone (Python `make_all_dates_comparable`).
-    pub fn new(
-        start: &When,
-        end: Option<&When>,
-        rrules: &[&str],
-        rdates: Vec<RDate>,
-        exdates: &[When],
-        include_start: bool,
-    ) -> Result<Series> {
+    pub fn new(start: &When, end: Option<&When>, rrules: &[&str], rdates: Vec<RDate>, exdates: &[When], include_start: bool) -> Result<Series> {
         let rdate_starts = rdates.iter().map(|r| match r {
             RDate::At(w) | RDate::Period(w, _) => w,
         });
-        let everything: Vec<&When> = std::iter::once(start)
-            .chain(end)
-            .chain(exdates)
-            .chain(rdate_starts)
-            .collect();
+        let everything: Vec<&When> = std::iter::once(start).chain(end).chain(exdates).chain(rdate_starts).collect();
         let all_dates = everything.iter().all(|w| matches!(w, When::Date(_)));
         let tz = everything.iter().find_map(|w| w.tz()).cloned();
         let tz = tz.as_ref();
@@ -327,11 +289,7 @@ impl Series {
         let mut rules = Vec::new();
         for text in rrules {
             let rule = Rule::parse(text, first.civil())?;
-            let until = rule
-                .until
-                .as_ref()
-                .map(|u| repair_until(u, &first, all_dates))
-                .transpose()?;
+            let until = rule.until.as_ref().map(|u| repair_until(u, &first, all_dates)).transpose()?;
             rules.push((rule, until));
         }
         let rdates = rdates
@@ -353,7 +311,6 @@ impl Series {
         }
         Ok(Series {
             start: first,
-            all_dates,
             rules,
             rdates,
             exdate_ids,
@@ -380,9 +337,7 @@ impl Series {
         };
         let mut found: Vec<Instance> = Vec::new();
         let mut keep = |instance: Instance| -> Result<()> {
-            if compare(&instance.start, lower)? != Ordering::Less
-                && compare(&instance.start, upper)? == Ordering::Less
-            {
+            if compare(&instance.start, lower)? != Ordering::Less && compare(&instance.start, upper)? == Ordering::Less {
                 found.push(instance);
             }
             Ok(())
@@ -396,10 +351,7 @@ impl Series {
                 {
                     break;
                 }
-                keep(Instance {
-                    start,
-                    length: None,
-                })?;
+                keep(Instance { start, length: None })?;
             }
             match (until, last_until) {
                 (Some(u), Some(last)) if compare(u, last)? != Ordering::Greater => {}
@@ -434,17 +386,11 @@ impl Series {
         found.sort_by(|a, b| compare(&a.start, &b.start).unwrap_or(Ordering::Equal));
         for instance in found {
             let ids = instance.ids();
-            if !seen.insert(ids[0])
-                || self.excludes(&ids)
-                || self.exdate_days.contains(&instance.start.civil().date())
-            {
+            if !seen.insert(ids[0]) || self.excludes(&ids) || self.exdate_days.contains(&instance.start.civil().date()) {
                 continue;
             }
             if result.len() == limit {
-                crate::bail!(
-                    "CALENDAR_RECURRENCE_TOO_LARGE",
-                    "Too many recurring blockers; simplify calendar recurrence"
-                );
+                crate::bail!("CALENDAR_RECURRENCE_TOO_LARGE", "Too many recurring blockers; simplify calendar recurrence");
             }
             result.push(instance);
         }
@@ -462,9 +408,7 @@ fn repair_until(until: &When, start: &When, all_dates: bool) -> Result<When> {
     Ok(match (until, start) {
         (u, _) if all_dates => When::Date(u.civil().date()),
         (When::Zoned(dt, _), When::Floating(_)) => When::Floating(*dt),
-        (When::Date(_) | When::Floating(_), When::Zoned(..)) => {
-            When::Zoned(until.civil(), TimeZone::UTC)
-        }
+        (When::Date(_) | When::Floating(_), When::Zoned(..)) => When::Zoned(until.civil(), TimeZone::UTC),
         (u, _) => u.clone(),
     })
 }
@@ -474,20 +418,13 @@ fn repair_until(until: &When, start: &When, all_dates: bool) -> Result<When> {
 /// timed events, `When::Date` for all-day ones. Like `dateutil.rrulestr(forceset=True)`, DTSTART only
 /// counts when the rule produces it. More than `limit` instances → CALENDAR_RECURRENCE_TOO_LARGE;
 /// unparsable lines → CALENDAR_RECURRENCE_INVALID.
-pub fn occurrences(
-    lines: &[impl AsRef<str>],
-    dtstart: &When,
-    lower: &When,
-    upper: &When,
-    limit: usize,
-) -> Result<Vec<When>> {
+pub fn occurrences(lines: &[impl AsRef<str>], dtstart: &When, lower: &When, upper: &When, limit: usize) -> Result<Vec<When>> {
     let mut rrules = Vec::new();
     let mut rdates = Vec::new();
     let mut exdates = Vec::new();
     for line in lines {
         let line = line.as_ref().trim();
-        let parsed =
-            ContentLine::parse(line).ok_or_else(|| invalid(format!("bad line {line:?}")))?;
+        let parsed = ContentLine::parse(line).ok_or_else(|| invalid(format!("bad line {line:?}")))?;
         match parsed.name.as_str() {
             "RRULE" => rrules.push(parsed.value),
             "EXDATE" => exdates.extend(parsed.times()?),
@@ -496,27 +433,18 @@ pub fn occurrences(
         }
     }
     let series = Series::new(dtstart, None, &rrules, rdates, &exdates, false)?;
-    Ok(series
-        .between(lower, upper, limit)?
-        .into_iter()
-        .map(|i| i.start)
-        .collect())
+    Ok(series.between(lower, upper, limit)?.into_iter().map(|i| i.start).collect())
 }
 
 /// RDATE values, including `VALUE=PERIOD` (`start/end` or `start/duration`).
 pub(crate) fn rdate_values(line: &ContentLine<'_>) -> Result<Vec<RDate>> {
-    if !line
-        .param("VALUE")
-        .is_some_and(|v| v.eq_ignore_ascii_case("PERIOD"))
-    {
+    if !line.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("PERIOD")) {
         return Ok(line.times()?.into_iter().map(RDate::At).collect());
     }
     line.value
         .split(',')
         .map(|period| {
-            let (a, b) = period
-                .split_once('/')
-                .ok_or_else(|| invalid("bad period"))?;
+            let (a, b) = period.split_once('/').ok_or_else(|| invalid("bad period"))?;
             let start = When::parse(a, line.param("TZID"), false)?;
             let length = if b.trim_start().starts_with(['P', 'p', '-', '+']) {
                 parse_duration(b)?
@@ -599,18 +527,11 @@ impl Rule {
             by_set_pos: vec![],
             week_start: Weekday::Monday,
         };
-        fn list<T: std::str::FromStr + PartialOrd + Default>(
-            value: &str,
-            range: std::ops::RangeInclusive<T>,
-            nonzero: bool,
-        ) -> Result<Vec<T>> {
+        fn list<T: std::str::FromStr + PartialOrd + Default>(value: &str, range: std::ops::RangeInclusive<T>, nonzero: bool) -> Result<Vec<T>> {
             value
                 .split(',')
                 .map(|v| {
-                    let n: T = v
-                        .trim()
-                        .parse()
-                        .map_err(|_| invalid(format!("bad number {v:?}")))?;
+                    let n: T = v.trim().parse().map_err(|_| invalid(format!("bad number {v:?}")))?;
                     if !range.contains(&n) || nonzero && n == T::default() {
                         return Err(invalid(format!("out of range {v:?}")));
                     }
@@ -619,9 +540,7 @@ impl Rule {
                 .collect()
         }
         for part in text.split(';').filter(|p| !p.trim().is_empty()) {
-            let (key, value) = part
-                .split_once('=')
-                .ok_or_else(|| invalid(format!("bad rule part {part:?}")))?;
+            let (key, value) = part.split_once('=').ok_or_else(|| invalid(format!("bad rule part {part:?}")))?;
             let value = value.trim().to_ascii_uppercase();
             match key.trim().to_ascii_uppercase().as_str() {
                 "FREQ" => {
@@ -654,19 +573,12 @@ impl Rule {
                 "BYMINUTE" => rule.by_minute = list(&value, 0..=59, false)?,
                 "BYSECOND" => rule.by_second = list(&value, 0..=59, false)?,
                 "BYSETPOS" => rule.by_set_pos = list(&value, -366..=366, true)?,
-                "WKST" => {
-                    rule.week_start =
-                        weekday(&value).ok_or_else(|| invalid(format!("bad WKST {value}")))?
-                }
+                "WKST" => rule.week_start = weekday(&value).ok_or_else(|| invalid(format!("bad WKST {value}")))?,
                 "BYDAY" | "BYWEEKDAY" => {
                     for day in value.split(',') {
                         let day = day.trim();
-                        let split = day
-                            .len()
-                            .checked_sub(2)
-                            .ok_or_else(|| invalid(format!("bad BYDAY {day}")))?;
-                        let wd = weekday(&day[split..])
-                            .ok_or_else(|| invalid(format!("bad BYDAY {day}")))?;
+                        let split = day.len().checked_sub(2).ok_or_else(|| invalid(format!("bad BYDAY {day}")))?;
+                        let wd = weekday(&day[split..]).ok_or_else(|| invalid(format!("bad BYDAY {day}")))?;
                         match &day[..split] {
                             "" => rule.by_weekday.push(wd),
                             n => rule.by_nth_weekday.push((list(n, -53..=53, true)?[0], wd)),
@@ -718,12 +630,7 @@ impl Rule {
 
     /// Wall-clock starts from `start`, skipping whole periods before `from` when COUNT allows,
     /// and stopping after `horizon`.
-    fn iter(
-        &self,
-        start: DateTime,
-        from: DateTime,
-        horizon: DateTime,
-    ) -> impl Iterator<Item = DateTime> + '_ {
+    fn iter(&self, start: DateTime, from: DateTime, horizon: DateTime) -> impl Iterator<Item = DateTime> + '_ {
         let first_period = if self.count.is_none() {
             self.periods_between(start, from).saturating_sub(1).max(0)
         } else {
@@ -774,9 +681,7 @@ impl Rule {
         let secs = to.duration_since(start).as_secs();
         let units = match self.freq {
             Freq::Yearly => i64::from(to.year() - start.year()),
-            Freq::Monthly => {
-                i64::from(to.year() - start.year()) * 12 + i64::from(to.month() - start.month())
-            }
+            Freq::Monthly => i64::from(to.year() - start.year()) * 12 + i64::from(to.month() - start.month()),
             Freq::Weekly => secs / 604_800,
             Freq::Daily => secs / 86_400,
             Freq::Hourly => secs / 3_600,
@@ -790,34 +695,21 @@ impl Rule {
     fn period(&self, start: DateTime, k: i64) -> Option<(Vec<Date>, DateTime)> {
         let step = k.checked_mul(self.interval)?;
         let midnight = |d: Date| d.to_datetime(civil::Time::midnight());
-        let days_from = |first: Date, n: i64| -> Option<Vec<Date>> {
-            (0..n).map(|i| first.checked_add(i.days()).ok()).collect()
-        };
+        let days_from = |first: Date, n: i64| -> Option<Vec<Date>> { (0..n).map(|i| first.checked_add(i.days()).ok()).collect() };
         match self.freq {
             Freq::Yearly => {
                 let year = i64::from(start.year()) + step;
-                let first =
-                    Date::new(i16::try_from(year).ok().filter(|y| *y <= 9999)?, 1, 1).ok()?;
-                Some((
-                    days_from(first, i64::from(first.days_in_year()))?,
-                    midnight(first),
-                ))
+                let first = Date::new(i16::try_from(year).ok().filter(|y| *y <= 9999)?, 1, 1).ok()?;
+                Some((days_from(first, i64::from(first.days_in_year()))?, midnight(first)))
             }
             Freq::Monthly => {
                 let index = i64::from(start.year()) * 12 + i64::from(start.month() - 1) + step;
-                let year = i16::try_from(index.div_euclid(12))
-                    .ok()
-                    .filter(|y| *y <= 9999)?;
+                let year = i16::try_from(index.div_euclid(12)).ok().filter(|y| *y <= 9999)?;
                 let first = Date::new(year, (index.rem_euclid(12) + 1) as i8, 1).ok()?;
-                Some((
-                    days_from(first, i64::from(first.days_in_month()))?,
-                    midnight(first),
-                ))
+                Some((days_from(first, i64::from(first.days_in_month()))?, midnight(first)))
             }
             Freq::Weekly => {
-                let back = (start.weekday().to_monday_zero_offset()
-                    - self.week_start.to_monday_zero_offset())
-                .rem_euclid(7);
+                let back = (start.weekday().to_monday_zero_offset() - self.week_start.to_monday_zero_offset()).rem_euclid(7);
                 let first = start
                     .date()
                     .checked_sub(i64::from(back).days())
@@ -837,19 +729,11 @@ impl Rule {
                     _ => 1,
                 };
                 let truncated = match self.freq {
-                    Freq::Hourly => start
-                        .with()
-                        .minute(0)
-                        .second(0)
-                        .subsec_nanosecond(0)
-                        .build()
-                        .ok()?,
+                    Freq::Hourly => start.with().minute(0).second(0).subsec_nanosecond(0).build().ok()?,
                     Freq::Minutely => start.with().second(0).subsec_nanosecond(0).build().ok()?,
                     _ => start.with().subsec_nanosecond(0).build().ok()?,
                 };
-                let at = truncated
-                    .checked_add(SignedDuration::from_secs(step.checked_mul(unit)?))
-                    .ok()?;
+                let at = truncated.checked_add(SignedDuration::from_secs(step.checked_mul(unit)?)).ok()?;
                 Some((vec![at.date()], at))
             }
         }
@@ -889,29 +773,15 @@ impl Rule {
         if !self.by_month.is_empty() && !self.by_month.contains(&day.month()) {
             return false;
         }
-        if !self.by_month_day.is_empty()
-            && !self
-                .by_month_day
-                .iter()
-                .any(|&m| m == month_day || m == month_day - month_len - 1)
-        {
+        if !self.by_month_day.is_empty() && !self.by_month_day.iter().any(|&m| m == month_day || m == month_day - month_len - 1) {
             return false;
         }
-        if !self.by_year_day.is_empty()
-            && !self
-                .by_year_day
-                .iter()
-                .any(|&y| y == year_day || y == year_day - year_len - 1)
-        {
+        if !self.by_year_day.is_empty() && !self.by_year_day.iter().any(|&y| y == year_day || y == year_day - year_len - 1) {
             return false;
         }
         if !self.by_week_no.is_empty() && self.freq == Freq::Yearly {
             let (number, total) = week_number(day, self.week_start);
-            if !self
-                .by_week_no
-                .iter()
-                .any(|&w| i16::from(w) == number || i16::from(w) == number - total - 1)
-            {
+            if !self.by_week_no.iter().any(|&w| i16::from(w) == number || i16::from(w) == number - total - 1) {
                 return false;
             }
         }
@@ -929,9 +799,9 @@ impl Rule {
             (year_day, year_len)
         };
         let (forward, backward) = ((index - 1) / 7 + 1, -((len - index) / 7 + 1));
-        self.by_nth_weekday.iter().any(|&(n, wd)| {
-            wd == day.weekday() && (i16::from(n) == forward || i16::from(n) == backward)
-        })
+        self.by_nth_weekday
+            .iter()
+            .any(|&(n, wd)| wd == day.weekday() && (i16::from(n) == forward || i16::from(n) == backward))
     }
 }
 
@@ -951,8 +821,7 @@ fn product(hours: &[i8], minutes: &[i8], seconds: &[i8]) -> Vec<civil::Time> {
 fn week_number(day: Date, week_start: Weekday) -> (i16, i16) {
     let week_one = |year: i16| -> Date {
         let jan4 = Date::new(year, 1, 4).expect("valid date");
-        let back = (jan4.weekday().to_monday_zero_offset() - week_start.to_monday_zero_offset())
-            .rem_euclid(7);
+        let back = (jan4.weekday().to_monday_zero_offset() - week_start.to_monday_zero_offset()).rem_euclid(7);
         jan4.checked_sub(i64::from(back).days()).expect("in range")
     };
     let mut year = day.year();
@@ -976,8 +845,7 @@ mod tests {
     /// (`testdata/ics/recurrence.json`, made by `testdata/ics/expected.py`).
     #[test]
     fn matches_dateutil() {
-        let cases: Vec<Value> =
-            serde_json::from_str(include_str!("testdata/ics/recurrence.json")).unwrap();
+        let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/recurrence.json")).unwrap();
         let berlin = TimeZone::get("Europe/Berlin").unwrap();
         for case in cases {
             let when = |key: &str| {
@@ -989,19 +857,12 @@ mod tests {
                 }
             };
             let lines: Vec<String> = serde_json::from_value(case["lines"].clone()).unwrap();
-            let actual = match occurrences(
-                &lines,
-                &when("dtstart"),
-                &when("lower"),
-                &when("upper"),
-                5000,
-            ) {
+            let actual = match occurrences(&lines, &when("dtstart"), &when("lower"), &when("upper"), 5000) {
                 Ok(found) => json!(
                     found
                         .iter()
                         .map(|w| match w {
-                            When::Zoned(dt, tz) =>
-                                crate::time::iso(&dt.to_zoned(tz.clone()).unwrap()),
+                            When::Zoned(dt, tz) => crate::time::iso(&dt.to_zoned(tz.clone()).unwrap()),
                             other => other.civil().strftime("%Y-%m-%dT%H:%M:%S").to_string(),
                         })
                         .collect::<Vec<_>>()

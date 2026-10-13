@@ -8,9 +8,7 @@ use jiff::SignedDuration;
 use jiff::tz::TimeZone;
 
 use super::http::{Method, Request, Transport};
-use super::recurrence::{
-    ContentLine, Instance, RDate, Series, When, compare, difference, parse_duration, rdate_values,
-};
+use super::recurrence::{ContentLine, Instance, RDate, Series, When, compare, difference, parse_duration, rdate_values};
 use crate::bail;
 use crate::domain::planning::Interval;
 use crate::error::{Error, Result};
@@ -25,18 +23,10 @@ pub fn normalize_url(url: &str) -> Result<String> {
         Some(rest) => format!("https://{rest}"),
         None => url.to_string(),
     };
-    let host = url
-        .strip_prefix("https://")
-        .map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    let host = url.strip_prefix("https://").map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
     // Python `urlsplit(...).hostname`: strip userinfo and port.
-    let host = host
-        .map(|h| h.rsplit('@').next().unwrap_or(""))
-        .map(|h| h.split(':').next().unwrap_or(""));
-    if !url
-        .get(..8)
-        .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
-        || host.is_none_or(str::is_empty)
-    {
+    let host = host.map(|h| h.rsplit('@').next().unwrap_or("")).map(|h| h.split(':').next().unwrap_or(""));
+    if !url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) || host.is_none_or(str::is_empty) {
         bail!(
             "PERSONAL_CALENDAR_URL_INVALID",
             "Personal calendar feed must be an https:// or webcal:// ICS link"
@@ -48,24 +38,14 @@ pub fn normalize_url(url: &str) -> Result<String> {
 /// GET the feed body. The URL is a capability secret and never appears in errors.
 pub fn fetch(url: &str, transport: &dyn Transport) -> Result<Vec<u8>> {
     let request = Request::new(Method::Get, url, 30).header("Accept", "text/calendar");
-    let response = transport.send(&request).map_err(|_| {
-        Error::domain(
-            "PERSONAL_CALENDAR_UNAVAILABLE",
-            "Personal calendar feed request failed",
-        )
-    })?;
+    let response = transport
+        .send(&request)
+        .map_err(|_| Error::domain("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed request failed"))?;
     if response.status >= 400 {
-        bail!(
-            "PERSONAL_CALENDAR_UNAVAILABLE",
-            "Personal calendar feed failed (HTTP {})",
-            response.status
-        );
+        bail!("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed failed (HTTP {})", response.status);
     }
     if response.body.len() > MAX_BYTES {
-        bail!(
-            "PERSONAL_CALENDAR_TOO_LARGE",
-            "Personal calendar feed exceeds size limit"
-        );
+        bail!("PERSONAL_CALENDAR_TOO_LARGE", "Personal calendar feed exceeds size limit");
     }
     Ok(response.body)
 }
@@ -74,12 +54,7 @@ pub fn fetch(url: &str, transport: &dyn Transport) -> Result<Vec<u8>> {
 /// RECURRENCE-ID overrides are expanded; free (TRANSP:TRANSPARENT) and cancelled events don't block.
 /// Floating times and all-day dates are read in `zone` (the owner's).
 pub fn busy_intervals(data: &[u8], start: Ts, end: Ts, zone: &TimeZone) -> Result<Vec<Interval>> {
-    expand(data, start, end, zone).map_err(|_| {
-        Error::domain(
-            "PERSONAL_CALENDAR_INVALID",
-            "Personal calendar feed could not be parsed",
-        )
-    })
+    expand(data, start, end, zone).map_err(|_| Error::domain("PERSONAL_CALENDAR_INVALID", "Personal calendar feed could not be parsed"))
 }
 
 /// One VEVENT, reduced to what busy time needs.
@@ -177,17 +152,8 @@ fn events(data: &[u8]) -> Result<Vec<Event>> {
 
 fn event(props: &[ContentLine<'_>]) -> Result<Event> {
     let get = |name: &str| props.iter().find(|p| p.name == name);
-    let text = |name: &str| {
-        get(name)
-            .map(|p| p.value.trim().to_ascii_uppercase())
-            .unwrap_or_default()
-    };
-    let one = |p: &ContentLine<'_>| -> Result<When> {
-        p.times()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::domain("ICS", "empty time"))
-    };
+    let text = |name: &str| get(name).map(|p| p.value.trim().to_ascii_uppercase()).unwrap_or_default();
+    let one = |p: &ContentLine<'_>| -> Result<When> { p.times()?.into_iter().next().ok_or_else(|| Error::domain("ICS", "empty time")) };
     let start = one(get("DTSTART").ok_or_else(|| Error::domain("ICS", "DTSTART missing"))?)?;
     let raw_end = match (get("DTEND"), get("DURATION")) {
         (Some(end), _) => one(end)?,
@@ -195,13 +161,10 @@ fn event(props: &[ContentLine<'_>]) -> Result<Event> {
             let duration = parse_duration(duration.value)?;
             match &start {
                 // Python: a date plus a duration with a time part becomes a floating date-time.
-                When::Date(d) if duration.as_secs().rem_euclid(86_400) != 0 => When::Floating(
-                    d.to_datetime(jiff::civil::Time::midnight())
-                        .checked_add(duration)?,
-                ),
-                When::Date(d) => When::Date(
-                    d.checked_add(jiff::Span::new().days(duration.as_secs().div_euclid(86_400)))?,
-                ),
+                When::Date(d) if duration.as_secs().rem_euclid(86_400) != 0 => {
+                    When::Floating(d.to_datetime(jiff::civil::Time::midnight()).checked_add(duration)?)
+                }
+                When::Date(d) => When::Date(d.checked_add(jiff::Span::new().days(duration.as_secs().div_euclid(86_400)))?),
                 When::Floating(dt) => When::Floating(dt.checked_add(duration)?),
                 When::Zoned(dt, tz) => When::Zoned(dt.checked_add(duration)?, tz.clone()),
             }
@@ -231,20 +194,12 @@ fn event(props: &[ContentLine<'_>]) -> Result<Event> {
         uid: get("UID").map(|p| p.value.to_string()),
         start,
         end,
-        rrules: props
-            .iter()
-            .filter(|p| p.name == "RRULE")
-            .map(|p| p.value.to_string())
-            .collect(),
+        rrules: props.iter().filter(|p| p.name == "RRULE").map(|p| p.value.to_string()).collect(),
         rdates,
         exdates,
         recurrence_id: recurrence.map(one).transpose()?,
-        this_and_future: recurrence
-            .and_then(|r| r.param("RANGE"))
-            .is_some_and(|r| r == "THISANDFUTURE"),
-        sequence: get("SEQUENCE")
-            .and_then(|p| p.value.trim().parse().ok())
-            .unwrap_or(-1),
+        this_and_future: recurrence.and_then(|r| r.param("RANGE")).is_some_and(|r| r == "THISANDFUTURE"),
+        sequence: get("SEQUENCE").and_then(|p| p.value.trim().parse().ok()).unwrap_or(-1),
         blocks: text("TRANSP") != "TRANSPARENT" && text("STATUS") != "CANCELLED",
     })
 }
@@ -293,10 +248,7 @@ fn expand(data: &[u8], window_start: Ts, window_end: Ts, zone: &TimeZone) -> Res
             }
         }
     }
-    Ok(busy
-        .into_iter()
-        .map(|(start, end)| Interval { start, end })
-        .collect())
+    Ok(busy.into_iter().map(|(start, end)| Interval { start, end }).collect())
 }
 
 /// Occurrences of one UID's master + overrides that may touch [lower, upper) (a superset; the caller filters).
@@ -319,17 +271,9 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
             unique.push(m);
         }
     }
-    let mut this_and_future: Vec<(jiff::civil::DateTime, &Event)> = unique
-        .iter()
-        .filter(|m| m.this_and_future)
-        .map(|m| (m.ids()[0], *m))
-        .collect();
+    let mut this_and_future: Vec<(jiff::civil::DateTime, &Event)> = unique.iter().filter(|m| m.this_and_future).map(|m| (m.ids()[0], *m)).collect();
     this_and_future.sort_by_key(|(id, _)| *id);
-    let modification_for = |ids: &[jiff::civil::DateTime]| {
-        ids.iter()
-            .rev()
-            .find_map(|id| modifications.get(id).copied())
-    };
+    let modification_for = |ids: &[jiff::civil::DateTime]| ids.iter().rev().find_map(|id| modifications.get(id).copied());
     let occurrence = |e: &Event| Occurrence {
         start: e.start.clone(),
         end: e.end.clone(),
@@ -372,11 +316,7 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
             }
             continue;
         }
-        let component = this_and_future
-            .iter()
-            .take_while(|(id, _)| *id < ids[0])
-            .last()
-            .map_or(core, |(_, m)| *m);
+        let component = this_and_future.iter().take_while(|(id, _)| *id < ids[0]).last().map_or(core, |(_, m)| *m);
         let moved = component.moved_by()?;
         let start = Series::end_of(
             &Instance {
@@ -399,10 +339,7 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
         });
     }
     for m in unique {
-        if returned.iter().any(|r| std::ptr::eq(*r, m))
-            || series.excludes(&m.ids())
-            || skip_stale_modification(m, core, &series)?
-        {
+        if returned.iter().any(|r| std::ptr::eq(*r, m)) || series.excludes(&m.ids()) || skip_stale_modification(m, core, &series)? {
             continue;
         }
         out.push(occurrence(m));
@@ -432,9 +369,7 @@ fn skip_stale_modification(m: &Event, core: &Event, series: &Series) -> Result<b
         })
     };
     let found = series.between(&day(rid, 0)?, &day(rid, 1)?, usize::MAX)?;
-    Ok(!found
-        .iter()
-        .any(|i| i.ids().iter().any(|id| ids.contains(id))))
+    Ok(!found.iter().any(|i| i.ids().iter().any(|id| ids.contains(id))))
 }
 
 #[cfg(test)]
@@ -449,39 +384,20 @@ mod tests {
     /// implementation's output (`testdata/ics/expected.py`).
     #[test]
     fn matches_python_expansion() {
-        let cases: Vec<Value> =
-            serde_json::from_str(include_str!("testdata/ics/expected.json")).unwrap();
+        let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/expected.json")).unwrap();
         let mut failures = Vec::new();
         for case in &cases {
-            let feed = std::fs::read(
-                concat!(env!("CARGO_MANIFEST_DIR"), "/src/providers/testdata/ics/").to_string()
-                    + case["feed"].as_str().unwrap(),
-            )
-            .unwrap();
+            let feed = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/src/providers/testdata/ics/").to_string() + case["feed"].as_str().unwrap()).unwrap();
             let start = Ts::parse(case["start"].as_str().unwrap(), None).unwrap();
             let end = Ts::parse(case["end"].as_str().unwrap(), None).unwrap();
-            let actual = match busy_intervals(
-                &feed,
-                start,
-                end,
-                &zone(case["zone"].as_str().unwrap()).unwrap(),
-            ) {
-                Ok(busy) => json!(
-                    busy.iter()
-                        .map(|i| [i.start.iso(), i.end.iso()])
-                        .collect::<Vec<_>>()
-                ),
+            let actual = match busy_intervals(&feed, start, end, &zone(case["zone"].as_str().unwrap()).unwrap()) {
+                Ok(busy) => json!(busy.iter().map(|i| [i.start.iso(), i.end.iso()]).collect::<Vec<_>>()),
                 Err(error) => json!({"error": error.code()}),
             };
             if actual != case["expected"] {
                 failures.push(format!(
                     "{} {} {}..{}\n  python: {}\n  rust:   {}",
-                    case["feed"],
-                    case["zone"],
-                    case["start"],
-                    case["end"],
-                    case["expected"],
-                    actual
+                    case["feed"], case["zone"], case["start"], case["end"], case["expected"], actual
                 ));
             }
         }
@@ -494,11 +410,6 @@ mod tests {
             normalize_url("webcal://p42-caldav.icloud.com/published/2/abc").unwrap(),
             "https://p42-caldav.icloud.com/published/2/abc"
         );
-        assert_eq!(
-            normalize_url("http://example.com/cal.ics")
-                .unwrap_err()
-                .code(),
-            "PERSONAL_CALENDAR_URL_INVALID"
-        );
+        assert_eq!(normalize_url("http://example.com/cal.ics").unwrap_err().code(), "PERSONAL_CALENDAR_URL_INVALID");
     }
 }
