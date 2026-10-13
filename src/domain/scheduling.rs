@@ -124,3 +124,37 @@ pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Opt
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Json;
+    use crate::db::models::{CalendarEventSnapshot, SessionStatus};
+
+    fn ts(text: &str) -> Ts {
+        Ts::parse(text, None).unwrap()
+    }
+
+    #[test]
+    fn calendar_snapshot_and_locked_session_preserved() {
+        let db = crate::domain::workout::tests::db();
+        get_profile(&db).unwrap();
+        let (start, end) = (ts("2026-10-15T19:00:00+02:00"), ts("2026-10-15T20:10:00+02:00"));
+        CalendarEventSnapshot {
+            calendar_event_id: "travel".into(), ical_uid: None, etag: None, title: "Travel".into(), start_at: ts("2026-10-12T00:00:00+02:00"),
+            end_at: ts("2026-10-14T00:00:00+02:00"), status: "confirmed".into(), updated_at_remote: None, gymclaw_managed: false, gymclaw_session_id: None,
+            gymclaw_plan_revision: None, user_locked: false, last_seen_at: start, raw_json: Json(json!({})),
+        }
+        .insert(&db)
+        .unwrap();
+        let mut locked = PlannedSession::new("2026-10-12".into(), None, true);
+        locked.id = "locked".into();
+        locked.status = SessionStatus::Tentative;
+        (locked.planned_start_at, locked.planned_end_at, locked.prep_start_at, locked.leave_home_at, locked.expected_finish_at) = (start, end, start, start, end);
+        locked.insert(&db).unwrap();
+        let result = schedule_week(&db, jiff::civil::date(2026, 10, 12), ts("2026-10-11T12:00:00+02:00"), None, None, &[]).unwrap();
+        let sessions = result["sessions"].as_array().unwrap();
+        assert_eq!((sessions.len(), sessions[0]["id"].as_str()), (1, Some("locked")));
+        assert_eq!(PlannedSession::get(&db, "locked").unwrap().unwrap().planned_start_at, start);
+    }
+}
