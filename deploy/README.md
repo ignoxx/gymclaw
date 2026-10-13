@@ -2,9 +2,8 @@
 
 One Docker Compose stack, built from this repo:
 
-- **gymclaw**: the official OpenClaw image (pinned `2026.7.1`) plus GymClaw's Python
-  domain. The gateway listens on loopback only, inside the container. Telegram uses
-  long polling, so no ports are published.
+- **gymclaw**: one Rust binary (`gymclaw serve`): Telegram long polling, the agent
+  (OpenRouter), the coach, the scheduler and the outbox. No ports are published.
 - **egress**: a Squid proxy that allows HTTPS `CONNECT` to an allowlist only
   (Telegram, OpenRouter, Google Calendar/OAuth, MySports, plus `EGRESS_EXTRA_HOSTS`).
 
@@ -20,14 +19,12 @@ as a non-root user with a read-only root filesystem, no capabilities and
 
 | Volume | Mounted at | Contents |
 | --- | --- | --- |
-| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, Google OAuth token), crowd config, previews, `turns/` [turn logs](../openclaw/plugins/turn-log/README.md) |
-| `gymclaw-workspace` | `/opt/gymclaw/openclaw` | Agent workspace: `USER.md` notes, `memory/`, inbound `media/` |
-| `openclaw-state` | `/home/node/.openclaw-gymclaw` | OpenClaw config, gateway token, chat sessions, scheduled jobs |
+| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, chat history, agent notes, Google OAuth token), crowd config, inbound `media/`, `turns/` turn logs (JSONL, format in [`src/agent/turnlog.rs`](../src/agent/turnlog.rs)), `heartbeat` |
+| `gymclaw-workspace` | `/opt/gymclaw/openclaw` (read-only) | Old OpenClaw workspace. Its `USER.md` "Owner notes" are imported into the DB once on first start |
 | `gymclaw-backups` | `/backups` | `backup.sh` archives |
 
-Repo-owned workspace files (`AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`) are
-synced from the image on every start. `USER.md` is seeded once, then belongs to
-the agent.
+The old `openclaw-state` volume is no longer mounted; delete it once the Rust runtime has run fine
+for a while.
 
 ## Coolify
 
@@ -44,7 +41,7 @@ the agent.
    Without this, `gymclaw` would have direct internet access, and it refuses to
    start.
 3. Set the environment variables: `GYMCLAW_TELEGRAM_USER_ID`, `TELEGRAM_BOT_TOKEN`,
-   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL`,
+   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL`, `TZ`,
    `GYMCLAW_PROVIDER` (default `inference-net/fp4`) and `EGRESS_EXTRA_HOSTS` (for example the personal calendar feed host).
 4. Turn off **Escape special characters in labels** (Advanced settings) so the
    dashboard's Traefik labels get `GYMCLAW_DASHBOARD_HOST` filled in.
@@ -75,7 +72,7 @@ Approve the route in the Tailscale admin console. Linux clients also need
 Only one instance may run at a time. Two pollers on one bot token conflict, and
 two runtimes would send every reminder twice.
 
-1. Old host: `runtime pause`, run `backup.sh`, copy the newest `/backups` archive
+1. Old host: `gymclaw call runtime_pause` (or ask the bot to pause), run `backup.sh`, copy the newest `/backups` archive
    off-host, then stop the old deployment.
 
 2. New host: deploy once so the volumes exist, then stop `gymclaw` and restore:
@@ -87,26 +84,24 @@ two runtimes would send every reminder twice.
    docker start <gymclaw container>
    ```
 
-3. Rebind the DB to this deployment, resume, and recreate the scheduled jobs:
+3. Resume (the scheduler runs in-process, there are no jobs to recreate):
 
    ```bash
-   docker exec -w /opt/gymclaw <gymclaw container> sh -c '
-     scripts/gymclaw-tool runtime relocate &&
-     scripts/gymclaw-tool runtime resume --allow-runtime-changes --allow-messages &&
-     scripts/gymclaw-tool runtime plan'
-   docker exec -w /opt/gymclaw <gymclaw container> scripts/gymclaw-tool runtime sync \
-     --allow-runtime-changes --allow-messages --with-crowd-poll [--allow-calendar-writes]
+   docker exec <gymclaw container> gymclaw call runtime_resume '{"owner_asked": true, "crowd_polling": true}'
    ```
 
-   `pause` revokes calendar writes, so grant them again explicitly if wanted.
+   `pause` revokes calendar writes; add `"calendar_writes": true` to grant them again if wanted.
 
-4. Check: message the bot, check `runtime deliveries`, and confirm the calendar
-   watcher runs (`openclaw cron list --all`).
+4. Check: message the bot, send `/status`, and `gymclaw call deliveries`.
+
+Google auth travels with the DB. If it's gone (`CALENDAR_AUTH_REQUIRED`), re-run
+`docker compose exec -it gymclaw gymclaw calendar-auth --calendar-id <id>`
+([setup](../docs/self-hosting.md#first-run)).
 
 ## Backups
 
-`backup.sh` writes a consistent `/backups/gymclaw-<UTC>.tar.gz` (SQLite online
-backup, workspace, OpenClaw state) and keeps the newest 14. Archives contain the
+`backup.sh` writes a consistent `/backups/gymclaw-<UTC>.tar.gz` (`gymclaw backup` of the DB,
+`data/`, the old workspace) and keeps the newest 14. Archives contain the
 Google OAuth token and chat history, so copy them off-host only to private storage:
 
 ```bash

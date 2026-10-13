@@ -1,50 +1,37 @@
-# GymClaw gateway: official OpenClaw image + GymClaw's Python domain.
+# GymClaw: one Rust binary (bot, agent, scheduler, dashboard) on Debian slim.
 # Build from repo root: docker build -f deploy/Dockerfile .
-FROM ghcr.io/openclaw/openclaw:2026.7.1
-
-USER root
-# OpenClaw's image tool converts photos (iPhone HEIC included) with an external processor and the
-# base image has none. Debian's ImageMagick 6 provides `convert` with the libheif delegate.
-# Bookworm's libheif 1.15 rejects current iPhone HEICs ("Too many auxiliary image references"),
-# so libheif and its HEVC decoder come from bookworm-backports (1.19).
-RUN echo "deb http://deb.debian.org/debian bookworm-backports main" \
-        > /etc/apt/sources.list.d/bookworm-backports.list \
-    && apt-get update && apt-get install -y --no-install-recommends imagemagick \
-    && apt-get install -y --no-install-recommends -t bookworm-backports \
-        libheif1 libheif-plugin-libde265 \
+FROM rust:1-bookworm AS build
+# libheif from bookworm-backports (1.19): bookworm's 1.15 rejects current iPhone HEICs.
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/bookworm-backports.list \
+    && apt-get update && apt-get install -y --no-install-recommends pkg-config clang \
+    && apt-get install -y --no-install-recommends -t bookworm-backports libheif-dev \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
-# Base image ships Python 3.11; GymClaw needs 3.12+.
-ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy UV_NO_CACHE=1
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY web ./web
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
+    cargo build --release --locked && cp target/release/gymclaw /usr/local/bin/gymclaw
+
+FROM debian:bookworm-slim
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/bookworm-backports.list \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \
+    && apt-get install -y --no-install-recommends -t bookworm-backports libheif1 libheif-plugin-libde265 \
+    && rm -rf /var/lib/apt/lists/*
+# uid 1000 = the old image's `node` user, so existing volumes stay writable.
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin gymclaw
 WORKDIR /opt/gymclaw
-COPY pyproject.toml alembic.ini ./
-COPY gymclaw ./gymclaw
-# Precompile bytecode: the container is read-only, so without this every gymclaw-tool
-# call recompiles all imported modules (~3s per call).
-RUN uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -e . \
-    && .venv/bin/python -m compileall -q -j0 -x '/(test|tests|idlelib|lib2to3)/' /opt/python .venv gymclaw \
-    && chmod -R a+rX /opt/python /opt/gymclaw
-
-COPY scripts/gymclaw-tool ./scripts/gymclaw-tool
+COPY --from=build /usr/local/bin/gymclaw /usr/local/bin/gymclaw
+COPY assets/workout-guide ./assets/workout-guide
 COPY config ./config
-# Repo-owned workspace files. Entrypoint syncs them into the persistent workspace
-# volume mounted at /opt/gymclaw/openclaw; plugins load straight from here.
-COPY openclaw ./openclaw.dist
 COPY deploy/entrypoint.sh deploy/backup.sh deploy/restore.sh /usr/local/bin/
-RUN mkdir -p openclaw data /home/node/.openclaw-gymclaw /backups \
-    && chown node:node openclaw data /home/node/.openclaw-gymclaw /backups
+RUN mkdir -p data openclaw /backups && chown gymclaw:gymclaw data openclaw /backups
 
-USER node
-# OPENCLAW_* match what `--profile gymclaw` derives. Cron children inherit them too, so
-# GymClaw's job declarations are identical whether synced from a shell or a callback.
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    GYMCLAW_DB_URL=sqlite:////opt/gymclaw/data/gymclaw.db \
+USER gymclaw
+ENV GYMCLAW_DATA_DIR=/opt/gymclaw/data \
+    GYMCLAW_ASSETS_DIR=/opt/gymclaw/assets/workout-guide \
     GYMCLAW_TURN_LOG_DIR=/opt/gymclaw/data/turns \
-    GYMCLAW_OPENCLAW_PROFILE=gymclaw \
-    OPENCLAW_PROFILE=gymclaw \
-    OPENCLAW_STATE_DIR=/home/node/.openclaw-gymclaw \
-    OPENCLAW_CONFIG_PATH=/home/node/.openclaw-gymclaw/openclaw.json \
-    NODE_USE_ENV_PROXY=1 \
+    GYMCLAW_LEGACY_USER_MD=/opt/gymclaw/openclaw/USER.md \
     NO_PROXY=localhost,127.0.0.1,::1 \
     no_proxy=localhost,127.0.0.1,::1
 ENTRYPOINT ["tini", "-s", "--", "entrypoint.sh"]
