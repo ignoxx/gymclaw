@@ -847,7 +847,8 @@ pub(crate) mod tests {
     fn guardrails_rollback_and_id_conflict() {
         let db = db();
         let id = short(&db);
-        let actions: [&dyn Fn(&Connection) -> Result<Value>; 4] = [
+        type Action<'a> = &'a dyn Fn(&Connection) -> Result<Value>;
+        let actions: [Action; 4] = [
             &|db| start(db, Some("short"), None, false, at(0), "duplicate-active"),
             &|db| start(db, Some("unknown"), None, false, at(0), "start"),
             &|db| transition(db, &mut load_workout(db, &id, None)?, WorkoutStatus::PlanUpdated, at(0)).map(|_| Value::Null),
