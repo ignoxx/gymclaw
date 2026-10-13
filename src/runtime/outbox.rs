@@ -437,4 +437,109 @@ mod tests {
         assert!(tg.calls().is_empty());
         assert_eq!(NotificationDelivery::get(&db, &id).unwrap().unwrap().status, DeliveryStatus::Pending);
     }
+
+    use crate::domain::set_parser::SetInput;
+    use crate::domain::templates::{Template, import_template};
+    use crate::db::models::SetType;
+    use crate::telegram::coach::tests::Call;
+
+    fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {
+        SetInput { weight, reps, set_type, rir: None }
+    }
+
+    /// A workout resting after its first working set: (workout id, rest job id).
+    fn rest_job(db: &Connection) -> (String, String) {
+        let bench = json!({"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 3, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 100});
+        import_template(db, &serde_json::from_value::<Template>(json!({"id": "short", "name": "Short", "exercises": [bench]})).unwrap()).unwrap();
+        let id = workout::start(db, Some("short"), None, false, now(), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        workout::log_set(db, &id, &set(50.0, 8, SetType::Warmup), now(), "warmup").unwrap();
+        let job = workout::log_set(db, &id, &set(80.0, 9, SetType::Working), now(), "one").unwrap()["data"]["rest_job"]["id"].as_str().unwrap().to_string();
+        (id, job)
+    }
+
+    fn planned_job(db: &Connection, kind: JobKind, instruction: &str) -> (PlannedSession, String) {
+        let mut plan = PlannedSession::new("2026-10-12".into(), None, false);
+        plan.status = SessionStatus::Committed;
+        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) = (now(), now().mins(60), now(), now(), now().mins(60));
+        plan.insert(db).unwrap();
+        let job = NotificationJob {
+            id: new_id(), kind, workout_session_id: None, planned_session_id: Some(plan.id.clone()), set_log_id: None, due_at: now(),
+            status: JobStatus::Pending, payload_json: Json(json!({"revision": 1, "instruction": instruction})), external_job_id: None, handled_at: None,
+        };
+        job.insert(db).unwrap();
+        let delivery = prepare_notification(db, &job.id, now(), "42").unwrap()["delivery_id"].as_str().unwrap().to_string();
+        (plan, delivery)
+    }
+
+    #[tokio::test]
+    async fn rest_output_survives_restart_and_delivery_retries_do_not_duplicate() {
+        let (dir, db) = fresh();
+        let (workout_id, job) = rest_job(&db);
+        let prepared = prepare_notification(&db, &job, now().mins(0) + SignedDuration::from_secs(100), "42").unwrap();
+        assert_eq!(prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap(), prepared);
+        let id = prepared["delivery_id"].as_str().unwrap();
+        let tg = FakeTelegram::new();
+        assert_eq!(deliver(&dir.db(), tg.as_ref(), id, now() + SignedDuration::from_secs(100)).await.unwrap()["status"], "SENT");
+        assert_eq!(deliver(&dir.db(), tg.as_ref(), id, now() + SignedDuration::from_secs(110)).await.unwrap()["status"], "SENT");
+        let sent = tg.calls();
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(&sent[0], Call::Send(text, _) if text.contains("Rest over · Bench")));
+        assert_eq!(workout::current(&db, &workout_id, now() + SignedDuration::from_secs(110)).unwrap()["status"], "SET_ACTIVE");
+        assert_eq!(NotificationDelivery::select(&db, "", []).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn crash_after_claim_never_auto_resends() {
+        let (dir, db) = fresh();
+        let (_, job) = rest_job(&db);
+        let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"].as_str().unwrap().to_string();
+        db.execute("UPDATE notification_delivery SET status = 'SENDING' WHERE id = ?1", [&id]).unwrap();
+        let tg = FakeTelegram::new();
+        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now().mins(5)).await.unwrap()["status"], "SENDING");
+        assert!(tg.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_set_suppresses_stale_pending_delivery() {
+        let (dir, db) = fresh();
+        let (workout_id, job) = rest_job(&db);
+        let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"].as_str().unwrap().to_string();
+        workout::log_set(&db, &workout_id, &set(80.0, 9, SetType::Working), now() + SignedDuration::from_secs(110), "next").unwrap();
+        let tg = FakeTelegram::new();
+        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now() + SignedDuration::from_secs(120)).await.unwrap()["status"], "CANCELLED");
+        assert!(tg.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn moved_plan_suppresses_old_preparation_delivery() {
+        let (dir, db) = fresh();
+        let (mut plan, id) = planned_job(&db, JobKind::GetReady, "Get ready.");
+        plan.source_revision += 1;
+        plan.update(&db).unwrap();
+        let tg = FakeTelegram::new();
+        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "CANCELLED");
+        assert!(tg.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_start_reminder_carries_a_start_button() {
+        let (dir, db) = fresh();
+        let (plan, id) = planned_job(&db, JobKind::SessionStart, "Gym session begins.");
+        let tg = FakeTelegram::new();
+        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
+        let Call::Send(_, buttons) = &tg.calls()[0] else { panic!("no send") };
+        assert_eq!(buttons, &vec![vec![Button { text: "▶️ Start workout".into(), data: format!("gc:begin:{}", &plan.id[..8]) }]]);
+    }
+
+    #[tokio::test]
+    async fn sent_event_message_marks_its_event_handled() {
+        let (dir, db) = fresh();
+        let id = briefing(&db, now());
+        let event = NotificationDelivery::get(&db, &id).unwrap().unwrap().agent_event_id.unwrap();
+        // Retrying the prepare returns the same delivery.
+        assert_eq!(prepare_event_message(&db, &event, "Moved Push to 14:30.", now(), "42", &[]).unwrap()["id"], id.as_str());
+        let tg = FakeTelegram::new();
+        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
+        assert!(AgentEvent::get(&db, &event).unwrap().unwrap().handled_at.is_some());
+    }
 }
