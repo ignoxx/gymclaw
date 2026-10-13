@@ -154,3 +154,27 @@ impl Tool for CalendarWritesRevoke {
         Ok(serde_json::to_value(outbox::runtime_authority(cx.db)?)?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::time::Ts;
+
+    fn call(db: &crate::db::Connection, tool: &str, args: Value) -> Result<Value> {
+        let dir = std::env::temp_dir();
+        let mut cx = Ctx { db, now: Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
+        crate::tools::call(&mut cx, tool, args)
+    }
+
+    /// Calendar-write authority is separate: revoked, paused, then resumed without it.
+    #[test]
+    fn separate_calendar_write_authority_and_resume_needs_the_owner() {
+        let db = crate::domain::workout::tests::db();
+        db.execute("INSERT INTO runtime_settings VALUES (1, 'gymclaw', '42', '', '', 'short', 1, 1, 0)", []).unwrap();
+        assert_eq!(call(&db, "calendar_writes_revoke", json!({})).unwrap()["calendar_writes_enabled"], false);
+        assert_eq!(call(&db, "runtime_pause", json!({})).unwrap()["enabled"], false);
+        assert_eq!(call(&db, "runtime_resume", json!({"owner_asked": false})).unwrap_err().code(), "RUNTIME_NOT_APPROVED");
+        let resumed = call(&db, "runtime_resume", json!({"owner_asked": true})).unwrap();
+        assert_eq!((resumed["enabled"].as_bool(), resumed["calendar_writes_enabled"].as_bool()), (Some(true), Some(false)));
+    }
+}
