@@ -145,3 +145,42 @@ macro_rules! sql_enum {
         }
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::db::models::{AgentEvent, SetLog, SetType};
+    use crate::domain::profile::{get_profile, update_profile};
+    use crate::time::Ts;
+
+    #[test]
+    fn migrations_and_restart() {
+        let path = std::env::temp_dir().join(format!("gymclaw-test-{}.db", new_id()));
+        let mut db = open(&path).unwrap();
+        migrate(&mut db).unwrap();
+        migrate(&mut db).unwrap();
+        update_profile(&db, json!({"prep_minutes": 23}).as_object().unwrap()).unwrap();
+        let at = Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap();
+        AgentEvent { id: new_id(), r#type: "test".into(), created_at: at, payload_json: Json(json!({})), handled_at: None, correlation_id: None }.insert(&db).unwrap();
+        drop(db);
+        let mut db = open(&path).unwrap();
+        migrate(&mut db).unwrap();
+        assert_eq!(get_profile(&db).unwrap().prep_minutes, 23);
+        assert_eq!(AgentEvent::select(&db, "", []).unwrap()[0].created_at, at);
+        let version: String = db.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, ALEMBIC_HEAD);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced() {
+        let db = crate::domain::workout::tests::db();
+        let orphan = SetLog {
+            id: new_id(), workout_exercise_id: "missing".into(), set_number: 1, set_type: SetType::Working, weight: 80.0, reps: 9, rir_optional: None,
+            logged_at: Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap(), rest_started_at: None, rest_due_at: None,
+        };
+        assert!(orphan.insert(&db).is_err());
+    }
+}

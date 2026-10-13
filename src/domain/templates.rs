@@ -303,3 +303,56 @@ fn not_found<T>(exercise: &str, name: &str, rows: &[Value]) -> Result<T> {
 pub fn spec_map(template: &Template) -> HashMap<&str, &ExerciseSpec> {
     template.exercises.iter().chain(&template.alternatives).map(|s| (s.id.as_str(), s)).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::domain::workout::tests::db;
+
+    fn seed() -> Template {
+        serde_json::from_str(&std::fs::read_to_string("config/exercises.seed.json").unwrap()).unwrap()
+    }
+
+    fn object(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn template_roundtrip_and_validation() {
+        let db = db();
+        let template = seed();
+        import_template(&db, &template).unwrap();
+        assert_eq!(get_template(&db, &template.id).unwrap(), template);
+        let raw = serde_json::to_value(&template).unwrap();
+        for change in ["warmup", "dependency", "role", "duplicate", "guide"] {
+            let mut modified = raw.clone();
+            match change {
+                "warmup" => modified["exercises"][0]["warmup_weight"] = Value::Null,
+                "dependency" => modified["exercises"][0]["requires_completed"] = json!(["pec-deck"]),
+                "role" => modified["alternatives"][0]["role"] = json!("press"),
+                "duplicate" => modified["alternatives"][0]["id"] = raw["exercises"][0]["id"].clone(),
+                _ => modified["exercises"][0]["guide_id"] = json!("../wrong"),
+            }
+            let modified: Template = serde_json::from_value(modified).unwrap();
+            assert_eq!(modified.validate().unwrap_err().code(), "INVALID_TEMPLATE", "{change}");
+        }
+    }
+
+    #[test]
+    fn edit_one_exercise_without_reimport() {
+        let db = db();
+        import_template(&db, &seed()).unwrap();
+        let ids = |definition: &Value| definition["exercises"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let edited = edit_exercise(&db, "upper-a", "bench press", ExerciseEdit::Change(&object(json!({"target_weight": 85, "working_sets": 4}))), None).unwrap();
+        assert_eq!((edited["exercises"][0]["target_weight"].as_f64(), edited["exercises"][0]["working_sets"].as_i64()), (Some(85.0), Some(4)));
+        let added = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Add(&Map::new()), Some(2)).unwrap();
+        assert_eq!(ids(&added), ["bench", "row", "face-pull", "pec-deck", "lateral-raise"]);
+        let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
+        assert!(!ids(&removed).contains(&"pec-deck".to_string()));
+        let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();
+        assert_eq!(missing.code(), "EXERCISE_NOT_FOUND");
+        assert!(missing.to_string().contains("Bench Press"), "{missing}");
+    }
+}

@@ -189,3 +189,49 @@ pub fn similar(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<Strin
 pub fn svg_path(slug: &str) -> Option<PathBuf> {
     catalog().contains_key(slug).then(|| asset_root().join(slug).join("frame-1.svg"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slugs(options: &[Entry]) -> Vec<&str> {
+        options.iter().map(|o| o.guide_id.as_str()).collect()
+    }
+
+    fn set(slugs: &[&str]) -> HashSet<String> {
+        slugs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn catalog_assets_and_no_fuzzy_matching() {
+        assert!(catalog().keys().all(|slug| svg_path(slug).is_some_and(|p| p.is_file())));
+        let pose = for_exercise("Seated Cable Row", None).unwrap();
+        assert_eq!((pose.equipment.as_str(), pose.primary_muscle.as_str()), ("Cable", "Back"));
+        assert!(std::path::Path::new(&pose.telegram_png).is_file());
+        assert!(for_exercise("some pulling machine", None).is_none());
+        assert!(for_exercise("anything", Some("../../private")).is_none());
+        assert!(svg_path("../README").is_none());
+    }
+
+    #[test]
+    fn swap_alternatives_differ_in_equipment() {
+        // "Rear Delt Fly" and "Bent-Over Rear Delt Raise" are the same dumbbell movement; offer one of them.
+        let options = similar("cable-rear-delt-fly", &HashSet::new(), &HashSet::new(), 3);
+        assert_eq!(options.len(), 3);
+        assert_ne!(options[0].equipment, options[1].equipment);
+    }
+
+    #[test]
+    fn swap_never_offers_the_same_movement_under_another_name() {
+        // Leg Curl and Lying Leg Curl share one picture: swapping one for the other isn't a swap.
+        assert!(!slugs(&similar("lying-leg-curl", &HashSet::new(), &HashSet::new(), 3)).contains(&"leg-curl"));
+        assert!(!slugs(&similar("dumbbell-romanian-deadlift", &set(&["leg-curl"]), &HashSet::new(), 3)).contains(&"lying-leg-curl"));
+    }
+
+    #[test]
+    fn swap_offers_the_same_movement_on_other_equipment_first() {
+        // Cable station taken: a fly elsewhere (pec deck = machine fly), not a press, even one done before.
+        let options = similar("cable-fly", &HashSet::new(), &set(&["bench-press"]), 3);
+        assert_eq!(slugs(&options)[..2], ["dumbbell-fly", "pec-deck"]);
+    }
+}
