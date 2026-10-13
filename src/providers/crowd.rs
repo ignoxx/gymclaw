@@ -6,7 +6,7 @@
 //!   {"kind": "mysports", "studio_id": "123", "tenant": "my-gym"}
 //!   {"kind": "http", "url": "https://…", "headers": {…}, "json_path": "data.0.count"}
 //!   {"kind": "http", "url": "https://…", "regex": "(\\d+) people"}
-//!   {"kind": "command", "argv": ["python3", "data/crowd-source.py"]}
+//!   {"kind": "command", "argv": ["sh", "data/crowd-source.sh"]}
 //!
 //! The file holds everything needed to read the count; nothing else configures the source.
 //! A file without "kind" is the original MySports shape. See docs/crowd.md.
