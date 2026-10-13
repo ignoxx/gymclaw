@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 ab_glyph = "0.2.32"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["http1", "tokio"] }
+base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 hex = "0.4.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -28,3 +31,6 @@ uuid = { version = "1.28.0", features = ["v4"] }
 default = ["heic"]
 # HEIC/HEIF photos (iPhone) via system libheif (Debian: libheif-dev; macOS: brew install libheif).
 heic = ["dep:libheif-rs"]
+
+[dev-dependencies]
+tokio = { version = "1.53.2", features = ["test-util", "full"] }
