@@ -1,10 +1,12 @@
 # diff-replay
 
+The Python package is gone from this repo; `--oracle` points at a checkout of the last Python release (tag `v1-python`).
+
 Runs the same owner operations through the Rust tools (`gymclaw call …`) and the Python CLI (the
 oracle) on two fresh copies of a real database, then compares the results and the affected tables.
 
 ```sh
-scripts/diff-replay ~/gymclaw-backups/<backup>.db [--python ~/Projects/gymclaw/.venv/bin/python] [--keep]
+scripts/diff-replay ~/gymclaw-backups/<backup>.db [--oracle ~/Projects/gymclaw] [--python ~/Projects/gymclaw/.venv/bin/python] [--keep]
 ```
 
 - The backup is only read; each side works on its own copy in a temp dir, deleted afterwards
@@ -35,7 +37,6 @@ Differences, all intended (the tool contract differs by design):
 |---|---|
 | plan week | Rust `plan_week` also queues the Google writes for the new sessions, like Python's `calendar plan-week`. The script uses Python's `schedule plan-week`, because `calendar plan-week` needs the calendar provider. That gives 3 extra `calendar_write` rows and 3 `calendar.write_queued` events on the Rust side. |
 | plan week | `choices[*]` timestamps: Rust `+00:00`, Python pydantic `Z`; same instants. One score differs in the last float digit (summation order). |
-| profile update | Python replans and returns `replanning`; the Rust tool only updates the profile and tells the agent to call `replan_week`. On this data the Python replan changed nothing (warnings only). See PARITY.md. |
 | crowd status | The Rust tool adds `polling` health next to the source list. |
 | crowd forecast | Rust returns `{forecast, prediction}`; Python `predict` returns the bare prediction. The prediction values are identical. |
 | events pending | `{"events": []}` vs a bare `[]`. |

@@ -5,7 +5,7 @@
 # rounded photo corners would otherwise clip it.
 # Needs rsvg-convert (librsvg) and ImageMagick: brew install librsvg imagemagick
 set -euo pipefail
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/gymclaw/assets/workout-guide"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/assets/workout-guide"
 for svg in "$ROOT"/*/frame-1.svg; do
   png="${svg%.svg}.png"
   rsvg-convert -w 820 -h 820 -b '#000000' "$svg" | magick - -background '#000000' -gravity center -extent 1024x1024 -colors 32 -strip "PNG8:$png"

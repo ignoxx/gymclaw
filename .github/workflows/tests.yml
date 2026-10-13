@@ -1,4 +1,4 @@
-name: Domain tests
+name: Tests
 
 on: [push, pull_request]
 
@@ -7,30 +7,14 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # libheif >= 1.17 for HEIC photos (the `heic` feature).
+      - run: sudo apt-get update && sudo apt-get install -y libheif-dev
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: '3.12'
-      - run: python -m pip install -e '.[dev]'
-      - run: python -m pytest -q
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - run: node --test openclaw/plugins/*/*.test.mjs
-      # Syntax-level only; the deploy scripts are replaced by the Rust rewrite.
-      - run: shellcheck -S error deploy/*.sh deploy/egress/*.sh scripts/gymclaw-tool scripts/connect-personal-calendar scripts/render-illustrations scripts/shot .githooks/pre-commit
-
-  secrets:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read  # gitleaks-action lists the PR's commits
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked

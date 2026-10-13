@@ -186,7 +186,7 @@ mod tests {
     fn tick(db: &Connection, now: Ts, calendar: Option<&mut FixtureCalendarProvider>) -> Value {
         let sync = || match calendar {
             Some(calendar) => sync_calendar(db, calendar, now),
-            None => Err(Error::domain("CALENDAR_AUTH_REQUIRED", "Google credentials expired or invalid; run calendar auth again")),
+            None => Err(Error::domain("CALENDAR_AUTH_REQUIRED", "Google credentials expired or invalid; run `gymclaw calendar-auth` again")),
         };
         watch_with(db, "123", now, sync, &Net::new().unwrap()).unwrap()
     }

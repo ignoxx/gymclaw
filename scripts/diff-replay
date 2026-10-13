@@ -95,7 +95,7 @@ def run_rust(binary, db, data_dir, label, tool, args):
 
 def run_python(python, db, argv):
     argv = [*argv, "--now", NOW]
-    out = subprocess.run([python, "-m", "gymclaw.cli", "--db-url", f"sqlite:///{db}", *argv], capture_output=True, text=True, cwd=ROOT)
+    out = subprocess.run([python, "-m", "gymclaw.cli", "--db-url", f"sqlite:///{db}", *argv], capture_output=True, text=True, cwd=ORACLE)
     return parse(out)
 
 
@@ -195,8 +195,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("backup", type=Path)
     parser.add_argument("--python", default=str(Path.home() / "Projects/gymclaw/.venv/bin/python"))
+    parser.add_argument("--oracle", type=Path, default=Path.home() / "Projects/gymclaw",
+                        help="Checkout of the last Python release (tag v1-python) to compare against")
     parser.add_argument("--keep", action="store_true", help="Keep the temp dir with both DB copies")
     opts = parser.parse_args()
+    global ORACLE
+    ORACLE = opts.oracle
     subprocess.run(["cargo", "build", "-q"], cwd=ROOT, check=True)
     binary = str(ROOT / "target/debug/gymclaw")
     work = Path(tempfile.mkdtemp(prefix="gymclaw-diff-replay-"))
