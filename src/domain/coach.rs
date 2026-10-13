@@ -651,4 +651,103 @@ mod tests {
         assert_eq!(done.ack.as_deref(), Some("✅ 13 reps"));
         assert!(done.cards.iter().all(|c| c.rest_until.is_none()) && done.cards[0].text.starts_with("🏁"));
     }
+
+    fn planned(db: &Connection, template: &str, start: Ts, status: crate::db::models::SessionStatus) -> crate::db::models::PlannedSession {
+        let mut plan = crate::db::models::PlannedSession::new("2026-10-12".into(), Some(template.into()), false);
+        plan.status = status;
+        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) = (start, start.mins(60), start.mins(-30), start.mins(-15), start.mins(60));
+        plan.insert(db).unwrap();
+        plan
+    }
+
+    #[test]
+    fn a_few_rating_is_stored_as_fine() {
+        let db = db();
+        push(&db);
+        handle_text(&db, "10x90", at(10), "m1").unwrap();
+        let done = handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap().cards.remove(0);
+        let rating = handle_tap(&db, &data(&done, "A few"), at(601), "cb-2").unwrap();
+        assert_eq!(rating.ack.as_deref(), Some("Saved: A few. Thanks."));
+        let stored: String = db.query_row("SELECT rating FROM crowd_feedback", [], |r| r.get(0)).unwrap();
+        assert_eq!(stored, "FINE");
+    }
+
+    #[test]
+    fn skip_before_any_set_on_a_swapped_card_is_an_old_button() {
+        let db = db();
+        push(&db);
+        let card = live(&db, at(0));
+        let option = handle_tap(&db, &data(&card, "🔄 Swap"), at(1), "cb-1").unwrap().cards.remove(0);
+        handle_tap(&db, &buttons(&option)[0].1, at(2), "cb-2").unwrap();
+        assert_eq!(handle_tap(&db, &data(&card, "⏭ Skip"), at(3), "cb-3").unwrap().ack.as_deref(), Some("⌛ Old button."));
+    }
+
+    #[test]
+    fn idle_workout_is_closed_and_keeps_logged_sets() {
+        use crate::domain::weekly::close_stale_workouts;
+        let db = db();
+        push(&db);
+        handle_text(&db, "10x90", at(10), "m1").unwrap();
+        assert!(close_stale_workouts(&db, at(10 + 2 * 3600)).unwrap().is_empty());
+        let id = active_workout(&db).unwrap().unwrap().id;
+        assert_eq!(close_stale_workouts(&db, at(10 + 3 * 3600 + 1)).unwrap(), vec![id.clone()]);
+        assert_eq!(crate::db::models::WorkoutSession::get(&db, &id).unwrap().unwrap().status, WorkoutStatus::PlanUpdated);
+        assert_eq!(workout::logs(&db, &workout::exercises(&db, &id).unwrap()[0].id, None).unwrap().len(), 1);
+        assert!(active_workout(&db).unwrap().is_none());
+        start(&db, Some("push"), None, false, at(10 + 4 * 3600), "again").unwrap();
+    }
+
+    #[test]
+    fn session_preview_uses_current_plan_local_time_and_one_image() {
+        let db = db();
+        push(&db);
+        let dir = std::env::temp_dir().join(format!("gymclaw-preview-{}", crate::db::new_id()));
+        planned(&db, "push", Ts::parse("2026-10-19T08:30:00+00:00", None).unwrap(), crate::db::models::SessionStatus::Tentative);
+        let card = crate::domain::preview::session_preview(&db, at(0), None, &dir).unwrap();
+        assert_eq!(card.text.lines().next(), Some("**Push** · Mon 10:30")); // Europe/Berlin, not UTC
+        assert!(card.text.contains("1. Machine incline press · 2 sets of 8–10") && card.text.contains("3. Cable fly · 2 sets of 8–10"), "{}", card.text);
+        let photo = card.photo.clone().unwrap();
+        assert!(std::path::Path::new(&photo).is_file() && photo.starts_with(dir.to_str().unwrap()));
+        assert_eq!(crate::domain::preview::session_preview(&db, at(0), None, &dir).unwrap().photo, card.photo); // cached
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_button_starts_once_without_a_blind_warmup() {
+        let db = db();
+        push(&db);
+        handle_action(&db, Action::End, None, None, None, false, at(1), "end").unwrap();
+        let legs = Template {
+            id: "legs".into(),
+            name: "Legs".into(),
+            exercises: vec![spec(json!({"id": "press", "name": "Leg press", "role": "legs", "guide_id": "leg-press", "primary": true, "working_sets": 1, "target_weight": 0, "warmup_weight": 0}))],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(&db, &legs).unwrap();
+        let plan = planned(&db, "legs", at(60), crate::db::models::SessionStatus::Committed);
+        let tap = format!("begin:{}", &plan.id[..8]);
+        let started = handle_tap(&db, &tap, at(70), "cb-begin").unwrap();
+        assert_eq!(started.ack.as_deref(), Some("▶️ Started."));
+        assert_eq!(crate::db::models::PlannedSession::get(&db, &plan.id).unwrap().unwrap().status, crate::db::models::SessionStatus::Started);
+        // Unknown weight: straight to the working set, no "8 × 0 kg" warm-up.
+        assert!(started.cards[0].text.contains("**? kg**"), "{}", started.cards[0].text);
+        assert_eq!(handle_tap(&db, &tap, at(71), "cb-again").unwrap().ack.as_deref(), Some("Already running."));
+    }
+
+    #[test]
+    fn only_button_starts_count_as_gym_arrivals_for_habits() {
+        use crate::domain::habits::evidence;
+        let db = db();
+        push(&db);
+        let tz = crate::time::zone("Europe/Berlin").unwrap();
+        assert!(evidence(&db, at(60), &tz).unwrap().is_empty()); // started from chat
+        handle_action(&db, Action::End, None, None, None, false, at(60), "end").unwrap();
+        let tomorrow = at(86400);
+        let plan = planned(&db, "push", tomorrow, crate::db::models::SessionStatus::Committed);
+        begin(&db, &plan.id[..8], tomorrow, "begin").unwrap();
+        assert_eq!(evidence(&db, tomorrow, &tz).unwrap(), vec![(20.0 * 60.0, 1.0)]); // 18:00 UTC = 20:00 Berlin
+    }
 }
