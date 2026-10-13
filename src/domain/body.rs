@@ -239,4 +239,14 @@ mod tests {
         let later = now() + SignedDuration::from_hours(24 * 9);
         assert_eq!(briefing_line(&db, later).unwrap().unwrap(), "⚖️ Last weigh-in 9 days ago. Send a scale photo when you get a chance.");
     }
+
+    #[test]
+    fn compressed_photo_without_date_is_refused() {
+        let db = db();
+        let path = std::env::temp_dir().join(format!("{}.jpg", new_id()));
+        image::RgbImage::new(8, 8).save(&path).unwrap();
+        let error = log(&db, &[weigh(80.0, None, Some(path.clone()))], now(), "r").unwrap_err();
+        assert!(error.to_string().contains("send") || error.to_string().contains("file"), "{error}");
+        let _ = std::fs::remove_file(path);
+    }
 }

@@ -108,3 +108,36 @@ pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String)
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> Arc<App> {
+        let path = std::env::temp_dir().join(format!("gymclaw-dash-{}.db", crate::db::new_id()));
+        let mut db = crate::db::open(&path).unwrap();
+        crate::db::migrate(&mut db).unwrap();
+        Arc::new(App { db_path: path, hosts: vec!["gym.example".into()] })
+    }
+
+    async fn get(app: &Arc<App>, method: Method, path: &str, host: &str) -> Response {
+        let request = Request::builder().method(method).uri(path).header(header::HOST, host).body(Body::empty()).unwrap();
+        handle(State(app.clone()), request).await
+    }
+
+    #[tokio::test]
+    async fn serves_state_only_to_allowed_hosts_and_only_public_assets() {
+        let app = app();
+        let state = get(&app, Method::GET, "/api/state", "gym.example").await;
+        assert_eq!(state.status(), StatusCode::OK);
+        assert_eq!(get(&app, Method::GET, "/api/state", "evil.example").await.status(), StatusCode::FORBIDDEN);
+        let index = get(&app, Method::GET, "/", "gym.example").await;
+        assert_eq!(index.status(), StatusCode::OK);
+        assert!(index.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("frame-ancestors 'none'"));
+        for path in ["/../README.md", "/data/private.sqlite", "/unknown", "/illustrations/../../README.svg"] {
+            assert_eq!(get(&app, Method::GET, path, "gym.example").await.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(get(&app, Method::POST, "/api/state", "gym.example").await.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let _ = std::fs::remove_file(&app.db_path);
+    }
+}
