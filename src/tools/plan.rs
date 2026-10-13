@@ -474,3 +474,187 @@ impl Tool for PersonalCalendarDisconnect {
         personal_calendar::disconnect(cx.db, cx.now)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::db::Connection;
+    use crate::db::models::{AgentEvent, AvailabilityBlock, SessionStatus};
+    use crate::domain::habits::{affinity, evidence};
+    use crate::domain::replanning::replan_weeks;
+    use crate::domain::templates::{Template, import_template};
+    use crate::domain::weekly::{assign_rotation, weekly_plan};
+    use crate::error::Error;
+
+    fn ts(text: &str) -> Ts {
+        Ts::parse(text, None).unwrap()
+    }
+
+    /// Sunday 2026-10-11 19:00 Berlin.
+    fn sunday() -> Ts {
+        ts("2026-10-11T17:00:00+00:00")
+    }
+
+    fn template(db: &Connection, value: Value) {
+        import_template(db, &serde_json::from_value::<Template>(value).unwrap()).unwrap();
+    }
+
+    fn db() -> Connection {
+        let db = crate::domain::workout::tests::db();
+        template(&db, json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}));
+        db
+    }
+
+    /// One tool call, like `gymclaw call <tool> '<json>' --now <now> --request-id <id>` minus the transaction.
+    fn call(db: &Connection, tool: &str, args: Value, now: Ts, request_id: &str) -> Result<Value> {
+        let dir = std::env::temp_dir();
+        let mut cx = Ctx { db, now, request_id: request_id.into(), data_dir: &dir, effects: vec![] };
+        crate::tools::call(&mut cx, tool, args)
+    }
+
+    fn week_start_ids(db: &Connection) -> Vec<Value> {
+        weekly_plan(db, "short", sunday()).unwrap()["plan"]["sessions"].as_array().unwrap().clone()
+    }
+
+    fn writes_start(db: &Connection, session_id: &str) -> Vec<String> {
+        let writes = call(db, "calendar_pending_writes", json!({}), sunday(), "w").unwrap()["writes"].as_array().unwrap().clone();
+        writes.iter().filter(|w| w["session_id"] == session_id).map(|w| w["body"]["start"]["dateTime"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn move_session_picks_valid_slot_or_explains() {
+        let db = db();
+        let sessions = week_start_ids(&db);
+        let friday = sessions.iter().find(|s| s["start"].as_str().unwrap().starts_with("2026-10-16")).unwrap().clone();
+        let id = friday["id"].as_str().unwrap();
+        let moved = call(&db, "move_session", json!({"session_id": id, "to": "2026-10-16T12:00:00+02:00"}), sunday(), "tg-1-move").unwrap();
+        assert_eq!(moved["data"]["to"], "2026-10-16T10:00:00+00:00");
+        assert_eq!(call(&db, "move_session", json!({"session_id": id, "to": "2026-10-16T12:00:00+02:00"}), sunday(), "tg-1-move").unwrap(), moved);
+        assert!(writes_start(&db, id).contains(&"2026-10-16T12:00:00+02:00".to_string()));
+        // "Later today": best slot at/after the bound, plus spread-out alternatives for buttons.
+        let later = call(&db, "move_session", json!({"session_id": id, "after": "2026-10-16T14:00:00+02:00"}), sunday(), "tg-4-move").unwrap();
+        let alternatives = later["data"]["alternatives"].as_array().unwrap();
+        assert!(!alternatives.is_empty());
+        let starts: Vec<Ts> = std::iter::once(&later["data"]["to"]).chain(alternatives.iter().map(|a| &a["start"])).map(|t| ts(t.as_str().unwrap())).collect();
+        assert!(starts.iter().all(|t| *t >= ts("2026-10-16T12:00:00+00:00") && t.iso().starts_with("2026-10-16")));
+        for (i, x) in starts.iter().enumerate() {
+            assert!(starts[i + 1..].iter().all(|y| (*x - *y).abs().as_mins() >= 60), "{starts:?}");
+        }
+        // The owner's explicit pick (12:00) is liked; the slot it was first planned at is not.
+        let tz = get_profile(&db).unwrap().tz();
+        let points = evidence(&db, sunday(), &tz).unwrap();
+        let first = ts(friday["start"].as_str().unwrap()).local(&tz);
+        assert!(affinity(&points, 12.0 * 60.0) > 0.5 && 0.5 > affinity(&points, f64::from(first.hour()) * 60.0 + f64::from(first.minute())));
+        // A time the owner names is kept even off-grid and outside the window: locked against
+        // replanning, still published, and the broken rule named.
+        let kept = call(&db, "move_session", json!({"session_id": id, "to": "2026-10-16T21:07:00+02:00"}), sunday(), "tg-5-move").unwrap();
+        assert_eq!(kept["data"]["to"], "2026-10-16T19:07:00+00:00");
+        assert_eq!(kept["data"]["warnings"], json!(["outside your workout window (07:00–22:00)"]));
+        assert!(writes_start(&db, id).contains(&"2026-10-16T21:07:00+02:00".to_string()));
+        replan_weeks(&db, &BTreeSet::from([jiff::civil::date(2026, 10, 12)]), sunday(), false).unwrap();
+        let row = PlannedSession::get(&db, id).unwrap().unwrap();
+        assert!(row.user_locked && row.planned_start_at == ts("2026-10-16T19:07:00+00:00"));
+        // "I can leave at 13:00": start is leave + commute.
+        let left = call(&db, "move_session", json!({"session_id": id, "leave_at": "2026-10-16T13:00:00+02:00"}), sunday(), "tg-6-move").unwrap();
+        let commute = get_profile(&db).unwrap().commute_to_gym_minutes;
+        assert_eq!(ts(left["data"]["to"].as_str().unwrap()), ts("2026-10-16T13:00:00+02:00").mins(commute));
+        // A day the owner asks for wins over the rest-day rule (Thursday follows Wednesday); the warning says so.
+        let thursday = call(&db, "move_session", json!({"session_id": id, "day": "2026-10-15"}), sunday(), "tg-7-move").unwrap();
+        assert!(thursday["data"]["to"].as_str().unwrap().starts_with("2026-10-15"));
+        assert_eq!(thursday["data"]["warnings"], json!(["skips a rest day"]));
+    }
+
+    #[test]
+    fn owner_adds_sessions_and_picks_workouts() {
+        let db = db();
+        let sessions = week_start_ids(&db);
+        template(&db, json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}));
+        // Naive times are the owner's local time. The extra session is kept beyond the weekly maximum.
+        let added = call(&db, "add_session", json!({"to": "2026-10-17T10:00", "template_id": "short"}), sunday(), "tg-1-add").unwrap();
+        assert_eq!(added["data"]["to"], "2026-10-17T08:00:00+00:00");
+        assert_eq!(added["data"]["warnings"], json!(["outside your workout window (07:00–22:00)", "skips a rest day"]));
+        replan_weeks(&db, &BTreeSet::from([jiff::civil::date(2026, 10, 12)]), sunday(), false).unwrap();
+        let status = PlannedSession::get(&db, added["data"]["session_id"].as_str().unwrap()).unwrap().unwrap().status;
+        assert!(matches!(status, SessionStatus::Tentative | SessionStatus::Committed), "{status:?}");
+        // "Legs today instead": the session gets that workout and keeps it.
+        let id = sessions[0]["id"].as_str().unwrap();
+        let legs = call(&db, "set_session_workout", json!({"session_id": id, "template_id": "legs"}), sunday(), "tg-2-set").unwrap();
+        assert_eq!(legs["data"]["to"], "legs");
+        assign_rotation(&db, sunday()).unwrap();
+        let row = PlannedSession::get(&db, id).unwrap().unwrap();
+        assert!(row.user_locked && row.workout_template_id.as_deref() == Some("legs"));
+        assert_eq!(row.workout_plan_json["template"]["id"], "legs");
+    }
+
+    /// Python's `profile update` replanned on its own; the Rust tool contract leaves that to `replan_week`.
+    #[test]
+    fn profile_window_change_moves_sessions_that_no_longer_fit() {
+        let db = db();
+        week_start_ids(&db);
+        call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p").unwrap();
+        let weeks = BTreeSet::from([jiff::civil::date(2026, 10, 12)]);
+        let changed = replan_weeks(&db, &weeks, sunday(), false).unwrap()["changed"].as_array().unwrap().clone();
+        assert!(!changed.is_empty() && changed.iter().all(|c| c["action"] == "moved"), "{changed:?}");
+        let tz = get_profile(&db).unwrap().tz();
+        assert!(changed.iter().all(|c| ts(c["to"].as_str().unwrap()).local(&tz).hour() >= 11));
+    }
+
+    #[test]
+    fn inclusive_local_date_handles_dst_and_retry() {
+        let db = db();
+        let args = json!({"kind": "TRAVEL", "from_date": "2026-10-25", "through": "2026-10-25"});
+        let first = call(&db, "availability_add", args.clone(), sunday(), "dst-trip").unwrap()["data"].clone();
+        assert_eq!((ts(first["end"].as_str().unwrap()) - ts(first["start"].as_str().unwrap())).as_hours(), 25);
+        assert_eq!(call(&db, "availability_add", args, sunday(), "dst-trip").unwrap()["data"], first);
+        assert_eq!(AvailabilityBlock::select(&db, "", []).unwrap().len(), 1);
+        let conflict = json!({"kind": "TRAVEL", "from_date": "2026-10-25", "through": "2026-10-25", "cancel_locked": true});
+        assert_eq!(call(&db, "availability_add", conflict, sunday(), "dst-trip").unwrap_err().code(), "IDEMPOTENCY_CONFLICT");
+    }
+
+    #[test]
+    fn plan_week_restart_and_idempotency() {
+        let db = db();
+        assert_eq!(call(&db, "profile_update", json!({"changes": {"prep_minutes": 25}}), sunday(), "p").unwrap()["prep_minutes"], 25);
+        assert_eq!(call(&db, "profile_get", json!({}), sunday(), "g").unwrap()["prep_minutes"], 25);
+        let now = ts("2026-10-11T12:00:00+02:00");
+        let args = json!({"day": "2026-10-12", "template_id": "short"});
+        let first = call(&db, "plan_week", args.clone(), now, "week-1").unwrap();
+        assert_eq!(first["sessions"].as_array().unwrap().len(), 3);
+        assert_eq!(call(&db, "plan_week", args.clone(), now, "week-1").unwrap(), first);
+        let again = call(&db, "plan_week", args, now, "week-2").unwrap();
+        assert_eq!((again["created_count"].as_i64(), again["sessions"].as_array().unwrap().len()), (Some(0), 3));
+        assert_eq!(PlannedSession::select(&db, "", []).unwrap().len(), 3);
+        let other_week = call(&db, "plan_week", json!({"day": "2026-10-19", "template_id": "short"}), now, "week-1").unwrap_err();
+        assert!(other_week.to_string().contains("different planning input"), "{other_week}");
+    }
+
+    #[test]
+    fn errors_roll_back_and_naive_times_are_local() {
+        let db = db();
+        for (tool, args) in [("profile_update", json!({"changes": {"prep_minutes": -1}})), ("profile_update", json!({"changes": []})), ("unknown", json!({}))] {
+            let tx = db.unchecked_transaction().unwrap();
+            let error: Error = call(&tx, tool, args, sunday(), "bad").unwrap_err();
+            assert!(["INVALID_PROFILE", "INVALID_ARGUMENTS", "UNKNOWN_TOOL"].contains(&error.code()), "{}", error.code());
+            drop(tx);
+        }
+        assert_eq!(get_profile(&db).unwrap().prep_minutes, 15);
+        // A naive time is the owner's local time (Europe/Berlin).
+        let blocked = call(&db, "availability_add", json!({"kind": "UNAVAILABLE", "start": "2026-10-13T12:00", "end": "2026-10-13T13:00"}), sunday(), "naive").unwrap();
+        assert_eq!(blocked["data"]["start"], "2026-10-13T10:00:00+00:00");
+    }
+
+    #[test]
+    fn planner_events_stay_out_of_the_inbox_until_asked() {
+        let db = db();
+        crate::domain::core::emit(&db, "planning.replan_required", sunday(), json!({})).unwrap();
+        assert_eq!(call(&db, "events_pending", json!({}), sunday(), "e").unwrap()["events"], json!([]));
+        let inbox = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"].as_array().unwrap().clone();
+        let actionable = inbox.iter().find(|e| e["type"] == "planning.replan_required").unwrap();
+        call(&db, "event_ack", json!({"event_id": actionable["id"]}), sunday(), "ack").unwrap();
+        let after = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"].as_array().unwrap().clone();
+        assert!(after.iter().all(|e| e["id"] != actionable["id"]));
+        assert!(AgentEvent::get(&db, actionable["id"].as_str().unwrap()).unwrap().unwrap().handled_at.is_some());
+    }
+}
