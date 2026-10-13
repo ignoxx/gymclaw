@@ -344,4 +344,57 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn determinism_and_travel_buffers() {
+        let first = plan(&Profile::default(), Inputs::default());
+        assert_eq!(first.sessions, plan(&Profile::default(), Inputs::default()).sessions);
+        for c in &first.sessions {
+            assert!(c.crowd.is_none() && c.confidence == 0.0);
+            assert_eq!(c.start - c.prep_start, SignedDuration::from_mins(35));
+            assert_eq!(c.home_at - c.end, SignedDuration::from_mins(20));
+        }
+    }
+
+    #[test]
+    fn travel_entire_week() {
+        let travel = [Interval { start: at(12, 0, 0), end: at(19, 0, 0) }];
+        let p = plan(&Profile::default(), Inputs { unavailable: &travel, ..Inputs::default() });
+        assert!(p.sessions.is_empty() && !p.minimum_met && p.shortfall == 3);
+    }
+
+    #[test]
+    fn weekly_max_counts_existing_sessions() {
+        let first = plan(&Profile::default(), Inputs::default());
+        let existing: Vec<Interval> = first.sessions.iter().take(2).map(|c| Interval { start: c.start, end: c.end }).collect();
+        let p = Profile { weekly_min_sessions: 1, weekly_target_sessions: 2, weekly_max_sessions: 2, ..Profile::default() };
+        let full = plan(&p, Inputs { existing: &existing, ..Inputs::default() });
+        assert!(full.sessions.is_empty() && full.existing_count == 2);
+    }
+
+    #[test]
+    fn no_past_preparation() {
+        let now = at(12, 19, 0);
+        let candidates = generate_candidates(&Profile::default(), WEEK, &Inputs::default(), now, &PlannerConfig::default()).unwrap();
+        assert!(!candidates.is_empty() && candidates.iter().all(|c| c.prep_start >= now));
+    }
+
+    #[test]
+    fn invalid_profile_and_week() {
+        let cases = [
+            Profile { weekly_target_sessions: 1, ..Profile::default() },
+            Profile { minimum_workout_minutes: 80, ..Profile::default() },
+            Profile { timezone: "bad".into(), ..Profile::default() },
+            Profile { weekdays_allowed: vec![7], ..Profile::default() },
+            Profile { weekdays_allowed: vec![0, 0], ..Profile::default() },
+            Profile { prep_minutes: -1, ..Profile::default() },
+            Profile { crowd_preference_weight: f64::NAN, ..Profile::default() },
+            Profile { latest_workout_finish: jiff::civil::time(6, 0, 0, 0), ..Profile::default() },
+        ];
+        for profile in cases {
+            assert!(profile.validate().is_err(), "{profile:?}");
+        }
+        let tuesday = jiff::civil::date(2026, 10, 13);
+        assert_eq!(plan_week(&Profile::default(), tuesday, &Inputs::default(), at(11, 0, 0), &PlannerConfig::default()).unwrap_err().code(), "INVALID_WEEK");
+    }
 }

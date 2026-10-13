@@ -129,4 +129,40 @@ mod tests {
         ];
         assert_eq!(busy, expected.map(|(a, b)| (a.to_string(), b.to_string())));
     }
+
+    fn berlin(day: i8, hour: i8) -> Ts {
+        Ts(jiff::civil::date(2026, 10, day).at(hour, 0, 0, 0).to_zoned(crate::time::zone("Europe/Berlin").unwrap()).unwrap().timestamp())
+    }
+
+    #[test]
+    fn recurring_blocker_honors_dst_and_moved_exception() {
+        use crate::domain::calendar::sync_calendar;
+        use crate::providers::fixture_calendar::FixtureCalendarProvider;
+        let db = crate::domain::workout::tests::db();
+        let mut provider = FixtureCalendarProvider::default();
+        provider.put(json!({"id": "weekly", "start": {"dateTime": "2026-10-19T19:00:00+02:00", "timeZone": "Europe/Berlin"}, "end": {"dateTime": "2026-10-19T20:00:00+02:00"}, "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=SU"]})).unwrap();
+        sync_calendar(&db, &mut provider, berlin(24, 0)).unwrap();
+        let busy = busy_intervals(&db, berlin(24, 0), berlin(27, 0)).unwrap();
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0].start, berlin(25, 19));
+        assert_eq!(busy[0].start.iso(), "2026-10-25T18:00:00+00:00");
+        provider.put(json!({"id": "exception", "recurringEventId": "weekly", "originalStartTime": {"dateTime": "2026-10-25T19:00:00+01:00"}, "start": {"dateTime": "2026-10-26T20:00:00+01:00"}, "end": {"dateTime": "2026-10-26T21:00:00+01:00"}})).unwrap();
+        sync_calendar(&db, &mut provider, berlin(24, 1)).unwrap();
+        let busy = busy_intervals(&db, berlin(24, 0), berlin(27, 0)).unwrap();
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0].start, berlin(26, 20));
+    }
+
+    #[test]
+    fn all_day_recurring_cancellation_and_transparent_event() {
+        use crate::domain::calendar::sync_calendar;
+        use crate::providers::fixture_calendar::FixtureCalendarProvider;
+        let db = crate::domain::workout::tests::db();
+        let mut provider = FixtureCalendarProvider::default();
+        provider.put(json!({"id": "weekly", "start": {"date": "2026-09-28"}, "end": {"date": "2026-09-29"}, "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261026"]})).unwrap();
+        provider.put(json!({"id": "free", "start": {"date": "2026-10-12"}, "end": {"date": "2026-10-19"}, "transparency": "transparent"})).unwrap();
+        provider.put(json!({"id": "cancelled-instance", "status": "cancelled", "recurringEventId": "weekly", "originalStartTime": {"date": "2026-10-12"}})).unwrap();
+        sync_calendar(&db, &mut provider, berlin(11, 0)).unwrap();
+        assert!(busy_intervals(&db, berlin(12, 0), berlin(19, 0)).unwrap().is_empty());
+    }
 }
