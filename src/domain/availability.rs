@@ -36,7 +36,8 @@ pub fn list_blocks(db: &Connection, now: Ts) -> Result<Vec<Value>> {
         .collect())
 }
 
-fn affected_weeks(db: &Connection, now: Ts) -> Result<BTreeSet<Date>> {
+/// This week, next week and every week with an upcoming open session.
+pub fn affected_weeks(db: &Connection, now: Ts) -> Result<BTreeSet<Date>> {
     let tz = get_profile(db)?.tz();
     let mut weeks = BTreeSet::from([week_of(now, &tz), week_of(now + jiff::SignedDuration::from_hours(24 * 7), &tz)]);
     for row in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1", [now])? {

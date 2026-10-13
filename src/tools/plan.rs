@@ -257,10 +257,13 @@ pub struct ProfileUpdate {
 
 impl Tool for ProfileUpdate {
     const NAME: &'static str = "profile_update";
-    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Future planning uses them; call replan_week if this week should follow now.";
+    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Upcoming sessions that no longer fit are replanned right away; `replanning` says what moved.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        Ok(serde_json::to_value(update_profile(cx.db, &self.changes)?)?)
+        let mut data = serde_json::to_value(update_profile(cx.db, &self.changes)?)?;
+        let weeks = availability::affected_weeks(cx.db, cx.now)?;
+        data["replanning"] = replanning::replan_weeks(cx.db, &weeks, cx.now, false)?;
+        Ok(data)
     }
 }
 
@@ -593,9 +596,8 @@ mod tests {
     fn profile_window_change_moves_sessions_that_no_longer_fit() {
         let db = db();
         week_start_ids(&db);
-        call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p").unwrap();
-        let weeks = BTreeSet::from([jiff::civil::date(2026, 10, 12)]);
-        let changed = replan_weeks(&db, &weeks, sunday(), false).unwrap()["changed"].as_array().unwrap().clone();
+        let updated = call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p").unwrap();
+        let changed = updated["replanning"]["changed"].as_array().unwrap().clone();
         assert!(!changed.is_empty() && changed.iter().all(|c| c["action"] == "moved"), "{changed:?}");
         let tz = get_profile(&db).unwrap().tz();
         assert!(changed.iter().all(|c| ts(c["to"].as_str().unwrap()).local(&tz).hour() >= 11));
