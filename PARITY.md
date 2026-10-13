@@ -314,3 +314,4 @@ Nothing in this list is trivial filler: every live behavior has a Rust test. Pyt
 
 ## Behavior differences found while porting
 
+None remaining. `profile_update` briefly stopped replanning in Rust; it replans again, like Python.
