@@ -224,8 +224,9 @@ impl Tool for TemplateImport {
 
 /// Upcoming sessions should follow the edited plan via the planning side's `weekly::refresh_plans`
 /// (not declared yet; `workout start` always uses the current template regardless).
-fn edited(definition: Value) -> Value {
-    json!({"template": definition})
+/// Upcoming sessions (and their calendar events) follow the edited plan.
+fn edited(cx: &Ctx, definition: Value) -> Result<Value> {
+    Ok(json!({"template": definition, "refreshed_sessions": crate::domain::weekly::refresh_plans(cx.db, cx.now)?}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -246,7 +247,7 @@ impl Tool for TemplateEditExercise {
     const DESCRIPTION: &'static str = "Change one exercise of a saved plan: weight, sets, reps, rest, or its place in the order.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        Ok(edited(edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Change(&self.changes), self.position)?))
+        edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Change(&self.changes), self.position)?)
     }
 }
 
@@ -268,7 +269,7 @@ impl Tool for TemplateAddExercise {
     const DESCRIPTION: &'static str = "Add a catalog exercise to a saved plan.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        Ok(edited(edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Add(&self.fields), self.position)?))
+        edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Add(&self.fields), self.position)?)
     }
 }
 
@@ -285,7 +286,7 @@ impl Tool for TemplateRemoveExercise {
     const DESCRIPTION: &'static str = "Remove an exercise from a saved plan.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        Ok(edited(edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Remove, None)?))
+        edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Remove, None)?)
     }
 }
 

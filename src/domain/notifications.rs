@@ -34,6 +34,15 @@ pub fn schedule_session_jobs(db: &Connection, session: &PlannedSession, now: Ts)
     if crate::domain::availability::session_blocked(db, session)? {
         return cancel_session_jobs(db, &session.id, now);
     }
+    let revision = json!(session.source_revision);
+    // Reminders of an older revision would be dropped as stale when due; cancel them now so pending jobs stay truthful.
+    for mut old in NotificationJob::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [&session.id])? {
+        if old.payload_json.get("revision") != Some(&revision) {
+            old.status = JobStatus::Cancelled;
+            old.handled_at = Some(now);
+            old.update(db)?;
+        }
+    }
     let existing = NotificationJob::select(db, "WHERE planned_session_id = ?1", [&session.id])?;
     let desired = [
         (JobKind::GetReady, session.prep_start_at, "Gym soon. Start getting ready now."),
@@ -44,7 +53,6 @@ pub fn schedule_session_jobs(db: &Connection, session: &PlannedSession, now: Ts)
         if due <= now {
             continue;
         }
-        let revision = json!(session.source_revision);
         if existing.iter().any(|j| j.kind == kind && j.due_at == due && j.status != JobStatus::Cancelled && j.payload_json.get("revision") == Some(&revision)) {
             continue;
         }
