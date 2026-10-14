@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Blocks commits that add private strings (owner IDs, hostnames, deployment IDs) to this public repo.
+# The list lives outside the repo, one literal per line, `#` for comments:
+#   ${GYMCLAW_PRIVATE_STRINGS:-~/.config/gymclaw/private-strings}
+# Enable once per clone: git config core.hooksPath .githooks
+set -euo pipefail
+
+list="${GYMCLAW_PRIVATE_STRINGS:-$HOME/.config/gymclaw/private-strings}"
+[ -f "$list" ] || { echo "pre-commit: no $list, private-string check skipped" >&2; exit 0; }
+
+patterns="$(grep -v -e '^#' -e '^[[:space:]]*$' "$list" || true)"
+[ -n "$patterns" ] || exit 0
+
+hits="$(git diff --cached --no-color -U0 --diff-filter=ACMR | grep '^+' | grep -v '^+++' | grep -n -F -f <(printf '%s\n' "$patterns") || true)"
+if [ -n "$hits" ]; then
+  echo "pre-commit: staged changes add private strings from $list:" >&2
+  echo "$hits" | cut -c1-160 >&2
+  exit 1
+fi
