@@ -93,22 +93,27 @@ fn watch_with(db: &Connection, recipient: &str, now: Ts, sync: impl FnOnce() -> 
     Ok(json!({"calendar_error": calendar_error, "rolling": rolling, "briefed": briefed}))
 }
 
-/// Sunday 19:00 local: sync, plan next week, audit last week, queue the weekly briefing. The scheduler
-/// publishes calendar writes right after, so the briefing says "published" when writes are enabled.
-pub fn weekly(db: &Connection, recipient: &str, now: Ts) -> Result<Value> {
+/// Sunday 19:00 local: sync, plan next week, audit last week. The scheduler then publishes calendar
+/// writes and calls `weekly_briefing` with the outcome.
+pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
     let authority = runtime_authority(db)?;
     let Some(template) = authority.template_id.clone() else { crate::bail!("TEMPLATE_REQUIRED", "No activated template or confirmed split to plan with") };
     let state = google_state(db)?;
     let net = Net::new()?;
     sync_calendar(db, &mut google_provider(db, Some(&state.calendar_id), &net)?, now)?;
     personal_calendar::refresh(db, now, true, &net, false)?;
-    let mut data = weekly::weekly_plan(db, &template, now)?;
+    weekly::weekly_plan(db, &template, now)
+}
+
+/// Queue the briefing for `weekly`'s plan. `published`: every calendar write landed without conflict.
+pub fn weekly_briefing(db: &Connection, recipient: &str, data: &mut Value, published: bool, now: Ts) -> Result<()> {
     let week: Date = data["week_start"].as_str().unwrap_or_default().parse()?;
-    let text = weekly::briefing(db, week, &data["audit"], authority.calendar_writes_enabled, now)?;
+    let text = weekly::briefing(db, week, &data["audit"], published, now)?;
     let event_id = data["event_id"].as_str().unwrap_or_default().to_string();
     data["delivery"] = prepare_event_message(db, &event_id, &text, now, recipient, &[])?;
     data["briefing"] = json!(text);
-    Ok(data)
+    data["published"] = json!(published);
+    Ok(())
 }
 
 /// Every 15 min when crowd polling is enabled: read the gym's live count. A failed read is returned,

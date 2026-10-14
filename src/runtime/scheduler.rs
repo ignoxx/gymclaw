@@ -100,7 +100,8 @@ impl Scheduler {
         let r = recipient.clone();
         note(in_tx(&self.db_path, move |db| ticks::watch(db, &r, Ts::now())).await, "watch");
         let r = recipient.clone();
-        note(in_tx(&self.db_path, move |db| weekly_if_due(db, &r, Ts::now())).await, "weekly");
+        // Commits per step (plan, publish, briefing), so no outer transaction.
+        note(blocking(&self.db_path, move |db| weekly_if_due(db, &r, Ts::now())).await, "weekly");
         if authority.crowd_polling_enabled && last_crowd.is_none_or(|t| t.elapsed() >= CROWD_EVERY) {
             *last_crowd = Some(Instant::now());
             note(in_tx(&self.db_path, |db| ticks::poll_crowd(db, Ts::now())).await, "crowd poll");
@@ -180,7 +181,7 @@ pub fn fire_at(job: &NotificationJob) -> Ts {
 }
 
 /// Run `ticks::weekly` once per week, on Sunday from 19:00 profile-local (a restart after 19:00
-/// still catches up the same evening).
+/// still catches up the same evening), publish calendar writes, then queue the briefing.
 pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Result<serde_json::Value> {
     let tz = profile::get_profile(db)?.tz();
     let local = now.local(&tz);
@@ -192,9 +193,24 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
     if done.is_some() {
         return Ok(json!({"due": false}));
     }
-    let result = ticks::weekly(db, recipient, now)?;
-    emit(db, "runtime.weekly_ran", now, json!({"week_start": week}))?;
-    Ok(result)
+    // Plan and mark the week done together, so a failure later never plans it twice.
+    let tx = db.unchecked_transaction()?;
+    let mut data = ticks::weekly(&tx, now)?;
+    emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
+    tx.commit()?;
+    // Publish before briefing so the briefing reports what actually reached the calendar.
+    let published = outbox::runtime_authority(db)?.calendar_writes_enabled
+        && match ticks::publish(db, now) {
+            Ok(result) => result["published"] == true,
+            Err(e) => {
+                tracing::warn!("weekly publish: {} {e}", e.code());
+                false
+            }
+        };
+    let tx = db.unchecked_transaction()?;
+    ticks::weekly_briefing(&tx, recipient, &mut data, published, now)?;
+    tx.commit()?;
+    Ok(data)
 }
 
 #[cfg(test)]
