@@ -19,3 +19,18 @@ jobs:
         with:
           node-version: '24'
       - run: node --test openclaw/plugins/*/*.test.mjs
+      # Syntax-level only; the deploy scripts are replaced by the Rust rewrite.
+      - run: shellcheck -S error deploy/*.sh deploy/egress/*.sh scripts/gymclaw-tool scripts/connect-personal-calendar scripts/render-illustrations scripts/shot .githooks/pre-commit
+
+  secrets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read  # gitleaks-action lists the PR's commits
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

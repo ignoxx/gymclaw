@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Screenshot a page (usually the local dashboard) with headless Chromium.
+#   scripts/shot <url> <out.png> [width=1200] [height=800] [--full]
+# Viewport-sized at 1x unless --full, so the PNG stays small enough to read back cheaply.
+# Use width 390 for a phone. Playwright and its browser are cached in ~/.cache/gymclaw-shot.
+set -euo pipefail
+[ $# -ge 2 ] || { sed -n 2,5p "$0" >&2; exit 2; }
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/gymclaw-shot"
+if [ ! -d "$cache/node_modules/playwright-core" ]; then
+  mkdir -p "$cache"
+  npm install --silent --prefix "$cache" playwright-core@1 >&2
+fi
+node "$cache/node_modules/playwright-core/cli.js" install chromium-headless-shell >/dev/null 2>&1 || true
+
+NODE_PATH="$cache/node_modules" node - "$@" <<'JS'
+const { chromium } = require("playwright-core");
+const args = process.argv.slice(2);
+const full = args.includes("--full");
+const [url, out, width = "1200", height = "800"] = args.filter((a) => a !== "--full");
+(async () => {
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: +width, height: +height }, deviceScaleFactor: 1 });
+  page.on("console", (m) => m.type() === "error" && console.error("console:", m.text()));
+  page.on("pageerror", (e) => console.error("pageerror:", e.message));
+  await page.goto(url, { waitUntil: "networkidle" });
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: out, fullPage: full });
+  await browser.close();
+  console.log(out);
+})().catch((e) => { console.error(e.message); process.exit(1); });
+JS

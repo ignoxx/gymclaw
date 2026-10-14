@@ -1,0 +1,7 @@
+# CI secret scan (.github/workflows/tests.yml). Default rules, minus the fake secrets the
+# turn-log redaction tests feed in on purpose.
+[extend]
+useDefault = true
+
+[allowlist]
+paths = ['''openclaw/plugins/turn-log/runtime\.test\.mjs''', '''src/agent/turnlog\.rs''']
