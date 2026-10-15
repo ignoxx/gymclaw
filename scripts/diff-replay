@@ -34,12 +34,12 @@ PULL, LEGS = "088cac56-9198-40a2-a776-d394e1d9b0ff", "a364a274-e874-40ec-8dbc-85
 # (see CAPTURE), separately per side.
 STEPS = [
     ("get week", "get_week", {"day": "2026-10-12"}, ["calendar", "get-week", "--week-start", "2026-10-12"]),
-    ("move session", "move_session", {"session_id": PULL, "to": "2026-10-16T17:00"},
+    ("move session", "session_update", {"session_id": PULL, "fields": {"start": "2026-10-16T17:00"}},
      ["calendar", "move", "--session-id", PULL, "--to", "2026-10-16T17:00", "--request-id", "dr-move"]),
-    ("add session", "add_session", {"template_id": "push", "to": "2026-10-15T11:00"},
+    ("add session", "session_create", {"fields": {"template_id": "push", "start": "2026-10-15T11:00"}},
      ["calendar", "add", "--template-id", "push", "--to", "2026-10-15T11:00", "--request-id", "dr-add"]),
-    ("skip", "skip_session", {"session_id": LEGS}, ["calendar", "skip", "--session-id", LEGS, "--request-id", "dr-skip"]),
-    ("set workout", "set_session_workout", {"session_id": "{added}", "template_id": "legs"},
+    ("skip", "session_update", {"session_id": LEGS, "fields": {"status": "SKIPPED"}}, ["calendar", "skip", "--session-id", LEGS, "--request-id", "dr-skip"]),
+    ("set workout", "session_update", {"session_id": "{added}", "fields": {"template_id": "legs"}},
      ["calendar", "set-workout", "--session-id", "{added}", "--template-id", "legs", "--request-id", "dr-set"]),
     ("plan week", "plan_week", {"day": "2026-10-19", "template_id": "push"},
      ["schedule", "plan-week", "--week-start", "2026-10-19", "--template-id", "push", "--request-id", "dr-plan"]),
@@ -80,6 +80,8 @@ def fill(value, ids):
 def find_id(result, key):
     """The new session/block id in a step result, wherever the side puts it."""
     data = result.get("data", result) if isinstance(result, dict) else result
+    if isinstance(data, dict) and isinstance(data.get("session"), dict):
+        data = data["session"]
     for name in ("session_id", "block_id", "id"):
         if isinstance(data, dict) and isinstance(data.get(name), str):
             return data[name]

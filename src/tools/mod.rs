@@ -35,15 +35,12 @@ pub enum Effect {
 pub trait Tool: DeserializeOwned + JsonSchema {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
-    /// The caller snapshots the DB (outside the transaction) before running it.
-    const SNAPSHOT: bool = false;
     fn run(self, cx: &mut Ctx) -> Result<Value>;
 }
 
 pub struct ToolDef {
     pub name: &'static str,
     pub description: &'static str,
-    pub snapshot: bool,
     /// JSON schema of the arguments (inlined, no `$ref`s).
     pub schema: fn() -> Value,
     pub call: fn(&mut Ctx, Value) -> Result<Value>,
@@ -53,7 +50,6 @@ pub fn def<T: Tool>() -> ToolDef {
     ToolDef {
         name: T::NAME,
         description: T::DESCRIPTION,
-        snapshot: T::SNAPSHOT,
         schema: || {
             let settings = schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
             let mut schema = settings.into_generator().into_root_schema_for::<T>().to_value();

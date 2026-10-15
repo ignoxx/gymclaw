@@ -54,7 +54,7 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// Consistent copy of the live DB (`VACUUM INTO`), e.g. before the agent runs raw SQL writes.
+/// Consistent backup copy of the DB (`VACUUM INTO`).
 pub fn snapshot(conn: &Connection, dest: &Path) -> Result<()> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
