@@ -192,3 +192,14 @@ planned_end_at, user_locked, workout_plan_json), `workout_template` (id, definit
 `calendar_event_snapshot`, `agent_event` (type, payload_json, handled_at), `body_weight`.
 Times are UTC; convert to profile timezone for replies. SQL results may contain private data:
 select only needed columns and keep credentials/runtime/provider state out of conversation.
+
+### General session edits
+
+- `session create --data '{"start":"2026-10-20T18:00","end":"2026-10-20T19:00","template_id":"legs"}' --request-id ID`
+- `session update --session-id ID --data '{"start":"2026-10-21T18:00","template_id":"push","status":"COMMITTED"}' --request-id ID`
+- `session cancel --session-id ID --request-id ID`
+
+Fields: `start`, `end`, `template_id`, `status`. Omitted end keeps duration (create uses profile
+preferred duration); naive times use profile timezone. Status: TENTATIVE, COMMITTED, CANCELLED,
+SKIPPED, MISSED. Running/completed workouts use workout tools to preserve history. Changes lock
+that session and leave others alone. `warnings` report broken defaults; carry out owner intent.

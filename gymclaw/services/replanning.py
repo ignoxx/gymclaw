@@ -35,20 +35,20 @@ def expanded(session, profile):
 
 def commit_upcoming(db: Session, *, now: datetime):
     for session in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]))):
-        if session.status == "TENTATIVE" and now < session.planned_start_at <= now + timedelta(hours=48):
+        if session.status == "TENTATIVE" and not session.user_locked and now < session.planned_start_at <= now + timedelta(hours=48):
             session.status = "COMMITTED"
             session.source_revision += 1
             queue_session_write(db, session, now=now)
         schedule_session_jobs(db, session, now=now)
 
 
-def place(db: Session, session: PlannedSession, slot: Candidate, *, week: date, now: datetime, crowd_model):
+def place(db: Session, session: PlannedSession, slot: Candidate, *, week: date, now: datetime, crowd_model, status: str | None = None):
     """Put a session on a planner slot: times, crowd forecast, workout fit, calendar intent and reminders."""
     session.planned_start_at, session.planned_end_at = slot.start, slot.end
     session.prep_start_at, session.leave_home_at = slot.prep_start, slot.leave_home
     session.expected_finish_at = slot.end
     session.crowd_prediction, session.crowd_confidence = slot.crowd, slot.confidence
-    session.status = "COMMITTED" if slot.start <= now + timedelta(hours=48) else "TENTATIVE"
+    session.status = status or ("COMMITTED" if slot.start <= now + timedelta(hours=48) else "TENTATIVE")
     session.week_id = week.isoformat()
     db.flush()
     allocation(db, session)

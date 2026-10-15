@@ -62,6 +62,12 @@ def parser():
     register_availability_parser(groups)
     register_coach_parser(groups)
     register_body_parser(groups)
+    session = groups.add_parser("session")
+    session.add_argument("operation", choices=["create", "update", "cancel"])
+    session.add_argument("--session-id")
+    session.add_argument("--data", type=json.loads, default={})
+    session.add_argument("--request-id", required=True)
+    session.add_argument("--now", type=datetime.fromisoformat)
     sql = groups.add_parser("sql")
     sql.add_argument("query", help="Read-only SELECT, including CTEs and joins")
     sql.add_argument("--limit", type=int, default=200)
@@ -231,7 +237,12 @@ def main(argv=None) -> int:
             data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         else:
             with Session(engine) as db, db.begin():
-                if args.group == "coach":
+                if args.group == "session":
+                    from gymclaw.services.sessions import SessionEdit, edit_session
+                    result = edit_session(db, args.operation, changes=SessionEdit.model_validate(args.data), session_id=args.session_id,
+                        now=args.now or datetime.now(timezone.utc), request_id=args.request_id)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "coach":
                     result = coach_command(db, args)
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "availability":
