@@ -212,7 +212,7 @@ def runtime_command(engine, args, *, now_override: datetime | None = None) -> di
                         if auth:
                             runtime.prepare_event_message(db, auth["event_id"], message=auth["message"], now=now, recipient=recipient, profile=provider.profile)
                     personal_calendar.refresh(db, now=now)
-                    rolling = weekly.rolling_plan(db, authority["template_id"], now=now) if authority.get("template_id") else {}
+                    rolling = weekly.rolling_plan(db, authority["template_id"], now=now, draft_defaults=calendar_error is None) if authority.get("template_id") else {}
                     weekly.no_show_nudges(db, now=now)
                     if authority["crowd_polling_enabled"]:
                         alert = crowd.polling_alert(db, now=now)

@@ -206,16 +206,6 @@ def workout_name(session: PlannedSession) -> str:
     return session.workout_plan_json.get("template", {}).get("name") or (session.workout_template_id or "Workout").title()
 
 
-def week_lineup(db: Session, week_start: date, *, now: datetime) -> str:
-    """The week's planned workouts for owner messages, e.g. "This week: Mon 12:15 Legs · Wed 10:30 Push".
-    Build it after rotation so names match the calendar."""
-    zone = ZoneInfo(get_profile(db).timezone)
-    sessions = [s for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED", "STARTED", "COMPLETED"])).order_by(PlannedSession.planned_start_at))
-        if week_of(s.planned_start_at, zone) == week_start]
-    label = "This week" if week_start == week_of(now, zone) else f"Week of {week_start:%b} {week_start.day}"
-    return f"{label}: " + (" · ".join(f"{s.planned_start_at.astimezone(zone):%a %H:%M} {workout_name(s)}" for s in sessions) or "no workouts") + "."
-
-
 def get_week(db: Session, week_start: date) -> dict:
     if week_start.weekday() != 0:
         raise ValueError("week_start must be Monday")

@@ -204,7 +204,7 @@ def refresh_plans(db: Session, *, now: datetime) -> list[str]:
     return changed
 
 
-def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
+def rolling_plan(db: Session, template_id: str, *, now: datetime, draft_defaults: bool = True) -> dict:
     now = utc(now)
     get_template(db, template_id)  # Explicit selected template, never guess from demo import.
     zone = ZoneInfo(get_profile(db).timezone)
@@ -217,7 +217,7 @@ def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     for week in (current_week, next_week):
         start = datetime.combine(week, datetime.min.time(), zone)
         # Start new next-week planning only inside rolling 10-day horizon.
-        if start > now + timedelta(days=3):
+        if not draft_defaults or start > now + timedelta(days=3):
             continue
         if not db.scalar(select(PlannedSession.id).where(PlannedSession.week_id == week.isoformat())):
             data = schedule_week(db, week, now=now, template_id=template_id, request_id=first_plan_key(db, week, now, template_id))
