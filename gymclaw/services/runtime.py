@@ -358,3 +358,35 @@ def resolve_delivery(db: Session, delivery_id: str, *, outcome: str, now: dateti
         acknowledge_delivery_events(db, row, utc(now))
     emit(db, "notifications.delivery_resolved", utc(now), {"delivery_id": row.id, "outcome": outcome, "source": "operator_confirmation"})
     return delivery_data(row)
+
+
+def wake_agent(engine, provider: AutomationProvider, *, now: datetime) -> dict:
+    """Wake only for unresolved events. Retry after failures/restarts; coalesce pending work for 10m."""
+    from gymclaw.services.events import pending
+    with Session(engine) as db, db.begin():
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        settings = db.get(RuntimeSettings, 1)
+        if settings is None or not settings.enabled or settings.profile != provider.profile:
+            return {"woken": False, "reason": "runtime_not_enabled"}
+        events = pending(db)
+        if not events:
+            return {"woken": False, "reason": "no_events"}
+        ids = [e["id"] for e in events]
+        previous = db.scalar(select(AgentEvent).where(AgentEvent.type == "agent.wake_requested").order_by(AgentEvent.created_at.desc()).limit(1))
+        if previous and set(ids).issubset(previous.payload_json.get("event_ids", [])) and now - previous.created_at < timedelta(minutes=10):
+            return {"woken": False, "reason": "already_requested"}
+        # Commit the attempt before waking; never acknowledge the underlying work here.
+        attempt = emit(db, "agent.wake_requested", now, {"event_ids": ids})
+        attempt_id = attempt.id
+    try:
+        provider.wake("GymClaw needs a planning decision. Read HEARTBEAT.md, AGENTS.md and USER.md, then run "
+            "../scripts/gymclaw-tool events pending. Resolve current events and acknowledge only after success. "
+            "Pending types: " + ", ".join(sorted({e["type"] for e in events})))
+    except DomainError as error:
+        with Session(engine) as db, db.begin():
+            # Remove only this attempt's dedup marker; retain failed-wake audit history.
+            attempt = db.get(AgentEvent, attempt_id)
+            attempt.type = "agent.wake_failed"
+            attempt.payload_json = attempt.payload_json | {"error_code": error.code}
+        return {"woken": False, "reason": error.code}
+    return {"woken": True, "events": len(ids)}

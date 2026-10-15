@@ -68,15 +68,16 @@ def test_webcal_link_normalized_and_plain_http_rejected():
         ics_feed.normalize_url("http://example.com/cal.ics")
 
 
-def test_personal_blocker_moves_session_and_outage_keeps_blockers(engine):  # noqa: F811
+def test_personal_blocker_reports_clash_and_outage_keeps_blockers(engine):  # noqa: F811
     with Session(engine) as db, db.begin():
         plan = weekly.weekly_plan(db, "short", now=SUNDAY)
         session = db.get(PlannedSession, plan["plan"]["sessions"][-1]["id"])
         original = session.planned_start_at
         feed = Feed(ics(event(original - timedelta(hours=1), original + timedelta(hours=2))))
         result = personal_calendar.connect(db, "webcal://p42-caldav.icloud.com/published/2/secret", now=SUNDAY, transport=feed)
-        assert result["changes"] and result["user_message_hint"].startswith("Personal calendar changed")
-        assert session.planned_start_at != original
+        assert not result["changes"] and result["warnings"]
+        assert result["user_message_hint"].startswith("Personal calendar changed")
+        assert session.planned_start_at == original
         assert any(b.start == original - timedelta(hours=1) for b in busy_intervals(db, SUNDAY, SUNDAY + timedelta(days=8)))
         assert "secret" not in str(personal_calendar.status(db))
 

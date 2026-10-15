@@ -13,7 +13,7 @@ from gymclaw.services.calendar import get_week, sync_calendar
 from gymclaw.services.calendar_writes import apply_write, pending_writes, queue_session_write
 from gymclaw.services.errors import DomainError
 from gymclaw.services.profile import get_profile
-from gymclaw.services.replanning import add_session, commit_upcoming, move_session, replan_weeks, set_workout, skip_session
+from gymclaw.services.replanning import add_session, commit_upcoming, move_session, replan_weeks
 from gymclaw.services.scheduling import schedule_week
 from gymclaw.services.workout import utc
 
@@ -46,7 +46,7 @@ def calendar_command(db: Session, args) -> dict:
         data = authenticate(db, needed(calendar_id, "--calendar-id or GOOGLE_CALENDAR_ID"), client_path=args.client_file or DEFAULT_CLIENT)
         return {"data": data, "events": [], "user_message_hint": None}
     if args.operation.startswith("personal-"):
-        # Read-only feed; replanning may queue GymClaw writes but never publishes them.
+        # Read-only feed; changed blockers become planning events.
         if args.operation == "personal-connect":
             url = args.url_file.read_text() if args.url_file else args.url
             data = personal_calendar.connect(db, needed(url, "--url or --url-file"), now=now)
@@ -63,16 +63,17 @@ def calendar_command(db: Session, args) -> dict:
     if args.operation == "pending-writes":
         state = db.get(CalendarSyncState, 1)
         return {"data": {"calendar_id": state.calendar_id if state else None, "source": state.source if state else None, "writes": pending_writes(db)}, "events": [], "user_message_hint": None}
-    if args.operation == "skip":
-        return skip_session(db, needed(args.session_id, "--session-id"), now=now, request_id=needed(args.request_id, "--request-id"))
+    if args.operation in {"skip", "set-workout"}:
+        from gymclaw.services.sessions import SessionEdit, edit_session
+        changes = SessionEdit(status="SKIPPED") if args.operation == "skip" else SessionEdit(template_id=needed(args.template_id, "--template-id"))
+        return edit_session(db, "update", changes=changes, session_id=needed(args.session_id, "--session-id"),
+            now=now, request_id=needed(args.request_id, "--request-id"))
     if args.operation in {"move", "add"}:
         to = args.to or (args.leave_at + timedelta(minutes=get_profile(db).commute_to_gym_minutes) if args.leave_at else None)
         request_id = needed(args.request_id, "--request-id")
         if args.operation == "add":
             return add_session(db, now=now, request_id=request_id, template_id=args.template_id, to=to, day=args.day, after=args.after)
         return move_session(db, needed(args.session_id, "--session-id"), now=now, request_id=request_id, to=to, day=args.day, after=args.after)
-    if args.operation == "set-workout":
-        return set_workout(db, needed(args.session_id, "--session-id"), needed(args.template_id, "--template-id"), now=now, request_id=needed(args.request_id, "--request-id"))
     provider = provider_for(db, args)
     synced = sync_calendar(db, provider, now=now)
     if args.operation == "sync":

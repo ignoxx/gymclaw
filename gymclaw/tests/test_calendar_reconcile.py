@@ -89,7 +89,8 @@ def test_move_kept_reminders_replaced_other_sessions_stay(setup):
         # Thu now skips the rest day before Fri; that's the owner's call, so Fri stays as planned.
         friday = db.get(PlannedSession, ids[2])
         assert friday.status == "TENTATIVE" and not friday.user_locked
-        assert result["user_message_hint"] == "Long moved to Thu 19:00."
+        assert result["user_message_hint"].startswith("Long moved to Thu 19:00.")
+        assert "skips a rest day" in result["data"]["warnings"][0]
         assert not result["data"]["remote_events_changed"]
     publish(engine, provider, NOW + timedelta(minutes=4))
     with Session(engine) as db, db.begin():
@@ -102,7 +103,7 @@ def test_move_kept_reminders_replaced_other_sessions_stay(setup):
     assert provider.get_event(event_id_for(ids[2])).status != "cancelled"
 
 
-def test_delete_tombstone_not_recreated_valid_replacement_found(setup):
+def test_delete_tombstone_not_recreated_replacement_left_to_agent(setup):
     engine, provider, ids = setup
     with Session(engine) as db, db.begin():
         update_profile(db, {"weekdays_allowed": [0, 1, 2, 3, 4, 5, 6]})
@@ -113,9 +114,10 @@ def test_delete_tombstone_not_recreated_valid_replacement_found(setup):
         original = db.get(PlannedSession, ids[1])
         assert original.status == "CANCELLED" and original.workout_plan_json["deleted_by_user"]
         new_rows = list(db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["COMMITTED", "TENTATIVE"]))))
-        assert len(new_rows) == 3
-        replacement = next(s for s in new_rows if s.id not in ids)
-        assert replacement.id != ids[1] and replacement.planned_start_at.astimezone(ZONE).weekday() == 6
+        assert len(new_rows) == 2
+        assert all(s.id in ids for s in new_rows)
+        from gymclaw.services.events import pending
+        assert any(e["type"] == "planning.attention_required" for e in pending(db))
         assert all(w["event_id"] != deleted_event_id for w in pending_writes(db))
     publish(engine, provider, NOW + timedelta(minutes=4))
     with Session(engine) as db, db.begin():
@@ -175,14 +177,18 @@ def test_too_short_edit_preserved_and_explained(setup):
         assert "too short" in response["user_message_hint"]
 
 
-def test_all_day_travel_cancels_without_compressing_missed_volume(setup):
+def test_all_day_travel_reports_clash_without_mutating_sessions(setup):
     engine, provider, ids = setup
     provider.put({"id": "travel", "summary": "Travel", "start": {"date": "2026-10-12"}, "end": {"date": "2026-10-19"}})
     with Session(engine) as db, db.begin():
         result = sync_calendar(db, provider, now=NOW + timedelta(minutes=3))
-        assert all(db.get(PlannedSession, i).status == "CANCELLED" for i in ids)
-        assert result["user_message_hint"].startswith("Long on Mon, Long on Wed, Long on Fri dropped")
-        assert not db.scalars(select(PlannedSession).where(PlannedSession.status == "TENTATIVE")).all()
+        assert all(db.get(PlannedSession, i).status in {"TENTATIVE", "COMMITTED"} for i in ids)
+        assert not result["data"]["changes"]
+        assert any("overlaps a calendar event" in w for w in result["data"]["warnings"])
+        from gymclaw.services.events import pending
+        before = pending(db)
+        sync_calendar(db, provider, now=NOW + timedelta(minutes=4))
+        assert [e["id"] for e in pending(db)] == [e["id"] for e in before]
 
 
 def test_invalidated_token_full_sync_keeps_deletion_provenance(setup):
@@ -219,7 +225,7 @@ def test_locked_hard_conflicts_are_kept_and_explained(setup):
         assert db.get(PlannedSession, ids[0]).user_locked
         assert db.get(PlannedSession, ids[1]).user_locked
         assert db.get(PlannedSession, ids[1]).planned_start_at == at(13)
-        assert "conflicts with recovery" in result["user_message_hint"]
+        assert "skips a rest day" in result["user_message_hint"]
 
 
 def test_write_retry_after_remote_success_no_duplicate_events(setup):

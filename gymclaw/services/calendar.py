@@ -56,7 +56,7 @@ def allocation(db: Session, session: PlannedSession):
     template = Template.model_validate(snapshot) if snapshot else get_template(db, session.workout_template_id)
     template = template.model_copy(update={"set_duration_seconds": ceil(historical_set_duration(db, template.set_duration_seconds))})
     budget = int((session.planned_end_at - session.planned_start_at).total_seconds())
-    crowd_metadata = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
+    crowd_metadata = {k: v for k, v in session.workout_plan_json.items() if (k.startswith("crowd_") or k == "agent_status")}
     try:
         session.workout_plan_json = compress_template(template, get_profile(db), budget)
     except DomainError as error:
@@ -158,7 +158,7 @@ def sync_calendar(db: Session, provider: CalendarProvider, *, now: datetime) -> 
             if snapshot.calendar_event_id not in ids:
                 incoming.append(CalendarEvent(id=snapshot.calendar_event_id, status="cancelled", raw={"id": snapshot.calendar_event_id, "status": "cancelled"}))
     affected, emitted = set(), []
-    # User changes all reconcile before recovery/replanning, so batch order is immaterial.
+    # Reconcile all user changes before detecting conflicts, so batch order is immaterial.
     for event in incoming:
         weeks, logs = reconcile_event(db, event, now=now)
         affected |= weeks
@@ -169,30 +169,21 @@ def sync_calendar(db: Session, provider: CalendarProvider, *, now: datetime) -> 
     replanned = replan_weeks(db, affected, now=now) if affected else {"changed": [], "warnings": []}
     commit_upcoming(db, now=now)
     db.flush()
-    meaningful = emitted or replanned["changed"] or replanned["warnings"]
+    meaningful = emitted  # Persistent warnings are already deduplicated in the agent inbox.
     if meaningful:
-        event = emit(db, "planning.replan_required", now, {"reason": "calendar_changed", "handled_locally": True, "changes": replanned["changed"], "warnings": replanned["warnings"]})
-        # Deterministic replan already ran; agent should communicate, not duplicate work.
-        event.handled_at = now
+        event = emit(db, "planning.replan_required", now, {"reason": "calendar_changed", "weeks": sorted(w.isoformat() for w in affected), "changes": replanned["changed"], "warnings": replanned["warnings"]})
         emitted.append({"id": event.id, "type": event.type})
     zone = ZoneInfo(get_profile(db).timezone)
-    # Name what happened: a vague "sessions replanned" hides that a workout was dropped.
+    # Explicit sync calls report remote edits; background callbacks leave replies to the agent.
     parts = []
     for e in emitted:
         if e["type"] in {"calendar.gym_event_changed", "calendar.gym_event_resized"}:
             session = db.get(PlannedSession, e["session_id"])
             start, end = session.planned_start_at.astimezone(zone), session.planned_end_at.astimezone(zone)
             parts.append(f"{workout_name(session)} moved to {start:%a %H:%M}." if e["type"] == "calendar.gym_event_changed" else f"{workout_name(session)} now {start:%a %H:%M}–{end:%H:%M}.")
-    dropped = [db.get(PlannedSession, c["session_id"]) for c in replanned["changed"] if c["action"] == "cancelled_no_valid_slot"]
-    if dropped:
-        names = ", ".join(f"{workout_name(s)} on {s.planned_start_at.astimezone(zone):%a}" for s in dropped)
-        parts.append(f"{names} dropped: no slot left this week that fits your rest days and calendar.")
-    # The drop line already explains the shortfall warning.
-    parts += [w for w in replanned["warnings"] if not (dropped and "sessions feasible" in w)]
+    parts += replanned["warnings"]
     if any(e["type"] == "calendar.gym_event_resized" for e in emitted):
         parts.append("Workout compressed to the new slot length.")
-    if not parts and replanned["changed"]:
-        parts.append("Other gym sessions replanned; preparation/leave times updated.")
     hint = " ".join(parts) or None
     return {"data": {"calendar_id": provider.calendar_id, "source": provider.source, "full_sync": batch.full, "events_received": len(batch.events), "changes": replanned["changed"], "warnings": replanned["warnings"], "weeks": sorted(w.isoformat() for w in affected), "calendar_writes_queued": db.scalar(select(func.count()).select_from(CalendarWrite).where(CalendarWrite.status == "PENDING")), "remote_events_changed": False}, "events": emitted, "user_message_hint": hint}
 
@@ -213,16 +204,6 @@ def auth_alert(db: Session, *, ok: bool, now: datetime) -> dict | None:
 
 def workout_name(session: PlannedSession) -> str:
     return session.workout_plan_json.get("template", {}).get("name") or (session.workout_template_id or "Workout").title()
-
-
-def week_lineup(db: Session, week_start: date, *, now: datetime) -> str:
-    """The week's planned workouts for owner messages, e.g. "This week: Mon 12:15 Legs · Wed 10:30 Push".
-    Build it after rotation so names match the calendar."""
-    zone = ZoneInfo(get_profile(db).timezone)
-    sessions = [s for s in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED", "STARTED", "COMPLETED"])).order_by(PlannedSession.planned_start_at))
-        if week_of(s.planned_start_at, zone) == week_start]
-    label = "This week" if week_start == week_of(now, zone) else f"Week of {week_start:%b} {week_start.day}"
-    return f"{label}: " + (" · ".join(f"{s.planned_start_at.astimezone(zone):%a %H:%M} {workout_name(s)}" for s in sessions) or "no workouts") + "."
 
 
 def get_week(db: Session, week_start: date) -> dict:

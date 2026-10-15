@@ -1,5 +1,6 @@
 """`coach` (Telegram cards for the gymclaw-coach plugin) and `catalog` (illustrated exercise search)."""
 from datetime import datetime, timezone
+import json
 
 from gymclaw.models import RuntimeSettings
 from gymclaw.services import coach, illustrations, workout
@@ -7,7 +8,7 @@ from gymclaw.services import coach, illustrations, workout
 
 def register_parser(groups):
     command = groups.add_parser("coach")
-    command.add_argument("operation", choices=["text", "tap", "act", "start", "card", "rest-over", "preview"])
+    command.add_argument("operation", choices=["text", "tap", "act", "start", "card", "rest-over", "preview", "fallback"])
     command.add_argument("--text")
     command.add_argument("--data", help="Callback payload without the gc: namespace")
     command.add_argument("--action", choices=["card", "swap", "later", "next", "end", "switch", "relabel", "rest"])
@@ -44,7 +45,13 @@ def coach_command(db, args):
     now = args.now or datetime.now(timezone.utc)
     # Serialise taps and typed sets arriving at the same moment.
     db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-    if args.operation == "card":
+    if args.operation == "fallback":
+        context = json.loads(needed(args.data, "--data"))
+        if not isinstance(context, dict):
+            raise ValueError("Fallback context must be an object")
+        result = workout.mutate(db, "coach.fallback", needed(args.request_id, "--request-id"), context, now,
+            lambda: {"context": context, "instruction": "Read workout current before acting; the original mutation may already have committed. Reuse its request ID only for the same action."})["data"]
+    elif args.operation == "card":
         result = coach.handle_action(db, "card", now=now, request_id="card")
     elif args.operation == "rest-over":
         result = coach.handle_rest_over(db, now=now)

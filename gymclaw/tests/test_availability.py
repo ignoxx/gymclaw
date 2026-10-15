@@ -30,19 +30,20 @@ def test_inclusive_local_date_handles_dst_and_restart(engine, capsys):
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "IDEMPOTENCY_CONFLICT"
 
 
-def test_pause_repairs_future_slots_no_makeup_volume_and_expires(engine):
+def test_pause_reports_conflicts_preserves_slots_and_expires(engine):
     with Session(engine) as db, db.begin():
         weekly.weekly_plan(db, "short", now=SUNDAY)
         end = SUNDAY + timedelta(days=6)
         result = availability.add(db, start=SUNDAY, end=end, kind="SICK", now=SUNDAY, request_id="pause")
-        assert result["data"]["replanning"]["changed"]
-        assert all(row.status == "CANCELLED" for row in db.scalars(select(PlannedSession)))
+        assert not result["data"]["replanning"]["changed"]
+        assert result["data"]["replanning"]["warnings"]
+        assert all(row.status in {"COMMITTED", "TENTATIVE"} for row in db.scalars(select(PlannedSession)))
         assert not db.scalars(select(NotificationJob).where(NotificationJob.status == "PENDING")).all()
         with pytest.raises(DomainError, match="availability override"):
             workout.start(db, "short", now=SUNDAY + timedelta(hours=1), request_id="blocked-start")
         resumed = weekly.rolling_plan(db, "short", now=end)
         assert resumed["created"]
-        assert all(row.planned_start_at >= end for row in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]))))
+        assert not resumed["changed"]  # Existing sessions await an agent decision.
         workout.start(db, "short", now=end, request_id="allowed-at-end")
 
 
@@ -67,6 +68,6 @@ def test_explicit_cancel_locked_records_later_user_intent(engine):
         row = db.get(PlannedSession, result["plan"]["sessions"][0]["id"])
         row.user_locked = True
         availability.add(db, start=SUNDAY, end=SUNDAY + timedelta(days=7), kind="SICK", now=SUNDAY, request_id="cancel-too", cancel_locked=True)
-        assert row.status == "CANCELLED" and not row.user_locked
+        assert row.status == "CANCELLED" and row.user_locked
         assert row.workout_plan_json["manual_lock_cancelled_by_request"] == "cancel-too"
         assert row.workout_plan_json["deleted_by_user"]

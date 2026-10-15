@@ -62,6 +62,15 @@ def parser():
     register_availability_parser(groups)
     register_coach_parser(groups)
     register_body_parser(groups)
+    session = groups.add_parser("session")
+    session.add_argument("operation", choices=["create", "update", "cancel"])
+    session.add_argument("--session-id")
+    session.add_argument("--data", type=json.loads, default={})
+    session.add_argument("--request-id", required=True)
+    session.add_argument("--now", type=datetime.fromisoformat)
+    sql = groups.add_parser("sql")
+    sql.add_argument("query", help="Read-only SELECT, including CTEs and joins")
+    sql.add_argument("--limit", type=int, default=200)
     db = groups.add_parser("db")
     db.add_argument("operation", choices=["init"])
     profile = groups.add_parser("profile")
@@ -143,7 +152,7 @@ def parser():
         command.add_argument("--json", action="store_true")
     global COMMANDS
     unique = {id(sub): (name, sub) for name, sub in groups.choices.items()}.values()
-    COMMANDS = "; ".join(f"{name} " + "|".join(next(a for a in sub._actions if a.dest == "operation").choices) for name, sub in unique)
+    COMMANDS = "; ".join(f"{name} " + "|".join(next((a.choices for a in sub._actions if a.dest == "operation"), ["<query>"])) for name, sub in unique)
     return root
 
 
@@ -208,7 +217,10 @@ def main(argv=None) -> int:
         localize(engine, args)
         emitted_events = []
         message_hint = None
-        if args.group == "catalog":
+        if args.group == "sql":
+            from gymclaw.services.sql import query
+            data = query(engine, args.query, limit=args.limit)
+        elif args.group == "catalog":
             result = catalog_command(args)
             data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         elif args.group == "db":
@@ -225,7 +237,12 @@ def main(argv=None) -> int:
             data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         else:
             with Session(engine) as db, db.begin():
-                if args.group == "coach":
+                if args.group == "session":
+                    from gymclaw.services.sessions import SessionEdit, edit_session
+                    result = edit_session(db, args.operation, changes=SessionEdit.model_validate(args.data), session_id=args.session_id,
+                        now=args.now or datetime.now(timezone.utc), request_id=args.request_id)
+                    data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
+                elif args.group == "coach":
                     result = coach_command(db, args)
                     data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
                 elif args.group == "availability":
@@ -250,7 +267,7 @@ def main(argv=None) -> int:
                         changes = json.loads(args.data)
                         if not isinstance(changes, dict):
                             raise ValueError("Profile changes must be JSON object")
-                        # Sessions that no longer fit (e.g. a narrower time window) move right away.
+                        # Updated defaults report conflicts for the agent; existing sessions stay.
                         now = args.now or datetime.now(timezone.utc)
                         data = update_profile(db, changes).model_dump(mode="json") | {"replanning": replan_weeks(db, affected_weeks(db, now), now=now)}
                     else:

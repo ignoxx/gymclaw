@@ -62,8 +62,8 @@ def test_cli_full_fake_workout_and_restart(tmp_path):
     assert final == command("finish", 390, "finish")
     assert run(tmp_path, "audit", "workout", "--workout-id", workout_id)[1]["data"] == final["data"]
     assert run(tmp_path, "workout", "current", "--workout-id", workout_id, "--now", (NOW + timedelta(seconds=400)).isoformat())[1]["data"]["status"] == "PLAN_UPDATED"
-    # Planner-owned events stay out of the agent's inbox; --all still shows them.
-    assert run(tmp_path, "events", "pending")[1]["data"] == []
+    # Completion asks the agent to review rotation; audit records stay out of its inbox.
+    assert [e["type"] for e in run(tmp_path, "events", "pending")[1]["data"]] == ["planning.replan_required"]
     inbox = run(tmp_path, "events", "pending", "--all")[1]["data"]
     actionable = next(e for e in inbox if e["type"] == "planning.replan_required")
     assert run(tmp_path, "events", "ack", "--event-id", actionable["id"], "--now", (NOW + timedelta(seconds=400)).isoformat())[1]["ok"]

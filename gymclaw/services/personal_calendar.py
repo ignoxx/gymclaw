@@ -1,7 +1,7 @@
 """Personal calendar as read-only blockers. Fetched by the watcher, never written.
 
 Connect stores the feed URL locally; each refresh replaces the expanded busy intervals
-and replans only the weeks whose blockers changed. A failed fetch keeps the last known
+and reports conflicts in the weeks whose blockers changed. A failed fetch keeps the last known
 blockers so an outage never frees up time that is actually busy.
 """
 from datetime import datetime, timedelta
@@ -100,10 +100,7 @@ def _replan(db: Session, old: set, new: set, *, now: datetime) -> dict:
     replanned = replan_weeks(db, weeks, now=now)
     commit_upcoming(db, now=now)
     event = emit(db, "calendar.personal_blockers_changed", now, {"added": len(new - old), "removed": len(old - new), "changes": replanned["changed"], "warnings": replanned["warnings"]})
-    event.handled_at = now  # Replan already ran; agent only communicates.
     hint = None
     if replanned["warnings"]:
         hint = "Personal calendar changed. " + " ".join(replanned["warnings"])
-    elif replanned["changed"]:
-        hint = "Personal calendar changed. Affected gym sessions replanned; preparation/leave times updated."
     return {"changes": replanned["changed"], "warnings": replanned["warnings"], "events": [{"id": event.id, "type": event.type}], "user_message_hint": hint}
