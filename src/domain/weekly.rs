@@ -524,7 +524,7 @@ mod tests {
     use crate::domain::calendar_writes::{describe_crowd, event_body, pending_writes};
     use crate::domain::crowd::record_feedback;
     use crate::domain::profile::update_profile;
-    use crate::domain::replanning::{move_session, skip_session};
+    use crate::domain::replanning::{edit_session, SessionPatch};
     use crate::domain::templates::{Template, import_template};
     use crate::domain::workout::start;
     use crate::runtime::outbox::{event_stale_reason, prepare_event_message};
@@ -787,7 +787,7 @@ mod tests {
         assert!(session_id == &first.id && message.contains("hasn't started. Skip it or move it?"), "{message}");
         assert!(no_show_nudges(&db, late.mins(1)).unwrap().is_empty());
         let delivery = prepare_event_message(&db, event_id, message, late, "123", &[]).unwrap();
-        skip_session(&db, &first.id, late, "tg-1-skip").unwrap();
+        edit_session(&db, Some(&first.id), SessionPatch { status: Some(SessionStatus::Skipped), ..Default::default() }, late, "tg-1-skip").unwrap();
         assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Skipped);
         // The skip is final: rolling replanning keeps the other two sessions, no make-up.
         rolling_plan(&db, "short", late.mins(5)).unwrap();
@@ -803,8 +803,8 @@ mod tests {
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let first = sessions(&db).remove(0);
         let late = first.planned_start_at.mins(31);
-        let moved = move_session(&db, &first.id, late, "tg-2-move", None, None, None).unwrap();
-        assert!(ts(moved["data"]["to"].as_str().unwrap()) > late, "{moved}");
+        let moved = edit_session(&db, Some(&first.id), SessionPatch { start: Some(late.mins(60)), ..Default::default() }, late, "tg-2-move").unwrap();
+        assert!(ts(moved["data"]["session"]["start"].as_str().unwrap()) > late, "{moved}");
         assert!(matches!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Tentative | SessionStatus::Committed));
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let first = sessions(&db).remove(0);

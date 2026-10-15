@@ -15,9 +15,9 @@ use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::{emit, mutate};
 use crate::domain::crowd::{CrowdModel, planning_signals};
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
-use crate::domain::planning::{Candidate, Inputs, Interval, PlannerConfig, generate_candidates, monday, overlaps, plan_week, recovery_ok, weekday};
+use crate::domain::planning::{Candidate, Inputs, Interval, PlannerConfig, monday, overlaps, plan_week, recovery_ok, weekday};
 use crate::domain::profile::{Profile, get_profile};
-use crate::domain::scheduling::{busy_window, deleted_intervals, interval};
+use crate::domain::scheduling::{busy_window, interval};
 use crate::domain::templates::get_template;
 use crate::error::Result;
 use crate::time::Ts;
@@ -222,185 +222,75 @@ fn rule_breaks(db: &Connection, session_id: &str, slot: &Candidate, profile: &Pr
     Ok(reasons)
 }
 
-/// Where an owner-requested session goes.
-pub struct Pick {
-    pub slot: Candidate,
-    pub week: Date,
-    /// Planner rules the slot breaks.
-    pub warnings: Vec<String>,
-    /// Next-best starts, spread apart, so the owner can pick another in one tap.
-    pub alternatives: Vec<Candidate>,
-    pub has_signals: bool,
+/// Editable session state. Status describes scheduling/history only; it never fabricates workout logs.
+#[derive(Clone, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPatch {
+    pub start: Option<Ts>,
+    pub end: Option<Ts>,
+    pub template_id: Option<String>,
+    pub status: Option<SessionStatus>,
 }
 
-/// Owner-requested placement. `to` is an exact start: a planner slot if one matches, otherwise kept
-/// anyway (`minutes` long). Without `to`, the best-scoring slot at/after `after`, on `day` (else in
-/// `anchor`'s week); if rest days leave none, the best slot ignoring them.
-#[allow(clippy::too_many_arguments)]
-fn pick_slot(db: &Connection, session_id: &str, now: Ts, minutes: i64, anchor: Ts, to: Option<Ts>, day: Option<Date>, after: Option<Ts>) -> Result<Pick> {
-    let profile = get_profile(db)?;
-    let tz = profile.tz();
-    let target_day = to.map(|t| t.local(&tz).date()).or(day).or(after.map(|a| a.local(&tz).date()));
-    let week = match target_day {
-        Some(d) => week_of(Ts(d.to_zoned(tz.clone())?.timestamp()), &tz),
-        None => week_of(anchor, &tz),
-    };
-    let others: Vec<Interval> = active(db, Some(session_id))?.iter().map(interval).collect();
-    let deleted = deleted_intervals(db)?;
-    let signals = planning_signals(db, week, now, 15)?;
-    let (window_start, window_end) = busy_window(week, &profile)?;
-    let busy = busy_intervals(db, window_start, window_end)?;
-    let candidates = |existing: &[Interval]| -> Result<Vec<Candidate>> {
-        let all = generate_candidates(&profile, week, &Inputs { busy: &busy, unavailable: &deleted, existing, signals: &signals }, now, &PlannerConfig::default())?;
-        Ok(all.into_iter().filter(|c| target_day.is_none_or(|d| c.start.local(&tz).date() == d) && after.is_none_or(|a| c.start >= a)).collect())
-    };
-    let mut found = candidates(&others)?;
-    let has_signals = !signals.is_empty();
-    if let Some(to) = to {
-        let slot = match found.into_iter().find(|c| c.start == to) {
-            Some(slot) => slot,
-            None => {
-                // The owner leads: keep their time even off the planner's grid or rules.
-                let end = to.mins(minutes);
-                if end <= now {
-                    crate::bail!("SLOT_IN_PAST", "{} would already be over", to.local(&tz).strftime("%a %H:%M"));
-                }
-                Candidate::manual(to, end, &profile)
-            }
+/// One atomic owner/agent edit. Policy violations warn; malformed times/templates fail. All saved
+/// edits lock the session and reconcile allocation, calendar intent and notification jobs together.
+pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now: Ts, request_id: &str) -> Result<Value> {
+    mutate(db, "planning.session_edited", request_id, json!({"session_id": id, "patch": patch}), now, || {
+        let profile = get_profile(db)?;
+        let mut session = match id {
+            Some(id) => PlannedSession::get(db, id)?.ok_or_else(|| crate::error::Error::domain("SESSION_NOT_FOUND", "Unknown session"))?,
+            None => PlannedSession::new(String::new(), None, true),
         };
-        let warnings = rule_breaks(db, session_id, &slot, &profile)?;
-        return Ok(Pick { slot, week, warnings, alternatives: vec![], has_signals });
-    }
-    // A day the owner asked for beats the rest-day rule; the warning says so.
-    if found.is_empty() && target_day.is_some() {
-        found = candidates(&[])?;
-    }
-    if found.is_empty() {
-        crate::bail!("NO_VALID_SLOT", "No valid slot for that day/week (workout window or calendar); offer a time and use `to`");
-    }
-    found.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let mut ranked = found.into_iter();
-    let slot = ranked.next().expect("non-empty");
-    let mut alternatives: Vec<Candidate> = Vec::new();
-    for c in ranked {
-        if alternatives.len() < 2 && std::iter::once(&slot).chain(&alternatives).all(|o| (c.start - o.start).abs() >= SignedDuration::from_mins(60)) {
-            alternatives.push(c);
+        if id.is_some() && (session.status == SessionStatus::Started || session.planned_end_at <= now) {
+            crate::bail!("SESSION_NOT_EDITABLE", "Use workout tools for a running or historical workout; session edits are for upcoming slots");
         }
-    }
-    let warnings = rule_breaks(db, session_id, &slot, &profile)?;
-    Ok(Pick { slot, week, warnings, alternatives, has_signals })
-}
-
-type Upcoming = Vec<(String, (SessionStatus, Ts, Option<String>))>;
-
-/// Upcoming sessions before an owner edit, for `side_effects`.
-fn upcoming(db: &Connection) -> Result<Upcoming> {
-    Ok(PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [])?
-        .into_iter()
-        .map(|s| (s.id, (s.status, s.planned_start_at, s.workout_template_id)))
-        .collect())
-}
-
-/// Other upcoming sessions an owner edit changed, so a reply never claims they stayed.
-fn side_effects(db: &Connection, before: &Upcoming, session_id: &str) -> Result<Vec<Value>> {
-    let mut changed = Vec::new();
-    for (id, old) in before {
-        if id == session_id {
-            continue;
+        let start = patch.start.or(id.map(|_| session.planned_start_at)).ok_or_else(|| crate::error::Error::domain("INVALID_ARGUMENTS", "Creating a session requires start"))?;
+        let duration = if id.is_some() { (session.planned_end_at - session.planned_start_at).as_mins() } else { profile.preferred_workout_minutes };
+        let end = patch.end.unwrap_or_else(|| start.mins(duration));
+        if end <= start || end <= now {
+            crate::bail!("INVALID_SESSION_TIME", "End must follow start and be in the future");
         }
-        let Some(other) = PlannedSession::get(db, id)? else { continue };
-        if (other.status, other.planned_start_at, other.workout_template_id.clone()) != *old {
-            changed.push(json!({"session_id": id, "status": other.status, "start": other.planned_start_at, "workout_template_id": other.workout_template_id}));
+        if let Some(template) = &patch.template_id {
+            get_template(db, template)?;
+            session.workout_template_id = Some(template.clone());
+            session.workout_plan_json.0 = session.crowd_keys(true);
         }
-    }
-    Ok(changed)
-}
-
-fn slot_data(session: &PlannedSession, pick: &Pick) -> Value {
-    let mut alternatives: Vec<&Candidate> = pick.alternatives.iter().collect();
-    alternatives.sort_by_key(|c| c.start);
-    json!({"session_id": session.id, "to": pick.slot.start, "end": pick.slot.end, "crowd": pick.slot.crowd, "confidence": pick.slot.confidence,
-        "workout_template_id": session.workout_template_id, "warnings": pick.warnings,
-        "alternatives": alternatives.iter().map(|c| json!({"start": c.start, "crowd": c.crowd})).collect::<Vec<_>>()})
-}
-
-fn placement_intent(mut intent: Value, to: Option<Ts>, day: Option<Date>, after: Option<Ts>) -> Value {
-    intent["to"] = json!(to);
-    intent["day"] = json!(day.map(|d| d.to_string()));
-    if let Some(after) = after {
-        intent["after"] = json!(after);
-    }
-    intent
-}
-
-/// Owner-requested move of one session that hasn't ended (a no-show can still be moved), including one
-/// the owner edited in the calendar. The session gets locked, so replanning neither moves it nor
-/// "repairs" other sessions around it.
-pub fn move_session(db: &Connection, session_id: &str, now: Ts, request_id: &str, to: Option<Ts>, day: Option<Date>, after: Option<Ts>) -> Result<Value> {
-    let intent = placement_intent(json!({"session_id": session_id}), to, day, after);
-    mutate(db, "planning.session_moved", request_id, intent, now, || {
-        let mut session = match PlannedSession::get(db, session_id)? {
-            Some(s) if s.status.is_open() && s.planned_end_at > now => s,
-            _ => crate::bail!("SESSION_NOT_MOVABLE", "Only tentative or committed sessions that haven't ended can be moved"),
-        };
-        let minutes = (session.planned_end_at - session.planned_start_at).as_secs() / 60;
-        let pick = pick_slot(db, &session.id, now, minutes, session.planned_start_at, to, day, after)?;
-        let (old_start, before) = (session.planned_start_at, upcoming(db)?);
-        if pick.slot.start != old_start || pick.slot.end != session.planned_end_at {
-            cancel_session_jobs(db, &session.id, now)?;
+        // A raw create chooses the next split workout without changing any existing session.
+        if id.is_none() && session.workout_template_id.is_none() {
+            crate::bail!("TEMPLATE_REQUIRED", "Creating a session requires a real template_id; inspect the split or templates first");
         }
-        session.source_revision += 1;
+        let status = patch.status.unwrap_or(if id.is_some() { session.status } else { SessionStatus::Tentative });
+        let slot = Candidate::manual(start, end, &profile);
+        let mut warnings = rule_breaks(db, &session.id, &slot, &profile)?;
+        let week = week_of(start, &profile.tz());
+        if active(db, Some(&session.id))?.iter().filter(|s| week_of(s.planned_start_at, &profile.tz()) == week).count() as i64 >= profile.weekly_max_sessions {
+            warnings.push("exceeds your weekly maximum".into());
+        }
+        cancel_session_jobs(db, &session.id, now)?;
         session.user_locked = true;
-        let model = if pick.has_signals { Some(CrowdModel::new(db, now)?) } else { None };
-        place(db, &mut session, &pick.slot, pick.week, now, model.as_ref())?;
-        let mut data = json!({"from": old_start});
-        data.as_object_mut().expect("object").extend(slot_data(&session, &pick).as_object().cloned().unwrap_or_default());
-        data["side_effects"] = json!(side_effects(db, &before, &session.id)?);
-        Ok(data)
-    })
-}
-
-/// An extra session on top of the week's plan (default: this week). It is locked, so replanning never
-/// drops it for exceeding the weekly maximum. Without `template_id` it takes its place in the rotation.
-pub fn add_session(db: &Connection, now: Ts, request_id: &str, template_id: Option<&str>, to: Option<Ts>, day: Option<Date>, after: Option<Ts>) -> Result<Value> {
-    let intent = placement_intent(json!({"template_id": template_id}), to, day, after);
-    mutate(db, "planning.session_added", request_id, intent, now, || {
-        if let Some(id) = template_id {
-            get_template(db, id)?;
-        }
-        let (profile, before) = (get_profile(db)?, upcoming(db)?);
-        let mut session = PlannedSession::new(String::new(), template_id.map(String::from), true);
-        let pick = pick_slot(db, &session.id, now, profile.preferred_workout_minutes, now, to, day, after)?;
-        let model = if pick.has_signals { Some(CrowdModel::new(db, now)?) } else { None };
-        place(db, &mut session, &pick.slot, pick.week, now, model.as_ref())?;
-        if template_id.is_none() {
-            crate::domain::weekly::assign_rotation(db, now)?;
-            session = PlannedSession::get(db, &session.id)?.expect("just placed");
-        }
-        let mut data = slot_data(&session, &pick);
-        data["side_effects"] = json!(side_effects(db, &before, &session.id)?);
-        Ok(data)
-    })
-}
-
-/// Owner picks the workout for one session ("legs today instead of pull"). The session is locked so
-/// rotation keeps it; later sessions get the split workout trained longest ago.
-pub fn set_workout(db: &Connection, session_id: &str, template_id: &str, now: Ts, request_id: &str) -> Result<Value> {
-    mutate(db, "planning.workout_set", request_id, json!({"session_id": session_id, "template_id": template_id}), now, || {
-        let mut session = match PlannedSession::get(db, session_id)? {
-            Some(s) if s.status.is_open() => s,
-            _ => crate::bail!("SESSION_NOT_EDITABLE", "Only tentative or committed sessions can change workout; a running one switches exercises instead"),
-        };
-        get_template(db, template_id)?;
-        let old = session.workout_template_id.replace(template_id.into());
-        session.user_locked = true;
-        session.workout_plan_json.0 = session.crowd_keys(true);
         session.source_revision += 1;
+        session.planned_start_at = start;
+        session.planned_end_at = end;
+        session.prep_start_at = slot.prep_start;
+        session.leave_home_at = slot.leave_home;
+        session.expected_finish_at = end;
+        session.week_id = week.to_string();
+        session.status = status;
         allocation(db, &mut session)?;
-        session.save(db)?;
+        if session.plan("error").is_some_and(|e| !e.is_null()) {
+            warnings.push("slot is too short for required movements; adjust the workout or duration".into());
+        }
+        if status == SessionStatus::Cancelled {
+            session.merge_plan(json!({"deleted_by_user": true}));
+        }
+        if id.is_some() { session.save(db)?; } else { session.insert(db)?; }
+        if !status.is_open() {
+            // Retire old queued writes too; a cancel then queues an owned calendar deletion.
+            retire_session(db, &mut session, status, now)?;
+        }
         queue_session_write(db, &session, now, false)?;
-        let rotation = crate::domain::weekly::assign_rotation(db, now)?;
-        Ok(json!({"session_id": session.id, "from": old, "to": template_id, "rotation": rotation}))
+        if status.is_open() { schedule_session_jobs(db, &session, now)?; }
+        Ok(json!({"session": crate::domain::scheduling::session_data(&session), "warnings": warnings, "side_effects": []}))
     })
 }
 
@@ -416,19 +306,6 @@ pub fn retire_session(db: &Connection, session: &mut PlannedSession, status: Ses
         write.update(db)?;
     }
     Ok(())
-}
-
-/// Owner skips a session, upcoming or due (e.g. answering the no-show nudge). It still counts toward the
-/// week, so no make-up session is added; `move_session` is the make-up path.
-pub fn skip_session(db: &Connection, session_id: &str, now: Ts, request_id: &str) -> Result<Value> {
-    mutate(db, "planning.session_skipped", request_id, json!({"session_id": session_id}), now, || {
-        let mut session = match PlannedSession::get(db, session_id)? {
-            Some(s) if s.status.is_open() && s.planned_end_at > now => s,
-            _ => crate::bail!("SESSION_NOT_SKIPPABLE", "Only tentative or committed sessions that haven't ended can be skipped"),
-        };
-        retire_session(db, &mut session, SessionStatus::Skipped, now)?;
-        Ok(json!({"session_id": session.id, "status": session.status}))
-    })
 }
 
 #[cfg(test)]
@@ -451,7 +328,7 @@ mod tests {
         assert_eq!(before.iter().map(|s| weekday(s.planned_start_at.local(&tz).date())).collect::<Vec<_>>(), [0, 2, 4]);
 
         let tuesday = before[0].planned_start_at + SignedDuration::from_hours(24);
-        let moved = move_session(&db, &ids[0], now, "move-1", Some(tuesday), None, None).unwrap();
+        let moved = edit_session(&db, Some(&ids[0]), SessionPatch { start: Some(tuesday), ..Default::default() }, now, "move-1").unwrap();
         assert_eq!(moved["data"]["warnings"], json!(["skips a rest day"]));
         assert_eq!(moved["data"]["side_effects"], json!([]));
 
