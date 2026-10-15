@@ -1,35 +1,9 @@
 //! Explicit in-memory demo calendar, never used as evidence of live Google behavior (port of `fixture_calendar.py`).
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::calendar::{CalendarEvent, CalendarProvider, SyncBatch, already_applied, body_session_id, conflict, parse_event, sync_token_expired};
 use crate::bail;
 use crate::error::Result;
-
-/// A calendar fixture file (`--fixture path.json`).
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CalendarFixture {
-    #[serde(default = "demo_calendar")]
-    pub calendar_id: String,
-    #[serde(default = "berlin")]
-    pub timezone: String,
-    #[serde(default)]
-    pub events: Vec<Value>,
-    #[serde(default = "yes")]
-    pub full: bool,
-}
-
-fn demo_calendar() -> String {
-    "demo-calendar".into()
-}
-fn berlin() -> String {
-    "Europe/Berlin".into()
-}
-fn yes() -> bool {
-    true
-}
 
 /// Which provider call a test saw.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,7 +23,6 @@ pub struct FixtureCalendarProvider {
     pub calls: Vec<Call>,
     pub fail_sync: bool,
     pub expire_token: bool,
-    pub batch_override: Option<SyncBatch>,
 }
 
 impl Default for FixtureCalendarProvider {
@@ -68,24 +41,7 @@ impl FixtureCalendarProvider {
             calls: vec![],
             fail_sync: false,
             expire_token: false,
-            batch_override: None,
         }
-    }
-
-    /// A provider that always returns the fixture's events as one batch, with a token derived from its content.
-    pub fn from_fixture(fixture: &CalendarFixture) -> Result<FixtureCalendarProvider> {
-        let mut provider = FixtureCalendarProvider::new(&fixture.calendar_id, &fixture.timezone);
-        for event in &fixture.events {
-            provider.set(event.clone());
-        }
-        let digest = hex::encode(Sha256::digest(super::python_json(&serde_json::to_value(fixture)?).as_bytes()));
-        provider.batch_override = Some(SyncBatch {
-            events: fixture.events.iter().map(|e| parse_event(e, &fixture.timezone)).collect::<Result<_>>()?,
-            next_sync_token: format!("fixture:{digest}"),
-            timezone: fixture.timezone.clone(),
-            full: fixture.full,
-        });
-        Ok(provider)
     }
 
     /// The stored Google resource, including fields `CalendarEvent` drops (description, …).
@@ -157,9 +113,6 @@ impl CalendarProvider for FixtureCalendarProvider {
         if self.expire_token && sync_token.is_some() {
             self.expire_token = false;
             return Err(sync_token_expired());
-        }
-        if let Some(batch) = &self.batch_override {
-            return Ok(batch.clone());
         }
         let raws: Vec<&Value> = match sync_token {
             None => self.events.iter().map(|(_, v)| v).collect(),

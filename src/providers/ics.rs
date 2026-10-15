@@ -381,7 +381,7 @@ mod tests {
 
     /// Feeds covering RRULE (UNTIL/COUNT/BYDAY/BYSETPOS/…), EXDATE, RDATE, RECURRENCE-ID overrides,
     /// all-day, floating, TZID with DST, cancelled and free events. `expected.json` is the Python
-    /// implementation's output (`testdata/ics/expected.py`).
+    /// implementation's output (generated from the Python `ics_feed` before its removal).
     #[test]
     fn matches_python_expansion() {
         let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/expected.json")).unwrap();
