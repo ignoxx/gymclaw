@@ -1,5 +1,5 @@
 //! Workout templates: validated on import, stored as JSON, snapshotted when a workout starts.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -297,11 +297,6 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
 fn not_found<T>(exercise: &str, name: &str, rows: &[Value]) -> Result<T> {
     let names: Vec<&str> = rows.iter().filter_map(|e| e["name"].as_str()).collect();
     crate::bail!("EXERCISE_NOT_FOUND", "'{exercise}' isn't in {name} ({})", names.join(", "))
-}
-
-/// Exercise IDs → specs of a template, planned first.
-pub fn spec_map(template: &Template) -> HashMap<&str, &ExerciseSpec> {
-    template.exercises.iter().chain(&template.alternatives).map(|s| (s.id.as_str(), s)).collect()
 }
 
 #[cfg(test)]

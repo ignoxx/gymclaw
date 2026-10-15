@@ -1,15 +1,12 @@
-//! Inbound photos/documents (JPEG, PNG, HEIC/HEIF) → JPEG for the vision model, and the EXIF
-//! capture time for weigh-in backfill (port of `services/body.py::photo_taken_at`).
+//! Inbound photos/documents (JPEG, PNG, HEIC/HEIF) → JPEG for the vision model. The EXIF capture
+//! time for weigh-in backfill is `domain::body::photo_taken_at`.
 //!
 //! HEIC needs the `heic` feature (default; system libheif). Without it HEIC is PHOTO_UNSUPPORTED.
 use std::io::Cursor;
 
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
-use jiff::civil;
-use jiff::tz::{Offset, TimeZone};
 
 use crate::error::{Error, Result};
-use crate::time::Ts;
 
 /// Longest edge sent to the vision model.
 pub const MAX_EDGE: u32 = 1600;
@@ -91,84 +88,13 @@ fn decode_heif(_: &[u8]) -> Result<DynamicImage> {
     Err(unsupported())
 }
 
-/// When the photo was taken: EXIF DateTimeOriginal (else DateTime), with OffsetTimeOriginal when
-/// present, else in `zone`. Files without readable EXIF fall back to the first EXIF-style stamp in
-/// the first 256 KiB, like the Python version did for HEIC. Fails with PHOTO_DATE_UNKNOWN.
-pub fn taken_at(bytes: &[u8], zone: &TimeZone) -> Result<Ts> {
-    let (stamp, offset) = match exif::Reader::new().read_from_container(&mut Cursor::new(bytes)) {
-        Ok(data) => {
-            let text = |tag: exif::Tag, ifd: exif::In| data.get_field(tag, ifd).and_then(|f| ascii(&f.value));
-            let stamp = text(exif::Tag::DateTimeOriginal, exif::In::PRIMARY).or_else(|| text(exif::Tag::DateTime, exif::In::PRIMARY));
-            (stamp, text(exif::Tag::OffsetTimeOriginal, exif::In::PRIMARY))
-        }
-        Err(_) => (first_stamp(&bytes[..bytes.len().min(1 << 18)]), None),
-    };
-    let unknown = || {
-        Error::domain(
-            "PHOTO_DATE_UNKNOWN",
-            "Photo has no capture date (Telegram strips it from compressed photos). Ask for the original sent as a file, or pass the date with --at.",
-        )
-    };
-    let stamp = stamp.ok_or_else(unknown)?;
-    let taken = civil::DateTime::strptime("%Y:%m:%d %H:%M:%S", stamp.trim_matches(['\0', ' '])).map_err(|_| unknown())?;
-    let zoned = match offset.as_deref().and_then(parse_offset) {
-        Some(offset) => taken.to_zoned(TimeZone::fixed(offset))?,
-        None => taken.to_zoned(zone.clone())?,
-    };
-    Ok(Ts(zoned.timestamp()))
-}
-
-fn ascii(value: &exif::Value) -> Option<String> {
-    match value {
-        exif::Value::Ascii(parts) => parts
-            .first()
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            .filter(|s| !s.trim_matches(['\0', ' ']).is_empty()),
-        _ => None,
-    }
-}
-
-/// `+02:00` / `-0530` (Python `%z`).
-fn parse_offset(text: &str) -> Option<Offset> {
-    let text = text.trim_matches(['\0', ' ']);
-    let sign = match text.as_bytes().first()? {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let digits: String = text[1..].chars().filter(|c| *c != ':').collect();
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let (hours, minutes): (i32, i32) = (digits[..2].parse().ok()?, digits[2..].parse().ok()?);
-    Offset::from_seconds(sign * (hours * 3600 + minutes * 60)).ok()
-}
-
-/// First `YYYY:MM:DD HH:MM:SS` in raw bytes.
-fn first_stamp(bytes: &[u8]) -> Option<String> {
-    let pattern = regex::bytes::Regex::new(r"(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})").expect("valid regex");
-    pattern.find(bytes).map(|m| String::from_utf8_lossy(m.as_bytes()).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const OFFSET_JPG: &[u8] = include_bytes!("testdata/photo/offset.jpg");
-    const LOCAL_JPG: &[u8] = include_bytes!("testdata/photo/local.jpg");
     const PLAIN_PNG: &[u8] = include_bytes!("testdata/photo/plain.png");
     const OFFSET_HEIC: &[u8] = include_bytes!("testdata/photo/offset.heic");
-
-    /// Fixtures from Pillow (`heif-enc` for the HEIC); expectations from Python's `photo_taken_at`.
-    #[test]
-    fn capture_time_matches_python() {
-        let berlin = TimeZone::get("Europe/Berlin").unwrap();
-        assert_eq!(taken_at(OFFSET_JPG, &berlin).unwrap().iso(), "2026-10-12T05:41:05+00:00");
-        assert_eq!(taken_at(LOCAL_JPG, &berlin).unwrap().iso(), "2026-03-29T04:15:00+00:00");
-        assert_eq!(taken_at(PLAIN_PNG, &berlin).unwrap_err().code(), "PHOTO_DATE_UNKNOWN");
-        // Python read the first stamp (DateTime, 2026:10:01 09:00:00) from HEIC; EXIF parsing gets the real capture time.
-        assert_eq!(taken_at(OFFSET_HEIC, &berlin).unwrap().iso(), "2026-10-12T05:41:05+00:00");
-    }
 
     #[test]
     fn decodes_upright_jpeg() {

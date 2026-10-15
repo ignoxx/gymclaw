@@ -842,7 +842,7 @@ mod tests {
     use super::*;
 
     /// Google `recurrence` arrays against Python's `dateutil.rrulestr(forceset=True).xafter(...)`
-    /// (`testdata/ics/recurrence.json`, made by `testdata/ics/expected.py`).
+    /// (`testdata/ics/recurrence.json`, generated from Python before its removal).
     #[test]
     fn matches_dateutil() {
         let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/recurrence.json")).unwrap();

@@ -47,10 +47,6 @@ pub const HISTORY: i64 = 30;
 /// Marker row written by `/new`; the window starts after the newest one.
 pub const BOUNDARY: &str = "boundary";
 
-pub fn weekday_name(z: &jiff::Zoned) -> String {
-    z.strftime("%a %-d %b %H:%M").to_string()
-}
-
 /// System prompt with notes and the state snapshot.
 pub fn system(db: &Connection, now: Ts) -> Result<String> {
     let mut out = String::from(SYSTEM_PROMPT);

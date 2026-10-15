@@ -211,6 +211,18 @@ mod tests {
         Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap()
     }
 
+    /// Fixtures from Pillow (`heif-enc` for the HEIC); expectations from Python's `photo_taken_at`.
+    #[test]
+    fn capture_time_matches_python() {
+        let berlin = TimeZone::get("Europe/Berlin").unwrap();
+        let at = |name: &str| photo_taken_at(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers/testdata/photo").join(name), &berlin);
+        assert_eq!(at("offset.jpg").unwrap().iso(), "2026-10-12T05:41:05+00:00");
+        assert_eq!(at("local.jpg").unwrap().iso(), "2026-03-29T04:15:00+00:00");
+        assert_eq!(at("plain.png").unwrap_err().code(), "PHOTO_DATE_UNKNOWN");
+        // Python read the first stamp (DateTime, 2026:10:01 09:00:00) from HEIC; EXIF parsing gets the real capture time.
+        assert_eq!(at("offset.heic").unwrap().iso(), "2026-10-12T05:41:05+00:00");
+    }
+
     fn weigh(kg: f64, at: Option<&str>, photo: Option<PathBuf>) -> WeighIn {
         WeighIn { kg, at: at.map(String::from), photo }
     }
