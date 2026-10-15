@@ -2,7 +2,7 @@
 //! one outcome (reply text with optional buttons, a reaction, or silence). Owner: WP-runtime.
 //!
 //! Tools are `tools::all()` plus `reply`, the turn's final answer. Each tool call runs in its own DB
-//! transaction on the blocking pool (snapshot first when the tool asks for it); errors go back to
+//! transaction on the blocking pool; errors go back to
 //! the model as `Error::to_json()`. Coach views a tool produced are rendered after the commit.
 pub mod context;
 pub mod failure;
@@ -153,10 +153,6 @@ impl Agent {
         let data_dir = self.data_dir.clone();
         let name_owned = name.to_string();
         let result = blocking(&self.db_path, move |db| {
-            let def = tools::all().into_iter().find(|t| t.name == name_owned);
-            if def.as_ref().is_some_and(|d| d.snapshot) {
-                crate::db::snapshot(db, &data_dir.join("backups").join(format!("agent-{}.db", now.0.as_millisecond())))?;
-            }
             let tx = db.transaction()?;
             let mut cx = tools::Ctx { db: &tx, now, request_id, data_dir: &data_dir, effects: vec![] };
             let value = tools::call(&mut cx, &name_owned, args)?;

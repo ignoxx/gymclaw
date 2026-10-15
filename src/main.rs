@@ -22,7 +22,7 @@ enum Command {
     Serve,
     /// Create or upgrade the database schema.
     Migrate,
-    /// Run one tool, exactly as the agent would: `gymclaw call move_session '{"session_id":"…"}'`.
+    /// Run one tool, exactly as the agent would: `gymclaw call session_update '{"session_id":"…","fields":{"status":"CANCELLED"}}'`.
     Call {
         tool: String,
         /// JSON arguments (default `{}`); `-` reads them from stdin, so secrets stay out of argv.
@@ -75,10 +75,6 @@ fn print(value: &Value) {
 fn call(tool: &str, args: Option<String>, now: Option<String>, request_id: Option<String>) -> Result<Value> {
     let (data_dir, db_path) = Config::paths();
     let mut conn = db::open(&db_path)?;
-    let def = tools::all().into_iter().find(|t| t.name == tool);
-    if def.as_ref().is_some_and(|d| d.snapshot) {
-        db::snapshot(&conn, &data_dir.join("backups").join(format!("cli-{}.db", Ts::now().0.as_second())))?;
-    }
     let args = match args.as_deref() {
         Some("-") => Some(std::io::read_to_string(std::io::stdin())?),
         _ => args,
