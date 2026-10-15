@@ -99,7 +99,7 @@ pub struct SessionFields {
     /// A real workout template. Required on create.
     pub template_id: Option<String>,
     /// Any scheduling status; this does not create workout/set logs. CANCELLED deletes the owned
-    /// calendar event; SKIPPED/MISSED keep it as history. Default: preserve (create: TENTATIVE).
+    /// calendar event; SKIPPED/MISSED keep it as history. Default: preserve (create: COMMITTED within 48h, otherwise TENTATIVE).
     pub status: Option<crate::db::models::SessionStatus>,
 }
 
@@ -155,19 +155,26 @@ impl Tool for PlanWeek {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let week = monday_of(cx, &Some(self.day))?;
-        let before: std::collections::BTreeSet<_> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
-        let planned = scheduling::schedule_week(cx.db, week, cx.now, Some(&cx.request_id), Some(&self.template_id), &[])?;
-        replanning::commit_upcoming(cx.db, cx.now)?;
-        for data in planned["sessions"].as_array().into_iter().flatten() {
-            if let Some(mut session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
-                if !before.contains(&session.id) {
-                    session.user_locked = true;
-                    session.save(cx.db)?;
+        let result = crate::domain::core::mutate(cx.db, "planning.agent_week_planned", &cx.request_id,
+            json!({"week": week.to_string(), "template_id": self.template_id}), cx.now, || {
+                let before: std::collections::BTreeSet<_> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
+                let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, Some(&self.template_id), &[])?;
+                replanning::commit_upcoming(cx.db, cx.now)?;
+                let mut saved = Vec::new();
+                for data in planned["sessions"].as_array().into_iter().flatten() {
+                    if let Some(mut session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
+                        if !before.contains(&session.id) {
+                            session.user_locked = true;
+                            session.save(cx.db)?;
+                        }
+                        calendar_writes::queue_session_write(cx.db, &session, cx.now, false)?;
+                        saved.push(scheduling::session_data(&session));
+                    }
                 }
-                calendar_writes::queue_session_write(cx.db, &session, cx.now, false)?;
-            }
-        }
-        Ok(planned)
+                planned["sessions"] = json!(saved);
+                Ok(planned)
+            })?;
+        Ok(result["data"].clone())
     }
 }
 
@@ -470,14 +477,24 @@ mod tests {
         assert_eq!(created["data"]["session"]["start"], "2026-10-13T21:07:00+00:00");
         assert_eq!(created["data"]["session"]["user_locked"], true);
         assert!(!writes_start(&db, id).is_empty());
-        let changed = call(&db, "session_update", json!({"session_id": id, "fields": {"start": "2026-10-14T12:00", "end": "2026-10-14T13:10", "status": "COMMITTED"}}), sunday(), "raw-update").unwrap();
+        // A scheduling status edit creates no workout logs and must remain correctable.
+        call(&db, "session_update", json!({"session_id": id, "fields": {"status": "STARTED"}}), sunday(), "status-only").unwrap();
+        template(&db, json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}));
+        assert!(call(&db, "session_update", json!({"session_id": id, "fields": {"template_id": "unknown"}}), sunday(), "bad-template").is_err());
+        let changed = call(&db, "session_update", json!({"session_id": id, "fields": {"start": "2026-10-14T12:00", "end": "2026-10-14T13:10", "template_id": "legs", "status": "COMMITTED"}}), sunday(), "raw-update").unwrap();
+        assert_eq!(changed["data"]["session"]["workout_plan"]["template"]["id"], "legs");
         assert_eq!(changed["data"]["side_effects"], json!([]));
+        let mut calendar = crate::providers::fixture_calendar::FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin");
+        let write = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
+        assert_eq!(calendar_writes::apply_write(&db, &mut calendar, write["id"].as_str().unwrap(), sunday(), false).unwrap()["status"], "APPLIED");
         let jobs: i64 = db.query_row("SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'", [id], |r| r.get(0)).unwrap();
         assert!(jobs > 0);
         assert!(call(&db, "session_update", json!({"session_id": id, "fields": {"end": "2026-10-14T11:00"}}), sunday(), "bad-time").is_err());
         let cancelled = call(&db, "session_update", json!({"session_id": id, "fields": {"status": "CANCELLED"}}), sunday(), "raw-cancel").unwrap();
         assert_eq!(cancelled["data"]["session"]["status"], "CANCELLED");
         assert!(PlannedSession::get(&db, id).unwrap().unwrap().deleted_by_user());
+        let deletion = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
+        assert_eq!(deletion["action"], "DELETE");
         let jobs: i64 = db.query_row("SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'", [id], |r| r.get(0)).unwrap();
         assert_eq!(jobs, 0);
         for row in before {
@@ -523,12 +540,13 @@ mod tests {
         let args = json!({"day": "2026-10-12", "template_id": "short"});
         let first = call(&db, "plan_week", args.clone(), now, "week-1").unwrap();
         assert_eq!(first["sessions"].as_array().unwrap().len(), 3);
+        assert!(first["sessions"].as_array().unwrap().iter().all(|s| s["user_locked"] == true));
         assert_eq!(call(&db, "plan_week", args.clone(), now, "week-1").unwrap(), first);
         let again = call(&db, "plan_week", args, now, "week-2").unwrap();
         assert_eq!((again["created_count"].as_i64(), again["sessions"].as_array().unwrap().len()), (Some(0), 3));
         assert_eq!(PlannedSession::select(&db, "", []).unwrap().len(), 3);
         let other_week = call(&db, "plan_week", json!({"day": "2026-10-19", "template_id": "short"}), now, "week-1").unwrap_err();
-        assert!(other_week.to_string().contains("different planning input"), "{other_week}");
+        assert_eq!(other_week.code(), "IDEMPOTENCY_CONFLICT");
     }
 
     #[test]
