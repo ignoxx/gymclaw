@@ -47,7 +47,8 @@ count as answers, and GymClaw works for any owner, schedule and gym.
 2. **Plan:** the owner sends a photo of their plan, or GymClaw builds one from the interview. Every
    exercise is mapped to an illustrated catalog entry (`catalog search`). Unknown weights start at 0
    and are learned from the first session. Several templates form a split that rotates over
-   sessions in order (e.g. Push → Pull → Legs).
+   sessions in order (e.g. Push → Pull → Legs); each session gets the one trained longest ago, so a
+   skipped or swapped-out workout comes next instead of repeating the last.
 3. **Review:** one short summary; the owner confirms.
 4. **Ready:** later profile or plan edits don't restart setup.
 

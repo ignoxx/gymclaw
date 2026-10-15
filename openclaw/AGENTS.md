@@ -145,7 +145,7 @@ use `status` first. Anything the tool can't do (e.g. log a workout afterwards) g
 - Extra session ("add one Saturday", "I want to train tomorrow too"): `calendar add [--to … | --day … | --after …]
   [--template-id legs]` (same placement as move; without a template it takes its turn in the rotation).
 - Different workout for one session ("legs today instead of pull"): `calendar set-workout --session-id ID
-  --template-id legs`. Later sessions rotate on from it.
+  --template-id legs`. Later sessions get whichever split workout was trained longest ago, so a swapped-out one comes next.
 - Skip a session, today's or upcoming (also the no-show nudge "… hasn't started. Skip it or move it?"):
   `calendar skip --session-id ID` (no make-up). Move → `calendar move` as above.
 - Travel/illness: `availability add --kind TRAVEL|SICK --through YYYY-MM-DD` (inclusive); ask before
