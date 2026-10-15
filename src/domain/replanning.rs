@@ -120,7 +120,9 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
             Some(id) => PlannedSession::get(db, id)?.ok_or_else(|| crate::error::Error::domain("SESSION_NOT_FOUND", "Unknown session"))?,
             None => PlannedSession::new(String::new(), None, true),
         };
-        if id.is_some() && (session.status == SessionStatus::Started || session.planned_end_at <= now) {
+        // Scheduling status alone is editable; actual training history belongs to workout tools.
+        let trained = crate::db::models::WorkoutSession::first(db, "WHERE planned_session_id = ?1 AND started_at IS NOT NULL", [&session.id])?.is_some();
+        if id.is_some() && (trained || session.planned_end_at <= now) {
             crate::bail!("SESSION_NOT_EDITABLE", "Use workout tools for a running or historical workout; session edits are for upcoming slots");
         }
         let start = patch.start.or(id.map(|_| session.planned_start_at)).ok_or_else(|| crate::error::Error::domain("INVALID_ARGUMENTS", "Creating a session requires start"))?;
@@ -138,11 +140,11 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         if id.is_none() && session.workout_template_id.is_none() {
             crate::bail!("TEMPLATE_REQUIRED", "Creating a session requires a real template_id; inspect the split or templates first");
         }
-        let status = patch.status.unwrap_or(if id.is_some() { session.status } else { SessionStatus::Tentative });
+        let status = patch.status.unwrap_or(if id.is_some() { session.status } else if start <= now + HOURS_48 { SessionStatus::Committed } else { SessionStatus::Tentative });
         let slot = Candidate::manual(start, end, &profile);
-        let mut warnings = rule_breaks(db, &session.id, &slot, &profile)?;
+        let mut warnings = if status.is_active() { rule_breaks(db, &session.id, &slot, &profile)? } else { Vec::new() };
         let week = week_of(start, &profile.tz());
-        if active(db, Some(&session.id))?.iter().filter(|s| week_of(s.planned_start_at, &profile.tz()) == week).count() as i64 >= profile.weekly_max_sessions {
+        if status.is_active() && active(db, Some(&session.id))?.iter().filter(|s| week_of(s.planned_start_at, &profile.tz()) == week).count() as i64 >= profile.weekly_max_sessions {
             warnings.push("exceeds your weekly maximum".into());
         }
         cancel_session_jobs(db, &session.id, now)?;
@@ -156,7 +158,7 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         session.week_id = week.to_string();
         session.status = status;
         allocation(db, &mut session)?;
-        if session.plan("error").is_some_and(|e| !e.is_null()) {
+        if status.is_active() && session.plan("error").is_some_and(|e| !e.is_null()) {
             warnings.push("slot is too short for required movements; adjust the workout or duration".into());
         }
         if status == SessionStatus::Cancelled {

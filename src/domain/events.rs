@@ -64,3 +64,14 @@ pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
         "planning.weekly_briefing" | "calendar.personal_blockers_changed" | "workout.stale"
     ))).take(20).collect())
 }
+
+/// Freeze a decision batch before calling the model. A retry reuses this batch and its tool request
+/// IDs even when new events arrive meanwhile, so a partial failed turn cannot duplicate mutations.
+pub fn wake_batch(db: &Connection, now: Ts) -> Result<Option<AgentEvent>> {
+    if let Some(batch) = AgentEvent::first(db, "WHERE type = 'runtime.agent_wake' AND handled_at IS NULL ORDER BY created_at, id", [])? {
+        return Ok(Some(batch));
+    }
+    let events = wake_pending(db)?;
+    if events.is_empty() { return Ok(None); }
+    Ok(Some(crate::domain::core::emit(db, "runtime.agent_wake", now, json!({"events": events}))?))
+}

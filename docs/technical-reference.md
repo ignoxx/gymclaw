@@ -345,7 +345,8 @@ session times are never moved automatically. Default rotation skips locked templ
 Calendar clashes, infeasible weeks, no-shows, missed slots and stale workouts enter a durable event
 inbox. The bot processes decision events in the same serialized worker as owner chat, at most one
 batch per minute. Successful turns acknowledge their events; failed turns stay pending across
-restarts and retry without repeated failure messages. An unchanged conflict is deduplicated even
+restarts and retry without repeated failure messages. Each batch is persisted before the model
+call so events arriving during a failure cannot change its mutation request IDs. An unchanged conflict is deduplicated even
 after acknowledgement. Elapsed unstarted slots may be marked MISSED, but make-up sessions and
 closing idle workouts require agent decisions. Crowd forecast refresh and reminder upkeep remain
 deterministic. No automatic “Plan updated” briefing is sent.
