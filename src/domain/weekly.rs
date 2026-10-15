@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::db::models::{
     AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, LearnedPreference, OnboardingState, PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutSession,
-    WorkoutStatus, WorkoutTemplate,
+    WorkoutTemplate,
 };
 use crate::db::{Connection, Json, new_id};
 use crate::domain::availability::session_blocked;
@@ -18,7 +18,7 @@ use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::emit;
 use crate::domain::crowd::{CrowdModel, feel};
 use crate::domain::profile::get_profile;
-use crate::domain::replanning::{commit_upcoming, replan_weeks, retire_session};
+use crate::domain::replanning::{commit_upcoming, inspect_weeks, retire_session};
 use crate::domain::scheduling::schedule_week;
 use crate::domain::templates::get_template;
 use crate::error::Result;
@@ -108,8 +108,8 @@ pub fn mark_missed(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// 30 min into a committed slot with no workout started: ask once whether to skip or move it. Unanswered,
-/// the slot still ends as MISSED and replanning finds a make-up slot. → (event id, session id, message).
+/// 30 min into an unstarted committed slot: queue one agent event. The agent decides how to respond.
+/// An elapsed slot still ends as MISSED; a make-up session requires an agent decision.
 pub fn no_show_nudges(db: &Connection, now: Ts) -> Result<Vec<(String, String, String)>> {
     let tz = get_profile(db)?.tz();
     let mut nudges = Vec::new();
@@ -189,73 +189,15 @@ pub fn assign_rotation(db: &Connection, now: Ts) -> Result<Vec<Value>> {
     Ok(changed)
 }
 
-/// What a rolling replan changed, in the owner's words: "Fri moved to 11:00 (was 10:30) · Wed is now Push".
-/// None when nothing visible changed (forecast-only updates stay quiet).
-pub fn plan_changes(db: &Connection, rolling: &Value) -> Result<Option<String>> {
-    let tz = get_profile(db)?.tz();
-    let local = |v: &Value| v.as_str().and_then(|s| Ts::parse(s, None).ok()).map(|t| t.local(&tz));
-    let session = |id: &Value| -> Result<Option<PlannedSession>> { id.as_str().map_or(Ok(None), |id| PlannedSession::get(db, id)) };
-    let mut parts = Vec::new();
-    for change in rolling["changed"].as_array().into_iter().flatten() {
-        match change["action"].as_str() {
-            Some("moved") => {
-                if let (Some(old), Some(new)) = (local(&change["from"]), local(&change["to"])) {
-                    parts.push(if old.date() == new.date() {
-                        format!("{} moved to {} (was {})", new.strftime("%a"), new.strftime("%H:%M"), old.strftime("%H:%M"))
-                    } else {
-                        format!("{} moved to {}", old.strftime("%a %H:%M"), new.strftime("%a %H:%M"))
-                    });
-                }
-            }
-            Some("replacement") => {
-                if let Some(to) = local(&change["to"]) {
-                    parts.push(format!("New session {}", to.strftime("%a %H:%M")));
-                }
-            }
-            Some("cancelled_no_valid_slot") => {
-                if let Some(s) = session(&change["session_id"])? {
-                    parts.push(format!("{} dropped: no free slot", s.planned_start_at.local(&tz).strftime("%a")));
-                }
-            }
-            _ => {}
-        }
-    }
-    for change in rolling["rotation"].as_array().into_iter().flatten() {
-        if let Some(s) = session(&change["session_id"])? {
-            let name = get_template(db, change["template_id"].as_str().unwrap_or_default())?.name;
-            parts.push(format!("{} is now {name}", s.planned_start_at.local(&tz).strftime("%a")));
-        }
-    }
-    if let Some(created) = rolling["created"].as_array().filter(|c| !c.is_empty()) {
-        parts.push(format!("{} new sessions planned", created.len()));
-    }
-    for id in rolling["missed"].as_array().into_iter().flatten() {
-        if let Some(s) = session(id)? {
-            parts.push(format!("{} marked missed", s.planned_start_at.local(&tz).strftime("%a")));
-        }
-    }
-    Ok((!parts.is_empty()).then(|| format!("📅 Plan updated: {}", parts.join(" · "))))
-}
-
-/// A workout left open (chat reset, phone away) would block the next start forever. After 3 idle hours:
-/// skip what's left as abandoned and finish it, so logged sets and progression are kept.
-pub fn close_stale_workouts(db: &Connection, now: Ts) -> Result<Vec<String>> {
-    use crate::domain::workout::{UNRESOLVED, exercises};
-    let mut closed = Vec::new();
+/// Flag an idle workout once; the agent decides whether the owner paused or finished. Logged
+/// sets and unfinished movements stay intact until that decision.
+pub fn detect_stale_workouts(db: &Connection, now: Ts) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
     for workout in WorkoutSession::select(db, "WHERE status != 'PLAN_UPDATED' AND last_action_at < ?1 ORDER BY rowid", [now - STALE_WORKOUT])? {
-        // Close at the last action, so duration means training time, not time until we noticed.
-        let Some(ended) = workout.last_action_at else { continue };
-        for row in exercises(db, &workout.id)? {
-            if UNRESOLVED.contains(&row.status) {
-                crate::domain::adaptation::skip_exercise(db, &workout.id, &row.id, "abandoned", ended, &format!("stale:{}:{}", workout.id, row.id))?;
-            }
-        }
-        if WorkoutSession::get(db, &workout.id)?.is_some_and(|w| w.status == WorkoutStatus::WorkoutComplete) {
-            crate::domain::audit::finish(db, &workout.id, ended, &format!("stale:{}:finish", workout.id))?;
-            closed.push(workout.id);
-        }
+        crate::domain::events::request(db, "workout.stale", json!({"workout_id": workout.id, "last_action_at": workout.last_action_at}), now)?;
+        ids.push(workout.id);
     }
-    Ok(closed)
+    Ok(ids)
 }
 
 /// Worth a calendar edit: first data, a different feel, or ≥3 people and ≥25% change.
@@ -304,7 +246,7 @@ pub fn refresh_crowd(db: &Connection, now: Ts) -> Result<Vec<Value>> {
 /// current template so the calendar and the workout use today's plan.
 pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
     let mut changed = Vec::new();
-    for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND workout_template_id IS NOT NULL ORDER BY rowid", [])? {
+    for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND workout_template_id IS NOT NULL AND user_locked = 0 ORDER BY rowid", [])? {
         let template_id = session.workout_template_id.clone().expect("filtered");
         if WorkoutTemplate::get(db, &template_id)?.is_none() {
             continue;
@@ -325,24 +267,15 @@ pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(changed)
 }
 
-/// The watcher's planning pass: mark missed, repair this and next week, plan a new week inside the
-/// rolling horizon, close stale workouts, rotate, refresh plans and crowd forecasts, commit.
+/// Deterministic upkeep: mark elapsed slots missed, inspect conflicts, draft previously empty weeks,
+/// rotate defaults, refresh unlocked plan snapshots/crowd, and reconcile reminder jobs.
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     get_template(db, template_id)?; // Explicit selected template, never guess from demo import.
     let tz = get_profile(db)?.tz();
     let current_week = week_of(now, &tz);
     let next_week = current_week.checked_add(days(7))?;
     let missed = mark_missed(db, now)?;
-    let triggers: Vec<AgentEvent> = AgentEvent::select(db, "WHERE type = 'planning.replan_required' AND handled_at IS NULL ORDER BY rowid", [])?
-        .into_iter()
-        .filter(|e| matches!(e.payload_json.get("reason").and_then(Value::as_str), Some("crowd_feedback" | "workout_completed")))
-        .collect();
-    let reconsider = triggers.iter().any(|e| e.payload_json["reason"] == "crowd_feedback");
-    let repaired = replan_weeks(db, &BTreeSet::from([current_week, next_week]), now, reconsider)?;
-    for mut event in triggers {
-        event.handled_at = Some(now);
-        event.update(db)?;
-    }
+    let repaired = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let mut created: Vec<String> = Vec::new();
     for week in [current_week, next_week] {
         let start = Ts(week.to_zoned(tz.clone())?.timestamp());
@@ -361,12 +294,12 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
             queue_session_write(db, &session, now, false)?;
         }
     }
-    let stale = close_stale_workouts(db, now)?;
+    let stale = detect_stale_workouts(db, now)?;
     let rotation = assign_rotation(db, now)?;
     let plans = refresh_plans(db, now)?;
     let crowd = refresh_crowd(db, now)?;
     commit_upcoming(db, now)?;
-    let mut result = json!({"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, "closed_workouts": stale, "refreshed_plans": plans});
+    let mut result = json!({"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, "stale_workouts": stale, "refreshed_plans": plans});
     result.as_object_mut().expect("object").extend(repaired.as_object().cloned().unwrap_or_default());
     Ok(result)
 }
@@ -379,7 +312,9 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     let previous = if now.local(&tz).date().weekday() == jiff::civil::Weekday::Sunday { current_week } else { current_week.checked_sub(days(7))? };
     let rolling = rolling_plan(db, template_id, now)?;
     let report = audit_week(db, previous, now, true)?;
-    schedule_week(db, next_week, now, Some(&format!("weekly-plan:{next_week}:{template_id}")), Some(template_id), &[])?;
+    if PlannedSession::first(db, "WHERE week_id = ?1", [next_week.to_string()])?.is_none() {
+        schedule_week(db, next_week, now, Some(&format!("weekly-plan:{next_week}:{template_id}")), Some(template_id), &[])?;
+    }
     assign_rotation(db, now)?;
     commit_upcoming(db, now)?;
     for session in PlannedSession::select(db, "WHERE week_id = ?1 AND status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [next_week.to_string()])? {
@@ -389,7 +324,7 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     let event = match AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])? {
         Some(event) => event,
         None => {
-            let mut event = emit(db, "planning.weekly_briefing", now, json!({"week_start": next_week.to_string(), "template_id": template_id}))?;
+            let mut event = emit(db, "planning.weekly_briefing", now, json!({"week_start": next_week.to_string(), "template_id": template_id, "audit": report}))?;
             event.correlation_id = Some(key);
             event.update(db)?;
             event
@@ -502,7 +437,7 @@ pub fn briefing(db: &Connection, week_start: Date, report: &Value, published: bo
     }
     lines.extend(listed);
     if !flexible.is_empty() {
-        // commit_upcoming locks sessions 48 h ahead; until then replanning may still move them.
+        // commit_upcoming confirms sessions 48 h ahead and reconciles reminders.
         let days = if flexible.len() == 1 { flexible[0].clone() } else { format!("{} & {}", flexible[..flexible.len() - 1].join(", "), flexible[flexible.len() - 1]) };
         lines.extend([String::new(), format!("{days} can still move if your calendar changes.")]);
     }
@@ -635,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn new_arrival_label_reconsiders_tentative_slot_but_not_user_lock() {
+    fn new_arrival_label_wakes_agent_and_keeps_saved_slots() {
         let db = db();
         let changes = json!({"weekly_min_sessions": 1, "weekly_target_sessions": 1, "weekly_max_sessions": 1, "weekdays_allowed": [2],
             "earliest_workout_start": "19:00", "latest_workout_finish": "22:00"});
@@ -649,14 +584,15 @@ mod tests {
         let result = rolling_plan(&db, "short", sunday(2)).unwrap();
         let id = original["id"].as_str().unwrap();
         let mut updated = PlannedSession::get(&db, id).unwrap().unwrap();
-        assert_eq!(updated.planned_start_at.0.strftime("%H").to_string(), "18"); // 20:00 local, the learned quiet slot.
-        assert!(!result["changed"].as_array().unwrap().is_empty() && updated.status == SessionStatus::Tentative);
+        assert_eq!(updated.planned_start_at.0.strftime("%H").to_string(), "17"); // Saved time stays; the agent decides.
+        assert!(result["changed"].as_array().unwrap().is_empty() && updated.status == SessionStatus::Tentative);
+        assert!(!crate::domain::events::wake_pending(&db).unwrap().is_empty());
         updated.user_locked = true;
         updated.save(&db).unwrap();
         let event = emit(&db, "planning.replan_required", sunday(0), json!({"reason": "crowd_feedback"})).unwrap();
         rolling_plan(&db, "short", sunday(3)).unwrap();
         assert_eq!(PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at, updated.planned_start_at);
-        assert!(AgentEvent::get(&db, &event.id).unwrap().unwrap().handled_at.is_some());
+        assert!(AgentEvent::get(&db, &event.id).unwrap().unwrap().handled_at.is_none());
     }
 
     #[test]
@@ -691,14 +627,8 @@ mod tests {
         assert!(assign_rotation(&db, base.mins(-24 * 60)).unwrap().is_empty());
         // A running workout counts: starting Pull doesn't hand Pull to the next session again.
         workout("pull", "SET_ACTIVE", base.mins(-60));
-        let changes = assign_rotation(&db, base.mins(-24 * 60)).unwrap();
+        assign_rotation(&db, base.mins(-24 * 60)).unwrap();
         assert_eq!(templates(&db), ["legs", "push", "pull", "legs"]);
-        let third = PlannedSession::get(&db, &ids[2]).unwrap().unwrap().planned_start_at;
-        let moved = json!({"session_id": ids[2], "from": third, "to": third.mins(30), "action": "moved"});
-        assert_eq!(plan_changes(&db, &json!({"rotation": changes, "changed": [moved]})).unwrap().as_deref(), Some("📅 Plan updated: Fri moved to 12:30 (was 12:00) · Mon is now Legs · Fri is now Pull · Sun is now Legs"));
-        let mut forecast = moved.clone();
-        forecast["action"] = json!("forecast_updated");
-        assert_eq!(plan_changes(&db, &json!({"changed": [forecast]})).unwrap(), None);
         // Owner swapped Push for Pull and Push got skipped: Push comes next, not Legs again.
         workout("legs", "PLAN_UPDATED", base.mins(-30));
         let mut swapped = PlannedSession::get(&db, &ids[1]).unwrap().unwrap();

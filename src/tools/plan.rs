@@ -1,6 +1,4 @@
 //! Planning tools: the week, sessions, profile, availability, crowd and events. Owner: lead.
-use std::collections::BTreeSet;
-
 use jiff::civil::Date;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -22,7 +20,6 @@ pub fn tools() -> Vec<ToolDef> {
         def::<SessionCreate>(),
         def::<SessionUpdate>(),
         def::<PlanWeek>(),
-        def::<ReplanWeek>(),
         def::<ProfileGet>(),
         def::<ProfileUpdate>(),
         def::<AvailabilityAdd>(),
@@ -158,34 +155,19 @@ impl Tool for PlanWeek {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let week = monday_of(cx, &Some(self.day))?;
+        let before: std::collections::BTreeSet<_> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
         let planned = scheduling::schedule_week(cx.db, week, cx.now, Some(&cx.request_id), Some(&self.template_id), &[])?;
         replanning::commit_upcoming(cx.db, cx.now)?;
         for data in planned["sessions"].as_array().into_iter().flatten() {
-            if let Some(session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
+            if let Some(mut session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
+                if !before.contains(&session.id) {
+                    session.user_locked = true;
+                    session.save(cx.db)?;
+                }
                 calendar_writes::queue_session_write(cx.db, &session, cx.now, false)?;
             }
         }
         Ok(planned)
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ReplanWeek {
-    /// Any date in the week (YYYY-MM-DD). Default: this week.
-    #[serde(default)]
-    pub day: Option<String>,
-}
-
-impl Tool for ReplanWeek {
-    const NAME: &'static str = "replan_week";
-    const DESCRIPTION: &'static str = "Repair a week: unlocked future sessions that broke a rule (calendar clash, rest day) move or drop. Locked ones stay.";
-
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let week = monday_of(cx, &self.day)?;
-        let repaired = replanning::replan_weeks(cx.db, &BTreeSet::from([week]), cx.now, false)?;
-        let mut data = get_week(cx.db, week)?;
-        data.as_object_mut().expect("object").extend(repaired.as_object().cloned().unwrap_or_default());
-        Ok(data)
     }
 }
 
@@ -209,12 +191,12 @@ pub struct ProfileUpdate {
 
 impl Tool for ProfileUpdate {
     const NAME: &'static str = "profile_update";
-    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Upcoming sessions that no longer fit are replanned right away; `replanning` says what moved.";
+    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Existing sessions stay saved; `replanning.warnings` lists conflicts for you to resolve with session_update.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let mut data = serde_json::to_value(update_profile(cx.db, &self.changes)?)?;
         let weeks = availability::affected_weeks(cx.db, cx.now)?;
-        data["replanning"] = replanning::replan_weeks(cx.db, &weeks, cx.now, false)?;
+        data["replanning"] = replanning::inspect_weeks(cx.db, &weeks, cx.now)?;
         Ok(data)
     }
 }
@@ -241,7 +223,7 @@ pub struct AvailabilityAdd {
 
 impl Tool for AvailabilityAdd {
     const NAME: &'static str = "availability_add";
-    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no sessions or reminders then; affected sessions are replanned.";
+    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no sessions or reminders then; conflicts are reported for your decision.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         if self.start.is_some() && self.from_date.is_some() || self.end.is_some() && self.through.is_some() {
@@ -382,7 +364,7 @@ pub struct CalendarSync {}
 
 impl Tool for CalendarSync {
     const NAME: &'static str = "calendar_sync";
-    const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and replan around them. Runs every minute anyway.";
+    const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and report conflicts for your decision. Runs every minute anyway.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let net = Net::new()?;
@@ -399,7 +381,7 @@ pub struct PersonalCalendarConnect {
 
 impl Tool for PersonalCalendarConnect {
     const NAME: &'static str = "personal_calendar_connect";
-    const DESCRIPTION: &'static str = "Use the owner's personal calendar feed as read-only busy time. Fetches it now and replans affected weeks. Never repeat the URL back.";
+    const DESCRIPTION: &'static str = "Use the owner's personal calendar feed as read-only busy time. Fetches it now and reports affected sessions. Never repeat the URL back.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         personal_calendar::connect(cx.db, &self.url, cx.now, &Net::new()?)
@@ -423,7 +405,7 @@ pub struct PersonalCalendarDisconnect {}
 
 impl Tool for PersonalCalendarDisconnect {
     const NAME: &'static str = "personal_calendar_disconnect";
-    const DESCRIPTION: &'static str = "Stop using the personal calendar feed; its blockers are dropped and affected weeks replanned.";
+    const DESCRIPTION: &'static str = "Stop using the personal calendar feed; its blockers are dropped; existing sessions stay saved.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         personal_calendar::disconnect(cx.db, cx.now)
@@ -504,16 +486,20 @@ mod tests {
         }
     }
 
-    /// Python's `profile update` replanned on its own; the Rust tool contract leaves that to `replan_week`.
     #[test]
-    fn profile_window_change_moves_sessions_that_no_longer_fit() {
+    fn profile_window_change_reports_conflicts_and_keeps_sessions() {
         let db = db();
-        week_start_ids(&db);
+        let before = week_start_ids(&db);
         let updated = call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p").unwrap();
-        let changed = updated["replanning"]["changed"].as_array().unwrap().clone();
-        assert!(!changed.is_empty() && changed.iter().all(|c| c["action"] == "moved"), "{changed:?}");
-        let tz = get_profile(&db).unwrap().tz();
-        assert!(changed.iter().all(|c| ts(c["to"].as_str().unwrap()).local(&tz).hour() >= 11));
+        assert_eq!(updated["replanning"]["changed"], json!([]));
+        assert!(!updated["replanning"]["warnings"].as_array().unwrap().is_empty());
+        for row in before {
+            assert_eq!(PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap().planned_start_at.iso(), row["start"]);
+        }
+        let events = events::wake_pending(&db).unwrap();
+        for event in &events { events::ack(&db, event["id"].as_str().unwrap(), sunday()).unwrap(); }
+        call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p2").unwrap();
+        assert!(events::wake_pending(&db).unwrap().is_empty());
     }
 
     #[test]
@@ -561,10 +547,10 @@ mod tests {
     }
 
     #[test]
-    fn planner_events_stay_out_of_the_inbox_until_asked() {
+    fn planner_events_are_actionable_until_acknowledged() {
         let db = db();
         crate::domain::core::emit(&db, "planning.replan_required", sunday(), json!({})).unwrap();
-        assert_eq!(call(&db, "events_pending", json!({}), sunday(), "e").unwrap()["events"], json!([]));
+        assert_eq!(call(&db, "events_pending", json!({}), sunday(), "e").unwrap()["events"].as_array().unwrap().len(), 1);
         let inbox = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"].as_array().unwrap().clone();
         let actionable = inbox.iter().find(|e| e["type"] == "planning.replan_required").unwrap();
         call(&db, "event_ack", json!({"event_id": actionable["id"]}), sunday(), "ack").unwrap();

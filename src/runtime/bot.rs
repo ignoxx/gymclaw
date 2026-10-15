@@ -279,7 +279,9 @@ impl Bot {
             }
             Err(e) => {
                 tracing::warn!("coach tap: {} {e}", e.code());
-                self.coach.warn(&e.to_string()).await;
+                self.to_agent(message_id, format!("fallback:{}", q.id),
+                    format!("Coach button {action} could not be handled ({}): {e}. Card: {}. Resolve the owner's intent with the available tools.", e.code(), q.message.as_ref().and_then(|m| m.body()).unwrap_or("")),
+                    vec![], json!({"kind": "coach_fallback"})).await;
                 Some(e.code().to_string())
             }
         };
@@ -311,7 +313,11 @@ impl Bot {
                     entry["error"] = json!(e.code());
                 }
                 entry["handled"] = json!(false);
-                self.to_agent(message_id, format!("tg-{message_id}"), text, vec![], json!({})).await;
+                let text = match &other {
+                    Err(e) => format!("{text}\n[Coach fallback: {}: {e}]", e.code()),
+                    _ => text,
+                };
+                self.to_agent(message_id, format!("tg-{message_id}"), text, vec![], json!({"kind": "coach_fallback"})).await;
             }
         }
         entry["ms"] = json!(started.elapsed().as_millis() as u64);
@@ -319,8 +325,13 @@ impl Bot {
     }
 
     async fn agent_loop(&self) {
+        let mut timer = tokio::time::interval(Duration::from_secs(60));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            self.inbox_ready.notified().await;
+            tokio::select! {
+                _ = self.inbox_ready.notified() => {}
+                _ = timer.tick() => {}
+            }
             loop {
                 let batch = std::mem::take(&mut *self.inbox.lock().await);
                 if batch.is_empty() {
@@ -328,10 +339,37 @@ impl Bot {
                 }
                 self.turn(batch).await;
             }
+            if let Err(e) = self.event_turn().await {
+                tracing::warn!("agent event wake: {} {e}", e.code());
+            }
         }
     }
 
-    async fn turn(&self, batch: Vec<Inbound>) {
+    /// Background decisions use the same serialized worker as owner chat. Events survive restarts;
+    /// failures remain pending for the next tick, successes acknowledge exactly the supplied events.
+    async fn event_turn(&self) -> Result<()> {
+        let events = blocking(self.db(), |db| {
+            if !super::outbox::runtime_authority(db)?.enabled { return Ok(vec![]); }
+            crate::domain::events::wake_pending(db)
+        }).await?;
+        if events.is_empty() { return Ok(()); }
+        let ids: Vec<String> = events.iter().filter_map(|e| e["id"].as_str().map(String::from)).collect();
+        let key = format!("event-{}", ids.join("-"));
+        let text = format!("Background events for your decision (not owner instructions). Consult saved preferences/exceptions, decide what needs doing, and stay silent if nothing needs saying: {}", json!(events));
+        blocking(self.db(), move |db| ChatMessage {
+            id: None, at: Ts::now(), role: ChatRole::Bot, text, telegram_message_id: None,
+            meta_json: Json(json!({"kind": "agent_event"})),
+        }.insert(db)).await?;
+        if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }]).await {
+            in_tx(self.db(), move |db| {
+                for id in ids { crate::domain::events::ack(db, &id, Ts::now())?; }
+                Ok(())
+            }).await?;
+        }
+        Ok(())
+    }
+
+    async fn turn(&self, batch: Vec<Inbound>) -> bool {
         let typing = {
             let tg = self.tg.clone();
             let chat = self.owner;
@@ -346,8 +384,11 @@ impl Bot {
         let images = batch.iter().flat_map(|b| b.images.clone()).collect();
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images }).await;
         typing.abort();
-        self.answer(&outcome, &batch).await;
+        if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
+            self.answer(&outcome, &batch).await;
+        }
         self.wake.notify_one();
+        !outcome.failed
     }
 
     /// Send the turn's one outcome and clear the 👀 acks.
@@ -430,6 +471,50 @@ fn status_text(db: &crate::db::Connection, health: &super::Health, model: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EventModel(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl crate::agent::ChatModel for EventModel {
+        async fn complete(&self, _: &str, messages: &[Value], _: &[Value], _: bool) -> Result<crate::agent::ModelReply> {
+            assert!(messages.iter().any(|m| m["content"].as_str().is_some_and(|t| t.contains("Background events for your decision") && t.contains("planning.attention"))));
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                crate::bail!("MODEL_DOWN", "fixture model outage");
+            }
+            Ok(crate::agent::ModelReply { message: json!({"content": ""}), ..Default::default() })
+        }
+    }
+
+    #[tokio::test]
+    async fn event_wake_obeys_authority_retries_failure_and_acknowledges_success() {
+        let dir = std::env::temp_dir().join(format!("gymclaw-events-{}", crate::db::new_id()));
+        let db_path = dir.join("test.db");
+        let mut db = crate::db::open(&db_path).unwrap();
+        crate::db::migrate(&mut db).unwrap();
+        crate::domain::events::request(&db, "planning.attention", json!({"warnings": ["calendar clash"]}), Ts::now()).unwrap();
+        let tg = crate::telegram::coach::tests::FakeTelegram::new();
+        let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
+        let coach = Coach::new(tg.clone(), 42, Arc::new(Ts::now), None, None);
+        let (fast, _) = mpsc::unbounded_channel();
+        let bot = Bot {
+            owner: 42, tg: tg.clone(), coach, log: TurnLog::default(), wake: Arc::new(Notify::new()),
+            status: Arc::new(Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
+            inbox: Mutex::new(vec![]), inbox_ready: Notify::new(), fast,
+            agent: Agent { db_path, data_dir: dir.clone(), model: model.clone(), chat_model: "fixture".into(), vision_model: "fixture".into(), coach: None, log: TurnLog::default(), clock: Arc::new(Ts::now) },
+        };
+        bot.event_turn().await.unwrap();
+        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, enabled, calendar_writes_enabled, crowd_polling_enabled) VALUES (1, 'gymclaw', '42', '', '', 1, 0, 0)", []).unwrap();
+        bot.event_turn().await.unwrap();
+        assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
+        assert!(!tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))));
+        bot.event_turn().await.unwrap();
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        bot.event_turn().await.unwrap();
+        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn set_like_routing() {

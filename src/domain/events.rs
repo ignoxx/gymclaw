@@ -8,7 +8,24 @@ use crate::time::Ts;
 
 /// Events that need the owner's attention. Everything else is an audit record the code already handled
 /// (state changes, timers, sends, calendar writes).
-pub const ACTIONABLE: [&str; 3] = ["notifications.delivery_unknown", "calendar.write_blocked", "crowd.source_unavailable"];
+pub const ACTIONABLE: [&str; 10] = [
+    "notifications.delivery_unknown", "calendar.write_blocked", "crowd.source_unavailable",
+    "planning.attention", "planning.replan_required", "planning.no_show", "workout.missed",
+    "planning.weekly_briefing", "calendar.personal_blockers_changed", "workout.stale",
+];
+
+/// One event per distinct situation, including across restarts and acknowledgement. A quiet timer
+/// never creates a new model turn for the same unchanged conflict.
+pub fn request(db: &Connection, kind: &str, payload: Value, now: Ts) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let key = format!("agent:{kind}:{}", hex::encode(Sha256::digest(payload.to_string())));
+    if AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])?.is_none() {
+        let mut event = crate::domain::core::emit(db, kind, now, payload)?;
+        event.correlation_id = Some(key);
+        event.update(db)?;
+    }
+    Ok(())
+}
 
 pub fn pending(db: &Connection, include_all: bool) -> Result<Vec<Value>> {
     let filter = if include_all { String::new() } else { format!("AND type IN ({})", ACTIONABLE.map(|t| format!("'{t}'")).join(", ")) };
@@ -37,4 +54,13 @@ pub fn ack(db: &Connection, event_id: &str, now: Ts) -> Result<Value> {
 pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> {
     let latest = AgentEvent::first(db, "WHERE type IN (?1, ?2) ORDER BY created_at DESC, id DESC", [lost, restored])?;
     Ok(latest.is_some_and(|e| e.r#type == lost))
+}
+
+/// Only decisions wake the model. Delivery/permission issues stay in the inbox until explicitly
+/// resolved; acknowledging a model wake must not imply the owner granted authority.
+pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
+    Ok(pending(db, false)?.into_iter().filter(|e| matches!(e["type"].as_str(), Some(
+        "planning.attention" | "planning.replan_required" | "planning.no_show" | "workout.missed" |
+        "planning.weekly_briefing" | "calendar.personal_blockers_changed" | "workout.stale"
+    ))).take(20).collect())
 }

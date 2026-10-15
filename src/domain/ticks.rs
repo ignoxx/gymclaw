@@ -1,14 +1,12 @@
 //! Periodic domain work the scheduler runs (was `runtime watch|weekly|poll-crowd`). Owner: lead.
 //! `watch`, `weekly` and `poll_crowd` run in one transaction and queue owner messages as PENDING
 //! `notification_delivery` rows; the runtime's outbox sends them afterwards. `publish` commits per write.
-use jiff::civil::Date;
 use serde_json::{Value, json};
 
 use crate::db::Connection;
 use crate::db::models::CalendarSyncState;
-use crate::domain::calendar::{auth_alert, sync_calendar, week_lineup};
+use crate::domain::calendar::{auth_alert, sync_calendar};
 use crate::domain::calendar_writes::{apply_write, pending_writes};
-use crate::domain::core::emit;
 use crate::domain::{crowd, personal_calendar, weekly};
 use crate::error::Result;
 use crate::providers::crowd::{from_environment, run_command};
@@ -24,15 +22,14 @@ fn google_state(db: &Connection) -> Result<CalendarSyncState> {
     }
 }
 
-fn ids(events: &Value) -> Vec<String> {
-    events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect()
-}
-
-/// Every 60 s: calendar sync, personal feed, rolling replan, no-show nudges, crowd alert, plan-change briefing.
+/// Every 60 s: calendar/feed sync, deterministic upkeep, decision events and crowd health alerts.
 pub fn watch(db: &Connection, recipient: &str, now: Ts) -> Result<Value> {
-    let state = google_state(db)?;
+    let state = CalendarSyncState::get(db, 1)?.filter(|s| s.source == "google");
     let net = Net::new()?;
-    let sync = || sync_calendar(db, &mut google_provider(db, Some(&state.calendar_id), &net)?, now);
+    let sync = || match &state {
+        Some(state) => sync_calendar(db, &mut google_provider(db, Some(&state.calendar_id), &net)?, now),
+        None => Ok(json!({"data": {"weeks": []}, "events": []})),
+    };
     watch_with(db, recipient, now, sync, &net)
 }
 
@@ -41,7 +38,7 @@ fn watch_with(db: &Connection, recipient: &str, now: Ts, sync: impl FnOnce() -> 
     let authority = runtime_authority(db)?;
     // A calendar outage must not stall the rest of the tick: reminders, nudges, deliveries.
     db.execute_batch("SAVEPOINT calendar_sync")?;
-    let (synced, calendar_error) = match sync() {
+    let (_synced, calendar_error) = match sync() {
         Ok(synced) => {
             db.execute_batch("RELEASE calendar_sync")?;
             (synced, None)
@@ -58,62 +55,30 @@ fn watch_with(db: &Connection, recipient: &str, now: Ts, sync: impl FnOnce() -> 
     {
         prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
     }
-    let personal = personal_calendar::refresh(db, now, false, net, false)?;
+    let _personal = personal_calendar::refresh(db, now, false, net, false)?;
     let rolling = match &authority.template_id {
         Some(template) => weekly::rolling_plan(db, template, now)?,
         None => json!({}),
     };
-    for (event_id, _, message) in weekly::no_show_nudges(db, now)? {
-        prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
-    }
+    weekly::no_show_nudges(db, now)?;
     if authority.crowd_polling_enabled
         && let Some((event_id, message)) = crowd::polling_alert(db, now)?
     {
         prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
     }
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(hint) = synced["user_message_hint"].as_str() {
-        parts.push(hint.into());
-        for week in synced["data"]["weeks"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-            parts.push(week_lineup(db, week.parse::<Date>()?, now)?);
-        }
-    }
-    parts.extend(personal["user_message_hint"].as_str().map(String::from));
-    let hint = if parts.is_empty() { weekly::plan_changes(db, &rolling)? } else { Some(parts.join(" ")) };
-    let mut briefed = false;
-    if let Some(mut hint) = hint {
-        if !authority.calendar_writes_enabled {
-            hint += " Local plan; calendar publication pending approval.";
-        }
-        let related: Vec<String> = ids(&synced["events"]).into_iter().chain(ids(&personal["events"])).collect();
-        let event = emit(db, "calendar.update_briefing", now, json!({"related_events": related}))?;
-        prepare_event_message(db, &event.id, &hint, now, recipient, &related)?;
-        briefed = true;
-    }
-    Ok(json!({"calendar_error": calendar_error, "rolling": rolling, "briefed": briefed}))
+    Ok(json!({"calendar_error": calendar_error, "rolling": rolling, "briefed": false}))
 }
 
-/// Sunday 19:00 local: sync, plan next week, audit last week. The scheduler then publishes calendar
-/// writes and calls `weekly_briefing` with the outcome.
+/// Sunday 19:00 local: sync, draft an empty next week, audit this week and queue the agent event.
 pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
     let authority = runtime_authority(db)?;
     let Some(template) = authority.template_id.clone() else { crate::bail!("TEMPLATE_REQUIRED", "No activated template or confirmed split to plan with") };
-    let state = google_state(db)?;
     let net = Net::new()?;
-    sync_calendar(db, &mut google_provider(db, Some(&state.calendar_id), &net)?, now)?;
+    if let Some(state) = CalendarSyncState::get(db, 1)?.filter(|s| s.source == "google") {
+        sync_calendar(db, &mut google_provider(db, Some(&state.calendar_id), &net)?, now)?;
+    }
     personal_calendar::refresh(db, now, true, &net, false)?;
     weekly::weekly_plan(db, &template, now)
-}
-
-/// Queue the briefing for `weekly`'s plan. `published`: every calendar write landed without conflict.
-pub fn weekly_briefing(db: &Connection, recipient: &str, data: &mut Value, published: bool, now: Ts) -> Result<()> {
-    let week: Date = data["week_start"].as_str().unwrap_or_default().parse()?;
-    let text = weekly::briefing(db, week, &data["audit"], published, now)?;
-    let event_id = data["event_id"].as_str().unwrap_or_default().to_string();
-    data["delivery"] = prepare_event_message(db, &event_id, &text, now, recipient, &[])?;
-    data["briefing"] = json!(text);
-    data["published"] = json!(published);
-    Ok(())
 }
 
 /// Every 15 min when crowd polling is enabled: read the gym's live count. A failed read is returned,
@@ -153,7 +118,6 @@ pub fn publish(db: &Connection, now: Ts) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use jiff::civil::Date;
-
     use super::*;
     use crate::db::models::PlannedSession;
     use crate::domain::calendar_writes::queue_session_write;
@@ -197,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn calendar_resize_watch_sends_once_without_publication() {
+    fn calendar_resize_wakes_agent_once_without_fixed_briefing() {
         let (db, mut calendar) = setup(json!({"weekly_min_sessions": 1, "weekly_target_sessions": 1, "weekly_max_sessions": 1}));
         let mut session = PlannedSession::select(&db, "", []).unwrap().remove(0);
         let write = queue_session_write(&db, &session, sunday(0), false).unwrap().unwrap();
@@ -207,12 +171,12 @@ mod tests {
         let tz = crate::time::zone("Europe/Berlin").unwrap();
         calendar.edit(session.calendar_event_id.as_deref().unwrap(), json!({"end": {"dateTime": iso(&end.local(&tz)), "timeZone": "Europe/Berlin"}})).unwrap();
         tick(&db, sunday(1), Some(&mut calendar));
-        let messages = sent(&db);
-        assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(messages[0].starts_with("Short now Mon 07:00–07:45. Workout compressed to the new slot length. Week of Oct 12: Mon 07:00 Short."), "{}", messages[0]);
-        assert!(messages[0].contains("publication pending approval"));
+        assert!(sent(&db).is_empty());
+        let events = crate::domain::events::wake_pending(&db).unwrap();
+        assert!(events.iter().any(|e| e["type"] == "planning.replan_required"));
         tick(&db, sunday(2), Some(&mut calendar));
-        assert_eq!(sent(&db).len(), 1);
+        assert_eq!(crate::domain::events::wake_pending(&db).unwrap(), events);
+        assert!(sent(&db).is_empty());
     }
 
     /// Expired Google auth used to fail the whole tick: no reminders, no nudges, no word to the owner.

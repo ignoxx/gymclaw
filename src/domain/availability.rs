@@ -12,7 +12,7 @@ use crate::domain::core::{emit, mutate};
 use crate::domain::notifications::cancel_session_jobs;
 use crate::domain::planning::Interval;
 use crate::domain::profile::get_profile;
-use crate::domain::replanning::{commit_upcoming, expanded, replan_weeks};
+use crate::domain::replanning::{commit_upcoming, expanded, inspect_weeks};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -46,7 +46,7 @@ pub fn affected_weeks(db: &Connection, now: Ts) -> Result<BTreeSet<Date>> {
     Ok(weeks)
 }
 
-/// Owner is away/sick/busy over [start, end): sessions in it lose their reminders and get replanned;
+/// Owner is away/sick/busy over [start, end): sessions in it lose their reminders and report conflicts;
 /// owner-locked ones stay unless `cancel_locked`.
 pub fn add(db: &Connection, start: Ts, end: Ts, kind: BlockKind, now: Ts, request_id: &str, cancel_locked: bool) -> Result<Value> {
     if start >= end {
@@ -79,9 +79,9 @@ pub fn add(db: &Connection, start: Ts, end: Ts, kind: BlockKind, now: Ts, reques
                 emit(db, "availability.locked_session_cancelled", now, json!({"session_id": plan.id, "block_id": row.id, "request_id": request_id}))?;
             }
         }
-        let repaired = replan_weeks(db, &affected_weeks(db, now)?, now, false)?;
+        let repaired = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
         let instruction = if locked.is_empty() {
-            "Unavailability saved. Affected plan repaired; normal planning resumes after end time."
+            "Unavailability saved. Existing sessions kept; resolve reported conflicts with session_update."
         } else {
             "Pause saved. Reminders suppressed; manually locked calendar slots need explicit cancellation."
         };
@@ -102,7 +102,7 @@ pub fn retract(db: &Connection, block_id: &str, now: Ts, request_id: &str) -> Re
         row.status = BlockStatus::Retracted;
         row.retracted_at = Some(now);
         row.update(db)?;
-        let repaired = replan_weeks(db, &affected_weeks(db, now)?, now, false)?;
+        let repaired = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
         commit_upcoming(db, now)?;
         Ok(json!({"block_id": row.id, "status": row.status, "replanning": repaired, "remote_events_changed": false,
             "instruction": "Availability override removed. Valid future planning resumed."}))
@@ -143,13 +143,14 @@ mod tests {
     }
 
     #[test]
-    fn pause_repairs_future_slots_no_makeup_volume_and_expires() {
+    fn pause_keeps_slots_reports_conflicts_and_expires() {
         let db = db();
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let end = sunday(6 * 24 * 60);
         let result = add(&db, sunday(0), end, BlockKind::Sick, sunday(0), "pause", false).unwrap();
-        assert!(!result["data"]["replanning"]["changed"].as_array().unwrap().is_empty());
-        assert!(PlannedSession::select(&db, "", []).unwrap().iter().all(|s| s.status == SessionStatus::Cancelled));
+        assert_eq!(result["data"]["replanning"]["changed"], json!([]));
+        assert!(!result["data"]["replanning"]["warnings"].as_array().unwrap().is_empty());
+        assert!(PlannedSession::select(&db, "", []).unwrap().iter().all(|s| s.status.is_open()));
         assert_eq!(pending_jobs(&db, None), 0);
         let blocked = start(&db, Some("short"), None, false, sunday(60), "blocked-start").unwrap_err();
         assert!(blocked.to_string().contains("availability override"), "{blocked}");
