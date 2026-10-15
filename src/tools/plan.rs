@@ -170,7 +170,7 @@ pub struct SetSessionWorkout {
 
 impl Tool for SetSessionWorkout {
     const NAME: &'static str = "set_session_workout";
-    const DESCRIPTION: &'static str = "Change which workout an upcoming session does (\"legs today instead of pull\"). Later sessions rotate on from it.";
+    const DESCRIPTION: &'static str = "Change which workout an upcoming session does (\"legs today instead of pull\"). Later sessions get whichever split workout was trained longest ago, so a swapped-out one comes next.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let id = session_id(cx, &self.session_id)?;
