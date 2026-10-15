@@ -84,7 +84,8 @@ calendar authority. Template import fails with `ILLUSTRATION_REQUIRED` until eve
 - Workout fits local start/finish bounds; entire prep/travel block must be free.
   Intervals are half-open, so touching appointments are valid.
 - At least one full local rest day by default, including sessions in adjacent weeks.
-  Recovery is hard validation; `recovery_weight` is reserved for later soft scoring.
+  These are candidate-generation defaults. Explicit session edits keep the chosen time and return
+  warnings instead; `recovery_weight` is reserved for later soft scoring.
 - Maximize achievable target session count first, then total score. Best candidate per
   local day + exhaustive weekday combinations avoids greedy recovery traps.
   Equal scores pick earliest date/start, preferred duration first.
@@ -140,7 +141,7 @@ times, no titles or notes.
 2. On the Docker host, run `scripts/connect-personal-calendar` and paste the link at the
    hidden prompt. It resolves iCloud's redirect, checks the feed host is in
    `EGRESS_EXTRA_HOSTS`, passes the link to the container over stdin (never argv), then
-   fetches once and replans. `calendar personal-status` shows health afterwards.
+   fetches once and reports planning conflicts. `calendar personal-status` shows health afterwards.
 
 Google's **Secret address in iCal format** works the same way.
 
@@ -168,26 +169,52 @@ python -m gymclaw.cli calendar publish --allow-writes
 ID/times/bodies in `pending-writes` before approving publication. `schedule plan-week`
 remains the provider-free local operation; optional `--template-id` adds compression plan.
 `calendar get-week --week-start ...` reads local state; `calendar replan --week-start ...`
-syncs then repairs it. `planning replan --week-start ...` repairs cached state without API.
+syncs then reports conflicts to the agent. `planning replan --week-start ...` checks cached state
+without API calls. Neither moves or cancels sessions.
 `calendar move --session-id ... [--day ... | --to ... | --after ...]` moves one upcoming session to the
 best valid slot (at/after `--after` if given) or an exact valid start, without a provider sync, and
 returns up to two spread-out `alternatives`. Slot score = crowd first, then a learned time-of-day
 habit (`services/habits.py`: arrival times of workouts started with the ▶️ button, and owner moves, decayed over ~6 weeks) at a
 lower weight, so a habitual busy hour still loses to a quiet one. `profile update`
-repairs upcoming weeks right away, so a narrower time window moves sessions that no longer fit.
+reports upcoming sessions that conflict with new defaults; the agent decides which to edit.
 
 Sync accepts manual edits, recalculates prep/leave/finish, replaces local reminder jobs,
-locks edited sessions, compresses resized slots and repairs only invalid unlocked sessions.
+locks edited sessions, compresses resized slots and emits planning events for conflicts.
 Locked recovery/blocker conflicts remain visible, not silently reverted. Slots too short
 for required movements stay edited and report explicit adjustment needed. Deletes leave
 tombstones; exact deleted events/slots are not recreated automatically. Metadata-only
 updates may refresh description/revision on locked events; never their chosen times/title.
 
-Upcoming sessions commit within 48 hours; get-ready/leave/start jobs become durable.
+Default sessions commit within 48 hours (an explicitly chosen TENTATIVE status stays tentative); get-ready/leave/start jobs become durable.
 `notifications due` emits local instructions only. Prepared OpenClaw watcher syncs every
 60 seconds without model calls and reconciles reminders. Publication stays off unless
 continuing calendar-write authority is separately granted. No watcher/job is installed
 until explicit runtime/message approval.
+
+### Agent data tools
+
+`sql 'SELECT …' [--limit 200]` reads any table on a separate `mode=ro` SQLite connection.
+CTEs/joins work; writes, ATTACH and PRAGMA commands are denied by SQLite's authorizer.
+Maximum 1000 rows, two-second execution budget and 1 MB per value. Results include columns,
+rows and `truncated`; blobs are `{hex: "…"}`. Discover schema with
+`SELECT sql FROM sqlite_schema WHERE type='table'`. Results can contain private DB data.
+
+`session create|update|cancel --request-id ID` provides explicit planning mechanics:
+
+```text
+session create --data '{"start":"2026-10-20T18:00","end":"2026-10-20T19:00","template_id":"legs"}' --request-id ID
+session update --session-id ID --data '{"start":"2026-10-21T18:00","template_id":"push","status":"COMMITTED"}' --request-id ID
+session cancel --session-id ID --request-id ID
+```
+
+Editable fields are start, end, template_id and status (TENTATIVE, COMMITTED, CANCELLED,
+SKIPPED, MISSED). Derived timing/allocation fields are recalculated through existing services;
+identity, calendar provenance and actual workout history remain service-owned. Naive times use
+profile timezone. Omitted end preserves duration; create defaults to preferred duration.
+Edits lock one session and return warnings for default-rule violations. Calendar writes remain
+queued behind existing publication authority, reminder jobs are reconciled, and exact request
+retries replay the original result. Elapsed sessions can be marked missed or explicitly rescheduled;
+started/completed workouts use workout tools.
 
 ### Safety and retries
 
@@ -404,9 +431,13 @@ move (see [deploy/README.md](../deploy/README.md)); `runtime sync` then recreate
 `audit week --week-start YYYY-MM-DD` returns durable weekly performance totals.
 `runtime weekly --template-id ID --telegram-id OWNER_ID` is local planning/briefing preview
 (no sends/publication); an explicit isolated calendar fixture is supported. Calendar
-read failure prevents rolling changes. Known labels can reconsider distant tentative
-slots; committed/user-locked slots do not move for crowd preference alone. Changed
-calendar consequences and Sunday briefings use same confirmed-delivery/unknown-send rules.
+read failure prevents drafting new defaults. Calendar clashes, no-shows, infeasible defaults, week
+rollover and new crowd feedback become durable agent events. The watcher wakes OpenClaw through `system event --mode now`; unchanged pending work
+is coalesced for ten minutes, then retried until acknowledged. Wake failures preserve events and
+retry on the next tick. Quiet ticks use no model. Existing times/templates and elapsed session
+statuses await agent decisions; no automatic make-up sessions or “Plan updated” messages.
+Default plans for empty weeks and crowd metadata refresh stay automatic. Sunday audit/default
+planning emits an event for the agent to review and brief. Timed reminders retain the delivery outbox.
 
 ### Travel / illness overrides
 
@@ -438,8 +469,9 @@ finish an open workout. Resolve its outstanding exercises explicitly before next
 - `gymclaw/services/notifications.py`, `events.py`: durable local job/event dispatch.
 - `gymclaw/providers/`: typed calendar contract, Google REST/OAuth and demo provider.
 - `gymclaw/services/calendar.py`, `calendar_busy.py`: sync/reconciliation and recurrence.
-- `gymclaw/services/calendar_writes.py`, `replanning.py`: owned outbox and plan repair.
-- `gymclaw/services/weekly.py`: rolling horizon, no-show nudges, missed-slot maintenance, weekly audit/briefing.
+- `gymclaw/services/calendar_writes.py`, `replanning.py`: owned outbox, slot suggestions and conflict detection.
+- `gymclaw/services/sessions.py`, `sql.py`: general session mutations and bounded read-only SQL.
+- `gymclaw/services/weekly.py`: rolling horizon, no-show nudges, missed-slot detection, weekly audit/briefing.
 - `gymclaw/services/body.py`, `body_cli.py`: weigh-ins, photo dates, trend and briefing line.
 - `gymclaw/services/compression.py`: deterministic workout time allocation.
 - `gymclaw/providers/openclaw.py`, `services/runtime.py`: scoped scheduler and durable delivery.

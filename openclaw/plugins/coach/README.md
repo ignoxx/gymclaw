@@ -11,6 +11,9 @@ Model-free workout flow in Telegram. Logging a set takes about a second and neve
   sees them (`inbound_claim` only fires for plugin-bound chats). On a bodyweight exercise reps alone
   count (`13`, `13 reps`, `13x`). The message gets 👍 (its ID comes from
   `message_received`), the set card gets `✅ 10 × 40 kg`. Order comes from units, then the expected weight, then reps-first.
+- **Fallback:** unparsed text and failed typed-set validation reach the agent with the original
+  message. Failed taps/rest transitions save `coach.fallback` with intent, error and original request
+  ID; runtime wakes the agent to inspect committed state before retrying.
 - **Rest** (after every working set, also before the next exercise): a small `⏱ 1:25 until Bench set 2/2`
   (or `until next: Cable fly`) message with `−15s` / `−30s` (edit the same message) and `⏭ Skip`, edited
   every 5 s. Exactly at zero (or on Skip) it is deleted and a fresh set card is sent, which notifies the

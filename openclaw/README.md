@@ -16,7 +16,10 @@ running workspace on every start, except `USER.md`.
 
 Every action goes through `scripts/gymclaw-tool`, which validates it and writes to SQLite. Scheduled
 jobs (calendar watcher, crowd poll, reminders, rest timers, Sunday plan) are OpenClaw cron jobs that
-`runtime sync` creates and owns; quiet ticks never wake the model.
+`runtime sync` creates and owns; quiet ticks never wake the model. Planning conflicts and failed
+workout buttons go into the durable event inbox and wake the agent through the existing heartbeat.
+The agent reads USER.md exceptions and makes explicit session edits; background code keeps
+existing times and templates.
 
 ## Model
 
