@@ -177,7 +177,7 @@ def handle_tap(db: Session, payload: str, *, now: datetime, request_id: str) -> 
         return begin(db, args[0], now=now, request_id=request_id)
     workout = active_workout(db)
     if workout is None:
-        return {"handled": True, "ack": "⌛ No workout running.", "cards": []}
+        raise DomainError("NO_ACTIVE_WORKOUT", "Button needs a running workout; agent should check current state")
     if action == "end":
         return end_workout(db, workout, now=now, request_id=request_id)
     ref = args[0] if args else ""
@@ -322,7 +322,7 @@ def begin(db: Session, ref: str, *, now: datetime, request_id: str) -> dict:
         return {"handled": True, "ack": "Already running.", "cards": [exercise_card(db, running, now)]}
     planned = db.scalar(select(PlannedSession).where(PlannedSession.id.startswith(ref)))
     if planned is None or planned.status not in {"TENTATIVE", "COMMITTED"} or not planned.workout_template_id:
-        return {"handled": True, "ack": "⌛ This session can't be started anymore.", "cards": []}
+        raise DomainError("SESSION_NOT_STARTABLE", "Session is missing, ended or has no template; agent should resolve the start request")
     start(db, planned.workout_template_id, now=now, request_id=request_id, planned_session_id=planned.id, by_button=True)
     return {"handled": True, "ack": "▶️ Started.", "cards": [exercise_card(db, active_workout(db), now)]}
 

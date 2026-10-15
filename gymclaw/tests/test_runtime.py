@@ -25,6 +25,7 @@ class FakeRuntime:
     def __init__(self):
         self.jobs = []
         self.sent = []
+        self.woken = []
         self.created = []
         self.removed = []
         self.fail_send = False
@@ -49,6 +50,9 @@ class FakeRuntime:
     def remove(self, job_id):
         self.removed.append(job_id)
         self.jobs = [row for row in self.jobs if row["id"] != job_id]
+
+    def wake(self, text):
+        self.woken.append(text)
 
     def send(self, recipient, message, buttons=()):
         self.sent.append((recipient, message))
@@ -258,3 +262,33 @@ def test_runtime_cli_offline_plan_and_fire(engine, capsys):
     assert value["data"]["status"] == "PENDING"
     assert main(args + ["sync", "--telegram-id", "123"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "RUNTIME_NOT_APPROVED"
+
+
+def test_agent_wake_only_for_durable_pending_work_retries_and_respects_pause(engine, tmp_path):
+    from gymclaw.services.events import attention, ack
+    provider = FakeRuntime()
+    with Session(engine) as db, db.begin():
+        runtime.configure_runtime(db, profile=provider.profile, recipient="123", project_root=tmp_path, python="python3")
+    assert runtime.wake_agent(engine, provider, now=NOW)["reason"] == "no_events"
+    with Session(engine) as db, db.begin():
+        event = attention(db, "planning.attention_required", {"week_start": "2026-10-12"}, now=NOW)
+        event_id = event.id
+    assert runtime.wake_agent(engine, provider, now=NOW)["woken"]
+    assert runtime.wake_agent(engine, provider, now=NOW + timedelta(minutes=1))["reason"] == "already_requested"
+    assert len(provider.woken) == 1
+    assert runtime.wake_agent(engine, provider, now=NOW + timedelta(minutes=11))["woken"]
+    with Session(engine) as db, db.begin():
+        ack(db, event_id, now=NOW + timedelta(minutes=12))
+    assert runtime.wake_agent(engine, provider, now=NOW + timedelta(minutes=12))["reason"] == "no_events"
+    with Session(engine) as db, db.begin():
+        attention(db, "coach.fallback", {"error": "test"}, now=NOW + timedelta(minutes=12))
+    def failed(_):
+        raise DomainError("GATEWAY_UNREACHABLE", "offline")
+    provider.wake = failed
+    assert runtime.wake_agent(engine, provider, now=NOW + timedelta(minutes=12))["reason"] == "GATEWAY_UNREACHABLE"
+    provider.wake = lambda text: provider.woken.append(text)
+    assert runtime.wake_agent(engine, provider, now=NOW + timedelta(minutes=13))["woken"]
+    with Session(engine) as db, db.begin():
+        from gymclaw.models import RuntimeSettings
+        db.get(RuntimeSettings, 1).enabled = False
+    assert runtime.wake_agent(engine, provider, now=NOW + timedelta(minutes=14))["reason"] == "runtime_not_enabled"

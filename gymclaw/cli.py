@@ -152,7 +152,7 @@ def parser():
         command.add_argument("--json", action="store_true")
     global COMMANDS
     unique = {id(sub): (name, sub) for name, sub in groups.choices.items()}.values()
-    COMMANDS = "; ".join(f"{name} " + "|".join(next(a for a in sub._actions if a.dest == "operation").choices) for name, sub in unique)
+    COMMANDS = "; ".join(f"{name} " + "|".join(next((a.choices for a in sub._actions if a.dest == "operation"), ["<query>"])) for name, sub in unique)
     return root
 
 
@@ -267,7 +267,7 @@ def main(argv=None) -> int:
                         changes = json.loads(args.data)
                         if not isinstance(changes, dict):
                             raise ValueError("Profile changes must be JSON object")
-                        # Sessions that no longer fit (e.g. a narrower time window) move right away.
+                        # Updated defaults report conflicts for the agent; existing sessions stay.
                         now = args.now or datetime.now(timezone.utc)
                         data = update_profile(db, changes).model_dump(mode="json") | {"replanning": replan_weeks(db, affected_weeks(db, now), now=now)}
                     else:

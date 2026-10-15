@@ -61,7 +61,7 @@ def add(db: Session, *, start: datetime, end: datetime, kind: str, now: datetime
                     locked.append(plan.id)
                     continue
                 # Explicit later user cancellation supersedes earlier calendar lock.
-                plan.user_locked = False
+                plan.user_locked = True
                 plan.status = "CANCELLED"
                 plan.source_revision += 1
                 plan.workout_plan_json |= {"deleted_by_user": True, "manual_lock_cancelled_by_request": request_id}
@@ -70,7 +70,7 @@ def add(db: Session, *, start: datetime, end: datetime, kind: str, now: datetime
         repaired = replan_weeks(db, affected_weeks(db, now), now=now)
         return {"block_id": row.id, "kind": kind, "start": start.isoformat(), "end": end.isoformat(), "locked_conflicts": locked,
             "replanning": repaired, "remote_events_changed": False,
-            "instruction": "Pause saved. Reminders suppressed; manually locked calendar slots need explicit cancellation." if locked else "Unavailability saved. Affected plan repaired; normal planning resumes after end time."}
+            "instruction": "Pause saved. Reminders suppressed; manually locked calendar slots need explicit cancellation." if locked else "Unavailability saved. Conflicting sessions reported for agent review; pause expires at end time."}
 
     return mutate(db, "availability.added", request_id, {"start": start.isoformat(), "end": end.isoformat(), "kind": kind, "cancel_locked": cancel_locked}, now, action)
 
@@ -88,5 +88,5 @@ def retract(db: Session, block_id: str, *, now: datetime, request_id: str) -> di
         db.flush()
         repaired = replan_weeks(db, affected_weeks(db, now), now=now)
         commit_upcoming(db, now=now)
-        return {"block_id": row.id, "status": row.status, "replanning": repaired, "remote_events_changed": False, "instruction": "Availability override removed. Valid future planning resumed."}
+        return {"block_id": row.id, "status": row.status, "replanning": repaired, "remote_events_changed": False, "instruction": "Availability override removed. Review future sessions against restored availability."}
     return mutate(db, "availability.retracted", request_id, {"block_id": block_id}, now, action)

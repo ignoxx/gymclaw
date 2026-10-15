@@ -125,17 +125,20 @@ def test_next_end_crowd_and_baseline_weight(db):
     assert db.get(ExerciseProgression, "incline").next_weight == 90
 
 
-def test_idle_workout_is_closed_and_keeps_logged_sets(db):
+def test_idle_workout_is_preserved_for_agent_decision(db):
     from gymclaw.models import WorkoutSession
     from gymclaw.services.weekly import close_stale_workouts
     coach.handle_text(db, "10x90", now=at(10), request_id="m1")
     assert close_stale_workouts(db, now=at(10) + timedelta(hours=2)) == []
     workout = coach.active_workout(db)
-    assert close_stale_workouts(db, now=at(10) + timedelta(hours=3, seconds=1)) == [workout.id]
-    assert db.get(WorkoutSession, workout.id).status == "PLAN_UPDATED"
-    assert coach.active_workout(db) is None
-    # A new workout can start again.
-    start(db, "push", now=at(10) + timedelta(hours=4), request_id="again")
+    assert close_stale_workouts(db, now=at(10) + timedelta(hours=3, seconds=1)) == []
+    assert db.get(WorkoutSession, workout.id).status == "RESTING"
+    assert coach.active_workout(db).id == workout.id
+    from gymclaw.services.events import pending
+    events = [e for e in pending(db) if e["type"] == "workout.stale"]
+    assert len(events) == 1 and events[0]["payload"]["workout_id"] == workout.id
+    close_stale_workouts(db, now=at(10) + timedelta(hours=4))
+    assert len([e for e in pending(db) if e["type"] == "workout.stale"]) == 1
 
 
 def test_session_preview_uses_current_plan_local_time_and_one_image(db, tmp_path, monkeypatch):
@@ -263,3 +266,24 @@ def test_only_button_starts_count_as_gym_arrivals_for_habits(db):
     db.add(planned); db.flush()
     coach.begin(db, planned.id[:8], now=tomorrow, request_id="begin")
     assert evidence(db, now=tomorrow, zone=zone) == [(20 * 60, 1.0)]  # 18:00 UTC = 20:00 Berlin
+
+
+def test_fallback_cli_persists_original_request_context_once(tmp_path, capsys):
+    import json
+    from gymclaw.cli import main
+    from gymclaw.services.events import pending
+    from gymclaw.db import initialize, make_engine
+    from sqlalchemy.orm import Session
+    engine = make_engine(f"sqlite:///{tmp_path / 'fallback.db'}")
+    initialize(engine)
+    context = {'source': 'tap', 'payload': 'begin:abc', 'request_id': 'tg-cb:abc', 'error_code': 'SLOT_TOO_SHORT'}
+    argv = ['--db-url', str(engine.url), 'coach', 'fallback', '--data', json.dumps(context), '--request-id', 'fallback:abc']
+    assert main(argv) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == first
+    with Session(engine) as db:
+        events = pending(db)
+        assert len(events) == 1 and events[0]['type'] == 'coach.fallback'
+        assert events[0]['payload']['result']['data']['context'] == context
+    engine.dispose()

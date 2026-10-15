@@ -44,6 +44,7 @@ class AutomationProvider(Protocol):
     def create(self, spec: AutomationSpec) -> str: ...
     def remove(self, job_id: str): ...
     def send(self, recipient: str, message: str, buttons: tuple[tuple[str, str], ...] = ()) -> str: ...
+    def wake(self, text: str): ...
 
 
 def cli_json(text: str) -> dict:
@@ -120,6 +121,10 @@ class OpenClawProvider:
 
     def remove(self, job_id: str):
         self.call("cron", "remove", job_id)
+
+    def wake(self, text: str):
+        """Trigger the existing heartbeat; durable domain events carry the actual work."""
+        self.call("system", "event", "--mode", "now", "--text", text)
 
     def send(self, recipient: str, message: str, buttons: tuple[tuple[str, str], ...] = ()) -> str:
         """`buttons` are (label, callback data) pairs in one row, e.g. ("▶️ Start workout", "gc:begin:1a2b3c4d")."""

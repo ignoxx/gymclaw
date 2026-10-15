@@ -229,18 +229,24 @@ export function registerCoach(api, { run, telegram, coaches = COACHES, turnLog =
       log: api.logger,
       // Closing the rest job here keeps the cron fallback ping silent; sync then removes it.
       onRestOver: async () => {
-        const result = await cli(["coach", "rest-over"]);
-        if (result.rest_over) sync();
-        return result;
+        try {
+          const result = await cli(["coach", "rest-over"]);
+          if (result.rest_over) sync();
+          return result;
+        } catch (error) {
+          await fallback({ source: "rest-over", error_code: error.code ?? "ERROR", error: error.message }, `rest:${now()}`);
+          return null;
+        }
       },
     }));
   }
   const coach = coaches.get(ownerId);
   const changed = (result) => result.handled !== false && !result.keep && (result.cards?.length || result.ack);
 
-  async function report(error) {
-    api.logger.warn(`gymclaw-coach: ${error.code ?? "ERROR"} ${error.message}`);
-    await coach.apply({ cards: [{ text: `⚠️ ${error.message}`, buttons: [] }], keep: true });
+  async function fallback(context, requestId) {
+    api.logger.warn(`gymclaw-coach: handing ${context.source} to agent: ${context.error_code}`);
+    await cli(["coach", "fallback", "--data", JSON.stringify(context), "--request-id", `fallback:${requestId}`]);
+    sync();
   }
 
   api.registerInteractiveHandler({
@@ -257,7 +263,14 @@ export function registerCoach(api, { run, telegram, coaches = COACHES, turnLog =
         if (changed(result)) sync();
       } catch (error) {
         entry.error = error.code ?? "ERROR";
-        await report(error);
+        try {
+          await fallback({ source: "tap", payload: ctx.callback.payload, message: ctx.callback.messageText,
+            message_id: ctx.callback.messageId, request_id: `tg-cb:${ctx.callbackId}`,
+            error_code: error.code ?? "ERROR", error: error.message }, `tg-cb:${ctx.callbackId}`);
+        } catch (fallbackError) {
+          api.logger.warn(`gymclaw-coach: fallback failed: ${fallbackError.message}`);
+          return { handled: false };
+        }
       }
       turnLog({ ...entry, ok: !entry.error, ms: now() - started });
       return { handled: true };

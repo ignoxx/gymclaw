@@ -133,17 +133,19 @@ def test_owner_adds_sessions_and_picks_workouts(engine, capsys):
         assert db.get(PlannedSession, added["data"]["session_id"]).status in {"TENTATIVE", "COMMITTED"}
     # "Legs today instead": the session gets that workout and keeps it.
     code, legs = call("calendar", "set-workout", "--session-id", sessions[0]["id"], "--template-id", "legs", "--request-id", "tg-2-set")
-    assert code == 0 and legs["data"]["to"] == "legs"
+    assert code == 0 and legs["data"]["session"]["workout_template_id"] == "legs"
     with Session(engine) as db, db.begin():
         weekly.assign_rotation(db, now=SUNDAY)
         row = db.get(PlannedSession, sessions[0]["id"])
         assert row.user_locked and row.workout_template_id == "legs" and row.workout_plan_json["template"]["id"] == "legs"
 
 
-def test_profile_window_change_moves_sessions_that_no_longer_fit(engine, capsys):
+def test_profile_window_change_reports_sessions_that_no_longer_fit(engine, capsys):
     with Session(engine) as db, db.begin():
         weekly.weekly_plan(db, "short", now=SUNDAY)
     assert main(["--db-url", str(engine.url), "profile", "update", "--data", '{"earliest_workout_start":"11:00"}', "--now", SUNDAY.isoformat()]) == 0
-    changed = json.loads(capsys.readouterr().out)["data"]["replanning"]["changed"]
-    assert changed and all(c["action"] == "moved" for c in changed)
-    assert all(datetime.fromisoformat(c["to"]).astimezone(ZoneInfo("Europe/Berlin")).hour >= 11 for c in changed)
+    result = json.loads(capsys.readouterr().out)["data"]["replanning"]
+    assert not result["changed"] and result["warnings"]
+    with Session(engine) as db:
+        from gymclaw.models import PlannedSession
+        assert all(row.planned_start_at.astimezone(ZoneInfo("Europe/Berlin")).hour == 7 for row in db.scalars(select(PlannedSession)))

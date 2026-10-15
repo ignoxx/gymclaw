@@ -240,3 +240,26 @@ test("agent tool: missing argument or nothing logged is an error, not a silent o
   const notLogged = parse(await registered.tool.execute("t2", { action: "log", text: "13" }));
   assert.deepEqual([notLogged.ok, notLogged.code], [false, "NOT_LOGGED"]);
 });
+
+
+test("tap failure saves original intent for the agent, including a possibly committed request", async () => {
+  const seen = [];
+  const { registered, calls } = plugin(async (args) => {
+    seen.push(args);
+    if (args[1] === "tap") throw Object.assign(new Error("Cannot allocate this slot"), { code: "SLOT_TOO_SHORT" });
+    return {};
+  });
+  const ctx = { auth: { isAuthorizedSender: true }, isGroup: false, senderId: OWNER, callbackId: "broken",
+    callback: { payload: "begin:abcd1234", messageId: 100, messageText: "Start Legs" } };
+  assert.deepEqual(await registered.callback.handler(ctx), { handled: true });
+  const fallback = seen.find((args) => args[1] === "fallback");
+  assert.deepEqual(JSON.parse(fallback[3]), { source: "tap", payload: "begin:abcd1234", message: "Start Legs",
+    message_id: 100, request_id: "tg-cb:broken", error_code: "SLOT_TOO_SHORT", error: "Cannot allocate this slot" });
+  assert.equal(fallback[5], "fallback:tg-cb:broken");
+  assert.equal(calls.length, 0);
+});
+
+test("validation failure on typed sets passes the original message to the agent", async () => {
+  const { registered } = plugin(async () => { throw Object.assign(new Error("Warm-up first"), { code: "WARMUP_REQUIRED" }); });
+  assert.equal(await registered.hooks.get("before_dispatch")({ channel: "telegram", senderId: OWNER, content: "9x80" }), undefined);
+});

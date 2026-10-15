@@ -62,12 +62,12 @@ def test_briefing_hides_uncertain_crowd_and_lists_new_targets(engine):
         text = weekly.briefing(db, datetime(2026, 10, 12).date(), result["audit"], published=True, now=SUNDAY)
     assert text.startswith("🏋️ Your week · Oct 12–18")
     assert "🔴 Packed" in text and "Empty" not in text and "score" not in text
-    assert "can still move if your calendar changes" in text
+    assert "are tentative; I’ll review calendar changes" in text
     assert "\n🎯 New targets: bench 82.5 kg (+2.5)\n" in text
     assert text.endswith("⚖️ Snap a photo of your scale anytime and I'll track your weight.")
 
 
-def test_rolling_watch_marks_elapsed_unstarted_session_missed_not_completed(engine):
+def test_rolling_watch_reports_elapsed_session_without_changing_status(engine):
     with Session(engine) as db, db.begin():
         weekly.weekly_plan(db, "short", now=SUNDAY)
     with Session(engine) as db, db.begin():
@@ -75,10 +75,11 @@ def test_rolling_watch_marks_elapsed_unstarted_session_missed_not_completed(engi
         result = weekly.rolling_plan(db, "short", now=later)
         assert len(result["missed"]) == 1
         missed = db.get(PlannedSession, result["missed"][0])
-        assert missed.status == "MISSED"
-        assert not db.scalars(select(CalendarWrite).where(CalendarWrite.planned_session_id == missed.id, CalendarWrite.status == "PENDING")).all()
+        assert missed.status == "COMMITTED"
+        from gymclaw.services.events import pending
+        assert any(e["type"] == "workout.missed" and e["payload"]["session_id"] == missed.id for e in pending(db))
         report = weekly.audit_week(db, datetime(2026, 10, 12).date(), now=later)
-        assert report["missed_sessions"] == 1 and report["completed_workouts"] == 0
+        assert report["missed_sessions"] == 0 and report["completed_workouts"] == 0
         count = len(db.scalars(select(AgentEvent).where(AgentEvent.type == "workout.missed")).all())
         weekly.rolling_plan(db, "short", now=later + timedelta(minutes=1))
         assert len(db.scalars(select(AgentEvent).where(AgentEvent.type == "workout.missed")).all()) == count
@@ -175,7 +176,7 @@ def test_weekly_cli_fixture_preview_never_activates_or_queues_send(engine, tmp_p
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "LIVE_CALENDAR_REQUIRED"
 
 
-def test_calendar_resize_watch_proactively_sends_once_without_publication(engine, monkeypatch):
+def test_calendar_resize_watch_wakes_agent_once_without_sending_or_publishing(engine, monkeypatch):
     from gymclaw.runtime_cli import runtime_command
     class FakeGoogle(FixtureCalendarProvider):
         source = "google"  # Synthetic Google boundary; HTTP remains blocked.
@@ -201,11 +202,12 @@ def test_calendar_resize_watch_proactively_sends_once_without_publication(engine
     args = parser().parse_args(["--db-url", str(engine.url), "runtime", "watch", "--telegram-id", "123", "--allow-runtime-changes", "--allow-messages"])
     result = runtime_command(engine, args, now_override=SUNDAY + timedelta(minutes=1))
     assert result["data"]["publication"]["published"] is False
-    assert len(provider.sent) == 1
-    assert provider.sent[0][1].startswith("Short now Mon 07:00–07:45. Workout compressed to the new slot length. Week of Oct 12: Mon 07:00 Short.")
-    assert "publication pending approval" in provider.sent[0][1]
+    assert not provider.sent and len(provider.woken) == 1
+    with Session(engine) as db:
+        from gymclaw.services.events import pending
+        assert any(e["type"] == "planning.replan_required" for e in pending(db))
     runtime_command(engine, args, now_override=SUNDAY + timedelta(minutes=2))
-    assert len(provider.sent) == 1
+    assert not provider.sent and len(provider.woken) == 1
 
 
 def test_start_without_template_starts_todays_session_even_when_late(engine):
@@ -246,7 +248,7 @@ def test_watch_survives_lost_calendar_auth_and_alerts_once(engine, monkeypatch):
     assert provider.sent[-1][1] == "✅ Google Calendar is connected again." and len(provider.sent) == 2
 
 
-def test_new_arrival_label_reconsiders_tentative_slot_but_not_user_lock(engine):
+def test_new_arrival_label_requests_agent_decision_and_preserves_tentative_slot(engine):
     from gymclaw.models import WorkoutSession
     from gymclaw.services.crowd import record_feedback
     with Session(engine) as db, db.begin():
@@ -260,21 +262,21 @@ def test_new_arrival_label_reconsiders_tentative_slot_but_not_user_lock(engine):
         record_feedback(db, visit.id, rating="EMPTY", now=SUNDAY + timedelta(minutes=1), request_id="quiet-visit")
         result = weekly.rolling_plan(db, "short", now=SUNDAY + timedelta(minutes=2))
         updated = db.get(PlannedSession, original["id"])
-        assert updated.planned_start_at.hour == 18  # 20:00 local learned quiet slot.
-        assert result["changed"] and updated.status == "TENTATIVE"
+        assert updated.planned_start_at.hour == 17  # Preferences no longer move slots automatically.
+        assert not result["changed"] and updated.status == "TENTATIVE"
         updated.user_locked = True
         original_time = updated.planned_start_at
         event = AgentEvent(type="planning.replan_required", created_at=SUNDAY, payload_json={"reason": "crowd_feedback"})
         db.add(event); db.flush()
         weekly.rolling_plan(db, "short", now=SUNDAY + timedelta(minutes=3))
         assert updated.planned_start_at == original_time
-        assert event.handled_at is not None
+        assert event.handled_at is None
 
 
 def test_split_gives_least_recent_workout_and_respects_locks(tmp_path):
     from gymclaw.models import OnboardingState, PlannedSession, WorkoutSession
     from gymclaw.services.templates import ExerciseSpec, Template, import_template
-    from gymclaw.services.weekly import assign_rotation, plan_changes
+    from gymclaw.services.weekly import assign_rotation
 
     engine = make_engine(f"sqlite:///{tmp_path / 'rotation.db'}")
     initialize(engine)
@@ -303,15 +305,12 @@ def test_split_gives_least_recent_workout_and_respects_locks(tmp_path):
             db.flush()
             changes = assign_rotation(db, now=base - timedelta(days=1))
             assert [s.workout_template_id for s in sessions] == ["legs", "push", "pull", "legs"]
-            moved = {"session_id": sessions[2].id, "from": sessions[2].planned_start_at.isoformat(), "to": (sessions[2].planned_start_at + timedelta(minutes=30)).isoformat(), "action": "moved"}
-            assert plan_changes(db, {"rotation": changes, "changed": [moved]}) == "📅 Plan updated: Fri moved to 12:30 (was 12:00) · Mon is now Legs · Fri is now Pull · Sun is now Legs"
             # Owner swapped Push for Pull and Push got skipped: Push comes next, not Legs again.
             db.add(WorkoutSession(template_id="legs", status="PLAN_UPDATED", template_snapshot={"x": 1}, started_at=base - timedelta(minutes=30)))
             sessions[1].workout_template_id = "pull"
             db.flush()
             assign_rotation(db, now=base - timedelta(days=1))
             assert [s.workout_template_id for s in sessions] == ["push", "pull", "legs", "push"]
-            assert plan_changes(db, {"changed": [moved | {"action": "forecast_updated"}]}) is None
     finally:
         engine.dispose()
 
@@ -446,3 +445,13 @@ def test_no_show_is_quiet_when_a_workout_started_and_can_still_be_moved(engine):
         workout.start(db, "short", now=session.planned_start_at, request_id="unlinked")
         assert session.status == "COMMITTED"
         assert weekly.no_show_nudges(db, now=session.planned_start_at + timedelta(minutes=31)) == []
+
+
+def test_sunday_does_not_refill_a_week_the_owner_already_edited(engine):
+    from gymclaw.services.sessions import SessionEdit, edit_session
+    with Session(engine) as db, db.begin():
+        original = weekly.weekly_plan(db, 'short', now=SUNDAY)['plan']['sessions']
+        edit_session(db, 'cancel', session_id=original[0]['id'], changes=SessionEdit(), now=SUNDAY, request_id='owner-cancel')
+        result = weekly.weekly_plan(db, 'short', now=SUNDAY + timedelta(minutes=1))
+        assert {s['id'] for s in result['plan']['sessions']} == {s['id'] for s in original}
+        assert db.get(PlannedSession, original[0]['id']).status == 'CANCELLED'

@@ -13,7 +13,8 @@ from gymclaw.services import body
 from gymclaw.services.calendar import allocation, get_week, week_of
 from gymclaw.services.calendar_writes import queue_session_write
 from gymclaw.services.profile import get_profile
-from gymclaw.services.replanning import commit_upcoming, replan_weeks, retire_session
+from gymclaw.services.replanning import commit_upcoming, replan_weeks
+from gymclaw.services.events import attention
 from gymclaw.services.scheduling import schedule_week
 from gymclaw.services.templates import get_template
 from gymclaw.services.workout import emit, utc
@@ -51,12 +52,13 @@ def audit_week(db: Session, week_start: date, *, now: datetime, learn: bool = Fa
 
 
 def mark_missed(db: Session, *, now: datetime) -> list[str]:
-    """Elapsed slot is missed, never fabricated completion; retain calendar history."""
+    """Report elapsed slots once. The agent decides whether to move, miss or cancel them."""
     ids = []
     for plan in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]), PlannedSession.planned_end_at < now)):
-        retire_session(db, plan, "MISSED", now=now)
-        emit(db, "workout.missed", now, {"session_id": plan.id, "reason": "planned_window_elapsed_without_start"})
-        ids.append(plan.id)
+        event = attention(db, "workout.missed", {"session_id": plan.id, "start": plan.planned_start_at.isoformat(),
+            "end": plan.planned_end_at.isoformat(), "reason": "planned_window_elapsed_without_start"}, now=now)
+        if event.created_at == now:
+            ids.append(plan.id)
     return ids
 
 
@@ -64,8 +66,7 @@ NO_SHOW_AFTER = timedelta(minutes=30)
 
 
 def no_show_nudges(db: Session, *, now: datetime) -> list[dict]:
-    """30 min into a committed slot with no workout started: ask once whether to skip or move it.
-    Unanswered, the slot still ends as MISSED and replanning finds a make-up slot, as before."""
+    """30 min into a committed slot with no workout started: report once for the agent to resolve."""
     from gymclaw.services.availability import session_blocked
     now = utc(now)
     zone = ZoneInfo(get_profile(db).timezone)
@@ -98,11 +99,11 @@ def first_plan_key(db: Session, week: date, now: datetime, template_id: str) -> 
 NEVER = datetime.min.replace(tzinfo=timezone.utc)
 
 
-def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
+def assign_rotation(db: Session, *, now: datetime, session_ids: set[str] | None = None) -> list[dict]:
     """Give each upcoming session the split workout (e.g. Push / Pull / Legs) trained least recently,
-    counting started workouts (a running one too, so starting it doesn't reshuffle the week) and the
-    sessions before it. In steady state that's the plain rotation; after a skip or an owner swap the
-    missed workout comes next instead of repeating the last one. User-locked sessions keep theirs."""
+    counting started workouts and preceding planned sessions. Background callers pass only newly
+    drafted IDs; existing sessions keep their template. Explicit callers can assign the whole split.
+    User-locked templates always stay."""
     row = db.get(OnboardingState, 1)
     split = row.split_json if row else []
     if len(split) < 2:
@@ -112,15 +113,16 @@ def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
     changed = []
     for session in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"])).order_by(PlannedSession.planned_start_at, PlannedSession.id)):
         wanted = min(split, key=lambda t: (last.get(t, NEVER), split.index(t)))
-        if session.user_locked and session.workout_template_id:
-            last[session.workout_template_id] = session.planned_start_at
+        if session_ids is not None and session.id not in session_ids or session.user_locked and session.workout_template_id:
+            if session.workout_template_id:
+                last[session.workout_template_id] = session.planned_start_at
             continue
         last[wanted] = session.planned_start_at
         if session.workout_template_id == wanted:
             continue
         session.workout_template_id = wanted
         # Drop the old template snapshot so allocation uses the rotated template.
-        session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
+        session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if (k.startswith("crowd_") or k == "agent_status")}
         session.source_revision += 1
         allocation(db, session)
         queue_session_write(db, session, now=now)
@@ -134,53 +136,12 @@ CROWD_RECHECK = timedelta(minutes=30)
 STALE_WORKOUT = timedelta(hours=3)
 
 
-def plan_changes(db: Session, rolling: dict) -> str | None:
-    """What a rolling replan changed, in the owner's words: 'Fri moved to 11:00 (was 10:30) · Wed is now Push'.
-    None when nothing visible changed (forecast-only updates stay quiet)."""
-    zone = ZoneInfo(get_profile(db).timezone)
-
-    def local(value: str | datetime) -> datetime:
-        return (datetime.fromisoformat(value) if isinstance(value, str) else value).astimezone(zone)
-
-    parts = []
-    for change in rolling.get("changed", []):
-        session = db.get(PlannedSession, change["session_id"])
-        if change["action"] == "moved":
-            old, new = local(change["from"]), local(change["to"])
-            parts.append(f"{new:%a} moved to {new:%H:%M} (was {old:%H:%M})" if old.date() == new.date() else f"{old:%a %H:%M} moved to {new:%a %H:%M}")
-        elif change["action"] == "replacement":
-            parts.append(f"New session {local(change['to']):%a %H:%M}")
-        elif change["action"] == "cancelled_no_valid_slot" and session:
-            parts.append(f"{local(session.planned_start_at):%a} dropped: no free slot")
-    for change in rolling.get("rotation", []):
-        session = db.get(PlannedSession, change["session_id"])
-        if session:
-            parts.append(f"{local(session.planned_start_at):%a} is now {get_template(db, change['template_id']).name}")
-    if rolling.get("created"):
-        parts.append(f"{len(rolling['created'])} new sessions planned")
-    for session_id in rolling.get("missed", []):
-        session = db.get(PlannedSession, session_id)
-        if session:
-            parts.append(f"{local(session.planned_start_at):%a} marked missed")
-    return "📅 Plan updated: " + " · ".join(parts) if parts else None
-
-
 def close_stale_workouts(db: Session, *, now: datetime) -> list[str]:
-    """A workout left open (chat reset, phone away) would block the next start forever. After 3 idle
-    hours: skip what's left as abandoned and finish it, so logged sets and progression are kept."""
-    from gymclaw.services import adaptation, audit
-    from gymclaw.services.workout import UNRESOLVED, exercises
-    closed = []
-    for workout in db.scalars(select(WorkoutSession).where(WorkoutSession.status != "PLAN_UPDATED", WorkoutSession.last_action_at < now - STALE_WORKOUT)):
-        # Close at the last action, so duration means training time, not time until we noticed.
-        ended = workout.last_action_at
-        for row in exercises(db, workout):
-            if row.status in UNRESOLVED:
-                adaptation.skip_exercise(db, workout.id, row.id, reason="abandoned", now=ended, request_id=f"stale:{workout.id}:{row.id}")
-        if workout.status == "WORKOUT_COMPLETE":
-            audit.finish(db, workout.id, now=ended, request_id=f"stale:{workout.id}:finish")
-            closed.append(workout.id)
-    return closed
+    """An idle workout needs judgment; preserve all logged and outstanding work for the agent."""
+    for workout in db.scalars(select(WorkoutSession).where(WorkoutSession.status.in_(["SCHEDULED", "SET_ACTIVE", "RESTING", "EXERCISE_COMPLETE", "WORKOUT_COMPLETE"]))):
+        if workout.last_action_at and now - workout.last_action_at >= STALE_WORKOUT:
+            attention(db, "workout.stale", {"workout_id": workout.id, "last_action_at": workout.last_action_at.isoformat()}, now=now)
+    return []
 
 
 def significant(old: dict | None, new: dict | None) -> bool:
@@ -235,7 +196,7 @@ def refresh_plans(db: Session, *, now: datetime) -> list[str]:
         # Allocation tunes set duration from history; only the plan itself matters here.
         if all(stored.get(key) == current[key] for key in ("name", "exercises", "alternatives")):
             continue
-        session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
+        session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if (k.startswith("crowd_") or k == "agent_status")}
         allocation(db, session)
         session.source_revision += 1
         queue_session_write(db, session, now=now, metadata_only=bool(session.calendar_event_id))
@@ -250,12 +211,8 @@ def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     current_week = week_of(now, zone)
     next_week = current_week + timedelta(days=7)
     missed = mark_missed(db, now=now)
-    triggers = [event for event in db.scalars(select(AgentEvent).where(AgentEvent.type == "planning.replan_required", AgentEvent.handled_at.is_(None)))
-        if event.payload_json.get("reason") in {"crowd_feedback", "workout_completed"}]
-    reconsider = any(event.payload_json.get("reason") == "crowd_feedback" for event in triggers)
-    repaired = replan_weeks(db, {current_week, next_week}, now=now, reconsider_tentative=reconsider)
-    for event in triggers:
-        event.handled_at = now
+    repaired = replan_weeks(db, {current_week, next_week}, now=now)
+    attention(db, "planning.week_started", {"week_start": current_week.isoformat()}, now=now)
     created = []
     for week in (current_week, next_week):
         start = datetime.combine(week, datetime.min.time(), zone)
@@ -265,10 +222,13 @@ def rolling_plan(db: Session, template_id: str, *, now: datetime) -> dict:
         if not db.scalar(select(PlannedSession.id).where(PlannedSession.week_id == week.isoformat())):
             data = schedule_week(db, week, now=now, template_id=template_id, request_id=first_plan_key(db, week, now, template_id))
             created.extend(s["id"] for s in data["sessions"])
+            if data["shortfall"]:
+                attention(db, "planning.attention_required", {"week_start": week.isoformat(),
+                    "reason": "default_plan_infeasible", "shortfall": data["shortfall"]}, now=now)
     for session_id in created:
         queue_session_write(db, db.get(PlannedSession, session_id), now=now)
     stale = close_stale_workouts(db, now=now)
-    rotation = assign_rotation(db, now=now)
+    rotation = assign_rotation(db, now=now, session_ids=set(created))
     plans = refresh_plans(db, now=now)
     crowd = refresh_crowd(db, now=now)
     commit_upcoming(db, now=now)
@@ -284,8 +244,10 @@ def weekly_plan(db: Session, template_id: str, *, now: datetime) -> dict:
     previous = current_week if now.astimezone(zone).weekday() == 6 else current_week - timedelta(days=7)
     rolling = rolling_plan(db, template_id, now=now)
     report = audit_week(db, previous, now=now, learn=True)
-    schedule_week(db, next_week, now=now, template_id=template_id, request_id=f"weekly-plan:{next_week}:{template_id}")
-    assign_rotation(db, now=now)
+    # Draft only an empty week. Owner cancellations/skips are not gaps to refill on Sunday.
+    if not db.scalar(select(PlannedSession.id).where(PlannedSession.week_id == next_week.isoformat())):
+        default = schedule_week(db, next_week, now=now, template_id=template_id, request_id=f"weekly-plan:{next_week}:{template_id}")
+        assign_rotation(db, now=now, session_ids={s["id"] for s in default["sessions"]})
     commit_upcoming(db, now=now)
     for session in db.scalars(select(PlannedSession).where(PlannedSession.week_id == next_week.isoformat(), PlannedSession.status.in_(["TENTATIVE", "COMMITTED"]))):
         queue_session_write(db, session, now=now)
@@ -363,9 +325,9 @@ def briefing(db: Session, week_start: date, report: dict, *, published: bool, no
             flexible.append(f"{at:%a}")
     lines += sessions or ["No sessions fit this week — calendar/recovery constraints kept."]
     if flexible:
-        # commit_upcoming locks sessions 48 h ahead; until then replanning may still move them.
+        # Tentative sessions are defaults; the agent decides whether they need moving.
         days = flexible[0] if len(flexible) == 1 else ", ".join(flexible[:-1]) + " & " + flexible[-1]
-        lines += ["", f"{days} can still move if your calendar changes."]
+        lines += ["", f"{days} are tentative; I’ll review calendar changes."]
     if targets := new_targets(db, previous, zone):
         lines += ["", "🎯 New targets: " + ", ".join(targets)]
     if weight := body.briefing_line(db, now=now):

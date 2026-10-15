@@ -31,6 +31,12 @@ def edit_session(db: Session, operation: str, *, changes: SessionEdit, session_i
                  now: datetime, request_id: str) -> dict:
     """One idempotent mutation. Only input integrity and actual workout history are hard boundaries."""
     now = utc(now)
+    if operation not in {"create", "update", "cancel"}:
+        raise ValueError("Unknown session operation")
+    if operation != "create" and not session_id:
+        raise ValueError("--session-id is required")
+    if operation == "cancel" and changes.model_fields_set:
+        raise ValueError("cancel accepts no --data; use update to combine changes")
 
     def action():
         profile = get_profile(db)
@@ -49,21 +55,19 @@ def edit_session(db: Session, operation: str, *, changes: SessionEdit, session_i
                 raise DomainError("SESSION_NOT_FOUND", "Unknown session; read calendar get-week or sql")
             if session.status in {"STARTED", "COMPLETED"}:
                 raise DomainError("SESSION_HAS_WORKOUT", "Edit the actual workout through workout tools")
-            if session.planned_end_at <= now and changes.start is None:
-                raise DomainError("SESSION_ENDED", "Elapsed session: provide a new start to reschedule, or use workout history tools")
         if changes.template_id:
             get_template(db, changes.template_id)
             if changes.template_id != session.workout_template_id:
                 session.workout_template_id = changes.template_id
-                session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if k.startswith("crowd_")}
+                session.workout_plan_json = {k: v for k, v in session.workout_plan_json.items() if (k.startswith("crowd_") or k == "agent_status")}
         def local(value):
             return utc(value.replace(tzinfo=zone) if value.tzinfo is None else value)
         start = local(changes.start) if changes.start else session.planned_start_at
         duration = timedelta(minutes=profile.preferred_workout_minutes) if creating else session.planned_end_at - session.planned_start_at
         end = local(changes.end) if changes.end else start + duration
-        if end <= start or end <= now:
-            raise ValueError("Session end must follow start and be in the future")
         status = "CANCELLED" if operation == "cancel" else changes.status or ("COMMITTED" if creating else session.status)
+        if end <= start or status in ACTIVE and end <= now:
+            raise ValueError("Session end must follow start; active sessions must end in the future")
         if status == "MISSED" and start > now:
             # This is an explicit agent/owner decision, never invented training history.
             warning = ["marked missed before its start"]
@@ -73,6 +77,8 @@ def edit_session(db: Session, operation: str, *, changes: SessionEdit, session_i
             leave_home=start - timedelta(minutes=profile.commute_to_gym_minutes), home_at=end + timedelta(minutes=profile.commute_home_minutes),
             crowd=None, confidence=0, score=0, score_parts={})
         warnings = warning + rule_breaks(db, session, slot, profile)
+        if end - start < timedelta(minutes=profile.minimum_workout_minutes):
+            warnings.append("shorter than your minimum workout duration")
         week = week_of(start, zone)
         count = sum(s.id != session.id and s.status in ACTIVE and week_of(s.planned_start_at, zone) == week
                     for s in db.scalars(select(PlannedSession)))
@@ -86,6 +92,8 @@ def edit_session(db: Session, operation: str, *, changes: SessionEdit, session_i
             session.source_revision += 1
         session.user_locked = True
         place(db, session, slot, week=week, now=now, crowd_model=None, status=status)
+        if changes.status is not None:
+            session.workout_plan_json = session.workout_plan_json | {"agent_status": status}
         if session.workout_plan_json.get("error"):
             warnings.append("too short for required movements; extend the slot or adjust the template")
         if status in {"CANCELLED", "SKIPPED", "MISSED"}:

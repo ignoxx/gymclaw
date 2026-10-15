@@ -48,3 +48,28 @@ def test_status_update_and_invalid_template_do_not_fabricate_workouts(engine):
             edit_session(db, 'update', session_id=sid, changes=SessionEdit(template_id='missing'), now=SUNDAY, request_id='bad')
         edit_session(db, 'update', session_id=sid, changes=SessionEdit(status='TENTATIVE'), now=SUNDAY, request_id='tentative')
         assert not db.scalars(select(NotificationJob).where(NotificationJob.status == 'PENDING')).all()
+
+
+def test_owner_exception_survives_background_ticks_without_changing_others(engine):
+    from gymclaw.services import weekly
+    from gymclaw.services.profile import update_profile
+    from gymclaw.services.replanning import commit_upcoming
+    with Session(engine) as db, db.begin():
+        plan = weekly.weekly_plan(db, 'short', now=SUNDAY)
+        ids = [s['id'] for s in plan['plan']['sessions']]
+        untouched = {sid: (db.get(PlannedSession, sid).planned_start_at, db.get(PlannedSession, sid).workout_template_id) for sid in ids[1:]}
+        moved = edit_session(db, 'update', session_id=ids[0], changes=SessionEdit(start='2026-10-13T07:00', status='TENTATIVE'),
+            now=SUNDAY, request_id='move-only-monday')
+        assert 'skips a rest day' in moved['data']['warnings']
+        # Explicit status remains tentative even when deterministic commitment would normally run.
+        commit_upcoming(db, now=SUNDAY + timedelta(days=1))
+        assert db.get(PlannedSession, ids[0]).status == 'TENTATIVE'
+        update_profile(db, {'weekly_min_sessions': 1, 'weekly_target_sessions': 1, 'weekly_max_sessions': 1})
+        extra = edit_session(db, 'create', changes=SessionEdit(start='2026-10-14T05:17', template_id='short'),
+            now=SUNDAY, request_id='extra-despite-defaults')
+        assert 'exceeds your weekly maximum' in extra['data']['warnings']
+        for minutes in (1, 2):
+            result = weekly.rolling_plan(db, 'short', now=SUNDAY + timedelta(minutes=minutes))
+            assert not result['changed'] and not result['rotation']
+            assert {sid: (db.get(PlannedSession, sid).planned_start_at, db.get(PlannedSession, sid).workout_template_id) for sid in ids[1:]} == untouched
+        assert db.get(PlannedSession, ids[0]).status == 'TENTATIVE'
