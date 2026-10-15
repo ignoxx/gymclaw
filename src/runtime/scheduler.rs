@@ -193,10 +193,10 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
     if done.is_some() {
         return Ok(json!({"due": false}));
     }
-    // Plan and mark the week done together, so a failure later never plans it twice.
+    // The week is marked done only with its briefing; a crash before that replans on the next tick,
+    // which is idempotent per week (request id + briefing correlation key).
     let tx = db.unchecked_transaction()?;
     let mut data = ticks::weekly(&tx, now)?;
-    emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
     // Publish before briefing so the briefing reports what actually reached the calendar.
     let published = outbox::runtime_authority(db)?.calendar_writes_enabled
@@ -209,6 +209,7 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
         };
     let tx = db.unchecked_transaction()?;
     ticks::weekly_briefing(&tx, recipient, &mut data, published, now)?;
+    emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
     Ok(data)
 }
