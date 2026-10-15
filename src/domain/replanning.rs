@@ -384,7 +384,7 @@ pub fn add_session(db: &Connection, now: Ts, request_id: &str, template_id: Opti
 }
 
 /// Owner picks the workout for one session ("legs today instead of pull"). The session is locked so
-/// rotation keeps it; later sessions rotate on from it.
+/// rotation keeps it; later sessions get the split workout trained longest ago.
 pub fn set_workout(db: &Connection, session_id: &str, template_id: &str, now: Ts, request_id: &str) -> Result<Value> {
     mutate(db, "planning.workout_set", request_id, json!({"session_id": session_id, "template_id": template_id}), now, || {
         let mut session = match PlannedSession::get(db, session_id)? {
