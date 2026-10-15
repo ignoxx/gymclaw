@@ -1,11 +1,11 @@
 """Deterministic rolling maintenance, weekly audit and concise briefing data."""
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from statistics import median
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from gymclaw.models import AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, LearnedPreference, OnboardingState, PlannedSession, SetLog, WorkoutExercise, WorkoutSession
@@ -95,23 +95,27 @@ def first_plan_key(db: Session, week: date, now: datetime, template_id: str) -> 
     return f"rolling:{week}:{sha256(material.encode()).hexdigest()[:32]}"
 
 
+NEVER = datetime.min.replace(tzinfo=timezone.utc)
+
+
 def assign_rotation(db: Session, *, now: datetime) -> list[dict]:
-    """Rotate the owner's split (e.g. Push → Pull → Legs) over upcoming sessions, continuing after the
-    last started workout (a running one counts, so starting it doesn't reshuffle the week).
-    User-locked sessions keep their template but still advance the rotation."""
+    """Give each upcoming session the split workout (e.g. Push / Pull / Legs) trained least recently,
+    counting started workouts (a running one too, so starting it doesn't reshuffle the week) and the
+    sessions before it. In steady state that's the plain rotation; after a skip or an owner swap the
+    missed workout comes next instead of repeating the last one. User-locked sessions keep theirs."""
     row = db.get(OnboardingState, 1)
     split = row.split_json if row else []
     if len(split) < 2:
         return []
-    last = db.scalar(select(WorkoutSession.template_id).order_by(WorkoutSession.started_at.desc()).limit(1))
-    position = split.index(last) + 1 if last in split else 0
+    # Never-trained workouts go first, ties in split order.
+    last: dict[str, datetime] = dict(db.execute(select(WorkoutSession.template_id, func.max(WorkoutSession.started_at)).where(WorkoutSession.template_id.in_(split)).group_by(WorkoutSession.template_id)).all())
     changed = []
     for session in db.scalars(select(PlannedSession).where(PlannedSession.status.in_(["TENTATIVE", "COMMITTED"])).order_by(PlannedSession.planned_start_at, PlannedSession.id)):
-        wanted = split[position % len(split)]
-        if session.user_locked:
-            position = split.index(session.workout_template_id) + 1 if session.workout_template_id in split else position + 1
+        wanted = min(split, key=lambda t: (last.get(t, NEVER), split.index(t)))
+        if session.user_locked and session.workout_template_id:
+            last[session.workout_template_id] = session.planned_start_at
             continue
-        position += 1
+        last[wanted] = session.planned_start_at
         if session.workout_template_id == wanted:
             continue
         session.workout_template_id = wanted
