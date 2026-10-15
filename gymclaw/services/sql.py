@@ -26,6 +26,8 @@ def query(engine, statement: str, *, limit: int = 200) -> dict:
             deadline = monotonic() + 2
             connection.set_progress_handler(lambda: int(monotonic() > deadline), 1000)
             cursor = connection.execute(statement)
+            if cursor.description is None:
+                raise DomainError("SQL_QUERY_FAILED", "Expected a query returning rows")
             rows = cursor.fetchmany(limit + 1)
             def cell(value):
                 if isinstance(value, bytes):

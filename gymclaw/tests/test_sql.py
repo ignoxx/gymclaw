@@ -15,7 +15,7 @@ def test_bounded_read_and_connection_level_write_protection(tmp_path):
     engine = make_engine(f"sqlite:///{path}")
     assert query(engine, "WITH x AS (SELECT * FROM sample) SELECT value FROM x ORDER BY value", limit=2) == {
         "columns": ["value"], "rows": [[1], [2]], "truncated": True}
-    for sql in ("DELETE FROM sample", "WITH x AS (SELECT 1) UPDATE sample SET value=0", "PRAGMA query_only=OFF",
+    for sql in ("", "-- just a comment", "DELETE FROM sample", "WITH x AS (SELECT 1) UPDATE sample SET value=0", "PRAGMA query_only=OFF",
                 f"ATTACH DATABASE '{tmp_path / 'other.db'}' AS other", "SELECT load_extension('nope')", "SELECT 1; DELETE FROM sample"):
         with pytest.raises(DomainError):
             query(engine, sql)
