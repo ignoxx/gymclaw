@@ -108,6 +108,5 @@ model never has to. Timestamps without an offset are the owner's local time.
 
 `cargo test` and `cargo clippy --all-targets -- -D warnings`. Tests pin down behavior that's easy
 to get subtly wrong (planner choices, set parsing, progression math, rest timing, stale-delivery
-rules); the compiler covers shape. [PARITY.md](../PARITY.md) maps the old Python suite to these
-tests, and `scripts/diff-replay` compares Rust against the last Python release on a copy of a real
+rules); the compiler covers shape. `scripts/diff-replay` compares Rust against the last Python release on a copy of a real
 backup. Never test against the production DB; use copies in `/tmp`.

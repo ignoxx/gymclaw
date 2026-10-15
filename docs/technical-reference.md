@@ -38,7 +38,6 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Tests use in-memory or temporary DBs and fixture providers; no test touches the network.
-[PARITY.md](../PARITY.md) maps every test of the old Python suite to its Rust counterpart.
 `scripts/diff-replay` replays owner operations against a copy of a real backup through both the
 Rust tools and the last Python release, and diffs the results ([how](../scripts/diff-replay.md)).
 Two ignored tests check against a real DB copy: `GYMCLAW_COMPAT_DB=/tmp/copy.db cargo test -- --ignored`.
