@@ -683,18 +683,20 @@ mod tests {
     }
 
     #[test]
-    fn idle_workout_is_closed_and_keeps_logged_sets() {
-        use crate::domain::weekly::close_stale_workouts;
+    fn idle_workout_flags_agent_and_keeps_logged_sets() {
+        use crate::domain::weekly::detect_stale_workouts;
         let db = db();
         push(&db);
         handle_text(&db, "10x90", at(10), "m1").unwrap();
-        assert!(close_stale_workouts(&db, at(10 + 2 * 3600)).unwrap().is_empty());
+        assert!(detect_stale_workouts(&db, at(10 + 2 * 3600)).unwrap().is_empty());
         let id = active_workout(&db).unwrap().unwrap().id;
-        assert_eq!(close_stale_workouts(&db, at(10 + 3 * 3600 + 1)).unwrap(), vec![id.clone()]);
-        assert_eq!(crate::db::models::WorkoutSession::get(&db, &id).unwrap().unwrap().status, WorkoutStatus::PlanUpdated);
+        assert_eq!(detect_stale_workouts(&db, at(10 + 3 * 3600 + 1)).unwrap(), vec![id.clone()]);
+        assert_ne!(crate::db::models::WorkoutSession::get(&db, &id).unwrap().unwrap().status, WorkoutStatus::PlanUpdated);
         assert_eq!(workout::logs(&db, &workout::exercises(&db, &id).unwrap()[0].id, None).unwrap().len(), 1);
-        assert!(active_workout(&db).unwrap().is_none());
-        start(&db, Some("push"), None, false, at(10 + 4 * 3600), "again").unwrap();
+        assert!(active_workout(&db).unwrap().is_some());
+        assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
+        detect_stale_workouts(&db, at(10 + 4 * 3600)).unwrap();
+        assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
     }
 
     #[test]

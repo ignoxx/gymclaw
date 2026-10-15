@@ -1,6 +1,4 @@
-//! Owner edits and rolling repair (port of replanning.py). Manual intent is preserved: only invalid,
-//! unlocked future sessions are repaired, and a rule the owner broke on purpose (rest day, weekly max)
-//! never moves or cancels other sessions. Owner: lead (planning).
+//! Session mechanics and non-mutating plan inspection. Policy decisions belong to the agent.
 use std::collections::BTreeSet;
 
 use jiff::SignedDuration;
@@ -12,10 +10,9 @@ use crate::db::models::{CalendarWrite, PlannedSession, SessionStatus, WriteStatu
 use crate::domain::calendar::{allocation, week_of};
 use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::calendar_writes::queue_session_write;
-use crate::domain::core::{emit, mutate};
-use crate::domain::crowd::{CrowdModel, planning_signals};
+use crate::domain::core::mutate;
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
-use crate::domain::planning::{Candidate, Inputs, Interval, PlannerConfig, monday, overlaps, plan_week, recovery_ok, weekday};
+use crate::domain::planning::{Candidate, Inputs, PlannerConfig, monday, overlaps, plan_week, recovery_ok, weekday};
 use crate::domain::profile::{Profile, get_profile};
 use crate::domain::scheduling::{busy_window, interval};
 use crate::domain::templates::get_template;
@@ -23,15 +20,6 @@ use crate::error::Result;
 use crate::time::Ts;
 
 const HOURS_48: SignedDuration = SignedDuration::from_hours(48);
-
-fn within_bounds(session: &PlannedSession, profile: &Profile) -> bool {
-    let tz = profile.tz();
-    let (start, end) = (session.planned_start_at.local(&tz), session.planned_end_at.local(&tz));
-    profile.weekdays_allowed.contains(&weekday(start.date()))
-        && start.date() == end.date()
-        && start.time() >= profile.earliest_workout_start
-        && end.time() <= profile.latest_workout_finish
-}
 
 /// The session including prep and travel: (leave-prep start, home again).
 pub fn expanded(session: &PlannedSession, profile: &Profile) -> (Ts, Ts) {
@@ -56,152 +44,43 @@ pub fn commit_upcoming(db: &Connection, now: Ts) -> Result<()> {
     Ok(())
 }
 
-/// Put a session on a planner slot: times, crowd forecast, workout fit, calendar intent and reminders.
-/// Inserts the session if it is new.
-pub fn place(db: &Connection, session: &mut PlannedSession, slot: &Candidate, week: Date, now: Ts, crowd_model: Option<&CrowdModel>) -> Result<()> {
-    session.planned_start_at = slot.start;
-    session.planned_end_at = slot.end;
-    session.prep_start_at = slot.prep_start;
-    session.leave_home_at = slot.leave_home;
-    session.expected_finish_at = slot.end;
-    session.crowd_prediction = slot.crowd;
-    session.crowd_confidence = Some(slot.confidence);
-    session.status = if slot.start <= now + HOURS_48 { SessionStatus::Committed } else { SessionStatus::Tentative };
-    session.week_id = week.to_string();
-    allocation(db, session)?;
-    session.workout_plan_json.0 = session.crowd_keys(false);
-    if slot.crowd.is_some() {
-        let demo = crowd_model.is_some_and(|m| m.predict(slot.start).demo);
-        session.merge_plan(json!({"crowd_source": if demo { "demo_fixture" } else { "local_crowd_model" }, "crowd_score_kind": "personal_perceived_crowd_proxy"}));
-    }
-    if PlannedSession::get(db, &session.id)?.is_some() { session.save(db)? } else { session.insert(db)? }
-    queue_session_write(db, session, now, false)?;
-    schedule_session_jobs(db, session, now)
-}
-
-/// Repair the given weeks: invalid unlocked future sessions move to the best valid slot (or are
-/// cancelled), missing ones are added. → `{changed, warnings}`.
-pub fn replan_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, reconsider_tentative: bool) -> Result<Value> {
+/// Inspect existing weeks without changing sessions. Conflicts and infeasibility become durable,
+/// deduplicated agent events; only the agent decides whether an exception or an edit is appropriate.
+pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result<Value> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
-    let mut changed: Vec<Value> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
+    let rows = PlannedSession::select(db, "ORDER BY planned_start_at, id", [])?;
+    let mut warnings = Vec::new();
     for &week in weeks {
-        if !monday(week) {
-            crate::bail!("INVALID_WEEK", "week_start must be Monday");
+        if !monday(week) { crate::bail!("INVALID_WEEK", "week_start must be Monday"); }
+        let sessions: Vec<_> = rows.iter().filter(|s| week_of(s.planned_start_at, &tz) == week && s.status.is_active()).collect();
+        if !rows.iter().any(|s| week_of(s.planned_start_at, &tz) == week) { continue; }
+        for session in sessions.iter().filter(|s| s.status.is_open() && s.planned_end_at > now) {
+            let slot = Candidate::manual(session.planned_start_at, session.planned_end_at, &profile);
+            for warning in rule_breaks(db, &session.id, &slot, &profile)? {
+                warnings.push(format!("Session {}: {warning}", session.id));
+            }
+            if session.plan("error").is_some_and(|v| !v.is_null()) {
+                warnings.push(format!("Session {}: slot too short for required movements", session.id));
+            }
         }
-        let all_rows = PlannedSession::select(db, "ORDER BY planned_start_at, id", [])?;
-        let week_rows: Vec<&PlannedSession> = all_rows.iter().filter(|s| week_of(s.planned_start_at, &tz) == week).collect();
-        if week_rows.is_empty() {
-            continue; // Sync alone must not invent an un-onboarded training plan.
+        if sessions.len() as i64 > profile.weekly_max_sessions {
+            warnings.push(format!("Week {week}: exceeds weekly maximum"));
         }
+        let existing: Vec<_> = rows.iter().filter(|s| s.status.is_active() || s.status == SessionStatus::Skipped).map(interval).collect();
         let (start, end) = busy_window(week, &profile)?;
         let busy = busy_intervals(db, start, end)?;
-        // Skipped sessions count toward the week: the owner chose not to make them up.
-        let fixed: Vec<&PlannedSession> = all_rows
-            .iter()
-            .filter(|s| {
-                s.status == SessionStatus::Skipped
-                    || s.status.is_active()
-                        && (s.user_locked || matches!(s.status, SessionStatus::Started | SessionStatus::Completed) || s.planned_start_at < now || week_of(s.planned_start_at, &tz) != week)
-            })
-            .collect();
-        let mut invalid: Vec<PlannedSession> = Vec::new();
-        let mut kept: Vec<&PlannedSession> = fixed.clone();
-        for &session in &week_rows {
-            if fixed.iter().any(|f| f.id == session.id) || !session.status.is_active() {
-                continue;
-            }
-            let (prep, home) = expanded(session, &profile);
-            // A rule the owner broke on purpose (rest day, weekly max) is theirs to resolve: other sessions stay.
-            let planner_kept: Vec<&&PlannedSession> = kept.iter().filter(|s| !s.user_locked).collect();
-            let valid = within_bounds(session, &profile)
-                && !busy.iter().any(|b| overlaps(prep, home, b))
-                && planner_kept.iter().all(|other| recovery_ok(session.planned_start_at, session.planned_end_at, &interval(other), &profile));
-            let reconsider = reconsider_tentative && session.status == SessionStatus::Tentative && session.planned_start_at > now + HOURS_48;
-            let in_week = planner_kept.iter().filter(|s| week_of(s.planned_start_at, &tz) == week).count() as i64;
-            if valid && !reconsider && in_week < profile.weekly_max_sessions {
-                kept.push(session);
-            } else {
-                invalid.push(session.clone());
-            }
-        }
-        let mut unavailable: Vec<Interval> = all_rows.iter().filter(|s| s.deleted_by_user()).map(interval).collect();
-        let horizon = now + SignedDuration::from_hours(24 * 10);
-        if horizon < end {
-            unavailable.push(Interval { start: horizon, end });
-        }
-        let signals = planning_signals(db, week, now, 15)?;
-        let crowd_model = if signals.is_empty() { None } else { Some(CrowdModel::new(db, now)?) };
-        let existing: Vec<Interval> = kept.iter().map(|s| interval(s)).collect();
-        let planned = plan_week(&profile, week, &Inputs { busy: &busy, unavailable: &unavailable, existing: &existing, signals: &signals }, now, &PlannerConfig::default())?;
-        // Existing legacy plans may still be moved, but no unknown workout is fabricated.
-        let template_id = week_rows.iter().find_map(|s| s.workout_template_id.clone());
-        for (index, slot) in planned.sessions.iter().enumerate() {
-            let (mut session, old_start, same_time) = match invalid.get(index) {
-                Some(session) => {
-                    let mut session = session.clone();
-                    let same_time = session.planned_start_at == slot.start && session.planned_end_at == slot.end;
-                    if same_time && session.crowd_prediction == slot.crowd && session.crowd_confidence == Some(slot.confidence) {
-                        continue; // Reconsidering unchanged tentative slots is not a new action.
-                    }
-                    if !same_time {
-                        cancel_session_jobs(db, &session.id, now)?;
-                    }
-                    session.source_revision += 1;
-                    let old = session.planned_start_at;
-                    (session, Some(old), same_time)
-                }
-                None => (PlannedSession::new(week.to_string(), template_id.clone(), false), None, false),
-            };
-            place(db, &mut session, slot, week, now, crowd_model.as_ref())?;
-            let action = if same_time { "forecast_updated" } else if old_start.is_some() { "moved" } else { "replacement" };
-            changed.push(json!({"session_id": session.id, "from": old_start, "to": slot.start, "action": action}));
-        }
-        for session in invalid.iter_mut().skip(planned.sessions.len()) {
-            session.status = SessionStatus::Cancelled;
-            session.source_revision += 1;
-            session.save(db)?;
-            cancel_session_jobs(db, &session.id, now)?;
-            queue_session_write(db, session, now, false)?;
-            changed.push(json!({"session_id": session.id, "action": "cancelled_no_valid_slot"}));
-        }
-        if planned.shortfall > 0 {
-            let count = planned.existing_count + planned.sessions.len() as i64;
-            warnings.push(format!("Week {week}: {count}/{} sessions feasible; recovery/blockers preserved.", profile.weekly_target_sessions));
-        }
-        // Re-read: placing may have changed this week's rows.
-        let week_rows: Vec<PlannedSession> = PlannedSession::select(db, "ORDER BY planned_start_at, id", [])?.into_iter().filter(|s| week_rows.iter().any(|w| w.id == s.id)).collect();
-        if week_rows.iter().filter(|s| s.user_locked && s.status.is_active()).count() as i64 > profile.weekly_max_sessions {
-            warnings.push("Manually locked sessions exceed weekly maximum; edited events kept.".into());
-        }
-        for session in week_rows.iter().filter(|s| s.user_locked && s.status.is_active()) {
-            let (prep, home) = expanded(session, &profile);
-            let (local_start, local_end) = (session.planned_start_at.local(&tz), session.planned_end_at.local(&tz));
-            if local_start.date() != local_end.date() || local_start.time() < profile.earliest_workout_start || local_end.time() > profile.latest_workout_finish {
-                warnings.push(format!("Manually edited session {} is outside configured workout time bounds; edited event kept.", session.id));
-            }
-            if busy.iter().any(|b| overlaps(prep, home, b)) {
-                warnings.push(format!("Manually edited session {} overlaps a blocker including prep/travel; kept for explicit resolution.", session.id));
-            }
-            if fixed.iter().any(|other| other.id != session.id && !recovery_ok(session.planned_start_at, session.planned_end_at, &interval(other), &profile)) {
-                warnings.push(format!("Manually edited session {} conflicts with recovery; edited event kept.", session.id));
-            }
-            if session.plan("error").is_some_and(|e| !e.is_null()) {
-                warnings.push(format!("Manually edited session {} is too short for required movement; adjust slot explicitly.", session.id));
-            }
+        let unavailable = crate::domain::scheduling::deleted_intervals(db)?;
+        let plan = plan_week(&profile, week, &Inputs { busy: &busy, unavailable: &unavailable, existing: &existing, signals: &[] }, now, &PlannerConfig::default())?;
+        let count = sessions.len() as i64;
+        if count < profile.weekly_target_sessions {
+            warnings.push(format!("Week {week}: {count}/{} sessions saved; {} additional default slots feasible. Agent decides whether to add or accept shortfall.", profile.weekly_target_sessions, plan.sessions.len()));
         }
     }
-    if !changed.is_empty() {
-        emit(db, "planning.replanned", now, json!({"changes": changed, "warnings": warnings}))?;
+    if !warnings.is_empty() {
+        crate::domain::events::request(db, "planning.attention", json!({"warnings": warnings}), now)?;
     }
-    let mut unique: Vec<String> = Vec::new();
-    for w in warnings {
-        if !unique.contains(&w) {
-            unique.push(w);
-        }
-    }
-    Ok(json!({"changed": changed, "warnings": unique}))
+    Ok(json!({"changed": [], "warnings": warnings}))
 }
 
 /// Planner rules an owner-chosen slot breaks, as short reasons for the owner.
@@ -332,7 +211,7 @@ mod tests {
         assert_eq!(moved["data"]["warnings"], json!(["skips a rest day"]));
         assert_eq!(moved["data"]["side_effects"], json!([]));
 
-        let repaired = replan_weeks(&db, &BTreeSet::from([week]), now, false).unwrap();
+        let repaired = inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
         assert_eq!(repaired["changed"], json!([]));
         for other in &before[1..] {
             let after = PlannedSession::get(&db, &other.id).unwrap().unwrap();

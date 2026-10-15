@@ -11,7 +11,7 @@ use crate::db::models::{CalendarEventSnapshot, CalendarWrite, PlannedSession, Se
 use crate::db::{Connection, Json};
 use crate::domain::calendar_writes::{event_id_for, queue_session_write};
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
-use crate::domain::replanning::{commit_upcoming, replan_weeks};
+use crate::domain::replanning::{commit_upcoming, inspect_weeks};
 use crate::providers::calendar::{CalendarEvent, CalendarProvider, SYNC_TOKEN_EXPIRED};
 use crate::providers::google::bind_calendar;
 use crate::domain::compression::compress_template;
@@ -164,7 +164,7 @@ fn cancel_writes(db: &Connection, session_id: &str, now: Ts) -> Result<()> {
 }
 
 /// Apply one remote event: owner deletes/moves/resizes of gym sessions become locked intent; other
-/// events are blockers. Own-write echoes are ignored. → (weeks to replan, emitted events).
+/// events are blockers. Own-write echoes are ignored. → (weeks to inspect, emitted events).
 pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Result<(BTreeSet<Date>, Vec<Value>)> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
@@ -262,7 +262,7 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
     Ok((weeks, emitted))
 }
 
-/// Pull calendar changes, reconcile them, replan affected weeks and describe what happened. Never
+/// Pull calendar changes, reconcile owner edits, inspect affected weeks and describe conflicts. Never
 /// writes remotely; queued writes go through `apply_write`.
 pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: Ts) -> Result<Value> {
     let mut state = bind_calendar(db, provider.calendar_id(), provider.source())?;
@@ -287,7 +287,7 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     }
     let mut affected = BTreeSet::new();
     let mut emitted = Vec::new();
-    // Owner changes all reconcile before replanning, so batch order is immaterial.
+    // Reconcile all owner edits before inspecting conflicts, so batch order is immaterial.
     for event in &incoming {
         let (weeks, logs) = reconcile_event(db, event, now)?;
         affected.extend(weeks);
@@ -296,19 +296,16 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     state.sync_token = Some(batch.next_sync_token.clone());
     state.last_synced_at = Some(now);
     state.update(db)?;
-    let replanned = if affected.is_empty() { json!({"changed": [], "warnings": []}) } else { replan_weeks(db, &affected, now, false)? };
+    let replanned = if affected.is_empty() { json!({"changed": [], "warnings": []}) } else { inspect_weeks(db, &affected, now)? };
     commit_upcoming(db, now)?;
     let changes = replanned["changed"].as_array().cloned().unwrap_or_default();
     let warnings: Vec<String> = replanned["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect();
     if !emitted.is_empty() || !changes.is_empty() || !warnings.is_empty() {
-        let mut event = emit(db, "planning.replan_required", now, json!({"reason": "calendar_changed", "handled_locally": true, "changes": changes, "warnings": warnings}))?;
-        // The deterministic replan already ran; the agent communicates, it doesn't redo the work.
-        event.handled_at = Some(now);
-        event.update(db)?;
+        let event = emit(db, "planning.replan_required", now, json!({"reason": "calendar_changed", "handled_locally": false, "changes": changes, "warnings": warnings}))?;
         emitted.push(json!({"id": event.id, "type": event.r#type}));
     }
     let tz = get_profile(db)?.tz();
-    // Name what happened: a vague "sessions replanned" hides that a workout was dropped.
+    // Describe accepted owner edits and warnings; no automatic repair changes sessions.
     let mut parts = Vec::new();
     for e in &emitted {
         let kind = e["type"].as_str().unwrap_or_default();
@@ -322,22 +319,9 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
             });
         }
     }
-    let mut dropped = Vec::new();
-    for change in changes.iter().filter(|c| c["action"] == "cancelled_no_valid_slot") {
-        if let Some(session) = PlannedSession::get(db, change["session_id"].as_str().unwrap_or_default())? {
-            dropped.push(format!("{} on {}", workout_name(&session), session.planned_start_at.local(&tz).strftime("%a")));
-        }
-    }
-    if !dropped.is_empty() {
-        parts.push(format!("{} dropped: no slot left this week that fits your rest days and calendar.", dropped.join(", ")));
-    }
-    // The drop line already explains the shortfall warning.
-    parts.extend(warnings.iter().filter(|w| dropped.is_empty() || !w.contains("sessions feasible")).cloned());
+    parts.extend(warnings.iter().cloned());
     if emitted.iter().any(|e| e["type"] == "calendar.gym_event_resized") {
         parts.push("Workout compressed to the new slot length.".into());
-    }
-    if parts.is_empty() && !changes.is_empty() {
-        parts.push("Other gym sessions replanned; preparation/leave times updated.".into());
     }
     let queued: i64 = db.query_row("SELECT count(*) FROM calendar_write WHERE status = 'PENDING'", [], |r| r.get(0))?;
     Ok(json!({
@@ -458,7 +442,8 @@ mod tests {
         // Thu now skips the rest day before Fri; that's the owner's call, so Fri stays as planned.
         let friday = session(&db, &ids[2]);
         assert!(friday.status == SessionStatus::Tentative && !friday.user_locked);
-        assert_eq!(result["user_message_hint"], "Long moved to Thu 19:00.");
+        assert!(result["user_message_hint"].as_str().unwrap().starts_with("Long moved to Thu 19:00."));
+        assert!(result["user_message_hint"].as_str().unwrap().contains("skips a rest day"));
         assert_eq!(result["data"]["remote_events_changed"], false);
         publish(&db, &mut provider, now(4));
         let result = sync_calendar(&db, &mut provider, now(5)).unwrap();
@@ -471,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_tombstone_not_recreated_valid_replacement_found() {
+    fn delete_tombstone_not_recreated_and_replacement_is_agent_decision() {
         let (db, mut provider, ids) = setup();
         update_profile(&db, &changes(json!({"weekdays_allowed": [0, 1, 2, 3, 4, 5, 6]}))).unwrap();
         let deleted = event_id_for(&ids[1]);
@@ -480,9 +465,9 @@ mod tests {
         let original = session(&db, &ids[1]);
         assert!(original.status == SessionStatus::Cancelled && original.deleted_by_user());
         let live = PlannedSession::select(&db, "WHERE status IN ('COMMITTED', 'TENTATIVE')", []).unwrap();
-        assert_eq!(live.len(), 3);
-        let replacement = live.iter().find(|s| !ids.contains(&s.id)).unwrap();
-        assert_eq!(replacement.planned_start_at.local(&berlin()).weekday(), jiff::civil::Weekday::Sunday);
+        assert_eq!(live.len(), 2);
+        assert!(live.iter().all(|s| ids.contains(&s.id)));
+        assert!(!crate::domain::events::wake_pending(&db).unwrap().is_empty());
         assert!(pending_writes(&db).unwrap().iter().all(|w| w["event_id"] != deleted.as_str()));
         publish(&db, &mut provider, now(4));
         sync_calendar(&db, &mut provider, now(5)).unwrap();
@@ -543,13 +528,19 @@ mod tests {
     }
 
     #[test]
-    fn all_day_travel_cancels_without_compressing_missed_volume() {
+    fn all_day_travel_reports_conflicts_without_changing_sessions() {
         let (db, mut provider, ids) = setup();
         provider.put(json!({"id": "travel", "summary": "Travel", "start": {"date": "2026-10-12"}, "end": {"date": "2026-10-19"}})).unwrap();
         let result = sync_calendar(&db, &mut provider, now(3)).unwrap();
-        assert!(ids.iter().all(|id| session(&db, id).status == SessionStatus::Cancelled));
-        assert!(result["user_message_hint"].as_str().unwrap().starts_with("Long on Mon, Long on Wed, Long on Fri dropped"));
-        assert!(PlannedSession::select(&db, "WHERE status = 'TENTATIVE'", []).unwrap().is_empty());
+        assert!(ids.iter().all(|id| session(&db, id).status.is_open()));
+        assert!(result["data"]["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("overlaps a calendar event")));
+        let events = crate::domain::events::wake_pending(&db).unwrap();
+        assert!(!events.is_empty());
+        let count = events.len();
+        for event in events { crate::domain::events::ack(&db, event["id"].as_str().unwrap(), now(3)).unwrap(); }
+        sync_calendar(&db, &mut provider, now(4)).unwrap();
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        assert!(count > 0);
     }
 
     #[test]
@@ -583,7 +574,7 @@ mod tests {
         let result = sync_calendar(&db, &mut provider, now(3)).unwrap();
         assert!(session(&db, &ids[0]).user_locked && session(&db, &ids[1]).user_locked);
         assert_eq!(session(&db, &ids[1]).planned_start_at, at(13, 19, 0));
-        assert!(result["user_message_hint"].as_str().unwrap().contains("conflicts with recovery"));
+        assert!(result["user_message_hint"].as_str().unwrap().contains("skips a rest day"));
     }
 
     #[test]

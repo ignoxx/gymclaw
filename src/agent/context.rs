@@ -40,7 +40,7 @@ Finish every turn with exactly one of: the reply tool (text, optional buttons, o
 A button tap comes back to you as the button's value, so make values plain requests (\"Move Push to 13:00\").";
 
 /// Agent events the owner may need to act on (old `events pending`).
-pub const ACTIONABLE: [&str; 3] = ["notifications.delivery_unknown", "calendar.write_blocked", "crowd.source_unavailable"];
+pub use crate::domain::events::ACTIONABLE;
 /// Chat rows in the window.
 pub const HISTORY: i64 = 30;
 
