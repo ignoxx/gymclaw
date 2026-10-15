@@ -145,25 +145,32 @@ fn first_plan_key(db: &Connection, week: Date, now: Ts, template_id: &str) -> Re
     Ok(format!("rolling:{week}:{}", &digest[..32]))
 }
 
-/// Rotate the owner's split (e.g. Push → Pull → Legs) over upcoming sessions, continuing after the last
-/// started workout (a running one counts, so starting it doesn't reshuffle the week). Locked sessions
-/// keep their template but still advance the rotation.
+/// Give each upcoming session the split workout (e.g. Push / Pull / Legs) trained least recently, counting
+/// started workouts (a running one too, so starting it doesn't reshuffle the week) and the sessions before
+/// it. In steady state that's the plain rotation; after a skip or an owner swap the missed workout comes
+/// next instead of repeating the last one. Locked sessions keep their template.
 pub fn assign_rotation(db: &Connection, now: Ts) -> Result<Vec<Value>> {
     let split = OnboardingState::get(db, 1)?.map(|o| o.split_json.0).unwrap_or_default();
     if split.len() < 2 {
         return Ok(vec![]);
     }
-    let last = WorkoutSession::first(db, "ORDER BY started_at DESC", [])?.and_then(|w| w.template_id);
-    let index_of = |id: Option<&String>| id.and_then(|id| split.iter().position(|s| s == id));
-    let mut position = index_of(last.as_ref()).map_or(0, |i| i + 1);
+    let mut last: HashMap<String, Ts> = HashMap::new();
+    for workout in WorkoutSession::select(db, "WHERE template_id IS NOT NULL AND started_at IS NOT NULL", [])? {
+        let (Some(template), Some(at)) = (workout.template_id, workout.started_at) else { continue };
+        let entry = last.entry(template).or_insert(at);
+        *entry = (*entry).max(at);
+    }
     let mut changed = Vec::new();
     for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY planned_start_at, id", [])? {
-        let wanted = split[position % split.len()].clone();
+        // Never-trained workouts go first (None < Some), ties in split order.
+        let wanted = split.iter().enumerate().min_by_key(|(i, t)| (last.get(*t).copied(), *i)).map(|(_, t)| t.clone()).expect("split has entries");
         if session.user_locked {
-            position = index_of(session.workout_template_id.as_ref()).map_or(position + 1, |i| i + 1);
+            if let Some(template) = &session.workout_template_id {
+                last.insert(template.clone(), session.planned_start_at);
+            }
             continue;
         }
-        position += 1;
+        last.insert(wanted.clone(), session.planned_start_at);
         if session.workout_template_id.as_deref() == Some(wanted.as_str()) {
             continue;
         }
@@ -653,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn split_rotates_after_last_started_workout_and_respects_locks() {
+    fn split_gives_least_recent_workout_and_respects_locks() {
         let db = crate::domain::workout::tests::db();
         let base = ts("2026-10-05T10:00:00+00:00");
         for name in ["push", "pull", "legs"] {
@@ -678,8 +685,8 @@ mod tests {
         }
         let templates = |db: &Connection| ids.iter().map(|id| PlannedSession::get(db, id).unwrap().unwrap().workout_template_id.unwrap()).collect::<Vec<_>>();
         assign_rotation(&db, base.mins(-24 * 60)).unwrap();
-        // Last done: Push → Pull, then the locked Push, then Pull again, then Legs.
-        assert_eq!(templates(&db), ["pull", "push", "pull", "legs"]);
+        // Last done: Push → Pull, then the locked Push, then Legs (never trained), then Pull.
+        assert_eq!(templates(&db), ["pull", "push", "legs", "pull"]);
         assert_eq!(PlannedSession::get(&db, &ids[0]).unwrap().unwrap().workout_plan_json["template"]["id"], "pull");
         assert!(assign_rotation(&db, base.mins(-24 * 60)).unwrap().is_empty());
         // A running workout counts: starting Pull doesn't hand Pull to the next session again.
@@ -688,10 +695,17 @@ mod tests {
         assert_eq!(templates(&db), ["legs", "push", "pull", "legs"]);
         let third = PlannedSession::get(&db, &ids[2]).unwrap().unwrap().planned_start_at;
         let moved = json!({"session_id": ids[2], "from": third, "to": third.mins(30), "action": "moved"});
-        assert_eq!(plan_changes(&db, &json!({"rotation": changes, "changed": [moved]})).unwrap().as_deref(), Some("📅 Plan updated: Fri moved to 12:30 (was 12:00) · Mon is now Legs"));
+        assert_eq!(plan_changes(&db, &json!({"rotation": changes, "changed": [moved]})).unwrap().as_deref(), Some("📅 Plan updated: Fri moved to 12:30 (was 12:00) · Mon is now Legs · Fri is now Pull · Sun is now Legs"));
         let mut forecast = moved.clone();
         forecast["action"] = json!("forecast_updated");
         assert_eq!(plan_changes(&db, &json!({"changed": [forecast]})).unwrap(), None);
+        // Owner swapped Push for Pull and Push got skipped: Push comes next, not Legs again.
+        workout("legs", "PLAN_UPDATED", base.mins(-30));
+        let mut swapped = PlannedSession::get(&db, &ids[1]).unwrap().unwrap();
+        swapped.workout_template_id = Some("pull".into());
+        swapped.save(&db).unwrap();
+        assign_rotation(&db, base.mins(-24 * 60)).unwrap();
+        assert_eq!(templates(&db), ["push", "pull", "legs", "push"]);
     }
 
     #[test]
