@@ -178,3 +178,17 @@ use `status` first. Anything the tool can't do (e.g. log a workout afterwards) g
 ## Memory
 
 USER.md holds owner preferences in plain words. Structured data (profile, plans, sets) lives in SQLite.
+
+### Read-only SQL
+
+`sql 'SELECT …' [--limit 200]` reads the whole SQLite DB (maximum 1000 rows; `truncated`
+means narrow the query). CTEs, joins and JSON functions work. The connection rejects writes.
+Discover columns with `SELECT sql FROM sqlite_schema WHERE type = 'table'`.
+
+Core tables: `planned_session` (id, week_id, workout_template_id, status, planned_start_at,
+planned_end_at, user_locked, workout_plan_json), `workout_template` (id, definition_json),
+`workout_session` → `workout_exercise` → `set_log` (training history), `exercise_progression`,
+`user_profile`, `onboarding_state` (split_json), `availability_block`, `personal_busy_interval`,
+`calendar_event_snapshot`, `agent_event` (type, payload_json, handled_at), `body_weight`.
+Times are UTC; convert to profile timezone for replies. SQL results may contain private data:
+select only needed columns and keep credentials/runtime/provider state out of conversation.

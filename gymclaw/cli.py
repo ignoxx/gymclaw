@@ -62,6 +62,9 @@ def parser():
     register_availability_parser(groups)
     register_coach_parser(groups)
     register_body_parser(groups)
+    sql = groups.add_parser("sql")
+    sql.add_argument("query", help="Read-only SELECT, including CTEs and joins")
+    sql.add_argument("--limit", type=int, default=200)
     db = groups.add_parser("db")
     db.add_argument("operation", choices=["init"])
     profile = groups.add_parser("profile")
@@ -208,7 +211,10 @@ def main(argv=None) -> int:
         localize(engine, args)
         emitted_events = []
         message_hint = None
-        if args.group == "catalog":
+        if args.group == "sql":
+            from gymclaw.services.sql import query
+            data = query(engine, args.query, limit=args.limit)
+        elif args.group == "catalog":
             result = catalog_command(args)
             data, emitted_events, message_hint = result["data"], result["events"], result["user_message_hint"]
         elif args.group == "db":
