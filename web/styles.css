@@ -92,6 +92,10 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .area { fill: var(--lime); fill-opacity: .3; }
 .line { stroke: #424e30; stroke-width: 2; fill: none; stroke-linejoin: round; }
 .typical { stroke: #a9b39a; stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.forecast { stroke: #7d8a68; stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.forecast-area { fill: #a9b39a; fill-opacity: .18; }
+.now { stroke: #a9b39a; stroke-width: 1; }
+.now-label { font-size: 8px; }
 .dot { fill: var(--ink); }
 .weigh-in { fill: #a9b39a; }
 .key.weigh-in::before { width: 6px; height: 6px; border: 0; border-radius: 50%; background: #a9b39a; vertical-align: 1px; }

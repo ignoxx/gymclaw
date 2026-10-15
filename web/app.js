@@ -214,7 +214,10 @@ function renderAttendance(crowd) {
   document.getElementById('crowd-next').disabled = back === 0;
   const raw = series.filter(([m]) => m >= start && m < end);
   const points = view === 'month' ? hourlyMeans(raw) : raw;
-  const typical = view === 'today' ? typicalDay(series, start).filter(([m]) => m < end) : [];
+  // Today also shows the rest of the day: the typical curve past now is the forecast.
+  const ahead = view === 'today' && back === 0;
+  const typical = view === 'today' ? typicalDay(series, start).filter(([m]) => m < (ahead ? start + DAY : end)) : [];
+  const later = ahead ? typical.filter(([m]) => m > now) : [];
   document.getElementById('legend-day').textContent = view === 'today' ? crowdTitle(view, back, window_) : 'Check-ins';
   const typicalKey = document.getElementById('legend-typical');
   typicalKey.hidden = typical.length < 2;
@@ -225,13 +228,21 @@ function renderAttendance(crowd) {
     const when = view === 'today' ? clock(peak[0] % DAY) : `${dayLabel(peak[0])} ${clock(peak[0] % DAY)}`;
     stats.textContent = `Peak ${peak[1]} at ${when} · ${raw.length} readings${view === 'month' ? ' · hourly averages' : ''}`;
   } else stats.textContent = '';
+  // Summarize hours that haven't started yet (points sit mid-hour).
+  const upcoming = later.filter(([m]) => m - 30 >= now);
+  if (upcoming.length) {
+    const busiest = upcoming.reduce((a, b) => b[1] > a[1] ? b : a), quietest = upcoming.reduce((a, b) => b[1] < a[1] ? b : a);
+    const forecast = `Later: busiest ~${Math.round(busiest[1])} around ${clock(busiest[0] % DAY - 30)}`
+      + (quietest !== busiest ? `, quietest ~${Math.round(quietest[1])} around ${clock(quietest[0] % DAY - 30)}` : '');
+    stats.textContent = stats.textContent ? `${stats.textContent} · ${forecast}` : forecast;
+  }
   if (!points.length && typical.length < 2) {
     box.replaceChildren(el('p', 'empty', 'No readings in this period.'));
     return;
   }
   const all = [...points, ...typical];
   const chart = frame(box, niceTop(Math.max(...all.map(p => p[1]))), { label: `Reported check-ins, ${crowdTitle(view, back, window_)}` });
-  const axisEnd = Math.max(end, start + 60);
+  const axisEnd = Math.max(end, start + 60, later.length ? later.at(-1)[0] + 30 : 0);
   const x = m => chart.L + (m - start) / (axisEnd - start) * (chart.W - chart.L - chart.R);
   for (const [m, label] of axisTicks(view, start, axisEnd, chart.W)) chart.svg.append(svgText(x(m), chart.H - 6, label, { 'text-anchor': 'middle' }));
   if (view === 'week') for (let m = start + DAY; m < end; m += DAY) chart.svg.append(svgEl('line', { x1: x(m), x2: x(m), y1: chart.T, y2: chart.H - chart.B, class: 'grid' }));
@@ -240,6 +251,18 @@ function renderAttendance(crowd) {
   const runs = list => list.reduce((acc, point, i) => { if (!i || point[0] - list[i - 1][0] > gap) acc.push([]); acc.at(-1).push(point); return acc; }, []);
   const path = run => run.map(([m, v], i) => `${i ? 'L' : 'M'}${x(m).toFixed(1)},${chart.y(v).toFixed(1)}`).join(' ');
   for (const run of runs(typical)) if (run.length > 1) chart.svg.append(svgEl('path', { d: path(run), class: 'typical' }));
+  if (later.length) {
+    // Forecast: the typical curve right of now, shaded and drawn stronger via a clip at now.
+    const clip = svgEl('clipPath', { id: 'crowd-ahead' });
+    clip.append(svgEl('rect', { x: x(now), y: 0, width: chart.W, height: chart.H }));
+    chart.svg.append(clip);
+    for (const run of runs(typical)) if (run.length > 1 && run.at(-1)[0] > now) {
+      chart.svg.append(svgEl('path', { d: `${path(run)} L${x(run.at(-1)[0])},${chart.y(0)} L${x(run[0][0])},${chart.y(0)} Z`, class: 'forecast-area', 'clip-path': 'url(#crowd-ahead)' }));
+      chart.svg.append(svgEl('path', { d: path(run), class: 'forecast', 'clip-path': 'url(#crowd-ahead)' }));
+    }
+    chart.svg.append(svgEl('line', { x1: x(now), x2: x(now), y1: chart.T, y2: chart.H - chart.B, class: 'now' }));
+    chart.svg.append(svgText(x(now), chart.T - 2, 'now', { 'text-anchor': 'middle', class: 'label now-label' }));
+  }
   for (const run of runs(points)) {
     chart.svg.append(svgEl('path', { d: `${path(run)} L${x(run.at(-1)[0])},${chart.y(0)} L${x(run[0][0])},${chart.y(0)} Z`, class: 'area' }));
     chart.svg.append(svgEl('path', { d: path(run), class: 'line' }));
@@ -249,12 +272,14 @@ function renderAttendance(crowd) {
     chart.svg.append(svgEl('circle', { cx: x(m), cy: chart.y(v), r: 4, class: 'dot' }));
   }
   const typicalAt = m => typical.find(([t]) => Math.floor(t / 60) === Math.floor(m / 60))?.[1];
-  const hover = points.length ? points : typical;
+  // Readings first, then the forecast hours past the last reading.
+  const hover = points.length ? [...points, ...later.filter(([m]) => m > points.at(-1)[0])] : typical;
   crosshair(chart, hover.map(([m]) => x(m)), index => {
     const [m, v] = hover[index];
+    const reading = index < points.length;
     const time = view === 'month' ? `${clock(m % DAY - 30)}–${clock(m % DAY + 30)}` : clock(m % DAY);
-    const title = view === 'today' ? (points.length ? time : `${clock(m % DAY - 30)}–${clock(m % DAY + 30)}`) : `${dayLabel(m)} ${time}`;
-    const rows = points.length ? [[v, view === 'month' ? 'avg checked in' : 'checked in', 'today']] : [];
+    const title = view === 'today' ? (reading ? time : `${clock(m % DAY - 30)}–${clock(m % DAY + 30)}`) : `${dayLabel(m)} ${time}`;
+    const rows = reading ? [[v, view === 'month' ? 'avg checked in' : 'checked in', 'today']] : [];
     const usual = typicalAt(m);
     if (usual !== undefined) rows.push([usual, `typical ${dateLabel(start, { weekday: 'long' })}`, 'typical']);
     return { title, rows, y: chart.y(v) };
