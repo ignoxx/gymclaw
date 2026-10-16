@@ -300,6 +300,11 @@ ambiguous input fails with a concise question. Structured `--weight`/`--reps`/`-
 are also supported. Logging early cancels stale rest jobs. `notifications due` is an
 idempotent local debug dispatcher; activated runtime callbacks use separate durable
 Telegram delivery outbox and persist actual external automation IDs.
+Rest countdowns show the upcoming exercise/set and its weight (warm-up weight when applicable,
+bodyweight or `? kg` when unknown). Every exercise uses the same rest duration: 90 seconds by
+default, stored in `default_accessory_rest_seconds` for compatibility. Legacy compound defaults and
+per-exercise template rest values no longer select timers. The coach's `rest` action changes the
+whole workout; `remember` also changes future workouts. Compression and ETA use the same duration.
 The final set needs no rest timer when no work remains.
 
 ETA counts remaining warm-up/working sets, rests, transitions, deferred/substituted work,

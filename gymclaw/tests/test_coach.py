@@ -47,7 +47,7 @@ def test_typed_set_reacts_then_rest_card_then_fresh_set_card(db):
     rest = result["cards"][0]
     # Between sets: only a countdown and ways to shorten it, nothing to log yet.
     assert rest["kind"] == "rest" and rest["rest_until"] == at(100).isoformat()
-    assert rest["text"] == "until **Machine incline press** set 2/2" and list(buttons(rest)) == ["−15s", "−30s", "⏭ Skip"]
+    assert rest["text"] == "until **Machine incline press** set 2/2 · 90 kg" and list(buttons(rest)) == ["−15s", "−30s", "⏭ Skip"]
     skipped = coach.handle_tap(db, buttons(rest)["⏭ Skip"], now=at(30), request_id="cb-skip")
     card = skipped["cards"][0]
     assert skipped["cleanup"] == "delete" and card["kind"] == "set" and card["photo"]
@@ -73,7 +73,7 @@ def test_finishing_an_exercise_rests_before_the_next(db):
     coach.handle_tap(db, "skip:" + coach.exercise_card(db, coach.active_workout(db), at(11))["buttons"][0][0]["data"].split(":")[2], now=at(12), request_id="cb")
     rest = coach.handle_text(db, "10x90", now=at(60), request_id="m2")["cards"][0]
     # The finished exercise's rest (90 s), and the countdown says what comes next.
-    assert rest["kind"] == "rest" and rest["text"] == "until next: **Shoulder press**" and rest["rest_until"] == at(150).isoformat()
+    assert rest["kind"] == "rest" and rest["text"] == "until next: **Shoulder press** · 25 kg" and rest["rest_until"] == at(150).isoformat()
     nxt = coach.handle_rest_over(db, now=at(151))["cards"][0]
     assert nxt["kind"] == "set" and nxt["text"].startswith("**Shoulder press**") and "🔄 Swap" in buttons(nxt)
 
@@ -263,3 +263,45 @@ def test_only_button_starts_count_as_gym_arrivals_for_habits(db):
     db.add(planned); db.flush()
     coach.begin(db, planned.id[:8], now=tomorrow, request_id="begin")
     assert evidence(db, now=tomorrow, zone=zone) == [(20 * 60, 1.0)]  # 18:00 UTC = 20:00 Berlin
+
+
+@pytest.mark.parametrize(("guide", "weight", "warmup", "expected"), [
+    ("bench-press", 80, True, "40 kg"),
+    ("bench-press", 0, False, "? kg"),
+    ("crunch", 0, False, "Bodyweight"),
+])
+def test_rest_previews_the_upcoming_target(db, guide, weight, warmup, expected):
+    from gymclaw.services.workout import exercises
+    workout = coach.active_workout(db)
+    upcoming = exercises(db, workout)[1]
+    upcoming.target_weight = weight
+    upcoming.config_json = upcoming.config_json | {"guide_id": guide, "warmup_required": warmup}
+    coach.handle_text(db, "10x90", now=at(10), request_id="m1")
+    rest = coach.handle_text(db, "10x90", now=at(20), request_id="m2")["cards"][0]
+    assert rest["text"] == f"until next: **Shoulder press** · {expected}"
+
+
+def test_one_rest_duration_overrides_legacy_exercise_settings(db):
+    from gymclaw.services.compression import compress_template
+    from gymclaw.services.profile import get_profile, update_profile
+    from gymclaw.services.templates import get_template
+    from gymclaw.services.workout import exercises
+    workout = coach.active_workout(db)
+    coach.end_workout(db, workout, now=NOW, request_id="end")
+    # The remembered preference must win over template timers in future workouts too.
+    coach.handle_action(db, "rest", seconds=120, remember=True, now=at(1), request_id="rest")
+    template = get_template(db, "push")
+    template.exercises[0].rest_seconds = 180
+    template.exercises[0].primary = True
+    template.exercises[0].target_weight = 80
+    template.exercises[0].warmup_weight = 40
+    template.exercises[1].rest_seconds = 60
+    import_template(db, template)
+    update_profile(db, {"default_compound_rest_seconds": 150})
+    result = start(db, "push", now=at(2), request_id="restart")["data"]
+    workout = coach.active_workout(db)
+    assert {row.rest_seconds for row in exercises(db, workout)} == {120}
+    planned = compress_template(template, get_profile(db), 3600)
+    assert planned["estimated_duration_seconds"] == (datetime.fromisoformat(result["eta"]) - at(2)).total_seconds()
+    rest = coach.handle_text(db, "10x90", now=at(10), request_id="m1")["cards"][0]
+    assert rest["rest_until"] == at(130).isoformat()

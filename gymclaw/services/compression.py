@@ -16,7 +16,7 @@ def compress_template(template: Template, profile: Profile, budget_seconds: int)
         kept = [e for e in template.exercises if counts[e.id]]
         seconds = template.set_duration_seconds if first_primary and counts[first_primary] else 0
         for index, spec in enumerate(kept):
-            rest = spec.rest_seconds or (profile.default_compound_rest_seconds if spec.primary else profile.default_accessory_rest_seconds)
+            rest = profile.rest_seconds
             seconds += counts[spec.id] * template.set_duration_seconds + max(0, counts[spec.id] - 1) * rest
             if index < len(kept) - 1:
                 seconds += rest + template.transition_seconds

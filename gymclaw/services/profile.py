@@ -37,6 +37,15 @@ class Profile(BaseModel):
     # Calendar event location: calendar apps derive travel time / time-to-leave from it.
     gym_address: Annotated[str, Field(min_length=3, max_length=200)] | None = None
 
+    @property
+    def rest_seconds(self) -> int:
+        """One rest duration for every exercise; reuse the stored accessory preference.
+
+        The compound and template fields remain readable for legacy data, but no longer
+        select different timers. `coach rest --remember` updates both stored defaults.
+        """
+        return self.default_accessory_rest_seconds
+
     @field_validator("timezone")
     @classmethod
     def timezone_exists(cls, value):
