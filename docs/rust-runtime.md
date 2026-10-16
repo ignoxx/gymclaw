@@ -47,8 +47,9 @@ One struct per tool implementing `tools::Tool` (`NAME`, `DESCRIPTION`, `run`). A
 `Deserialize + JsonSchema`; their doc comments become the schema the model reads. The same tool
 serves the agent and `gymclaw call`, so anything the agent can do can be reproduced by hand.
 
-Tools are intent-level verbs (`move_session`, `add_session`, `skip_session`,
-`set_session_workout`, `get_week`, `workout`, …). Mutations that touch other sessions return
+Tools include general `session_create`/`session_update` (exact time, duration, template, status),
+read-only `sql_query`, `get_week`, `workout`, and profile/notes tools. Session edits lock the session
+and return rule warnings; no other sessions change. Mutations that touch other sessions return
 `side_effects`, so a reply can't contradict the state. Tools that show something in Telegram push
 `Effect::Coach(CoachView)`; the runtime renders it after the transaction commits.
 
@@ -61,10 +62,13 @@ model never has to. Timestamps without an offset are the owner's local time.
   the owner's notes. No tool manual: tool descriptions carry that.
 - Context per turn: system prompt + state snapshot (local time, profile, this week's sessions,
   running workout, open events) + notes + the last ~30 `chat_message` rows. Target < 15k tokens.
-- Escape hatch: `sql_query` (read anything but secrets) and `sql_write` (DB snapshot first, audited
-  as `agent.sql_write`). When no verb fits, the model does it with SQL instead of telling the owner
-  "can't". `note_add {kind: lesson}` lets it write down a workaround for next time. Lessons and owner
-  notes are in every prompt, which is how it improves itself.
+- Open-ended questions use `sql_query`: a dedicated read-only SQLite connection, a 200-row cap,
+  schema discovery and a concise schema description in the tool docs. OAuth credentials and the
+  private feed URL stay excluded. There is no raw SQL write tool; session edits reconcile calendar,
+  allocation and reminder state through the validated domain layer.
+- The agent owns planning decisions and exceptions. `note_add {kind: owner}` records standing
+  preferences and date-bounded exceptions; notes and lessons appear in every prompt. Background
+  events are observations, never fresh owner permission.
 - One turn ends with one reply: text (+ optional buttons) or a reaction or nothing. Tool errors go
   back to the model. Step cap (12 calls) and an identical-call breaker; on giving up, one sanitized
   line to the owner.
@@ -77,7 +81,8 @@ model never has to. Timestamps without an offset are the owner's local time.
 - 👀 ack reaction on receipt, removed when the reply is sent; typing indicator while working.
 - Two button kinds: `gc:<action>:<ref>` → coach, no model. Agent buttons → `btn:<id>` with the
   value in `agent_button`; a tap is fed to the agent as the owner's text.
-- Typed sets (`10x40`, `13 reps`) → coach first; anything it doesn't handle → agent.
+- Typed sets (`10x40`, `13 reps`) → coach first; unparsed text and failed validations → agent
+  with error context. Failed button operations also fall back to the agent with the card context.
 - Coach card: one live card per exercise with image, target and quick buttons, edited in place;
   the rest countdown edits every 5 s.
 - Photos/documents in (HEIC included, via libheif ≥ 1.17) → vision model; EXIF capture date for
@@ -93,7 +98,13 @@ model never has to. Timestamps without an offset are the owner's local time.
 
 - In-process: `ticks::watch` every 60 s (calendar sync, personal feed, reminders), `ticks::weekly`
   Sunday from 19:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
-  after ticks when calendar writes are enabled. `serve` touches `data/heartbeat` every minute for
+  after ticks when calendar writes are enabled. Conflicts, no-shows, missed slots, stale workouts
+  and week rollover create durable decision events rather than automatic replans or fixed briefings.
+  The bot checks this inbox every minute in its serialized agent worker, gated by runtime authority;
+  successful turns acknowledge events and failed turns remain pending. Unchanged conflicts dedupe
+  across restarts and acknowledgement. Default drafts for empty weeks, rotation of unlocked
+  templates, crowd forecast refresh, reminders and calendar publication stay deterministic.
+  `serve` touches `data/heartbeat` every minute for
   the container health check.
 - One-off jobs live in `notification_job` (GET_READY, LEAVE, SESSION_START, REST). One loop sleeps
   until the next `due_at` (or a wake-up after any write) and fires them. REST jobs fire 30 s late as

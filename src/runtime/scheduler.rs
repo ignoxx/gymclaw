@@ -181,8 +181,8 @@ pub fn fire_at(job: &NotificationJob) -> Ts {
 }
 
 /// Run `ticks::weekly` once per week, on Sunday from 19:00 profile-local (a restart after 19:00
-/// still catches up the same evening), publish calendar writes, then queue the briefing.
-pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Result<serde_json::Value> {
+/// still catches up the same evening), publish calendar writes; the agent handles the briefing.
+pub fn weekly_if_due(db: &crate::db::Connection, _recipient: &str, now: Ts) -> Result<serde_json::Value> {
     let tz = profile::get_profile(db)?.tz();
     let local = now.local(&tz);
     if local.weekday() != jiff::civil::Weekday::Sunday || local.hour() < 19 {
@@ -193,12 +193,11 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
     if done.is_some() {
         return Ok(json!({"due": false}));
     }
-    // The week is marked done only with its briefing; a crash before that replans on the next tick,
-    // which is idempotent per week (request id + briefing correlation key).
+    // Drafting and the agent event are idempotent per week, including across crashes.
     let tx = db.unchecked_transaction()?;
     let mut data = ticks::weekly(&tx, now)?;
     tx.commit()?;
-    // Publish before briefing so the briefing reports what actually reached the calendar.
+    // Publish before recording the weekly run; the agent reads the actual outbox state.
     let published = outbox::runtime_authority(db)?.calendar_writes_enabled
         && match ticks::publish(db, now) {
             Ok(result) => result["published"] == true,
@@ -208,7 +207,7 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
             }
         };
     let tx = db.unchecked_transaction()?;
-    ticks::weekly_briefing(&tx, recipient, &mut data, published, now)?;
+    data["published"] = json!(published);
     emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
     Ok(data)

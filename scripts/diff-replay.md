@@ -23,7 +23,12 @@ scripts/diff-replay ~/gymclaw-backups/<backup>.db [--oracle ~/Projects/gymclaw] 
 - The script hardcodes two session ids from the 2026-10-12 backup (`PULL`, `LEGS`). Update them when
   you replay a newer backup.
 
-## Last result (backup gymclaw-20261012-190132.db, 2026-10-14)
+The Rust session calls now use `session_create`/`session_update`; captures accept their nested
+`data.session.id`. Policy and result-shape differences from the Python release are intentional:
+Rust warns and leaves existing sessions saved, locks agent-authored plans, and exposes planning
+events to the agent. This replay remains a compatibility diagnostic, not a zero-diff requirement.
+
+## Historical result (backup gymclaw-20261012-190132.db, 2026-10-14)
 
 Every table is identical after the replay: `planned_session`, `availability_block`, `user_profile`,
 `workout_session`, `workout_exercise`, `set_log`, `notification_job`, `exercise_progression` and

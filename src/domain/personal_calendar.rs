@@ -1,6 +1,6 @@
 //! Personal calendar as read-only blockers (port of personal_calendar.py). Fetched by the watcher, never
 //! written. Connect stores the feed URL locally; each refresh replaces the expanded busy intervals and
-//! replans only the weeks whose blockers changed. A failed fetch keeps the last known blockers so an
+//! reports conflicts in weeks whose blockers changed. A failed fetch keeps the last known blockers so an
 //! outage never frees up time that is actually busy. Owner: lead (planning).
 use std::collections::BTreeSet;
 
@@ -13,7 +13,7 @@ use crate::domain::calendar::week_of;
 use crate::domain::core::emit;
 use crate::domain::planning::Interval;
 use crate::domain::profile::get_profile;
-use crate::domain::replanning::{commit_upcoming, replan_weeks};
+use crate::domain::replanning::{commit_upcoming, inspect_weeks};
 use crate::error::Result;
 use crate::providers::http::Transport;
 use crate::providers::ics;
@@ -60,7 +60,7 @@ pub fn disconnect(db: &Connection, now: Ts) -> Result<Value> {
     let old = stored(db)?;
     db.execute("DELETE FROM personal_busy_interval", [])?;
     db.execute("DELETE FROM personal_calendar_state WHERE id = 1", [])?;
-    let mut result = replan(db, &old, &BTreeSet::new(), now)?;
+    let mut result = inspect_changes(db, &old, &BTreeSet::new(), now)?;
     result["connected"] = json!(false);
     Ok(result)
 }
@@ -100,7 +100,7 @@ pub fn refresh(db: &Connection, now: Ts, force: bool, transport: &dyn Transport,
             PersonalBusyInterval { id: None, start_at, end_at }.insert(db)?;
         }
     }
-    let mut result = replan(db, &old, &fresh, now)?;
+    let mut result = inspect_changes(db, &old, &fresh, now)?;
     result["refreshed"] = json!(true);
     result["blockers"] = json!(fresh.len());
     Ok(result)
@@ -110,7 +110,7 @@ fn stored(db: &Connection) -> Result<BTreeSet<(Ts, Ts)>> {
     Ok(PersonalBusyInterval::select(db, "", [])?.into_iter().map(|r| (r.start_at, r.end_at)).collect())
 }
 
-fn replan(db: &Connection, old: &BTreeSet<(Ts, Ts)>, new: &BTreeSet<(Ts, Ts)>, now: Ts) -> Result<Value> {
+fn inspect_changes(db: &Connection, old: &BTreeSet<(Ts, Ts)>, new: &BTreeSet<(Ts, Ts)>, now: Ts) -> Result<Value> {
     let tz = get_profile(db)?.tz();
     // Only future changes matter; a blocker sliding out of the lookback window is not news.
     let changed: Vec<_> = old.symmetric_difference(new).filter(|(_, end)| *end > now).collect();
@@ -125,17 +125,13 @@ fn replan(db: &Connection, old: &BTreeSet<(Ts, Ts)>, new: &BTreeSet<(Ts, Ts)>, n
             week = week.checked_add(jiff::Span::new().days(7))?;
         }
     }
-    let replanned = replan_weeks(db, &weeks, now, false)?;
+    let replanned = inspect_weeks(db, &weeks, now)?;
     commit_upcoming(db, now)?;
-    let mut event = emit(db, "calendar.personal_blockers_changed", now, json!({"added": new.difference(old).count(), "removed": old.difference(new).count(),
+    let event = emit(db, "calendar.personal_blockers_changed", now, json!({"added": new.difference(old).count(), "removed": old.difference(new).count(),
         "changes": replanned["changed"], "warnings": replanned["warnings"]}))?;
-    event.handled_at = Some(now); // The replan already ran; the agent only communicates.
-    event.update(db)?;
     let warnings: Vec<&str> = replanned["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let hint = if !warnings.is_empty() {
         json!(format!("Personal calendar changed. {}", warnings.join(" ")))
-    } else if replanned["changed"].as_array().is_some_and(|c| !c.is_empty()) {
-        json!("Personal calendar changed. Affected gym sessions replanned; preparation/leave times updated.")
     } else {
         Value::Null
     };
@@ -171,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_blocker_moves_session_and_outage_keeps_blockers() {
+    fn personal_blocker_reports_conflict_and_outage_keeps_blockers() {
         let db = crate::domain::workout::tests::db();
         let sunday = Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap();
         let template: Template = serde_json::from_value(json!({"id": "short", "name": "Short",
@@ -187,8 +183,9 @@ mod tests {
 
         let result = connect(&db, "webcal://p42-caldav.icloud.com/published/2/secret", sunday, &up).unwrap();
         assert!(result["user_message_hint"].as_str().unwrap().starts_with("Personal calendar changed"));
-        assert!(!result["changes"].as_array().unwrap().is_empty());
-        assert_ne!(PlannedSession::get(&db, &id).unwrap().unwrap().planned_start_at, original);
+        assert_eq!(result["changes"], json!([]));
+        assert!(!crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        assert_eq!(PlannedSession::get(&db, &id).unwrap().unwrap().planned_start_at, original);
         assert!(busy_intervals(&db, sunday, sunday.mins(8 * 24 * 60)).unwrap().iter().any(|b| b.start == busy_start));
         assert!(!status(&db).unwrap().to_string().contains("secret"));
 
