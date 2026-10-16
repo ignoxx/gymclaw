@@ -421,7 +421,6 @@ pub fn make_exercise(db: &Connection, workout_id: &str, spec: &ExerciseSpec, pos
     let progression = ExerciseProgression::get(db, &spec.id)?;
     let mut config = serde_json::to_value(spec)?;
     config["warmup_required"] = Value::Bool(warmup);
-    let default_rest = if spec.primary { profile.default_compound_rest_seconds } else { profile.default_accessory_rest_seconds };
     let row = WorkoutExercise {
         id: new_id(),
         workout_session_id: workout_id.into(),
@@ -433,7 +432,7 @@ pub fn make_exercise(db: &Connection, workout_id: &str, spec: &ExerciseSpec, pos
         rep_min: spec.rep_min,
         rep_max: spec.rep_max,
         target_weight: progression.map_or(spec.target_weight, |p| p.next_weight),
-        rest_seconds: spec.rest_seconds.unwrap_or(default_rest),
+        rest_seconds: profile.rest_seconds(),
         substituted_from_exercise_id: None,
         deferred_reason: None,
         config_json: Json(config),
@@ -747,6 +746,7 @@ pub(crate) mod tests {
     }
 
     fn short(db: &Connection) -> String {
+        crate::domain::profile::update_profile(db, &serde_json::from_value(json!({"default_accessory_rest_seconds": 100})).unwrap()).unwrap();
         let bench = spec(json!({"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 100}));
         import_template(db, &Template { id: "short".into(), name: "Short".into(), exercises: vec![bench], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: "user".into() }).unwrap();
         start(db, Some("short"), None, false, at(0), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string()
