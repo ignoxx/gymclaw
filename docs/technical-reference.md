@@ -249,6 +249,11 @@ not lower the full-volume progression threshold. Compression uses configured or 
 durations, refreshed again at workout start.
 
 Warm-up never counts toward volume/progression. Logging a working set skips a pending warm-up.
+Rest countdowns show the upcoming exercise/set and weight (warm-up weight when applicable,
+bodyweight or `? kg` when unknown). All exercises use one duration: 90 seconds by default,
+stored in `default_accessory_rest_seconds` for compatibility. Legacy compound defaults and
+per-exercise template rest values no longer select timers. `rest` changes the whole workout;
+`remember` also changes future workouts. Compression and ETA use the same duration.
 Logging early cancels stale rest jobs; the final set needs no rest timer.
 Rest countdowns show the upcoming exercise/set and its weight (warm-up weight when applicable,
 bodyweight or `? kg` when unknown). Every exercise uses the same rest duration: 90 seconds by

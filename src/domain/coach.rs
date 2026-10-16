@@ -81,8 +81,10 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     if let Some(rest) = data.rest_job {
         // Resting there is nothing to log yet: just the countdown and ways to shorten it.
         let upcoming = if active.new_exercise { format!("next: **{}**", active.name) } else { format!("**{}** set {}/{}", active.name, active.set_number, active.working_sets) };
+        let weight = if active.set_type == SetType::Warmup { active.target_weight } else { active.last_set.as_ref().map_or(active.target_weight, |last| last.weight) };
+        let target = if weight > 0.0 { kg(weight) } else if active.bodyweight { "Bodyweight".into() } else { "? kg".into() };
         return Ok(Card {
-            text: format!("until {upcoming}"),
+            text: format!("until {upcoming} · {target}"),
             photo: None,
             buttons: vec![vec![button("−15s", &["cut", r, "15"])?, button("−30s", &["cut", r, "30"])?, button("⏭ Skip", &["skip", r])?]],
             rest_until: Some(rest.due_at),
@@ -509,7 +511,7 @@ mod tests {
         assert_eq!((result.react.as_deref(), result.ack.as_deref()), (Some("👍"), Some("✅ 12 × 90 kg")));
         let rest = &result.cards[0];
         assert_eq!((rest.kind, rest.rest_until), (CardKind::Rest, Some(at(100))));
-        assert_eq!(rest.text, "until **Machine incline press** set 2/2");
+        assert_eq!(rest.text, "until **Machine incline press** set 2/2 · 90 kg");
         assert_eq!(buttons(rest).iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["−15s", "−30s", "⏭ Skip"]);
         let skipped = handle_tap(&db, &data(rest, "⏭ Skip"), at(30), "cb-skip").unwrap();
         let card = &skipped.cards[0];
@@ -533,7 +535,7 @@ mod tests {
         assert!(!handle_rest_over(&db, at(102)).unwrap().rest_over);
         let rest = handle_text(&db, "10x90", at(110), "m2").unwrap().cards.remove(0);
         // The finished exercise's rest (90 s), and the countdown says what comes next.
-        assert_eq!((rest.text.as_str(), rest.rest_until), ("until next: **Shoulder press**", Some(at(200))));
+        assert_eq!((rest.text.as_str(), rest.rest_until), ("until next: **Shoulder press** · 25 kg", Some(at(200))));
         let next = handle_rest_over(&db, at(201)).unwrap().cards.remove(0);
         assert!(next.text.starts_with("**Shoulder press**"));
         data(&next, "🔄 Swap");
@@ -608,6 +610,48 @@ mod tests {
         assert!(over.cleanup == Some(Cleanup::Delete) && over.cards[0].kind == CardKind::Set);
         let profile = crate::domain::profile::get_profile(&db).unwrap();
         assert_eq!((profile.default_compound_rest_seconds, profile.default_accessory_rest_seconds), (60, 60));
+    }
+
+    #[test]
+    fn rest_previews_warmup_unknown_and_bodyweight_targets() {
+        for (guide, weight, warmup, expected) in [("bench-press", 80.0, true, "40 kg"), ("bench-press", 0.0, false, "? kg"), ("crunch", 0.0, false, "Bodyweight")] {
+            let db = db();
+            push(&db);
+            let workout = active_workout(&db).unwrap().unwrap();
+            let mut upcoming = exercises(&db, &workout.id).unwrap().remove(1);
+            upcoming.target_weight = weight;
+            upcoming.config_json["guide_id"] = json!(guide);
+            upcoming.config_json["warmup_required"] = json!(warmup);
+            upcoming.update(&db).unwrap();
+            handle_text(&db, "10x90", at(10), "m1").unwrap();
+            let rest = handle_text(&db, "10x90", at(20), "m2").unwrap().cards.remove(0);
+            assert_eq!(rest.text, format!("until next: **Shoulder press** · {expected}"));
+        }
+    }
+
+    #[test]
+    fn one_rest_duration_overrides_legacy_exercise_settings() {
+        use crate::domain::{compression::compress_template, profile::{get_profile, update_profile}};
+        let db = db();
+        push(&db);
+        handle_action(&db, Action::End, None, None, None, false, at(0), "end").unwrap();
+        handle_action(&db, Action::Rest, None, None, Some(120), true, at(1), "rest").unwrap();
+        let mut template = get_template(&db, "push").unwrap();
+        template.exercises[0].rest_seconds = Some(180);
+        template.exercises[0].primary = true;
+        template.exercises[0].target_weight = 80.0;
+        template.exercises[0].warmup_weight = Some(40.0);
+        template.exercises[1].rest_seconds = Some(60);
+        import_template(&db, &template).unwrap();
+        update_profile(&db, &serde_json::from_value(json!({"default_compound_rest_seconds": 150})).unwrap()).unwrap();
+        let result = start(&db, Some("push"), None, false, at(2), "restart").unwrap();
+        let workout = active_workout(&db).unwrap().unwrap();
+        assert!(exercises(&db, &workout.id).unwrap().iter().all(|row| row.rest_seconds == 120));
+        let planned = compress_template(&template, &get_profile(&db).unwrap(), 3600).unwrap();
+        let eta = Ts::parse(result["data"]["eta"].as_str().unwrap(), None).unwrap();
+        assert_eq!(planned["estimated_duration_seconds"].as_i64().unwrap() as f64, (eta - at(2)).as_secs_f64());
+        let rest = handle_text(&db, "10x90", at(10), "m1").unwrap().cards.remove(0);
+        assert_eq!(rest.rest_until, Some(at(130)));
     }
 
     #[test]

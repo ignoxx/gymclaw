@@ -27,7 +27,7 @@ pub fn compress_template(template: &Template, profile: &Profile, budget_seconds:
             _ => 0,
         };
         for (index, spec) in kept.iter().enumerate() {
-            let rest = spec.rest_seconds.unwrap_or(if spec.primary { profile.default_compound_rest_seconds } else { profile.default_accessory_rest_seconds });
+            let rest = profile.rest_seconds();
             let sets = counts[spec.id.as_str()];
             seconds += sets * template.set_duration_seconds + (sets - 1).max(0) * rest;
             if index < kept.len() - 1 {

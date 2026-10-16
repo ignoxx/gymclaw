@@ -70,6 +70,12 @@ impl Default for Profile {
 }
 
 impl Profile {
+    /// One rest duration for every exercise. The stored compound/template settings are
+    /// retained for legacy data; `rest --remember` still updates both profile defaults.
+    pub fn rest_seconds(&self) -> i64 {
+        self.default_accessory_rest_seconds
+    }
+
     pub fn tz(&self) -> TimeZone {
         zone(&self.timezone).unwrap_or(TimeZone::UTC)
     }
