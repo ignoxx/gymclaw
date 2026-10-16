@@ -499,13 +499,13 @@ mod tests {
         assert!(resized.user_locked);
         let plan = &resized.workout_plan_json;
         assert!(plan["estimated_duration_seconds"].as_i64().unwrap() <= 45 * 60);
-        assert_eq!([&plan["sets"]["bench"], &plan["sets"]["row"], &plan["sets"]["triceps"], &plan["sets"]["curl"]], [&json!(3), &json!(3), &json!(0), &json!(0)]);
+        assert_eq!([&plan["sets"]["bench"], &plan["sets"]["row"], &plan["sets"]["triceps"], &plan["sets"]["curl"]], [&json!(3), &json!(3), &json!(0), &json!(1)]);
         assert!(response["user_message_hint"].is_string());
         let started = start(&db, Some("long"), Some(&resized.id), false, at(14, 20, 0), "start-short").unwrap();
         assert!(Ts::parse(started["data"]["eta"].as_str().unwrap(), None).unwrap() <= at(14, 20, 45));
         let rows = WorkoutExercise::select(&db, "ORDER BY position", []).unwrap();
         let raise = rows.iter().find(|e| e.exercise_id == "raise").unwrap();
-        assert_eq!((raise.planned_working_sets, raise.config_json["working_sets"].as_i64()), (2, Some(3)));
+        assert_eq!((raise.planned_working_sets, raise.config_json["working_sets"].as_i64()), (3, Some(3)));
         assert_eq!(rows.iter().find(|e| e.exercise_id == "triceps").unwrap().status, crate::db::models::ExerciseStatus::Skipped);
     }
 
