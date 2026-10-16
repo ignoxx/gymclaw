@@ -135,12 +135,12 @@ def test_resize_compresses_to_45_minutes_and_start_uses_snapshot(setup):
         plan = session.workout_plan_json
         assert plan["estimated_duration_seconds"] <= 45 * 60
         assert plan["sets"]["bench"] == plan["sets"]["row"] == 3
-        assert plan["sets"]["triceps"] == plan["sets"]["curl"] == 0
+        assert plan["sets"]["triceps"] == 0 and plan["sets"]["curl"] == 1
         assert response["user_message_hint"]
         result = start(db, "long", planned_session_id=session.id, now=at(14, 20), request_id="start-short")["data"]
         assert datetime.fromisoformat(result["eta"]) <= at(14, 20, 45)
         rows = list(db.scalars(select(WorkoutExercise)))
-        assert next(e for e in rows if e.exercise_id == "raise").planned_working_sets == 2
+        assert next(e for e in rows if e.exercise_id == "raise").planned_working_sets == 3
         assert next(e for e in rows if e.exercise_id == "raise").config_json["working_sets"] == 3
         assert next(e for e in rows if e.exercise_id == "triceps").status == "SKIPPED"
 

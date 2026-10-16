@@ -261,7 +261,7 @@ def touch(db: Session, workout: WorkoutSession, now: datetime) -> dict:
 def make_exercise(db: Session, workout: WorkoutSession, spec: ExerciseSpec, position: int, *, warmup: bool = False, working_sets: int | None = None) -> WorkoutExercise:
     profile = get_profile(db)
     progression = db.get(ExerciseProgression, spec.id)
-    row = WorkoutExercise(workout_session_id=workout.id, exercise_id=spec.id, position=position, planned_working_sets=working_sets or spec.working_sets, rep_min=spec.rep_min, rep_max=spec.rep_max, target_weight=progression.next_weight if progression else spec.target_weight, rest_seconds=spec.rest_seconds or (profile.default_compound_rest_seconds if spec.primary else profile.default_accessory_rest_seconds), config_json=spec.model_dump(mode="json") | {"warmup_required": warmup})
+    row = WorkoutExercise(workout_session_id=workout.id, exercise_id=spec.id, position=position, planned_working_sets=working_sets or spec.working_sets, rep_min=spec.rep_min, rep_max=spec.rep_max, target_weight=progression.next_weight if progression else spec.target_weight, rest_seconds=profile.rest_seconds, config_json=spec.model_dump(mode="json") | {"warmup_required": warmup})
     db.add(row)
     db.flush()
     return row

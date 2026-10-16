@@ -72,7 +72,9 @@ def exercise_card(db: Session, workout: WorkoutSession, now: datetime) -> dict:
     if data["rest_job"]:
         # Resting there is nothing to log yet: just the countdown and ways to shorten it.
         upcoming = f"next: **{active['name']}**" if active["new_exercise"] else f"**{active['name']}** set {active['set_number']}/{active['working_sets']}"
-        return card(f"until {upcoming}",
+        weight = active["target_weight"] if active["set_type"] == "WARMUP" else (active["last_set"]["weight"] if active["last_set"] else active["target_weight"])
+        target = kg(weight) if weight else "Bodyweight" if active["bodyweight"] else "? kg"
+        return card(f"until {upcoming} · {target}",
             [[button("−15s", "cut", ref, "15"), button("−30s", "cut", ref, "30"), button("⏭ Skip", "skip", ref)]],
             rest_until=data["rest_job"]["due_at"], kind="rest")
     head = f"**{active['name']}**" + (f" · {active['primary_muscle']}" if active["primary_muscle"] else "")

@@ -19,6 +19,8 @@ def engine(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'workout.db'}")
     initialize(engine)
     with Session(engine) as db, db.begin():
+        from gymclaw.services.profile import update_profile
+        update_profile(db, {"default_accessory_rest_seconds": 100})
         import_template(db, Template(id="short", name="Short", exercises=[ExerciseSpec(id="bench", name="Bench", role="press", primary=True, working_sets=2, target_weight=80, warmup_weight=50, rest_seconds=100)]))
     yield engine
     engine.dispose()
