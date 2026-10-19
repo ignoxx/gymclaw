@@ -1,5 +1,5 @@
-//! What the model sees each turn: a short system prompt, the owner's notes and lessons, a fresh state
-//! snapshot from the DB, and the chat since the last `/new`. Target: well under 15k tokens.
+//! What the model sees each turn: a short system prompt, the DB schema, the owner's notes and lessons,
+//! a fresh state snapshot from the DB, and the chat since the last `/new`. Target: well under 15k tokens.
 use std::fmt::Write;
 
 use jiff::ToSpan;
@@ -29,7 +29,7 @@ You own planning decisions: weekly placement, rotation overrides, exceptions, ca
 Use session_create/session_update for exact times, templates, durations and statuses (including cancellation); these preserve reminders, \
 calendar sync, allocation and retries, lock your edits and return warnings. Use plan_week only when a default plan is appropriate; \
 it fills gaps and does not implement exceptions. Never change other sessions when the owner says to leave them alone. \
-Use sql_query for arbitrary history questions and schema discovery. SQL is read-only; use the domain tools for changes. \
+Use sql_query for arbitrary history questions. SQL is read-only; use the domain tools for changes. \
 When the fast path hands you an error or unparsed input, use its context and the current state to resolve the owner's intent. \
 If logging succeeded but displaying a card failed, resend the card without logging again. \
 Save lasting preferences with note_add (kind owner). Save temporary exceptions there too, with explicit local start/end dates \
@@ -58,9 +58,12 @@ pub const HISTORY: i64 = 30;
 /// Marker row written by `/new`; the window starts after the newest one.
 pub const BOUNDARY: &str = "boundary";
 
-/// System prompt with notes and the state snapshot.
+/// System prompt with schema, notes and the state snapshot. Most stable first, so provider prompt
+/// caching covers as much as possible.
 pub fn system(db: &Connection, now: Ts) -> Result<String> {
     let mut out = String::from(SYSTEM_PROMPT);
+    let schema: Vec<String> = meta::schema(db)?.into_iter().map(|(_, line)| line).collect();
+    write!(out, "\n\n## Database (for sql_query)\n{}", schema.join("\n")).unwrap();
     let notes = meta::notes(db)?;
     for (kind, title) in [(NoteKind::Owner, "Owner notes"), (NoteKind::Lesson, "Lessons you saved")] {
         let lines: Vec<String> = notes.iter().filter(|n| n.kind == kind).map(|n| format!("- [{}] {}", n.id.unwrap_or_default(), n.text)).collect();

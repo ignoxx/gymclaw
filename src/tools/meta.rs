@@ -38,13 +38,12 @@ fn cell(value: rusqlite::types::ValueRef<'_>) -> Value {
 #[derive(Deserialize, JsonSchema)]
 pub struct SqlQuery {
     /// One read-only SQLite statement. Timestamps are naive UTC text; JSON columns are text.
-    /// `SELECT name, sql FROM sqlite_master` shows the schema.
     pub sql: String,
 }
 
 impl Tool for SqlQuery {
     const NAME: &'static str = "sql_query";
-    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. Schema: planned_session (times, status, workout_template_id, user_locked), workout_session, workout_exercise, set_log, workout_template, user_profile, agent_note and agent_event. JOIN on *_id; inspect sqlite_master or PRAGMA table_info for columns. UTC text timestamps, JSON text columns. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
+    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. The schema is in your instructions (\"Database\"); JOIN on *_id. UTC text timestamps, JSON text columns. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         // File-backed tools use an OS read-only handle. Tests/ephemeral databases get an
@@ -68,7 +67,11 @@ impl Tool for SqlQuery {
             if allowed { Authorization::Allow } else { Authorization::Deny }
         }))?;
         {
-            let mut stmt = db.prepare(&self.sql)?;
+            let mut stmt = match db.prepare(&self.sql) {
+                Ok(stmt) => stmt,
+                Err(e) if e.to_string().contains("no such ") => crate::bail!("SQL_SCHEMA", "{e}. {}", schema_hint(&db, &self.sql)?),
+                Err(e) => return Err(e.into()),
+            };
             if !stmt.readonly() {
                 crate::bail!("NOT_READ_ONLY", "sql_query only reads; use the session tools to change sessions");
             }
@@ -86,10 +89,31 @@ impl Tool for SqlQuery {
     }
 }
 
+/// The model-visible schema, one `table(col, …)` line per table, read live so it always matches
+/// the migrated DB. Goes into the system prompt and into failed-query errors.
+pub fn schema(db: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = db.prepare(
+        "SELECT m.name, group_concat(p.name, ', ') FROM sqlite_master m JOIN pragma_table_info(m.name) p
+         WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND m.name != 'alembic_version' GROUP BY m.name ORDER BY m.name",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().filter(|(t, _)| !SECRET_TABLES.contains(&t.as_str())).map(|(t, cols)| (t.clone(), format!("{t}({cols})"))).collect())
+}
+
+/// Columns of the tables a failed query names (every table if it names none).
+fn schema_hint(db: &Connection, sql: &str) -> Result<String> {
+    let words: std::collections::HashSet<&str> = sql.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+    let tables = schema(db)?;
+    let named: Vec<&str> = tables.iter().filter(|(t, _)| words.contains(t.as_str())).map(|(_, line)| line.as_str()).collect();
+    let lines = if named.is_empty() { tables.iter().map(|(_, line)| line.as_str()).collect() } else { named };
+    Ok(format!("Schema: {}", lines.join("; ")))
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct NoteAdd {
     /// `owner`: a lasting preference or fact about the owner. `lesson`: how to do something next time
-    /// (e.g. a workaround that worked).
+    /// (e.g. a workaround that worked). Never current state (a missed session, an open question):
+    /// the database already holds it.
     pub kind: NoteKind,
     /// One short line.
     pub text: String,
@@ -165,6 +189,10 @@ mod tests {
         assert_eq!(result["rows"].as_array().unwrap().len(), 200);
         assert_eq!(result["truncated"], true);
         assert!(!query(&mut cx, "SELECT name FROM sqlite_master").unwrap()["rows"].as_array().unwrap().is_empty());
+        let guessed = query(&mut cx, "SELECT start_time FROM planned_session").unwrap_err().to_string();
+        assert!(guessed.contains("planned_session(") && guessed.contains("planned_start_at") && !guessed.contains("set_log("), "{guessed}");
+        let missing = query(&mut cx, "SELECT * FROM sessions").unwrap_err().to_string();
+        assert!(missing.contains("set_log(") && !missing.contains("calendar_credential"), "{missing}");
     }
 
 }
