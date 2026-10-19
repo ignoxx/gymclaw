@@ -2,7 +2,7 @@
 
 GymClaw is a single-owner prototype, not an audited multi-user service.
 
-- Keep OpenClaw Gateway private. Require a Telegram user-ID allowlist; disable groups.
+- The bot answers only the allowlisted Telegram user ID (`GYMCLAW_TELEGRAM_USER_ID`), in private chats. Everything else is ignored.
 - Keep tokens, OAuth files, gym identifiers and runtime state out of Git and chat.
 - SQLite stores OAuth credentials and workout data. Restrict file access; protect and encrypt backups.
 - Calendar publication requires explicit approval, separately from reminders.
