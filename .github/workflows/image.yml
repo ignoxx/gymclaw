@@ -1,0 +1,47 @@
+name: Image
+
+# Builds deploy/Dockerfile once per push to main, pushes it to GHCR, then tells Coolify to deploy.
+# The prod host only pulls the image, so it never compiles Rust. Setup: deploy/README.md ("Coolify").
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: image
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:main
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          # mode=max keeps the cargo-chef dependency layer, so source-only pushes skip compiling deps.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # COOLIFY_DEPLOY_WEBHOOK: the app's deploy webhook URL; COOLIFY_TOKEN: an API token with deploy rights.
+      - name: Deploy on Coolify
+        env:
+          WEBHOOK: ${{ secrets.COOLIFY_DEPLOY_WEBHOOK }}
+          TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "COOLIFY_DEPLOY_WEBHOOK not set, skipping deploy"; exit 0; fi
+          curl -fsS -H "Authorization: Bearer $TOKEN" "$WEBHOOK"

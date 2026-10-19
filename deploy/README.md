@@ -1,6 +1,9 @@
 # Deploying GymClaw
 
-One Docker Compose stack, built from this repo:
+One Docker Compose stack. `gymclaw` and `dashboard` run the same image, which GitHub Actions
+([`image.yml`](../.github/workflows/image.yml)) builds on every push to `main` and pushes to
+`ghcr.io/ignoxx/gymclaw:main` (plus a `:<commit sha>` tag). The host only pulls it.
+
 
 - **gymclaw**: one Rust binary (`gymclaw serve`): Telegram long polling, the agent
   (OpenRouter), the coach, the scheduler and the outbox. No ports are published.
@@ -49,9 +52,19 @@ for a while.
 5. Add a scheduled task on the `gymclaw` service: `backup.sh`, daily (for example
    `30 3 * * *`).
 6. Set a spending limit on the OpenRouter key.
+7. Deploy from CI instead of on push, so Coolify never pulls an image that isn't built yet:
+   - Turn off **Auto Deploy** (Advanced settings) on the application.
+   - Create an API token (Keys & Tokens, deploy permission) and copy the app's **Deploy
+     Webhook** URL (Webhooks).
+   - Add them as GitHub Actions secrets `COOLIFY_TOKEN` and `COOLIFY_DEPLOY_WEBHOOK`.
+   - After the first image push, make the `gymclaw` GHCR package public (package settings),
+     or add a GHCR registry login on the server.
 
-Plain Docker works the same way: `docker compose up -d --build` with an `.env`
-file. Compose creates the internal network itself.
+   Roll back by setting `GYMCLAW_IMAGE_TAG` to an older commit sha and redeploying.
+
+Plain Docker works the same way: `docker compose up -d` with an `.env` file. To run a
+local build instead, `docker build -f deploy/Dockerfile -t ghcr.io/ignoxx/gymclaw:local .` and
+set `GYMCLAW_IMAGE_TAG=local` plus `--pull never`. Compose creates the internal network itself.
 
 ## Dashboard on your tailnet
 

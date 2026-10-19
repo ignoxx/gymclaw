@@ -3,9 +3,9 @@
 # Setup and migration: deploy/README.md
 services:
   gymclaw:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
+    # Built once by .github/workflows/image.yml; the host only pulls. Local build: deploy/README.md.
+    image: &image ghcr.io/ignoxx/gymclaw:${GYMCLAW_IMAGE_TAG:-main}
+    pull_policy: always
     restart: unless-stopped
     depends_on: [egress]
     environment:
@@ -47,9 +47,8 @@ services:
   # Dashboard: reads the DB, writes only the agent's notes. No internet and no published port: only the reverse proxy
   # reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
   dashboard:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
+    image: *image
+    pull_policy: always
     restart: unless-stopped
     entrypoint: ["tini", "-s", "--"]
     command: ["gymclaw", "dashboard", "--addr", "0.0.0.0:8766", "--allowed-host", "${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}"]
