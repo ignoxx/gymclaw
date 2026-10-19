@@ -12,7 +12,7 @@ cargo build --release
 gymclaw migrate                  # create or upgrade data/gymclaw.db
 gymclaw tools                    # every agent tool with its JSON schema
 gymclaw call profile_get
-gymclaw call move_session '{"session_id": "…", "day": "2026-10-14"}'
+gymclaw call session_update '{"session_id": "…", "fields": {"start": "2026-10-14T18:00"}}'
 gymclaw serve                    # the bot
 ```
 
@@ -90,26 +90,47 @@ calendar authority. `template_import` fails with `ILLUSTRATION_REQUIRED` until e
 - Workout fits local start/finish bounds; entire prep/travel block must be free.
   Intervals are half-open, so touching appointments are valid.
 - At least one full local rest day by default, including sessions in adjacent weeks.
-  Recovery is hard validation.
+  These are default-plan rules; exact agent/owner edits may override them with warnings.
 - Maximize achievable target session count first, then total score. Best candidate per
   local day + exhaustive weekday combinations avoids greedy recovery traps.
   Equal scores pick earliest date/start, preferred duration first.
 - Profile controls crowd/calendar weights. No data → null crowd, zero confidence.
 - Existing active/completed sessions count toward weekly target/max and recovery;
-  user-locked sessions are untouched. `plan_week` fills gaps, `replan_week` repairs.
+  locked sessions keep their time and template. `plan_week` fills gaps; background inspection reports conflicts to the agent.
 - Each plan returns scores, minimum feasibility and target shortfall. Impossible
   minimum is reported, never met by silently relaxing constraints.
 - Successful request ID replay returns original result. Reuse with changed intent fails.
 
-Intent-level verbs: `get_week`, `move_session`, `add_session`, `skip_session`,
-`set_session_workout`, `plan_week`, `replan_week`. `move_session` without `to` picks the best valid
-slot on `day` / at or after `after`, else in its week, and returns up to two spread-out
-`alternatives`; with `to` it keeps that exact start and names broken rules in `warnings`. Slot
-score = crowd first, then a learned time-of-day habit (arrival times of workouts started with the
-▶️ button, and owner moves, decayed over ~6 weeks) at a lower weight, so a habitual busy hour still
-loses to a quiet one. Mutations that touch other sessions return `side_effects`.
-`profile_update` repairs upcoming weeks right away, so a narrower time window moves sessions that
-no longer fit.
+The agent owns planning decisions, rotation overrides and exceptions. `get_week` reads the plan;
+`session_create` and `session_update` edit exact times, duration, template and status. All edits lock
+the session and leave other sessions alone; warnings describe rest-day, weekly maximum, window,
+calendar and allocation conflicts. Invalid times or unknown templates fail back to the agent.
+
+```bash
+gymclaw call session_create '{"fields": {"start": "2026-10-17T10:00", "end": "2026-10-17T11:10", "template_id": "legs"}}'
+gymclaw call session_update '{"session_id": "…", "fields": {"template_id": "pull", "status": "COMMITTED"}}'
+gymclaw call session_update '{"session_id": "…", "fields": {"status": "CANCELLED"}}'
+gymclaw call sql_query '{"sql": "SELECT workout_template_id, status, planned_start_at FROM planned_session ORDER BY planned_start_at DESC LIMIT 20"}'
+```
+
+Create requires a start and real template; end defaults to the profile duration, and status defaults
+to COMMITTED within 48 hours, otherwise TENTATIVE. Update preserves
+omitted fields; moving the start alone preserves duration. Timestamps without offsets use the
+owner's timezone. Cancellation queues deletion of the owned calendar event; SKIPPED/MISSED keep
+calendar history and cancel pending jobs/writes. Any scheduling status can be set, but this never
+fabricates workout or set logs. Running/historical workouts use the workout tools.
+
+Session mutations go through the same allocation, calendar outbox, reminder and idempotency
+mechanics as calendar edits. `profile_update` and calendar/feed changes report conflicts without
+repairing saved sessions. The agent chooses whether to move/cancel a session, accept an exception
+or ask the owner. Standing preferences and dated temporary exceptions go into owner notes,
+which appear in every prompt. Default planning still scores quiet slots ahead of learned habits.
+
+`sql_query` uses a separate read-only connection (an isolated query-only copy for in-memory DBs),
+returns at most 200 rows, and allows schema discovery via `sqlite_master` and `PRAGMA table_info`.
+All application tables are readable except OAuth credentials and the private personal feed URL.
+Timestamps are naive UTC text; JSON columns are text. Raw SQL writes are not exposed: domain tools
+preserve calendar, allocation, locks and reminder invariants.
 
 ## Google Calendar setup
 
@@ -154,7 +175,7 @@ times, no titles or notes.
 2. On the Docker host, run `scripts/connect-personal-calendar` and paste the link at the
    hidden prompt. It resolves iCloud's redirect, checks the feed host is in
    `EGRESS_EXTRA_HOSTS`, and pipes `{"url": …}` into `gymclaw call personal_calendar_connect -`
-   (stdin, never argv), which fetches once and replans. `personal_calendar_status` shows
+   (stdin, never argv), which fetches once and reports conflicts. `personal_calendar_status` shows
    health afterwards.
 
 Google's **Secret address in iCal format** works the same way.
@@ -179,14 +200,15 @@ from reminders: `runtime_resume` with `"calendar_writes": true`, revoked with
 publishes owned queued writes after each tick.
 
 Sync accepts manual edits, recalculates prep/leave/finish, replaces local reminder jobs,
-locks edited sessions, compresses resized slots and repairs only invalid unlocked sessions.
+locks edited sessions, compresses resized slots and reports conflicts for the agent.
 Locked recovery/blocker conflicts remain visible, not silently reverted. Slots too short
 for required movements stay edited and report explicit adjustment needed. Deletes leave
 tombstones; exact deleted events/slots are not recreated automatically. Metadata-only
 updates may refresh description/revision on locked events; never their chosen times/title.
 
 Upcoming sessions commit within 48 hours; get-ready/leave/start jobs become durable.
-The watcher syncs every 60 seconds without model calls and reconciles reminders.
+The watcher syncs every 60 seconds and reconciles reminders. Decision events wake the agent;
+quiet ticks do not call the model.
 
 ### Safety and retries
 
@@ -240,7 +262,7 @@ Machine busy (`later`) defers the current movement: next comes a pending movemen
 primary muscle, else plan order. Deferred work is never dropped. Substitution covers only the
 remaining volume. Skipping an exercise is an explicit volume reduction; dependants of skipped
 movements need explicit resolution. Finishing (after the last exercise, or `end`) saves the audit and next
-working weights, marks the linked planned session completed and replans.
+working weights, marks the linked planned session completed and queues a planning event.
 
 Only one unfinished workout is allowed. Re-importing a template does not alter a workout already
 in progress. Linked workouts use snapshotted calendar volume allocation; compression removes
@@ -255,12 +277,6 @@ stored in `default_accessory_rest_seconds` for compatibility. Legacy compound de
 per-exercise template rest values no longer select timers. `rest` changes the whole workout;
 `remember` also changes future workouts. Compression and ETA use the same duration.
 Logging early cancels stale rest jobs; the final set needs no rest timer.
-Rest countdowns show the upcoming exercise/set and its weight (warm-up weight when applicable,
-bodyweight or `? kg` when unknown). Every exercise uses the same rest duration: 90 seconds by
-default, stored in `default_accessory_rest_seconds` for compatibility. Legacy compound defaults and
-per-exercise template rest values no longer select timers. The coach's `rest` action changes the
-whole workout; `remember` also changes future workouts. Compression and ETA use the same duration.
-The final set needs no rest timer when no work remains.
 
 ETA counts remaining warm-up/working sets, rests, transitions, deferred/substituted work,
 current outstanding rest and elapsed time. Configured estimates are used until completed
@@ -298,7 +314,7 @@ Under 10 paired labels use conservative neighbor heuristic; 10+ use small monoto
 regression. Future slots combine same-weekday/hour locally collected count history
 and user slot labels. Repeated polls count as one dated-hour
 mean rather than independent days. Confidence is heuristic evidence strength, **not
-validated forecast accuracy**. The planner and replanner use these signals. Locked sessions
+validated forecast accuracy**. Default planning uses these signals. Locked sessions
 remain untouched.
 
 The gym's own check-in counts are the only crowd source; Google Popular Times was dropped
@@ -326,9 +342,19 @@ Proactive messages go through an outbox (`deliveries`). A delivery stuck in SEND
 never retried automatically, since Telegram has no exactly-once send. Check the chat, then
 `delivery_resolve` with `sent` or `not-sent` (`not-sent` queues it again).
 
-The weekly tick (Sunday from 19:00 profile-local) audits the week, plans the next one and sends the
-briefing. Calendar read failure prevents rolling changes. Known labels can reconsider distant
-tentative slots; committed/user-locked slots do not move for crowd preference alone.
+The weekly tick (Sunday from 19:00 profile-local) audits the week, drafts next week only when it
+is empty, and queues a week-rollover event for the agent to assess and communicate. Calendar
+read failure prevents drafting against stale blockers. Crowd labels queue an agent event; existing
+session times are never moved automatically. Default rotation skips locked templates.
+
+Calendar clashes, infeasible weeks, no-shows, missed slots and stale workouts enter a durable event
+inbox. The bot processes decision events in the same serialized worker as owner chat, at most one
+batch per minute. Successful turns acknowledge their events; failed turns stay pending across
+restarts and retry without repeated failure messages. Each batch is persisted before the model
+call so events arriving during a failure cannot change its mutation request IDs. An unchanged conflict is deduplicated even
+after acknowledgement. Elapsed unstarted slots may be marked MISSED, but make-up sessions and
+closing idle workouts require agent decisions. Crowd forecast refresh and reminder upkeep remain
+deterministic. No automatic “Plan updated” briefing is sent.
 
 ### Travel / illness overrides
 

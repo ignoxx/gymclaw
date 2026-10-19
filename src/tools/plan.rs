@@ -1,6 +1,4 @@
 //! Planning tools: the week, sessions, profile, availability, crowd and events. Owner: lead.
-use std::collections::BTreeSet;
-
 use jiff::civil::Date;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -19,12 +17,9 @@ use crate::time::Ts;
 pub fn tools() -> Vec<ToolDef> {
     vec![
         def::<GetWeek>(),
-        def::<MoveSession>(),
-        def::<AddSession>(),
-        def::<SetSessionWorkout>(),
-        def::<SkipSession>(),
+        def::<SessionCreate>(),
+        def::<SessionUpdate>(),
         def::<PlanWeek>(),
-        def::<ReplanWeek>(),
         def::<ProfileGet>(),
         def::<ProfileUpdate>(),
         def::<AvailabilityAdd>(),
@@ -55,10 +50,6 @@ fn date(text: &str) -> Result<Date> {
     text.trim().parse().map_err(|_| crate::error::Error::domain("INVALID_DATE", format!("Not a date (YYYY-MM-DD): {text}")))
 }
 
-fn date_opt(text: &Option<String>) -> Result<Option<Date>> {
-    text.as_deref().map(date).transpose()
-}
-
 /// The Monday of the week containing `day` (default: today, owner-local).
 fn monday_of(cx: &Ctx, day: &Option<String>) -> Result<Date> {
     let tz = get_profile(cx.db)?.tz();
@@ -82,15 +73,6 @@ fn session_id(cx: &Ctx, id: &str) -> Result<String> {
     }
 }
 
-/// `to`, or `leave_at` + commute: the owner says when they can leave, the session starts on arrival.
-fn start_time(cx: &Ctx, to: &Option<String>, leave_at: &Option<String>) -> Result<Option<Ts>> {
-    if let Some(to) = local_opt(cx, to)? {
-        return Ok(Some(to));
-    }
-    let commute = get_profile(cx.db)?.commute_to_gym_minutes;
-    Ok(local_opt(cx, leave_at)?.map(|t| t.mins(commute)))
-}
-
 #[derive(Deserialize, JsonSchema)]
 pub struct GetWeek {
     /// Any date in the week (YYYY-MM-DD). Default: this week.
@@ -108,88 +90,55 @@ impl Tool for GetWeek {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct Placement {
-    /// Exact start, owner-local unless it has an offset (e.g. "2026-10-14T11:45"). Kept even if it breaks
-    /// planner rules; `warnings` then names them.
-    #[serde(default)]
-    pub to: Option<String>,
-    /// When the owner can leave home; the session starts after the commute. Instead of `to`.
-    #[serde(default)]
-    pub leave_at: Option<String>,
-    /// Without `to`: pick the best slot on this date (YYYY-MM-DD).
-    #[serde(default)]
-    pub day: Option<String>,
-    /// Without `to`: only starts at/after this time (implies its day).
-    #[serde(default)]
-    pub after: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct MoveSession {
-    pub session_id: String,
-    #[serde(flatten)]
-    pub placement: Placement,
-}
-
-impl Tool for MoveSession {
-    const NAME: &'static str = "move_session";
-    const DESCRIPTION: &'static str = "Move one upcoming session. Without `to`, picks the best slot (quiet first, then habits) on `day`/after `after`, \
-        else in its week. The session is locked: other sessions are never moved because of it. Report `warnings` and any `side_effects`.";
-
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let id = session_id(cx, &self.session_id)?;
-        let p = &self.placement;
-        replanning::move_session(cx.db, &id, cx.now, &cx.request_id, start_time(cx, &p.to, &p.leave_at)?, date_opt(&p.day)?, local_opt(cx, &p.after)?)
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct AddSession {
-    /// Workout template id. Default: next in the rotation.
-    #[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFields {
+    /// Exact start, owner-local unless an offset is supplied. Required on create.
+    pub start: Option<String>,
+    /// Exact end. Default: preserve duration (create: profile duration).
+    pub end: Option<String>,
+    /// A real workout template. Required on create.
     pub template_id: Option<String>,
-    #[serde(flatten)]
-    pub placement: Placement,
+    /// Any scheduling status; this does not create workout/set logs. CANCELLED deletes the owned
+    /// calendar event; SKIPPED/MISSED keep it as history. Default: preserve (create: COMMITTED within 48h, otherwise TENTATIVE).
+    pub status: Option<crate::db::models::SessionStatus>,
 }
 
-impl Tool for AddSession {
-    const NAME: &'static str = "add_session";
-    const DESCRIPTION: &'static str = "Add an extra session on top of the plan (default: best slot this week). It is locked, so it's never dropped for the weekly maximum.";
-
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let p = &self.placement;
-        replanning::add_session(cx.db, cx.now, &cx.request_id, self.template_id.as_deref(), start_time(cx, &p.to, &p.leave_at)?, date_opt(&p.day)?, local_opt(cx, &p.after)?)
+impl SessionFields {
+    fn patch(self, cx: &Ctx) -> Result<replanning::SessionPatch> {
+        Ok(replanning::SessionPatch { start: local_opt(cx, &self.start)?, end: local_opt(cx, &self.end)?, template_id: self.template_id, status: self.status })
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct SetSessionWorkout {
-    pub session_id: String,
-    pub template_id: String,
+#[serde(deny_unknown_fields)]
+pub struct SessionCreate {
+    pub fields: SessionFields,
 }
 
-impl Tool for SetSessionWorkout {
-    const NAME: &'static str = "set_session_workout";
-    const DESCRIPTION: &'static str = "Change which workout an upcoming session does (\"legs today instead of pull\"). Later sessions get whichever split workout was trained longest ago, so a swapped-out one comes next.";
+impl Tool for SessionCreate {
+    const NAME: &'static str = "session_create";
+    const DESCRIPTION: &'static str = "Create an upcoming session at exact times with a real template. Rules are defaults: violations return warnings, never silently change your choice. Locks the session. Calendar writes, allocation, reminders and retries are handled together.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let id = session_id(cx, &self.session_id)?;
-        replanning::set_workout(cx.db, &id, &self.template_id, cx.now, &cx.request_id)
+        replanning::edit_session(cx.db, None, self.fields.patch(cx)?, cx.now, &cx.request_id)
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct SkipSession {
+#[serde(deny_unknown_fields)]
+pub struct SessionUpdate {
     pub session_id: String,
+    /// Change any combination in one call. Omitted fields stay as saved.
+    pub fields: SessionFields,
 }
 
-impl Tool for SkipSession {
-    const NAME: &'static str = "skip_session";
-    const DESCRIPTION: &'static str = "Skip a session that hasn't ended. It counts toward the week, so no make-up is added (moving is the make-up path).";
+impl Tool for SessionUpdate {
+    const NAME: &'static str = "session_update";
+    const DESCRIPTION: &'static str = "Edit any upcoming session's exact time, duration, template or status; cancel with status CANCELLED. Owner/agent edits lock it and affect no other sessions. Report warnings. Use sql_query/get_week to choose a session, time or template first.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let id = session_id(cx, &self.session_id)?;
-        replanning::skip_session(cx.db, &id, cx.now, &cx.request_id)
+        replanning::edit_session(cx.db, Some(&id), self.fields.patch(cx)?, cx.now, &cx.request_id)
     }
 }
 
@@ -206,34 +155,26 @@ impl Tool for PlanWeek {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let week = monday_of(cx, &Some(self.day))?;
-        let planned = scheduling::schedule_week(cx.db, week, cx.now, Some(&cx.request_id), Some(&self.template_id), &[])?;
-        replanning::commit_upcoming(cx.db, cx.now)?;
-        for data in planned["sessions"].as_array().into_iter().flatten() {
-            if let Some(session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
-                calendar_writes::queue_session_write(cx.db, &session, cx.now, false)?;
-            }
-        }
-        Ok(planned)
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ReplanWeek {
-    /// Any date in the week (YYYY-MM-DD). Default: this week.
-    #[serde(default)]
-    pub day: Option<String>,
-}
-
-impl Tool for ReplanWeek {
-    const NAME: &'static str = "replan_week";
-    const DESCRIPTION: &'static str = "Repair a week: unlocked future sessions that broke a rule (calendar clash, rest day) move or drop. Locked ones stay.";
-
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let week = monday_of(cx, &self.day)?;
-        let repaired = replanning::replan_weeks(cx.db, &BTreeSet::from([week]), cx.now, false)?;
-        let mut data = get_week(cx.db, week)?;
-        data.as_object_mut().expect("object").extend(repaired.as_object().cloned().unwrap_or_default());
-        Ok(data)
+        let result = crate::domain::core::mutate(cx.db, "planning.agent_week_planned", &cx.request_id,
+            json!({"week": week.to_string(), "template_id": self.template_id}), cx.now, || {
+                let before: std::collections::BTreeSet<_> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
+                let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, Some(&self.template_id), &[])?;
+                replanning::commit_upcoming(cx.db, cx.now)?;
+                let mut saved = Vec::new();
+                for data in planned["sessions"].as_array().into_iter().flatten() {
+                    if let Some(mut session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
+                        if !before.contains(&session.id) {
+                            session.user_locked = true;
+                            session.save(cx.db)?;
+                        }
+                        calendar_writes::queue_session_write(cx.db, &session, cx.now, false)?;
+                        saved.push(scheduling::session_data(&session));
+                    }
+                }
+                planned["sessions"] = json!(saved);
+                Ok(planned)
+            })?;
+        Ok(result["data"].clone())
     }
 }
 
@@ -257,12 +198,12 @@ pub struct ProfileUpdate {
 
 impl Tool for ProfileUpdate {
     const NAME: &'static str = "profile_update";
-    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Upcoming sessions that no longer fit are replanned right away; `replanning` says what moved.";
+    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Existing sessions stay saved; `replanning.warnings` lists conflicts for you to resolve with session_update.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let mut data = serde_json::to_value(update_profile(cx.db, &self.changes)?)?;
         let weeks = availability::affected_weeks(cx.db, cx.now)?;
-        data["replanning"] = replanning::replan_weeks(cx.db, &weeks, cx.now, false)?;
+        data["replanning"] = replanning::inspect_weeks(cx.db, &weeks, cx.now)?;
         Ok(data)
     }
 }
@@ -289,7 +230,7 @@ pub struct AvailabilityAdd {
 
 impl Tool for AvailabilityAdd {
     const NAME: &'static str = "availability_add";
-    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no sessions or reminders then; affected sessions are replanned.";
+    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no sessions or reminders then; conflicts are reported for your decision.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         if self.start.is_some() && self.from_date.is_some() || self.end.is_some() && self.through.is_some() {
@@ -430,7 +371,7 @@ pub struct CalendarSync {}
 
 impl Tool for CalendarSync {
     const NAME: &'static str = "calendar_sync";
-    const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and replan around them. Runs every minute anyway.";
+    const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and report conflicts for your decision. Runs every minute anyway.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let net = Net::new()?;
@@ -447,7 +388,7 @@ pub struct PersonalCalendarConnect {
 
 impl Tool for PersonalCalendarConnect {
     const NAME: &'static str = "personal_calendar_connect";
-    const DESCRIPTION: &'static str = "Use the owner's personal calendar feed as read-only busy time. Fetches it now and replans affected weeks. Never repeat the URL back.";
+    const DESCRIPTION: &'static str = "Use the owner's personal calendar feed as read-only busy time. Fetches it now and reports affected sessions. Never repeat the URL back.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         personal_calendar::connect(cx.db, &self.url, cx.now, &Net::new()?)
@@ -471,7 +412,7 @@ pub struct PersonalCalendarDisconnect {}
 
 impl Tool for PersonalCalendarDisconnect {
     const NAME: &'static str = "personal_calendar_disconnect";
-    const DESCRIPTION: &'static str = "Stop using the personal calendar feed; its blockers are dropped and affected weeks replanned.";
+    const DESCRIPTION: &'static str = "Stop using the personal calendar feed; its blockers are dropped; existing sessions stay saved.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         personal_calendar::disconnect(cx.db, cx.now)
@@ -484,11 +425,9 @@ mod tests {
 
     use super::*;
     use crate::db::Connection;
-    use crate::db::models::{AgentEvent, AvailabilityBlock, SessionStatus};
-    use crate::domain::habits::{affinity, evidence};
-    use crate::domain::replanning::replan_weeks;
+    use crate::db::models::{AgentEvent, AvailabilityBlock};
     use crate::domain::templates::{Template, import_template};
-    use crate::domain::weekly::{assign_rotation, weekly_plan};
+    use crate::domain::weekly::weekly_plan;
     use crate::error::Error;
 
     fn ts(text: &str) -> Ts {
@@ -527,80 +466,57 @@ mod tests {
     }
 
     #[test]
-    fn move_session_picks_valid_slot_or_explains() {
+    fn raw_session_edits_keep_intent_and_reconcile_mechanics() {
         let db = db();
-        let sessions = week_start_ids(&db);
-        let friday = sessions.iter().find(|s| s["start"].as_str().unwrap().starts_with("2026-10-16")).unwrap().clone();
-        let id = friday["id"].as_str().unwrap();
-        let moved = call(&db, "move_session", json!({"session_id": id, "to": "2026-10-16T12:00:00+02:00"}), sunday(), "tg-1-move").unwrap();
-        assert_eq!(moved["data"]["to"], "2026-10-16T10:00:00+00:00");
-        assert_eq!(call(&db, "move_session", json!({"session_id": id, "to": "2026-10-16T12:00:00+02:00"}), sunday(), "tg-1-move").unwrap(), moved);
-        assert!(writes_start(&db, id).contains(&"2026-10-16T12:00:00+02:00".to_string()));
-        // "Later today": best slot at/after the bound, plus spread-out alternatives for buttons.
-        let later = call(&db, "move_session", json!({"session_id": id, "after": "2026-10-16T14:00:00+02:00"}), sunday(), "tg-4-move").unwrap();
-        let alternatives = later["data"]["alternatives"].as_array().unwrap();
-        assert!(!alternatives.is_empty());
-        let starts: Vec<Ts> = std::iter::once(&later["data"]["to"]).chain(alternatives.iter().map(|a| &a["start"])).map(|t| ts(t.as_str().unwrap())).collect();
-        assert!(starts.iter().all(|t| *t >= ts("2026-10-16T12:00:00+00:00") && t.iso().starts_with("2026-10-16")));
-        for (i, x) in starts.iter().enumerate() {
-            assert!(starts[i + 1..].iter().all(|y| (*x - *y).abs().as_mins() >= 60), "{starts:?}");
-        }
-        // The owner's explicit pick (12:00) is liked; the slot it was first planned at is not.
-        let tz = get_profile(&db).unwrap().tz();
-        let points = evidence(&db, sunday(), &tz).unwrap();
-        let first = ts(friday["start"].as_str().unwrap()).local(&tz);
-        assert!(affinity(&points, 12.0 * 60.0) > 0.5 && 0.5 > affinity(&points, f64::from(first.hour()) * 60.0 + f64::from(first.minute())));
-        // A time the owner names is kept even off-grid and outside the window: locked against
-        // replanning, still published, and the broken rule named.
-        let kept = call(&db, "move_session", json!({"session_id": id, "to": "2026-10-16T21:07:00+02:00"}), sunday(), "tg-5-move").unwrap();
-        assert_eq!(kept["data"]["to"], "2026-10-16T19:07:00+00:00");
-        assert_eq!(kept["data"]["warnings"], json!(["outside your workout window (07:00–22:00)"]));
-        assert!(writes_start(&db, id).contains(&"2026-10-16T21:07:00+02:00".to_string()));
-        replan_weeks(&db, &BTreeSet::from([jiff::civil::date(2026, 10, 12)]), sunday(), false).unwrap();
-        let row = PlannedSession::get(&db, id).unwrap().unwrap();
-        assert!(row.user_locked && row.planned_start_at == ts("2026-10-16T19:07:00+00:00"));
-        // "I can leave at 13:00": start is leave + commute.
-        let left = call(&db, "move_session", json!({"session_id": id, "leave_at": "2026-10-16T13:00:00+02:00"}), sunday(), "tg-6-move").unwrap();
-        let commute = get_profile(&db).unwrap().commute_to_gym_minutes;
-        assert_eq!(ts(left["data"]["to"].as_str().unwrap()), ts("2026-10-16T13:00:00+02:00").mins(commute));
-        // A day the owner asks for wins over the rest-day rule (Thursday follows Wednesday); the warning says so.
-        let thursday = call(&db, "move_session", json!({"session_id": id, "day": "2026-10-15"}), sunday(), "tg-7-move").unwrap();
-        assert!(thursday["data"]["to"].as_str().unwrap().starts_with("2026-10-15"));
-        assert_eq!(thursday["data"]["warnings"], json!(["skips a rest day"]));
-    }
-
-    #[test]
-    fn owner_adds_sessions_and_picks_workouts() {
-        let db = db();
-        let sessions = week_start_ids(&db);
+        let before = week_start_ids(&db);
+        let args = json!({"fields": {"start": "2026-10-13T23:07", "end": "2026-10-13T23:17", "template_id": "short"}});
+        let created = call(&db, "session_create", args.clone(), sunday(), "raw-create").unwrap();
+        assert_eq!(call(&db, "session_create", args, sunday(), "raw-create").unwrap(), created);
+        let id = created["data"]["session"]["id"].as_str().unwrap();
+        assert!(created["data"]["warnings"].as_array().unwrap().len() >= 3);
+        assert_eq!(created["data"]["session"]["start"], "2026-10-13T21:07:00+00:00");
+        assert_eq!(created["data"]["session"]["user_locked"], true);
+        assert!(!writes_start(&db, id).is_empty());
+        // A scheduling status edit creates no workout logs and must remain correctable.
+        call(&db, "session_update", json!({"session_id": id, "fields": {"status": "STARTED"}}), sunday(), "status-only").unwrap();
         template(&db, json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}));
-        // Naive times are the owner's local time. The extra session is kept beyond the weekly maximum.
-        let added = call(&db, "add_session", json!({"to": "2026-10-17T10:00", "template_id": "short"}), sunday(), "tg-1-add").unwrap();
-        assert_eq!(added["data"]["to"], "2026-10-17T08:00:00+00:00");
-        assert_eq!(added["data"]["warnings"], json!(["outside your workout window (07:00–22:00)", "skips a rest day"]));
-        replan_weeks(&db, &BTreeSet::from([jiff::civil::date(2026, 10, 12)]), sunday(), false).unwrap();
-        let status = PlannedSession::get(&db, added["data"]["session_id"].as_str().unwrap()).unwrap().unwrap().status;
-        assert!(matches!(status, SessionStatus::Tentative | SessionStatus::Committed), "{status:?}");
-        // "Legs today instead": the session gets that workout and keeps it.
-        let id = sessions[0]["id"].as_str().unwrap();
-        let legs = call(&db, "set_session_workout", json!({"session_id": id, "template_id": "legs"}), sunday(), "tg-2-set").unwrap();
-        assert_eq!(legs["data"]["to"], "legs");
-        assign_rotation(&db, sunday()).unwrap();
-        let row = PlannedSession::get(&db, id).unwrap().unwrap();
-        assert!(row.user_locked && row.workout_template_id.as_deref() == Some("legs"));
-        assert_eq!(row.workout_plan_json["template"]["id"], "legs");
+        assert!(call(&db, "session_update", json!({"session_id": id, "fields": {"template_id": "unknown"}}), sunday(), "bad-template").is_err());
+        let changed = call(&db, "session_update", json!({"session_id": id, "fields": {"start": "2026-10-14T12:00", "end": "2026-10-14T13:10", "template_id": "legs", "status": "COMMITTED"}}), sunday(), "raw-update").unwrap();
+        assert_eq!(changed["data"]["session"]["workout_plan"]["template"]["id"], "legs");
+        assert_eq!(changed["data"]["side_effects"], json!([]));
+        let mut calendar = crate::providers::fixture_calendar::FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin");
+        let write = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
+        assert_eq!(calendar_writes::apply_write(&db, &mut calendar, write["id"].as_str().unwrap(), sunday(), false).unwrap()["status"], "APPLIED");
+        let jobs: i64 = db.query_row("SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'", [id], |r| r.get(0)).unwrap();
+        assert!(jobs > 0);
+        assert!(call(&db, "session_update", json!({"session_id": id, "fields": {"end": "2026-10-14T11:00"}}), sunday(), "bad-time").is_err());
+        let cancelled = call(&db, "session_update", json!({"session_id": id, "fields": {"status": "CANCELLED"}}), sunday(), "raw-cancel").unwrap();
+        assert_eq!(cancelled["data"]["session"]["status"], "CANCELLED");
+        assert!(PlannedSession::get(&db, id).unwrap().unwrap().deleted_by_user());
+        let deletion = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
+        assert_eq!(deletion["action"], "DELETE");
+        let jobs: i64 = db.query_row("SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'", [id], |r| r.get(0)).unwrap();
+        assert_eq!(jobs, 0);
+        for row in before {
+            let after = PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap();
+            assert_eq!(after.planned_start_at.iso(), row["start"]);
+        }
     }
 
-    /// Python's `profile update` replanned on its own; the Rust tool contract leaves that to `replan_week`.
     #[test]
-    fn profile_window_change_moves_sessions_that_no_longer_fit() {
+    fn profile_window_change_reports_conflicts_and_keeps_sessions() {
         let db = db();
-        week_start_ids(&db);
+        let before = week_start_ids(&db);
         let updated = call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p").unwrap();
-        let changed = updated["replanning"]["changed"].as_array().unwrap().clone();
-        assert!(!changed.is_empty() && changed.iter().all(|c| c["action"] == "moved"), "{changed:?}");
-        let tz = get_profile(&db).unwrap().tz();
-        assert!(changed.iter().all(|c| ts(c["to"].as_str().unwrap()).local(&tz).hour() >= 11));
+        assert_eq!(updated["replanning"]["changed"], json!([]));
+        assert!(!updated["replanning"]["warnings"].as_array().unwrap().is_empty());
+        for row in before {
+            assert_eq!(PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap().planned_start_at.iso(), row["start"]);
+        }
+        let events = events::wake_pending(&db).unwrap();
+        for event in &events { events::ack(&db, event["id"].as_str().unwrap(), sunday()).unwrap(); }
+        call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p2").unwrap();
+        assert!(events::wake_pending(&db).unwrap().is_empty());
     }
 
     #[test]
@@ -624,12 +540,13 @@ mod tests {
         let args = json!({"day": "2026-10-12", "template_id": "short"});
         let first = call(&db, "plan_week", args.clone(), now, "week-1").unwrap();
         assert_eq!(first["sessions"].as_array().unwrap().len(), 3);
+        assert!(first["sessions"].as_array().unwrap().iter().all(|s| s["user_locked"] == true));
         assert_eq!(call(&db, "plan_week", args.clone(), now, "week-1").unwrap(), first);
         let again = call(&db, "plan_week", args, now, "week-2").unwrap();
         assert_eq!((again["created_count"].as_i64(), again["sessions"].as_array().unwrap().len()), (Some(0), 3));
         assert_eq!(PlannedSession::select(&db, "", []).unwrap().len(), 3);
         let other_week = call(&db, "plan_week", json!({"day": "2026-10-19", "template_id": "short"}), now, "week-1").unwrap_err();
-        assert!(other_week.to_string().contains("different planning input"), "{other_week}");
+        assert_eq!(other_week.code(), "IDEMPOTENCY_CONFLICT");
     }
 
     #[test]
@@ -648,10 +565,10 @@ mod tests {
     }
 
     #[test]
-    fn planner_events_stay_out_of_the_inbox_until_asked() {
+    fn planner_events_are_actionable_until_acknowledged() {
         let db = db();
         crate::domain::core::emit(&db, "planning.replan_required", sunday(), json!({})).unwrap();
-        assert_eq!(call(&db, "events_pending", json!({}), sunday(), "e").unwrap()["events"], json!([]));
+        assert_eq!(call(&db, "events_pending", json!({}), sunday(), "e").unwrap()["events"].as_array().unwrap().len(), 1);
         let inbox = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"].as_array().unwrap().clone();
         let actionable = inbox.iter().find(|e| e["type"] == "planning.replan_required").unwrap();
         call(&db, "event_ack", json!({"event_id": actionable["id"]}), sunday(), "ack").unwrap();

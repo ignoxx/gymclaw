@@ -7,7 +7,7 @@ use crate::db::models::{CalendarEventSnapshot, CalendarWrite, OnboardingState, P
 use crate::db::{Connection, Json, new_id};
 use crate::domain::calendar::{persist_snapshot, reconcile_event, tombstone};
 use crate::domain::core::emit;
-use crate::domain::replanning::replan_weeks;
+use crate::domain::replanning::inspect_weeks;
 use crate::providers::calendar::{CalendarProvider, WRITE_CONFLICT};
 use crate::providers::google::bind_calendar;
 use crate::domain::profile::get_profile;
@@ -202,7 +202,7 @@ fn send(db: &Connection, provider: &mut dyn CalendarProvider, write: &CalendarWr
     // A retry may find an event created earlier and since edited by the owner.
     if remote.start != Some(session.planned_start_at) || remote.end != Some(session.planned_end_at) {
         let (affected, _) = reconcile_event(db, &remote, now)?;
-        replan_weeks(db, &affected, now, false)?;
+        inspect_weeks(db, &affected, now)?;
     } else {
         persist_snapshot(db, &remote, now, false)?;
         if write.action == WriteAction::Create && remote.revision != Some(session.source_revision) {
