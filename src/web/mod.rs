@@ -1,8 +1,9 @@
-//! Read-only dashboard (`gymclaw dashboard`). Owner: WP-runtime.
+//! Dashboard (`gymclaw dashboard`). Owner: WP-runtime.
 //!
 //! Serves the frontend in `web/` (embedded), exercise SVGs and `/api/state`, a fresh snapshot from a
-//! read-only connection per request. Only the allowed Host (or loopback) gets an answer, so DNS
-//! rebinding can't read it.
+//! read-only connection per request. The only writes are the agent's notes (`POST /api/note_*`), so
+//! the owner can edit what it remembers. Only the allowed Host (or loopback) gets an answer, so DNS
+//! rebinding can't read it, and writes need a same-origin JSON request.
 pub mod state;
 
 use std::net::SocketAddr;
@@ -26,6 +27,9 @@ const ASSETS: [(&str, &[u8], &str); 6] = [
     ("/fonts/BarlowCondensed-SemiBold.ttf", include_bytes!("../../web/fonts/BarlowCondensed-SemiBold.ttf"), "font/ttf"),
     ("/fonts/DM-Sans.ttf", include_bytes!("../../web/fonts/DM-Sans.ttf"), "font/ttf"),
 ];
+
+/// Tools the dashboard may call: the owner edits the notes and lessons in the agent's prompt.
+const NOTE_TOOLS: [&str; 3] = ["note_add", "note_edit", "note_delete"];
 
 struct App {
     db_path: PathBuf,
@@ -61,6 +65,39 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
     let cross_site = headers.get("sec-fetch-site").is_some_and(|v| v == "cross-site");
     if !app.hosts.iter().any(|h| h == host) || cross_site {
         return error(StatusCode::FORBIDDEN);
+    }
+    if request.method() == Method::POST {
+        let Some(tool) = request.uri().path().strip_prefix("/api/").filter(|t| NOTE_TOOLS.contains(t)).map(String::from) else {
+            return error(StatusCode::NOT_FOUND);
+        };
+        // A cross-site page can only send JSON after a CORS preflight, which is never answered.
+        let json = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("application/json"));
+        let same_origin = headers.get("sec-fetch-site").is_none_or(|v| v == "same-origin");
+        if !json || !same_origin {
+            return error(StatusCode::FORBIDDEN);
+        }
+        let Ok(body) = axum::body::to_bytes(request.into_body(), 8192).await else { return error(StatusCode::PAYLOAD_TOO_LARGE) };
+        let Ok(args) = serde_json::from_slice::<serde_json::Value>(&body) else { return error(StatusCode::BAD_REQUEST) };
+        let db_path = app.db_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let db = crate::db::open(&db_path)?;
+            let dir = db_path.parent().unwrap_or(std::path::Path::new("."));
+            let mut cx = crate::tools::Ctx { db: &db, now: Ts::now(), request_id: format!("dashboard:{}", crate::db::new_id()), data_dir: dir, effects: vec![] };
+            crate::tools::call(&mut cx, &tool, args)
+        })
+        .await;
+        return match result {
+            Ok(Ok(data)) => reply(StatusCode::OK, serde_json::to_vec(&data).unwrap_or_default(), "application/json"),
+            Ok(Err(e @ crate::error::Error::Domain { .. })) => reply(StatusCode::BAD_REQUEST, e.to_json().to_string().into_bytes(), "application/json"),
+            Ok(Err(e)) => {
+                tracing::warn!("dashboard note write: {} {e}", e.code());
+                error(StatusCode::SERVICE_UNAVAILABLE)
+            }
+            Err(e) => {
+                tracing::warn!("dashboard note write panicked: {e}");
+                error(StatusCode::SERVICE_UNAVAILABLE)
+            }
+        };
     }
     if request.method() != Method::GET {
         return error(StatusCode::METHOD_NOT_ALLOWED);
@@ -98,13 +135,14 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
     }
 }
 
-/// Serve the dashboard from a read-only DB. Requests whose Host isn't `allowed_host` are rejected.
+/// Serve the dashboard: reads from a read-only connection, note edits through a writable one.
+/// Requests whose Host isn't `allowed_host` are rejected.
 pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String) -> Result<()> {
     let port = addr.port();
     let hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), allowed_host];
     let app = Router::new().fallback(handle).with_state(Arc::new(App { db_path, hosts }));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("GymClaw dashboard: http://{addr}, read-only DB state");
+    tracing::info!("GymClaw dashboard: http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -118,6 +156,18 @@ mod tests {
         let mut db = crate::db::open(&path).unwrap();
         crate::db::migrate(&mut db).unwrap();
         Arc::new(App { db_path: path, hosts: vec!["gym.example".into()] })
+    }
+
+    async fn post(app: &Arc<App>, path: &str, body: &str, site: &str) -> Response {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::HOST, "gym.example")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("sec-fetch-site", site)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        handle(State(app.clone()), request).await
     }
 
     async fn get(app: &Arc<App>, method: Method, path: &str, host: &str) -> Response {
@@ -137,7 +187,20 @@ mod tests {
         for path in ["/../README.md", "/data/private.sqlite", "/unknown", "/illustrations/../../README.svg"] {
             assert_eq!(get(&app, Method::GET, path, "gym.example").await.status(), StatusCode::NOT_FOUND, "{path}");
         }
-        assert_eq!(get(&app, Method::POST, "/api/state", "gym.example").await.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(get(&app, Method::POST, "/api/state", "gym.example").await.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_file(&app.db_path);
+    }
+
+    #[tokio::test]
+    async fn edits_notes_only_from_same_origin() {
+        let app = app();
+        let add = r#"{"kind":"owner","text":"Weighs in on Sundays"}"#;
+        assert_eq!(post(&app, "/api/note_add", add, "cross-site").await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(post(&app, "/api/sql_query", r#"{"sql":"SELECT 1"}"#, "same-origin").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(post(&app, "/api/note_add", add, "same-origin").await.status(), StatusCode::OK);
+        assert_eq!(post(&app, "/api/note_edit", r#"{"id":99,"text":"x"}"#, "same-origin").await.status(), StatusCode::BAD_REQUEST);
+        let db = crate::db::open_readonly(&app.db_path).unwrap();
+        assert_eq!(crate::tools::meta::notes(&db).unwrap()[0].text, "Weighs in on Sundays");
         let _ = std::fs::remove_file(&app.db_path);
     }
 }

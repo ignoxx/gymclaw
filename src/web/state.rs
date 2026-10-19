@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::db::Connection;
 use crate::db::models::{
-    AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, PlannedSession, RuntimeSettings, SetLog, SetType, UserProfile, WorkoutSession,
+    AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, NoteKind, PlannedSession, RuntimeSettings, SetLog, SetType, UserProfile, WorkoutSession,
     WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
@@ -307,6 +307,15 @@ fn body_weight(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>> {
         .collect())
 }
 
+/// What the agent remembers: the owner's notes and its own lessons, each oldest first.
+fn memory(db: &Connection) -> Result<Value> {
+    let notes = crate::tools::meta::notes(db)?;
+    let list = |kind: NoteKind| -> Vec<Value> {
+        notes.iter().filter(|n| n.kind == kind).map(|n| json!({"id": n.id, "text": n.text, "updated_at": iso(&n.updated_at.local(&TimeZone::UTC))})).collect()
+    };
+    Ok(json!({"owner": list(NoteKind::Owner), "lesson": list(NoteKind::Lesson)}))
+}
+
 /// The whole dashboard state.
 pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let profile = if UserProfile::get(db, 1)?.is_some() { get_profile(db)? } else { Profile::default() };
@@ -323,7 +332,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
         "demo": false, "live_database_accessed": true, "captured_at": iso(&now.local(&TimeZone::UTC)), "timezone": profile.timezone,
         "range": format!("{} – {}", date_fmt(today, "%-d %b"), date_fmt(today.checked_add(6.days())?, "%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
-        "crowd": crowd_state(db, &tz, now, polling)?, "history": done, "insights": insights,
+        "crowd": crowd_state(db, &tz, now, polling)?, "history": done, "insights": insights, "memory": memory(db)?,
         "activity": events.iter().map(|e| json!({"time": hhmm(e.created_at, &tz), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
     }))

@@ -7,8 +7,9 @@ One Docker Compose stack, built from this repo:
 - **egress**: a Squid proxy that allows HTTPS `CONNECT` to an allowlist only
   (Telegram, OpenRouter, Google Calendar/OAuth, MySports, plus `EGRESS_EXTRA_HOSTS`).
 
-- **dashboard**: the read-only web dashboard. It reads the DB through a read-only
-  mount and has no internet access and no published port.
+- **dashboard**: the web dashboard. It reads the DB through a read-only connection; its
+  only writes are edits to the agent's notes (Memory tab). No internet access and no
+  published port.
 
 `gymclaw` sits only on an internal network, so the proxy is its single way out. It
 refuses to start if a direct connection to the internet works. The container runs

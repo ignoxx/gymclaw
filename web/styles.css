@@ -242,3 +242,18 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
   .pager { width: 100%; justify-content: space-between; }
   .title { font-size: 32px; }
 }
+
+/* Memory: one editable line per note */
+.notes { list-style: none; margin: 10px 0 0; padding: 0; }
+.note { display: flex; align-items: baseline; gap: 10px; padding: 9px 0; border-top: 1px solid #eceee5; font-size: 13px; }
+.note:first-child { border-top: 0; }
+.note-text { flex: 1; min-width: 0; padding: 2px 6px; margin: 0 -6px; border-radius: 5px; outline: 0; cursor: text; }
+.note-text:hover { background: #f4f5ee; }
+.note-text:focus { background: #eef0e5; box-shadow: inset 0 0 0 1px #d4dac7; }
+.note-text:empty::before { content: attr(data-placeholder); color: var(--faint); }
+.note time { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.forget { border: 0; background: none; color: var(--faint); font-size: 15px; line-height: 1; padding: 0 2px; }
+.forget:hover, .note.armed .forget { color: #8f3a2a; }
+.note.armed .forget { font-size: 11px; font-weight: 600; }
+.note.add { border-top: 1px dashed var(--line); }
+.note.failed .note-text { box-shadow: inset 0 0 0 1px #e3a898; }
