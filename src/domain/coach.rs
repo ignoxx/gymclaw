@@ -597,6 +597,20 @@ mod tests {
     }
 
     #[test]
+    fn corrected_set_recomputes_next_weight() {
+        let db = db();
+        push(&db);
+        handle_text(&db, "10x90", at(10), "m1").unwrap();
+        handle_rest_over(&db, at(101)).unwrap();
+        handle_tap(&db, &data(&live(&db, at(110)), "⏭ Next exercise"), at(112), "cb-1").unwrap();
+        handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
+        let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
+        let fixed = crate::domain::audit::correct_set(&db, &set.id, Some(95.0), None, at(700), "fix").unwrap();
+        assert_eq!((fixed["data"]["before"]["weight"].as_f64(), fixed["data"]["next_weight"].as_f64()), (Some(90.0), Some(95.0)));
+        assert_eq!(ExerciseProgression::get(&db, "incline").unwrap().unwrap().next_weight, 95.0);
+    }
+
+    #[test]
     fn cut_rest_and_rest_change() {
         let db = db();
         push(&db);

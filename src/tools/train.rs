@@ -21,6 +21,7 @@ pub fn tools() -> Vec<ToolDef> {
         def::<Workout>(),
         def::<WorkoutLogPast>(),
         def::<WorkoutAudit>(),
+        def::<SetCorrect>(),
         def::<TemplateGet>(),
         def::<TemplateImport>(),
         def::<TemplateEditExercise>(),
@@ -187,6 +188,25 @@ impl Tool for WorkoutAudit {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         audit::get_audit(cx.db, &self.workout_id)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetCorrect {
+    /// set_log.id
+    pub set_id: String,
+    pub weight: Option<f64>,
+    pub reps: Option<i64>,
+}
+
+impl Tool for SetCorrect {
+    const NAME: &'static str = "set_correct";
+    const DESCRIPTION: &'static str = "Fix a logged set's weight or reps when the owner says it was logged wrong, during or after the workout. \
+        Find the set with sql_query on set_log. Recomputes that exercise's next weight if this workout set it.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        audit::correct_set(cx.db, &self.set_id, self.weight, self.reps, cx.now, &cx.request_id)
     }
 }
 
