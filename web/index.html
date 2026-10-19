@@ -15,7 +15,7 @@
       <span class="updated" id="updated"></span>
     </header>
     <div class="page-heading"><h1>Training</h1>
-      <nav class="tabs" aria-label="Views"><button data-tab="today" aria-current="page">Today</button><button data-tab="progress">Progress</button><button data-tab="history">History</button></nav></div>
+      <nav class="tabs" aria-label="Views"><button data-tab="today" aria-current="page">Today</button><button data-tab="progress">Progress</button><button data-tab="history">History</button><button data-tab="memory">Memory</button></nav></div>
     <div id="load-error" role="alert" hidden>Can't reach GymClaw right now.</div>
     <div id="polling-alert" class="alert" role="alert" hidden></div>
     <div class="layout tab" id="tab-today" hidden>
@@ -51,6 +51,12 @@
     </div>
     <div class="tab" id="tab-history" hidden>
       <section class="panel"><div class="section-heading"><h2>Workouts</h2><span id="history-count"></span></div><div id="history"></div></section>
+    </div>
+    <div class="tab" id="tab-memory" hidden>
+      <div class="grid-2">
+        <section class="panel"><div class="section-heading"><h2>About you</h2><span>Read before every reply</span></div><ul class="notes" data-kind="owner"></ul></section>
+        <section class="panel"><div class="section-heading"><h2>Learned</h2><span>Its own notes on working better</span></div><ul class="notes" data-kind="lesson"></ul></section>
+      </div>
     </div>
     <div class="tooltip" id="tooltip" role="status" hidden></div>
     <footer class="credits">Exercise art: <a href="https://github.com/bryllim/workout-guide">Workout Guide</a>, Bryl Lim / Everkinetic, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a></footer>

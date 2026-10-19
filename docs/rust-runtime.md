@@ -10,7 +10,7 @@ gymclaw tools        # tool names, descriptions, JSON schemas
 gymclaw migrate      # schema (baseline = last alembic head of the old Python schema, then src/db/migrations)
 gymclaw backup [dest]
 gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
-gymclaw dashboard    # read-only dashboard
+gymclaw dashboard    # dashboard; writes only the agent's notes
 ```
 
 ## Why one binary

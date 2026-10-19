@@ -44,7 +44,7 @@ services:
     mem_limit: 1536m
     pids_limit: 512
 
-  # Read-only dashboard. No internet and no published port: only the reverse proxy
+  # Dashboard: reads the DB, writes only the agent's notes. No internet and no published port: only the reverse proxy
   # reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
   dashboard:
     build:
@@ -58,7 +58,7 @@ services:
       interval: 60s
       timeout: 10s
     volumes:
-      - gymclaw-data:/opt/gymclaw/data:ro
+      - gymclaw-data:/opt/gymclaw/data
     networks: [internal]
     read_only: true
     tmpfs: [/tmp]

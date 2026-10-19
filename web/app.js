@@ -1,4 +1,4 @@
-/* Read-only view of GymClaw state. Presentation only: no timers or writes on the server. */
+/* View of GymClaw state. Presentation only, except the Memory tab, which edits the agent's notes. */
 const SVG = 'http://www.w3.org/2000/svg';
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 let restTimer = null;
@@ -609,11 +609,66 @@ function renderHistory(history) {
   }
 }
 
+/* ---------- Memory ---------- */
+
+const PLACEHOLDER = { owner: 'Add something GymClaw should know', lesson: 'Add a lesson' };
+
+async function noteCall(tool, args) {
+  const response = await fetch(`/api/${tool}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
+  if (!response.ok) throw new Error(tool);
+  await refresh();
+}
+
+/* One line per note: click to edit in place, Enter saves, Esc cancels. An emptied line reverts. */
+function editable(text, placeholder, save) {
+  const node = el('span', 'note-text', text);
+  node.contentEditable = 'plaintext-only';
+  node.spellcheck = true;
+  node.dataset.placeholder = placeholder;
+  node.addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); node.blur(); }
+    if (event.key === 'Escape') { node.textContent = text; node.blur(); }
+  });
+  node.addEventListener('blur', async () => {
+    const next = node.textContent.trim();
+    if (!next || next === text) { node.textContent = text; return; }
+    try { await save(next); } catch { node.textContent = text; node.closest('li').classList.add('failed'); }
+  });
+  return node;
+}
+
+function renderMemory(memory) {
+  for (const list of document.querySelectorAll('.notes')) {
+    // Don't replace a line while it's being typed in; the next refresh catches up.
+    if (list.contains(document.activeElement)) continue;
+    const kind = list.dataset.kind;
+    list.replaceChildren();
+    for (const note of memory[kind]) {
+      const item = el('li', 'note');
+      const forget = el('button', 'forget', '×');
+      forget.setAttribute('aria-label', 'Forget');
+      forget.addEventListener('click', () => {
+        // Two taps: the first arms it, the second forgets.
+        if (!item.classList.contains('armed')) { item.classList.add('armed'); forget.textContent = 'Forget?'; return; }
+        forget.blur();
+        noteCall('note_delete', { id: note.id }).catch(() => item.classList.add('failed'));
+      });
+      forget.addEventListener('blur', () => { item.classList.remove('armed'); forget.textContent = '×'; });
+      const text = editable(note.text, '', next => noteCall('note_edit', { id: note.id, text: next }));
+      item.append(text, el('time', '', ago(note.updated_at)), forget);
+      list.append(item);
+    }
+    const add = el('li', 'note add');
+    add.append(editable('', PLACEHOLDER[kind], next => noteCall('note_add', { kind, text: next })));
+    list.append(add);
+  }
+}
+
 /* ---------- Shell ---------- */
 
 function activeTab() {
   const tab = location.hash.slice(1);
-  return ['today', 'progress', 'history'].includes(tab) ? tab : 'today';
+  return ['today', 'progress', 'history', 'memory'].includes(tab) ? tab : 'today';
 }
 
 function showTab() {
@@ -626,6 +681,7 @@ function showTab() {
   if (tab === 'today') renderToday(state);
   if (tab === 'progress') renderInsights(state);
   if (tab === 'history') renderHistory(state.history);
+  if (tab === 'memory') renderMemory(state.memory);
 }
 
 let rendered = '';

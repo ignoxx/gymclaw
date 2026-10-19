@@ -36,10 +36,10 @@ docker compose up -d --build
 | `GYMCLAW_PROVIDER` | no | Pinned OpenRouter provider. Default `inference-net/fp4`. |
 | `GYMCLAW_MODEL_FAST`, `GYMCLAW_MODEL_VISION` | no | Models for background triage and photos. Default: `GYMCLAW_MODEL`. |
 | `EGRESS_EXTRA_HOSTS` | no | Extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
-| `GYMCLAW_DASHBOARD_HOST` | no | Hostname for the read-only dashboard behind Traefik. |
+| `GYMCLAW_DASHBOARD_HOST` | no | Hostname for the dashboard behind Traefik. |
 
 The stack is three containers: GymClaw (one Rust binary: bot, agent, coach, scheduler), an egress proxy
-with a host allowlist, and the read-only dashboard. Details, Coolify steps, backups and moving hosts:
+with a host allowlist, and the dashboard (read-only except the agent's notes). Details, Coolify steps, backups and moving hosts:
 [deploy/README.md](../deploy/README.md).
 
 ## First run
