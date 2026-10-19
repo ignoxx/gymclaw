@@ -44,7 +44,7 @@ pub struct SqlQuery {
 
 impl Tool for SqlQuery {
     const NAME: &'static str = "sql_query";
-    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. Schema: planned_session (times, status, workout_template_id, user_locked), workout_session, workout_exercise, set_log, workout_template, user_profile, agent_note and agent_event. JOIN on *_id; inspect sqlite_master or PRAGMA table_info for columns. UTC text timestamps, JSON text columns. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
+    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. Schema: planned_session (planned_start_at, planned_end_at, status, workout_template_id, user_locked), workout_session, workout_exercise, set_log, workout_template, user_profile, agent_note and agent_event. JOIN on *_id; inspect sqlite_master or PRAGMA table_info for columns. UTC text timestamps, JSON text columns. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         // File-backed tools use an OS read-only handle. Tests/ephemeral databases get an
@@ -68,7 +68,11 @@ impl Tool for SqlQuery {
             if allowed { Authorization::Allow } else { Authorization::Deny }
         }))?;
         {
-            let mut stmt = db.prepare(&self.sql)?;
+            let mut stmt = match db.prepare(&self.sql) {
+                Ok(stmt) => stmt,
+                Err(e) if e.to_string().contains("no such ") => crate::bail!("SQL_SCHEMA", "{e}. {}", schema_hint(&db, &self.sql)?),
+                Err(e) => return Err(e.into()),
+            };
             if !stmt.readonly() {
                 crate::bail!("NOT_READ_ONLY", "sql_query only reads; use the session tools to change sessions");
             }
@@ -86,10 +90,34 @@ impl Tool for SqlQuery {
     }
 }
 
+/// Columns of the tables a failed query names (or the table list if it names none), so a guessed
+/// column costs one retry instead of a schema lookup plus a retry.
+fn schema_hint(db: &Connection, sql: &str) -> Result<String> {
+    let words: std::collections::HashSet<&str> = sql.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+    let tables: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?
+        .into_iter()
+        .filter(|t| !SECRET_TABLES.contains(&t.as_str()))
+        .collect();
+    let named: Vec<&String> = tables.iter().filter(|t| words.contains(t.as_str())).collect();
+    if named.is_empty() {
+        return Ok(format!("Tables: {}", tables.join(", ")));
+    }
+    let mut out = vec![];
+    for table in named {
+        let columns: Vec<String> = db.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        out.push(format!("{table}({})", columns.join(", ")));
+    }
+    Ok(format!("Columns: {}", out.join("; ")))
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct NoteAdd {
     /// `owner`: a lasting preference or fact about the owner. `lesson`: how to do something next time
-    /// (e.g. a workaround that worked).
+    /// (e.g. a workaround that worked). Never current state (a missed session, an open question):
+    /// the database already holds it.
     pub kind: NoteKind,
     /// One short line.
     pub text: String,
@@ -165,6 +193,10 @@ mod tests {
         assert_eq!(result["rows"].as_array().unwrap().len(), 200);
         assert_eq!(result["truncated"], true);
         assert!(!query(&mut cx, "SELECT name FROM sqlite_master").unwrap()["rows"].as_array().unwrap().is_empty());
+        let guessed = query(&mut cx, "SELECT start_time FROM planned_session").unwrap_err().to_string();
+        assert!(guessed.contains("planned_session(") && guessed.contains("planned_start_at"), "{guessed}");
+        let missing = query(&mut cx, "SELECT * FROM sessions").unwrap_err().to_string();
+        assert!(missing.contains("Tables:") && !missing.contains("calendar_credential"), "{missing}");
     }
 
 }
