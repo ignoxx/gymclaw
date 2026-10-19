@@ -3,9 +3,9 @@
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{AgentEvent, ExerciseProgression, ExerciseStatus, PlannedSession, SessionStatus, SetType, WorkoutStatus};
+use crate::db::models::{AgentEvent, ExerciseProgression, ExerciseStatus, PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutStatus};
 use crate::domain::core::{emit, mutate};
-use crate::domain::progression::{PerformanceSet, double_progression};
+use crate::domain::progression::{PerformanceSet, ProgressionDecision, double_progression};
 use crate::domain::workout::{cancel_rest, exercises, load_workout, logs, name, transition, unresolved};
 use crate::error::Result;
 use crate::time::Ts;
@@ -23,6 +23,46 @@ pub fn get_audit(db: &Connection, workout_id: &str) -> Result<Value> {
         }
     }
     crate::bail!("AUDIT_NOT_READY", "Finish workout before requesting audit")
+}
+
+/// Next-weight decision for one exercise from its logged working sets, which it also returns.
+fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDecision, Vec<SetLog>)> {
+    let working = logs(db, &exercise.id, Some(SetType::Working))?;
+    let sets: Vec<PerformanceSet> = working.iter().map(|s| PerformanceSet { weight: s.weight, reps: s.reps }).collect();
+    let required = exercise.config_json.get("working_sets").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let increment = exercise.config_json.get("increment").and_then(Value::as_f64).unwrap_or(2.5);
+    let mut decision = double_progression(&exercise.exercise_id, exercise.target_weight, exercise.rep_max, required, increment, &sets);
+    if exercise.target_weight == 0.0 && !working.is_empty() {
+        // Unknown starting weight: the heaviest working set becomes the baseline target.
+        decision.next_weight = working.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
+        decision.progressed = false;
+        decision.reason = "baseline_from_first_session";
+    }
+    Ok((decision, working))
+}
+
+/// Fix a logged set's weight and/or reps, during or after its workout. When the finished workout set
+/// this exercise's next weight, that weight is recomputed from the corrected sets.
+pub fn correct_set(db: &Connection, set_id: &str, weight: Option<f64>, reps: Option<i64>, now: Ts, request_id: &str) -> Result<Value> {
+    mutate(db, "set.corrected", request_id, json!({"set_id": set_id, "weight": weight, "reps": reps}), now, || {
+        if weight.is_none() && reps.is_none() {
+            crate::bail!("ARGUMENT_REQUIRED", "Pass weight and/or reps");
+        }
+        let Some(mut set) = SetLog::get(db, set_id)? else { crate::bail!("SET_NOT_FOUND", "No logged set {set_id}") };
+        let before = json!({"weight": set.weight, "reps": set.reps});
+        set.weight = weight.unwrap_or(set.weight);
+        set.reps = reps.unwrap_or(set.reps);
+        set.update(db)?;
+        let Some(exercise) = WorkoutExercise::get(db, &set.workout_exercise_id)? else { crate::bail!("EXERCISE_NOT_FOUND", "Set {set_id} has no exercise") };
+        let mut next_weight = None;
+        if let Some(mut progression) = ExerciseProgression::get(db, &exercise.exercise_id)?.filter(|p| p.source_workout_id == exercise.workout_session_id) {
+            progression.next_weight = decide(db, &exercise)?.0.next_weight;
+            progression.updated_at = now;
+            progression.update(db)?;
+            next_weight = Some(progression.next_weight);
+        }
+        Ok(json!({"set_id": set.id, "exercise": name(&exercise), "before": before, "after": {"weight": set.weight, "reps": set.reps}, "next_weight": next_weight}))
+    })
 }
 
 /// Finish a WORKOUT_COMPLETE workout: progression, PLAN_UPDATED. Mutation result envelope.
@@ -49,19 +89,9 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
         let (mut performance, mut progressions) = (vec![], vec![]);
         let (mut warmups, mut completed_sets, mut progressed) = (0, 0, 0);
         for exercise in &rows {
-            let working = logs(db, &exercise.id, Some(SetType::Working))?;
+            let (decision, working) = decide(db, exercise)?;
             warmups += logs(db, &exercise.id, Some(SetType::Warmup))?.len();
             completed_sets += working.len();
-            let sets: Vec<PerformanceSet> = working.iter().map(|s| PerformanceSet { weight: s.weight, reps: s.reps }).collect();
-            let required = exercise.config_json.get("working_sets").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let increment = exercise.config_json.get("increment").and_then(Value::as_f64).unwrap_or(2.5);
-            let mut decision = double_progression(&exercise.exercise_id, exercise.target_weight, exercise.rep_max, required, increment, &sets);
-            if exercise.target_weight == 0.0 && !working.is_empty() {
-                // Unknown starting weight: the heaviest working set becomes the baseline target.
-                decision.next_weight = working.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
-                decision.progressed = false;
-                decision.reason = "baseline_from_first_session";
-            }
             if exercise.status == ExerciseStatus::Completed {
                 let target = ExerciseProgression { exercise_id: exercise.exercise_id.clone(), next_weight: decision.next_weight, updated_at: now, source_workout_id: workout.id.clone() };
                 if ExerciseProgression::get(db, &exercise.exercise_id)?.is_some() { target.update(db)? } else { target.insert(db)? }
