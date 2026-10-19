@@ -263,6 +263,7 @@ function renderAttendance(crowd) {
     chart.svg.append(svgEl('line', { x1: x(now), x2: x(now), y1: chart.T, y2: chart.H - chart.B, class: 'now' }));
     chart.svg.append(svgText(x(now), chart.T - 2, 'now', { 'text-anchor': 'middle', class: 'label now-label' }));
   }
+  workoutMarkers(chart, x, crowd.sessions || [], { start, end: axisEnd, now, view });
   for (const run of runs(points)) {
     chart.svg.append(svgEl('path', { d: `${path(run)} L${x(run.at(-1)[0])},${chart.y(0)} L${x(run[0][0])},${chart.y(0)} Z`, class: 'area' }));
     chart.svg.append(svgEl('path', { d: path(run), class: 'line' }));
@@ -284,6 +285,23 @@ function renderAttendance(crowd) {
     if (usual !== undefined) rows.push([usual, `typical ${dateLabel(start, { weekday: 'long' })}`, 'typical']);
     return { title, rows, y: chart.y(v) };
   });
+}
+
+/* Planned workouts as vertical lines like "now"; past/finished ones are quieter. Week/Month label
+   with the initial only, and skip a label that would crowd the previous one. */
+function workoutMarkers(chart, x, sessions, { start, end, now, view }) {
+  const short = view === 'week' || view === 'month';
+  let lastX = -Infinity;
+  for (const { start: m, name, status } of sessions) {
+    if (m < start || m > end) continue;
+    const quiet = m < now || !['TENTATIVE', 'COMMITTED'].includes(status);
+    const cls = `workout-mark${quiet ? ' quiet' : ''}`;
+    chart.svg.append(svgEl('line', { x1: x(m), x2: x(m), y1: chart.T, y2: chart.H - chart.B, class: cls }));
+    const label = short ? String(name).slice(0, 1) : name;
+    if (x(m) - lastX < (short ? 10 : 36)) continue;
+    lastX = x(m);
+    chart.svg.append(svgText(x(m), chart.T - 2, label, { 'text-anchor': 'middle', class: `label ${cls}` }));
+  }
 }
 
 function renderGym(crowd) {

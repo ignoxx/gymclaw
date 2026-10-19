@@ -151,6 +151,18 @@ fn crowd_state(db: &Connection, tz: &TimeZone, now: Ts, polling: bool) -> Result
         "polling": polling, "health": crowd::polling_health(db, now)?}))
 }
 
+/// Planned workouts the attendance chart can show (same 400 days back as `series`, ~6 weeks ahead),
+/// as `{start: local minutes, name, status}` so the browser draws them like the "now" line.
+fn crowd_sessions(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>> {
+    let rows = PlannedSession::select(
+        db,
+        "WHERE status != 'CANCELLED' AND planned_start_at >= ?1 AND planned_start_at < ?2 ORDER BY planned_start_at",
+        [now - SignedDuration::from_hours(24 * 400), now + SignedDuration::from_hours(24 * 42)],
+    )?;
+    Ok(rows.iter().map(|r| json!({"start": local_minutes(r.planned_start_at, tz), "status": r.status,
+        "name": r.workout_plan_json.pointer("/template/name").cloned().unwrap_or(json!("Workout"))})).collect())
+}
+
 fn label(rating: &str) -> Value {
     crowd::LABELS.iter().find(|(k, _)| *k == rating).map(|(_, v)| json!(v)).unwrap_or(Value::Null)
 }
@@ -328,11 +340,13 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let mut insights = insights(db, &tz, now, &profile, &done)?;
     insights["weight"] = json!(body_weight(db, &tz, now)?);
     let polling = settings.is_some_and(|s| s.enabled && s.crowd_polling_enabled);
+    let mut crowd = crowd_state(db, &tz, now, polling)?;
+    crowd["sessions"] = json!(crowd_sessions(db, &tz, now)?);
     Ok(json!({
         "demo": false, "live_database_accessed": true, "captured_at": iso(&now.local(&TimeZone::UTC)), "timezone": profile.timezone,
         "range": format!("{} – {}", date_fmt(today, "%-d %b"), date_fmt(today.checked_add(6.days())?, "%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
-        "crowd": crowd_state(db, &tz, now, polling)?, "history": done, "insights": insights, "memory": memory(db)?,
+        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?,
         "activity": events.iter().map(|e| json!({"time": hhmm(e.created_at, &tz), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
     }))
