@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # libheif >= 1.17 for HEIC photos (the `heic` feature).
-      - run: sudo apt-get update && sudo apt-get install -y libheif-dev
+      # libheif >= 1.17 plus the HEVC decoder for HEIC photos (the `heic` feature).
+      - run: sudo apt-get update && sudo apt-get install -y libheif-dev libheif-plugin-libde265
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
