@@ -12,10 +12,11 @@ pub mod turnlog;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -129,10 +130,18 @@ pub fn tool_specs() -> Vec<Value> {
     specs
 }
 
-/// Tool-call markup some models write as text instead of calling the tool (`<tool_call>workout…`).
-/// Returns the text before it, or None when there is none.
+/// Start of tool-call markup models write as text: `<tool_call>`, `<|tool_call|>`, `<function_call>`,
+/// `<tool_calls>`, `<function=workout>`.
+static CALL_MARKUP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<\|?(tool_calls?|function_calls?)\b|<function=").unwrap());
+
+/// A tool call written as text instead of made (markup, or the whole message as a `{"name", "arguments"}`
+/// object). Returns the text before it, or None when there is none.
 fn written_tool_call(text: &str) -> Option<&str> {
-    text.find("<tool_call>").map(|at| text[..at].trim())
+    if let Some(found) = CALL_MARKUP.find(text) {
+        return Some(text[..found.start()].trim());
+    }
+    let json: Value = serde_json::from_str(text.trim()).ok()?;
+    (json.get("name").is_some() && (json.get("arguments").is_some() || json.get("parameters").is_some())).then_some("")
 }
 
 fn cut(text: String) -> String {
@@ -288,6 +297,10 @@ impl Agent {
                 let (result, ok) = match (name.as_str(), args) {
                     (_, Err(e)) => (Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}")).to_json(), false),
                     (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
+                        // The call it meant didn't run; the owner must not get its markup or a silent reply.
+                        Ok(reply) if reply.text.as_deref().and_then(written_tool_call).is_some() => {
+                            (Error::domain("WRITTEN_TOOL_CALL", "The reply text contains a tool call written as text; it did not run. Make it as a function call, then reply.").to_json(), false)
+                        }
                         Ok(reply) => {
                             finished = Some(reply);
                             (json!({"ok": true}), true)
@@ -314,7 +327,7 @@ impl Agent {
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": cut(result.to_string())}));
             }
             if let Some(mut reply) = finished {
-                reply.text = as_reply(reply.text.as_deref().map(|t| written_tool_call(t).unwrap_or(t))).text;
+                reply.text = as_reply(reply.text.as_deref()).text;
                 reply.buttons.truncate(8);
                 return Ok(reply);
             }
@@ -446,5 +459,22 @@ mod tests {
         let (agent, _, _) = scripted(calls);
         let outcome = agent.turn(input()).await;
         assert!(outcome.failed && !outcome.reply.text.unwrap().contains("<tool_call>"));
+    }
+
+    #[test]
+    fn written_tool_calls_in_other_formats() {
+        for text in ["<|tool_call|>workout", "Starting.\n<function_call>workout</function_call>", "<function=workout>{}</function>", r#"{"name": "workout", "arguments": {"action": "start"}}"#] {
+            assert!(written_tool_call(text).is_some(), "{text}");
+        }
+        for text in ["Use the function of the hips.", r#"{"name": "Bench"}"#, "**Pull** at 13:30"] {
+            assert_eq!(written_tool_call(text), None, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reply_tool_with_a_written_call_goes_back_to_the_model() {
+        let (agent, script, _) = scripted(vec![call("reply", json!({"text": "<tool_call>workout</tool_call>"})), json!({"content": "Started."})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Started."));
+        assert_eq!(script.seen.lock().unwrap().len(), 2);
     }
 }
