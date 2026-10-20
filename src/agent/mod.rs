@@ -26,7 +26,7 @@ use crate::telegram::Media;
 use crate::telegram::coach::Coach;
 use crate::time::Ts;
 use crate::tools::{self, Effect};
-use failure::{FailureState, format_failure};
+use failure::{FailureState, diagnose, format_failure};
 use turnlog::{TurnLog, clean, scrub, sha};
 
 /// Tool calls per turn before the model must answer.
@@ -180,7 +180,7 @@ impl Agent {
     pub async fn turn(&self, input: TurnInput) -> Outcome {
         let run_id = crate::db::new_id();
         let started = Instant::now();
-        let mut state = FailureState { run_id: run_id.clone(), ..FailureState::default() };
+        let mut state = FailureState::default();
         let mut calls_log = vec![];
         let result = tokio::time::timeout(DEADLINE, self.run(&input, &run_id, &mut state, &mut calls_log)).await;
         let (reply, failed, error) = match result {
@@ -197,7 +197,7 @@ impl Agent {
         let text = reply.text.clone().unwrap_or_default();
         self.log.log(json!({
             "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": "user", "ok": !failed,
-            "error": error.map(|e| scrub(&e, 500)), "ms": started.elapsed().as_millis() as u64, "calls": calls_log,
+            "error": error.map(|e| scrub(&e, 500)), "diagnosis": failed.then(|| diagnose(&state)), "ms": started.elapsed().as_millis() as u64, "calls": calls_log,
             "noReply": (reply.text.is_none() && reply.react.is_none()).then_some(true), "reply": scrub(&text, 4000),
         }));
         Outcome { reply, failed, run_id }
