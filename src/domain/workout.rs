@@ -441,6 +441,13 @@ pub fn make_exercise(db: &Connection, workout_id: &str, spec: &ExerciseSpec, pos
     Ok(row)
 }
 
+/// A workout can start on it: upcoming, or missed earlier the same local day (the owner showed up late).
+/// An older missed session is history; a make-up workout gets its own session.
+pub fn startable(db: &Connection, session: &PlannedSession, now: Ts) -> Result<bool> {
+    let zone = get_profile(db)?.tz();
+    Ok(session.status.is_open() || (session.status == SessionStatus::Missed && session.planned_start_at.local(&zone).date() == now.local(&zone).date()))
+}
+
 /// The startable planned session on the owner's local today closest to now, even if its slot already passed
 /// or was already marked missed (the owner showed up late).
 pub fn todays_session(db: &Connection, now: Ts) -> Result<Option<PlannedSession>> {
@@ -481,7 +488,7 @@ pub fn start(db: &Connection, template_id: Option<&str>, planned_session_id: Opt
         let mut template = get_template(db, &template_id)?;
         let mut planned = match &planned_session_id {
             Some(id) => match PlannedSession::get(db, id)? {
-                Some(p) if p.status.is_open() => Some(p),
+                Some(p) if startable(db, &p, now)? => Some(p),
                 _ => crate::bail!("INVALID_PLAN", "Planned session is missing or no longer startable"),
             },
             None => None,

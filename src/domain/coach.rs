@@ -445,8 +445,11 @@ pub fn begin(db: &Connection, r: &str, now: Ts, request_id: &str) -> Result<Coac
     if let Some(running) = active_workout(db)? {
         return Ok(acked("Already running.", vec![exercise_card(db, &running.id, now)?]));
     }
-    let planned = PlannedSession::first(db, "WHERE substr(id, 1, length(?1)) = ?1", [r])?;
-    let Some((planned, template_id)) = planned.and_then(|p| p.workout_template_id.clone().filter(|_| p.status.is_open()).map(|t| (p, t))) else {
+    let planned = match PlannedSession::first(db, "WHERE substr(id, 1, length(?1)) = ?1", [r])? {
+        Some(p) if workout::startable(db, &p, now)? => Some(p),
+        _ => None,
+    };
+    let Some((planned, template_id)) = planned.and_then(|p| p.workout_template_id.clone().map(|t| (p, t))) else {
         return Ok(acked("⌛ This session can't be started anymore.", vec![]));
     };
     start(db, Some(&template_id), Some(&planned.id), true, now, request_id)?;
