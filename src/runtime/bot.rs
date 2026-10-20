@@ -396,7 +396,8 @@ impl Bot {
         };
         let last = batch.last().expect("non-empty batch").clone();
         let images = batch.iter().flat_map(|b| b.images.clone()).collect();
-        let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images }).await;
+        let background = batch.iter().all(|b| b.message_id == 0);
+        let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
         typing.abort();
         if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
             self.answer(&outcome, &batch).await;
