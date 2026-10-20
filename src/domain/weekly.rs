@@ -568,6 +568,9 @@ mod tests {
         let mut missed = first.clone();
         missed.status = SessionStatus::Missed;
         missed.update(&db).unwrap();
+        // A missed session from an earlier day stays history.
+        let error = start(&db, None, Some(&first.id), false, first.planned_end_at.mins(24 * 60), "next-day").unwrap_err();
+        assert_eq!(error.code(), "INVALID_PLAN");
         start(&db, None, None, false, first.planned_end_at.mins(10), "late").unwrap();
         assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Started);
     }
