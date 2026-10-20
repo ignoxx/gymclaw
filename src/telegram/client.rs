@@ -27,6 +27,15 @@ impl Bot {
         parse(method, response).await
     }
 
+    /// Make the "/" menu exactly `commands` (command, description). OpenClaw left its own menu in the
+    /// default and group scopes; group commands go too, the bot is DM only.
+    pub async fn set_commands(&self, commands: &[(&str, &str)]) -> Result<()> {
+        let commands: Vec<Value> = commands.iter().map(|(command, description)| json!({"command": command, "description": description})).collect();
+        let _: bool = self.call("setMyCommands", json!({"commands": commands})).await?;
+        let _: bool = self.call("deleteMyCommands", json!({"scope": {"type": "all_group_chats"}})).await?;
+        Ok(())
+    }
+
     /// HTML first; if Telegram can't parse the entities, the same text without formatting.
     async fn call_text<T: DeserializeOwned>(&self, method: &str, mut body: Value, text_key: &str, text: &str) -> Result<T> {
         body[text_key] = json!(markdown::to_html(text));
