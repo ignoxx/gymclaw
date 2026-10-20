@@ -276,14 +276,23 @@ pub fn last_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<O
     crate::domain::preview::last_set(db, &exercise.exercise_id)
 }
 
-/// Weight the owner most likely means when a typed set's order is unclear (last set, else target).
+/// The next working set as (weight, reps): this workout's last set, else the prescribed target, else
+/// last time's set. What the coach card offers and what a typed set is read against.
+pub fn next_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<(f64, i64)>> {
+    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop() {
+        return Ok(Some((own.weight, own.reps)));
+    }
+    if exercise.target_weight != 0.0 {
+        return Ok(Some((exercise.target_weight, exercise.rep_min)));
+    }
+    Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.map(|s| (s.weight, s.reps)))
+}
+
+/// Weight the owner most likely means when a typed set's order is unclear: the one the card offers.
 pub fn expected_weight(db: &Connection, workout_id: &str) -> Result<Option<f64>> {
     let workout = load_workout(db, workout_id, None)?;
     let Some(active) = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active) else { return Ok(None) };
-    Ok(match last_working_set(db, &active)? {
-        Some(last) => Some(last.weight),
-        None => (active.target_weight != 0.0).then_some(active.target_weight),
-    })
+    Ok(next_working_set(db, &active)?.map(|(weight, _)| weight))
 }
 
 #[derive(Clone, Debug, Serialize)]
