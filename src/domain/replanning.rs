@@ -1,5 +1,5 @@
 //! Session mechanics and non-mutating plan inspection. Policy decisions belong to the agent.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use jiff::SignedDuration;
 use jiff::civil::Date;
@@ -50,12 +50,13 @@ pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let rows = PlannedSession::select(db, "ORDER BY planned_start_at, id", [])?;
+    let known = known_warnings(db)?;
     let (mut warnings, mut fresh) = (Vec::new(), Vec::new());
     for &week in weeks {
         if !monday(week) { crate::bail!("INVALID_WEEK", "week_start must be Monday"); }
         let sessions: Vec<_> = rows.iter().filter(|s| week_of(s.planned_start_at, &tz) == week && s.status.is_active()).collect();
         if !rows.iter().any(|s| week_of(s.planned_start_at, &tz) == week) {
-            fresh.extend(new_warnings(db, week, &[], now)?);
+            fresh.extend(new_warnings(db, week, &[], &known, now)?);
             continue;
         }
         let from = warnings.len();
@@ -80,7 +81,7 @@ pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result
         if count < profile.weekly_target_sessions {
             warnings.push(format!("Week {week}: {count}/{} sessions saved; {} additional default slots feasible. Agent decides whether to add or accept shortfall.", profile.weekly_target_sessions, plan.sessions.len()));
         }
-        fresh.extend(new_warnings(db, week, &warnings[from..], now)?);
+        fresh.extend(new_warnings(db, week, &warnings[from..], &known, now)?);
     }
     if !fresh.is_empty() {
         crate::domain::core::emit(db, "planning.attention", now, json!({"warnings": fresh}))?;
@@ -88,20 +89,33 @@ pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result
     Ok(json!({"changed": [], "warnings": warnings}))
 }
 
-/// The week's warnings that weren't there at its last inspection. A warning wakes the agent when it
-/// appears, stays quiet while it persists (the agent already decided about it) and wakes it again if
-/// it goes away and comes back. Each week's current list is a `planning.warnings` event, written when
-/// it changes and handled at once, so it never wakes the agent itself.
-fn new_warnings(db: &Connection, week: Date, current: &[String], now: Ts) -> Result<Vec<String>> {
+/// Every warning currently standing: the newest `planning.warnings` event of each week (written when a
+/// week's list changes and handled at once, so it never wakes the agent). Warnings name their session or
+/// week, so a session moved to another week with the same problem is still the same warning.
+fn known_warnings(db: &Connection) -> Result<HashSet<String>> {
+    let mut weeks: HashMap<String, Vec<String>> = HashMap::new();
+    for event in AgentEvent::select(db, "WHERE type = 'planning.warnings' ORDER BY created_at, rowid", [])? {
+        let week = event.payload_json["week"].as_str().unwrap_or_default().to_string();
+        weeks.insert(week, serde_json::from_value(event.payload_json.0["active"].clone())?);
+    }
+    Ok(weeks.into_values().flatten().collect())
+}
+
+/// Records the week's current warnings and returns the ones not already standing (`known`, taken
+/// before this inspection). A warning wakes the agent when it appears, stays quiet while it persists
+/// (the agent already decided about it) and wakes it again if it goes away and comes back.
+fn new_warnings(db: &Connection, week: Date, current: &[String], known: &HashSet<String>, now: Ts) -> Result<Vec<String>> {
     let week = week.to_string();
-    let last = AgentEvent::first(db, "WHERE type = 'planning.warnings' AND payload_json ->> 'week' = ?1 ORDER BY created_at DESC, rowid DESC", [&week])?;
-    let before: Vec<String> = last.map(|e| serde_json::from_value(e.payload_json.0["active"].clone())).transpose()?.unwrap_or_default();
+    let before = AgentEvent::first(db, "WHERE type = 'planning.warnings' AND payload_json ->> 'week' = ?1 ORDER BY created_at DESC, rowid DESC", [&week])?
+        .map(|e| serde_json::from_value::<Vec<String>>(e.payload_json.0["active"].clone()))
+        .transpose()?
+        .unwrap_or_default();
     if before != current {
         let mut event = crate::domain::core::emit(db, "planning.warnings", now, json!({"week": week, "active": current}))?;
         event.handled_at = Some(now);
         event.update(db)?;
     }
-    Ok(current.iter().filter(|w| !before.contains(w)).cloned().collect())
+    Ok(current.iter().filter(|w| !known.contains(*w)).cloned().collect())
 }
 
 /// Planner rules an owner-chosen slot breaks, as short reasons for the owner.
@@ -214,6 +228,8 @@ pub fn retire_session(db: &Connection, session: &mut PlannedSession, status: Ses
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::ToSpan;
+
     use crate::domain::scheduling::schedule_week;
     use crate::domain::workout::tests::db;
 
@@ -263,5 +279,16 @@ mod tests {
         edit_session(&db, Some(&ids[2]), SessionPatch { start: Some(thursday), ..Default::default() }, now, "move-4").unwrap();
         inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
         assert_eq!((attention(&db).len(), raised(&db)), (count + 1, new));
+
+        // A session moved to the next week with the same problem doesn't raise it again.
+        let late = Ts(before[1].planned_start_at.local(&tz).date().at(21, 30, 0, 0).to_zoned(tz.clone()).unwrap().timestamp());
+        edit_session(&db, Some(&ids[1]), SessionPatch { start: Some(late), ..Default::default() }, now, "late-1").unwrap();
+        inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
+        let window = raised(&db).into_iter().find(|w| w.contains(&ids[1]) && w.contains("outside your workout window")).expect("window warning raised");
+        let count = attention(&db).len();
+        let next_week = late + SignedDuration::from_hours(7 * 24);
+        edit_session(&db, Some(&ids[1]), SessionPatch { start: Some(next_week), ..Default::default() }, now, "late-2").unwrap();
+        inspect_weeks(&db, &BTreeSet::from([week, week.checked_add(7.days()).unwrap()]), now).unwrap();
+        assert!(attention(&db)[count..].iter().all(|e| !e.payload_json.0["warnings"].as_array().unwrap().contains(&json!(window))));
     }
 }
