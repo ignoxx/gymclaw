@@ -44,4 +44,4 @@ jobs:
           TOKEN: ${{ secrets.COOLIFY_TOKEN }}
         run: |
           if [ -z "$WEBHOOK" ]; then echo "COOLIFY_DEPLOY_WEBHOOK not set, skipping deploy"; exit 0; fi
-          curl -fsS -H "Authorization: Bearer $TOKEN" "$WEBHOOK"
+          curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "$WEBHOOK"
