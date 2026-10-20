@@ -100,6 +100,8 @@ pub struct TurnInput {
     pub key: String,
     /// Photos/documents from this turn (owner messages are already in `chat_message`).
     pub images: Vec<Media>,
+    /// Woken by background events, not by the owner: notes to itself ("nothing to report") are dropped.
+    pub background: bool,
 }
 
 pub struct Agent {
@@ -155,10 +157,21 @@ fn cut(text: String) -> String {
     format!("{}…[cut {} chars; narrow the query]", &text[..end], text.len() - end)
 }
 
-/// "NO_REPLY" and empty text mean silence.
-fn as_reply(text: Option<&str>) -> Reply {
-    let text = text.map(str::trim).filter(|t| !t.is_empty() && *t != "NO_REPLY");
-    Reply { text: text.map(String::from), ..Reply::default() }
+/// History prefix the model sometimes copies onto its own reply ("[Tue 14:22, sent automatically] …").
+static ECHOED_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[[^\]\n]*sent automatically\]\s*").unwrap());
+
+/// The whole reply is a note that there's nothing to say: "No reply needed.", "Nothing to report",
+/// "(background events handled — nothing to report)".
+static NOTHING_TO_SAY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\(?([^()]*\s[—–-]\s*)?(heartbeat_ok|no (reply|response|message|action) (is )?(needed|required|necessary)|nothing (to (report|say|do|add)|(needs|requires) (saying|attention|action)))[.!]?\)?$").unwrap()
+});
+
+/// "NO_REPLY" and empty text mean silence. On a background turn so does a note to itself ("No reply
+/// needed."); to the owner the same words can be a real answer.
+fn as_reply(text: Option<&str>, background: bool) -> Reply {
+    let text = text.map(|t| ECHOED_PREFIX.replace(t.trim(), "").trim().to_string());
+    let text = text.filter(|t| !t.is_empty() && t != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(t)));
+    Reply { text, ..Reply::default() }
 }
 
 impl Agent {
@@ -286,7 +299,7 @@ impl Agent {
                 if force_text && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("STUCK", "step limit reached without an answer");
                 }
-                return Ok(as_reply(content));
+                return Ok(as_reply(content, input.background));
             }
             // Text next to tool calls is narration ("Moving it now…"): it never reaches the owner.
             messages.push(json!({"role": "assistant", "content": content, "tool_calls": tool_calls}));
@@ -337,7 +350,7 @@ impl Agent {
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": cut(result.to_string())}));
             }
             if let Some(mut reply) = finished {
-                reply.text = as_reply(reply.text.as_deref()).text;
+                reply.text = as_reply(reply.text.as_deref(), input.background).text;
                 reply.buttons.truncate(8);
                 return Ok(reply);
             }
@@ -403,7 +416,11 @@ mod tests {
     }
 
     fn input() -> TurnInput {
-        TurnInput { key: "tg-5".into(), images: vec![] }
+        TurnInput { key: "tg-5".into(), images: vec![], background: false }
+    }
+
+    fn background() -> TurnInput {
+        TurnInput { key: "event-1".into(), images: vec![], background: true }
     }
 
     #[tokio::test]
@@ -427,6 +444,23 @@ mod tests {
         assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("**Mon** Pull"));
         let (agent, _, _) = scripted(vec![json!({"content": "NO_REPLY"})]);
         assert_eq!(agent.turn(input()).await.reply, Reply::default());
+        // An echoed history prefix is never part of the message.
+        let (agent, _, _) = scripted(vec![json!({"content": "[Tue 14:22, sent automatically] Pull moved to **13:30**."})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Pull moved to **13:30**."));
+        // After background events, notes to itself are silence; to the owner the same words can be answers.
+        let notes = ["[Tue 14:22, sent automatically] (background events handled — nothing to report)", "No reply needed.", "Nothing to report", "nothing needs attention."];
+        for note in notes {
+            let (agent, _, _) = scripted(vec![json!({"content": note})]);
+            assert_eq!(agent.turn(background()).await.reply, Reply::default(), "{note}");
+        }
+        for answer in ["No action needed.", "(Pull moved to 13:30)"] {
+            let (agent, _, _) = scripted(vec![json!({"content": answer})]);
+            assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some(answer));
+        }
+        for message in ["Nothing to report on the crowd yet: no data for Fridays.", "(Pull moved to 13:30)", "Wed clash — move Pull?"] {
+            let (agent, _, _) = scripted(vec![json!({"content": message})]);
+            assert_eq!(agent.turn(background()).await.reply.text.as_deref(), Some(message));
+        }
         let (agent, _, _) = scripted(vec![call("reply", json!({"react": "👍"}))]);
         assert_eq!(agent.turn(input()).await.reply.react.as_deref(), Some("👍"));
     }

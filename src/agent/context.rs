@@ -157,7 +157,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<String> {
 }
 
 /// Chat since the last `/new` as OpenAI messages, oldest first. Owner and automatic messages carry
-/// their local time, so "earlier today" and reminders make sense.
+/// their local time, so "earlier today" and reminders make sense. Background-event prompts are user turns.
 pub fn history(db: &Connection) -> Result<Vec<Value>> {
     let tz = get_profile(db)?.tz();
     let rows = ChatMessage::select(
@@ -173,6 +173,9 @@ pub fn history(db: &Connection) -> Result<Vec<Value>> {
             match m.role {
                 ChatRole::Owner => json!({"role": "user", "content": format!("[{at}] {}", m.text)}),
                 ChatRole::Assistant => json!({"role": "assistant", "content": m.text}),
+                // A wake prompt is input to answer, not something the owner saw; as an assistant turn the
+                // model echoed its prefix and narrated "(nothing to report)" to the owner.
+                ChatRole::Bot if m.meta_json.get("kind").and_then(Value::as_str) == Some("agent_event") => json!({"role": "user", "content": format!("[{at}, system] {}", m.text)}),
                 ChatRole::Bot => json!({"role": "assistant", "content": format!("[{at}, sent automatically] {}", m.text)}),
             }
         })
