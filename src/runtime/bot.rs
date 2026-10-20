@@ -41,6 +41,9 @@ pub enum Route {
     Agent,
 }
 
+/// The "/" menu Telegram shows; `route` handles each (and `/reset` as `/new`). Set on startup.
+pub const COMMANDS: &[(&str, &str)] = &[("new", "Start a fresh conversation"), ("status", "Bot health and what's running")];
+
 pub fn route(text: &str) -> Route {
     let command = text.split_whitespace().next().unwrap_or("").split('@').next().unwrap_or("");
     match command {
@@ -562,5 +565,7 @@ mod tests {
         }
         assert_eq!(route("/new"), Route::New);
         assert_eq!(route("/status@gymclaw_bot"), Route::Status);
+        // The menu only offers commands the bot handles.
+        assert!(COMMANDS.iter().all(|(c, _)| matches!(route(&format!("/{c}")), Route::New | Route::Status)));
     }
 }

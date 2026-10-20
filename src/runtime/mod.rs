@@ -85,7 +85,11 @@ pub async fn serve(config: Config) -> Result<()> {
         tracing::info!("imported {imported} owner notes from USER.md");
     }
 
-    let tg: Arc<dyn Telegram> = Arc::new(TelegramBot::new(&config.telegram_token)?);
+    let telegram = TelegramBot::new(&config.telegram_token)?;
+    if let Err(e) = telegram.set_commands(bot::COMMANDS).await {
+        tracing::warn!("telegram command menu not updated: {e}");
+    }
+    let tg: Arc<dyn Telegram> = Arc::new(telegram);
     let model: Arc<dyn ChatModel> = Arc::new(OpenRouter::new(&config.openrouter_key, config.provider.clone())?);
     let log = TurnLog::new(std::env::var("GYMCLAW_TURN_LOG_DIR").ok().filter(|d| !d.is_empty()).map(PathBuf::from));
     let wake = Arc::new(Notify::new());
