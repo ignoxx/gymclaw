@@ -129,6 +129,12 @@ pub fn tool_specs() -> Vec<Value> {
     specs
 }
 
+/// Tool-call markup some models write as text instead of calling the tool (`<tool_call>workout…`).
+/// Returns the text before it, or None when there is none.
+fn written_tool_call(text: &str) -> Option<&str> {
+    text.find("<tool_call>").map(|at| text[..at].trim())
+}
+
 fn cut(text: String) -> String {
     if text.len() <= MAX_RESULT {
         return text;
@@ -256,6 +262,15 @@ impl Agent {
                 if reply.finish_reason.as_deref() == Some("length") && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("OUTPUT_LIMIT", "model stopped at the output limit");
                 }
+                let written = content.and_then(written_tool_call);
+                if written.is_some() && !force_text {
+                    // It meant to call a tool: nothing ran, so say so and let it call properly.
+                    steps += 1;
+                    messages.push(json!({"role": "assistant", "content": content}));
+                    messages.push(json!({"role": "user", "content": "[system] That tool call was written as text, so it did not run and the owner would have seen it. Call tools as function calls, or answer the owner."}));
+                    continue;
+                }
+                let content = written.or(content);
                 if force_text && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("STUCK", "step limit reached without an answer");
                 }
@@ -299,7 +314,7 @@ impl Agent {
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": cut(result.to_string())}));
             }
             if let Some(mut reply) = finished {
-                reply.text = as_reply(reply.text.as_deref()).text;
+                reply.text = as_reply(reply.text.as_deref().map(|t| written_tool_call(t).unwrap_or(t))).text;
                 reply.buttons.truncate(8);
                 return Ok(reply);
             }
@@ -418,5 +433,18 @@ mod tests {
         assert!(seen.last().unwrap().1, "the last call forbids tools");
         // The script's 13th message still has tool calls; with tools forbidden its text is the answer.
         assert_eq!(outcome.reply.text.as_deref(), Some("Working on it…"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_written_as_text_never_reaches_the_owner() {
+        let written = || json!({"content": "<tool_call>workout<arg_key>action</arg_key><arg_value>start</arg_value></tool_call>"});
+        let (agent, script, _) = scripted(vec![written(), json!({"content": "Started."})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Started."));
+        assert_eq!(script.seen.lock().unwrap().len(), 2);
+        // Forced to answer, it can't retry: an honest failure beats leaking the markup.
+        let calls: Vec<Value> = (0..STEP_CAP).map(|i| call("sql_query", json!({"sql": format!("SELECT {i}")}))).chain([written()]).collect();
+        let (agent, _, _) = scripted(calls);
+        let outcome = agent.turn(input()).await;
+        assert!(outcome.failed && !outcome.reply.text.unwrap().contains("<tool_call>"));
     }
 }
