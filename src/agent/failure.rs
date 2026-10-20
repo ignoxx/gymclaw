@@ -39,16 +39,12 @@ fn classify(state: &FailureState) -> (&'static str, &'static str, bool) {
     }
 }
 
-/// The owner's line: what happened and whether anything may have saved, in plain words.
+/// The owner's line: what happened, in plain words. It never claims nothing saved: the fast path may
+/// have logged a set before handing the message over, and a resend would log it twice.
 pub fn format_failure(state: &FailureState) -> String {
     let (_, _, reachable) = classify(state);
     let what = if reachable { "I got stuck on that." } else { "I can't reach my model right now." };
-    let saved = if state.tool_calls > 0 || !state.observed_input {
-        "Something may already be saved, so check before sending it again."
-    } else {
-        "Nothing was changed; send it again."
-    };
-    format!("⚠️ {what} {saved}")
+    format!("⚠️ {what} If it was a change, check whether it saved before sending it again.")
 }
 
 /// Classified diagnosis for the turn log ("STUCK: … · output 12 tokens · 2 tool calls").
@@ -62,6 +58,9 @@ pub fn diagnose(state: &FailureState) -> String {
         metrics.push(format!("reasoning {}", thousands(r)));
     }
     metrics.push(format!("{} tool calls", state.tool_calls));
+    if !state.observed_input {
+        metrics.push("no model call".into());
+    }
     format!("{code}: {reason} {}", metrics.join(" · "))
 }
 
@@ -84,10 +83,10 @@ mod tests {
     #[test]
     fn owner_line_is_plain_and_the_log_keeps_the_class() {
         let state = FailureState { stop: Some("length".into()), output: Some(16384), reasoning: Some(15900), tool_calls: 2, observed_input: true, ..Default::default() };
-        assert_eq!(format_failure(&state), "⚠️ I got stuck on that. Something may already be saved, so check before sending it again.");
+        assert_eq!(format_failure(&state), "⚠️ I got stuck on that. If it was a change, check whether it saved before sending it again.");
         assert_eq!(diagnose(&state), "OUTPUT_LIMIT: Model exhausted output/reasoning budget before finishing its answer. output 16,384 tokens · reasoning 15,900 · 2 tool calls");
         let state = FailureState { error: "MODEL_ERROR: 429 Provider returned error sk-secret".into(), observed_input: true, ..Default::default() };
-        assert_eq!(format_failure(&state), "⚠️ I can't reach my model right now. Nothing was changed; send it again.");
+        assert_eq!(format_failure(&state), "⚠️ I can't reach my model right now. If it was a change, check whether it saved before sending it again.");
         assert!(diagnose(&state).starts_with("RATE_LIMIT:") && !diagnose(&state).contains("sk-secret"));
     }
 }
