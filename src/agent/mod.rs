@@ -147,22 +147,25 @@ fn as_reply(text: Option<&str>) -> Reply {
 }
 
 impl Agent {
-    /// Run one tool call in its own transaction. Returns the JSON the model sees and whether it succeeded.
-    async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool) {
+    /// Run one tool call in its own transaction. Returns the JSON the model sees, whether it succeeded
+    /// and whether it changed the database.
+    async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool, bool) {
         let now = (self.clock)();
         let data_dir = self.data_dir.clone();
         let name_owned = name.to_string();
         let result = blocking(&self.db_path, move |db| {
             let tx = db.transaction()?;
+            let before = tx.total_changes();
             let mut cx = tools::Ctx { db: &tx, now, request_id, data_dir: &data_dir, effects: vec![] };
             let value = tools::call(&mut cx, &name_owned, args)?;
             let effects = std::mem::take(&mut cx.effects);
+            let wrote = tx.total_changes() > before;
             tx.commit()?;
-            Ok((value, effects))
+            Ok((value, effects, wrote))
         })
         .await;
         match result {
-            Ok((value, effects)) => {
+            Ok((value, effects, wrote)) => {
                 for Effect::Coach(view) in effects {
                     if let Some(coach) = &self.coach
                         && let Err(e) = coach.apply(&view, None, None).await
@@ -170,9 +173,9 @@ impl Agent {
                         tracing::warn!("coach card from {name} not shown: {e}");
                     }
                 }
-                (value, true)
+                (value, true, wrote)
             }
-            Err(e) => (e.to_json(), false),
+            Err(e) => (e.to_json(), false, false),
         }
     }
 
@@ -281,7 +284,7 @@ impl Agent {
                     },
                     (_, Ok(args)) => {
                         let key = format!("{name} {args}");
-                        let repeats = seen.entry(key).or_default();
+                        let repeats = seen.entry(key.clone()).or_default();
                         *repeats += 1;
                         if *repeats >= 2 {
                             looping |= *repeats >= 3;
@@ -291,7 +294,12 @@ impl Agent {
                             steps += 1;
                             index += 1;
                             state.tool_calls += 1;
-                            self.tool(&name, args, format!("{}-{index}", input.key)).await
+                            let (result, ok, wrote) = self.tool(&name, args, format!("{}-{index}", input.key)).await;
+                            // State changed, so other earlier calls may now give a different answer.
+                            if wrote {
+                                seen.retain(|k, _| *k == key);
+                            }
+                            (result, ok)
                         }
                     }
                 };
@@ -330,12 +338,15 @@ mod tests {
     struct Script {
         replies: Mutex<Vec<Value>>,
         seen: Mutex<Vec<(usize, bool)>>,
+        /// Messages of the latest call.
+        last: Mutex<Vec<Value>>,
     }
 
     #[async_trait]
     impl ChatModel for Script {
         async fn complete(&self, _: &str, messages: &[Value], _: &[Value], force_text: bool) -> Result<ModelReply> {
             self.seen.lock().unwrap().push((messages.len(), force_text));
+            *self.last.lock().unwrap() = messages.to_vec();
             let mut replies = self.replies.lock().unwrap();
             let message = if replies.is_empty() { json!({"content": "fallback"}) } else { replies.remove(0) };
             Ok(ModelReply { message, finish_reason: Some("stop".into()), ..ModelReply::default() })
@@ -353,7 +364,7 @@ mod tests {
         crate::db::migrate(&mut db).unwrap();
         let now = Ts::parse("2026-10-12T10:00:00Z", None).unwrap();
         ChatMessage { id: None, at: now, role: ChatRole::Owner, text: "remember I hate lunges".into(), telegram_message_id: Some(5), meta_json: Json(json!({})) }.insert(&db).unwrap();
-        let script = Arc::new(Script { replies: Mutex::new(replies), seen: Mutex::new(vec![]) });
+        let script = Arc::new(Script { replies: Mutex::new(replies), seen: Mutex::new(vec![]), last: Mutex::new(vec![]) });
         let agent = Agent {
             db_path, data_dir: dir.clone(), model: script.clone(), chat_model: "m".into(), vision_model: "v".into(), coach: None,
             log: TurnLog::default(), clock: Arc::new(move || now),
@@ -406,6 +417,16 @@ mod tests {
         assert!(!outcome.failed);
         assert_eq!(outcome.reply.text.as_deref(), Some("Couldn't do that."));
         assert_eq!(script.seen.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_write_lets_earlier_calls_run_again() {
+        let check = || call("sql_query", json!({"sql": "SELECT count(*) AS n FROM agent_note"}));
+        let (agent, script, _) = scripted(vec![check(), call("note_add", json!({"kind": "owner", "text": "Hates lunges"})), check(), json!({"content": "Saved."})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Saved."));
+        let last = script.last.lock().unwrap();
+        let rerun = last.last().unwrap()["content"].as_str().unwrap();
+        assert!(rerun.contains("[[1]]"), "{rerun}");
     }
 
     #[tokio::test]

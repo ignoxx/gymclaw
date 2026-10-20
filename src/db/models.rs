@@ -36,6 +36,11 @@ impl SessionStatus {
     pub fn is_open(self) -> bool {
         matches!(self, SessionStatus::Tentative | SessionStatus::Committed)
     }
+
+    /// A workout can start on it; a missed slot still counts (the owner showed up late).
+    pub fn is_startable(self) -> bool {
+        self.is_open() || self == SessionStatus::Missed
+    }
 }
 
 table!(UserProfile = "user_profile" {

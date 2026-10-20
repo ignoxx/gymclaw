@@ -481,7 +481,7 @@ pub fn start(db: &Connection, template_id: Option<&str>, planned_session_id: Opt
         let mut template = get_template(db, &template_id)?;
         let mut planned = match &planned_session_id {
             Some(id) => match PlannedSession::get(db, id)? {
-                Some(p) if p.status.is_open() => Some(p),
+                Some(p) if p.status.is_startable() => Some(p),
                 _ => crate::bail!("INVALID_PLAN", "Planned session is missing or no longer startable"),
             },
             None => None,

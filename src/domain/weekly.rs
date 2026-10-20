@@ -564,7 +564,10 @@ mod tests {
         let first = sessions(&db).remove(0);
         let error = start(&db, None, None, false, first.planned_start_at.mins(-24 * 60), "yesterday").unwrap_err();
         assert!(error.to_string().contains("No planned workout today"), "{error}");
-        // Its slot is already over; the owner is just late.
+        // Its slot is over and already marked missed; the owner is just late.
+        let mut missed = first.clone();
+        missed.status = SessionStatus::Missed;
+        missed.update(&db).unwrap();
         start(&db, None, None, false, first.planned_end_at.mins(10), "late").unwrap();
         assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Started);
     }
