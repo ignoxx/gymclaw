@@ -1,12 +1,12 @@
 //! Session mechanics and non-mutating plan inspection. Policy decisions belong to the agent.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use jiff::SignedDuration;
 use jiff::civil::Date;
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{CalendarWrite, PlannedSession, SessionStatus, WriteStatus};
+use crate::db::models::{AgentEvent, CalendarWrite, PlannedSession, SessionStatus, WriteStatus};
 use crate::domain::calendar::{allocation, week_of};
 use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::calendar_writes::queue_session_write;
@@ -20,6 +20,8 @@ use crate::error::Result;
 use crate::time::Ts;
 
 const HOURS_48: SignedDuration = SignedDuration::from_hours(48);
+/// How long a raised planning warning stays known (a plan spans at most two weeks).
+const WARNING_MEMORY: SignedDuration = SignedDuration::from_hours(14 * 24);
 
 /// The session including prep and travel: (leave-prep start, home again).
 pub fn expanded(session: &PlannedSession, profile: &Profile) -> (Ts, Ts) {
@@ -44,8 +46,8 @@ pub fn commit_upcoming(db: &Connection, now: Ts) -> Result<()> {
     Ok(())
 }
 
-/// Inspect existing weeks without changing sessions. Conflicts and infeasibility become durable,
-/// deduplicated agent events; only the agent decides whether an exception or an edit is appropriate.
+/// Inspect existing weeks without changing sessions. Conflicts and infeasibility become durable agent
+/// events, each warning raised once; only the agent decides whether an exception or an edit is appropriate.
 pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result<Value> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
@@ -77,8 +79,16 @@ pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result
             warnings.push(format!("Week {week}: {count}/{} sessions saved; {} additional default slots feasible. Agent decides whether to add or accept shortfall.", profile.weekly_target_sessions, plan.sessions.len()));
         }
     }
-    if !warnings.is_empty() {
-        crate::domain::events::request(db, "planning.attention", json!({"warnings": warnings}), now)?;
+    // Each warning wakes the agent once: it already decided about the ones it saw, and a list that
+    // only changed elsewhere would otherwise raise them all again.
+    let seen: HashSet<String> = AgentEvent::select(db, "WHERE type = 'planning.attention' AND created_at > ?1", [now - WARNING_MEMORY])?
+        .iter()
+        .flat_map(|e| e.payload_json["warnings"].as_array().cloned().unwrap_or_default())
+        .filter_map(|w| w.as_str().map(String::from))
+        .collect();
+    let fresh: Vec<&String> = warnings.iter().filter(|w| !seen.contains(*w)).collect();
+    if !fresh.is_empty() {
+        crate::domain::events::request(db, "planning.attention", json!({"warnings": fresh}), now)?;
     }
     Ok(json!({"changed": [], "warnings": warnings}))
 }
@@ -220,5 +230,19 @@ mod tests {
             let after = PlannedSession::get(&db, &other.id).unwrap().unwrap();
             assert_eq!((after.status, after.planned_start_at), (other.status, other.planned_start_at));
         }
+
+        // Each warning wakes the agent once, even when the list around it changes.
+        let attention = |db: &Connection| AgentEvent::select(db, "WHERE type = 'planning.attention' ORDER BY rowid", []).unwrap();
+        let first = attention(&db);
+        assert!(!first.is_empty());
+        // Friday's session to Thursday: a new rest-day clash next to the old ones.
+        let thursday = before[2].planned_start_at - SignedDuration::from_hours(24);
+        edit_session(&db, Some(&ids[2]), SessionPatch { start: Some(thursday), ..Default::default() }, now, "move-2").unwrap();
+        let again = inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
+        let events = attention(&db);
+        let fresh = events.last().unwrap().payload_json["warnings"].as_array().unwrap().clone();
+        assert!(events.len() > first.len() && !fresh.is_empty(), "{events:?}");
+        assert!(fresh.len() < again["warnings"].as_array().unwrap().len(), "{fresh:?}");
+        assert!(fresh.iter().all(|w| first.iter().all(|e| !e.payload_json["warnings"].as_array().unwrap().contains(w))));
     }
 }
