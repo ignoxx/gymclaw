@@ -224,8 +224,10 @@ impl Agent {
         let mut steps = 0usize;
         let mut index = 0usize;
         let mut seen: HashMap<String, u32> = HashMap::new();
+        // Set once the model loops on one call: the next turn must answer in text.
+        let mut looping = false;
         loop {
-            let force_text = steps >= STEP_CAP;
+            let force_text = steps >= STEP_CAP || looping;
             state.observed_input = true;
             let call_started = Instant::now();
             let reply = match self.model.complete(model, &messages, &specs, force_text).await {
@@ -281,10 +283,8 @@ impl Agent {
                         let key = format!("{name} {args}");
                         let repeats = seen.entry(key).or_default();
                         *repeats += 1;
-                        if *repeats >= 3 {
-                            crate::bail!("STUCK", "model repeated the same call");
-                        }
-                        if *repeats == 2 {
+                        if *repeats >= 2 {
+                            looping |= *repeats >= 3;
                             let message = "Same call with the same arguments as before; the result won't change. Use the earlier result, try something else, or reply.";
                             (Error::domain("REPEATED_CALL", message).to_json(), false)
                         } else {
@@ -399,14 +399,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identical_calls_are_blocked_then_the_turn_gives_up() {
+    async fn identical_calls_are_blocked_then_the_model_must_answer() {
         let same = || call("sql_query", json!({"sql": "SELECT 1"}));
-        let (agent, _, _) = scripted(vec![same(), same(), same()]);
+        let (agent, script, _) = scripted(vec![same(), same(), same(), json!({"content": "Couldn't do that."})]);
         let outcome = agent.turn(input()).await;
-        assert!(outcome.failed);
-        let text = outcome.reply.text.unwrap();
-        assert!(text.starts_with("⚠️ STUCK:"), "{text}");
-        assert!(text.contains("Tool actions may already have run"));
+        assert!(!outcome.failed);
+        assert_eq!(outcome.reply.text.as_deref(), Some("Couldn't do that."));
+        assert_eq!(script.seen.lock().unwrap().len(), 4);
     }
 
     #[tokio::test]
