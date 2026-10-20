@@ -140,6 +140,9 @@ function renderWeek(days, range) {
    Date read with getUTC* gives local calendar fields without any timezone math. */
 const DAY = 1440;
 const crowdView = { view: 'today', back: 0 };
+/* How far › pages ahead per view (negative `back`). The forecast is a typical-weekday curve, so
+   a month out is as good as it gets; further only repeats the same weeks. */
+const CROWD_AHEAD = { today: 7, '24h': 7, week: 4, month: 1 };
 const local = minutes => new Date(minutes * 60000);
 const dayStart = minutes => Math.floor(minutes / DAY) * DAY;
 const weekStart = minutes => dayStart(minutes) - ((local(minutes).getUTCDay() + 6) % 7) * DAY;
@@ -160,7 +163,7 @@ function crowdTitle(view, back, { start, end }) {
   if (view === '24h') return back ? `24 h to ${dayLabel(end)} ${clock(end % DAY)}` : 'Last 24 h';
   if (view === 'week') return `${dateLabel(start, { day: 'numeric', month: 'short' })} – ${dateLabel(end - DAY, { day: 'numeric', month: 'short' })}`;
   if (view === 'month') return dateLabel(start, { month: 'long', year: 'numeric' });
-  return back === 0 ? 'Today' : back === 1 ? 'Yesterday' : dayLabel(start);
+  return back === 0 ? 'Today' : back === 1 ? 'Yesterday' : back === -1 ? 'Tomorrow' : dayLabel(start);
 }
 
 /* Typical day for `day`'s weekday: per hour, mean of each earlier same-weekday's mean (13 weeks). */
@@ -177,6 +180,18 @@ function typicalDay(series, day) {
   const avg = values => values.reduce((a, b) => a + b, 0) / values.length;
   return [...hours.entries()].sort((a, b) => a[0] - b[0])
     .map(([hour, dates]) => [day + hour * 60 + 30, Math.round(avg([...dates.values()].map(avg)) * 10) / 10]);
+}
+
+/* Forecast for [start, end): each day's typical curve from today on. Later weeks reuse this
+   week's curve for the weekday, so the forecast rests on the most recent history. */
+function forecastSpan(series, start, end, now) {
+  const today = dayStart(now), curves = new Map(), out = [];
+  for (let day = dayStart(Math.max(start, now)); day < end; day += DAY) {
+    const shift = Math.floor((day - today) / (7 * DAY)) * 7 * DAY;
+    if (!curves.has(day - shift)) curves.set(day - shift, typicalDay(series, day - shift));
+    out.push(...curves.get(day - shift).map(([m, v]) => [m + shift, v]));
+  }
+  return out.filter(([m]) => m >= start && m < end);
 }
 
 /* Month view averages readings per hour to keep the line readable. */
@@ -211,13 +226,14 @@ function renderAttendance(crowd) {
   document.querySelectorAll('.segmented button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
   document.getElementById('crowd-title').textContent = crowdTitle(view, back, window_);
   document.getElementById('crowd-prev').disabled = !series.length || series[0][0] >= start;
-  document.getElementById('crowd-next').disabled = back === 0;
+  document.getElementById('crowd-next').disabled = back <= -CROWD_AHEAD[view];
   const raw = series.filter(([m]) => m >= start && m < end);
   const points = view === 'month' ? hourlyMeans(raw) : raw;
-  // Today also shows the rest of the day: the typical curve past now is the forecast.
-  const ahead = view === 'today' && back === 0;
-  const typical = view === 'today' ? typicalDay(series, start).filter(([m]) => m < (ahead ? start + DAY : end)) : [];
-  const later = ahead ? typical.filter(([m]) => m > now) : [];
+  // Anything past now is forecast: the typical curve (day views) or each day's typical curve.
+  const windowEnd = view === 'today' ? start + DAY : end;
+  const ahead = windowEnd > now;
+  const typical = view === 'today' ? typicalDay(series, start).filter(([m]) => m < windowEnd) : [];
+  const later = !ahead ? [] : (view === 'today' ? typical : forecastSpan(series, start, end, now)).filter(([m]) => m > now);
   document.getElementById('legend-day').textContent = view === 'today' ? crowdTitle(view, back, window_) : 'Check-ins';
   const typicalKey = document.getElementById('legend-typical');
   typicalKey.hidden = typical.length < 2;
@@ -232,15 +248,16 @@ function renderAttendance(crowd) {
   const upcoming = later.filter(([m]) => m - 30 >= now);
   if (upcoming.length) {
     const busiest = upcoming.reduce((a, b) => b[1] > a[1] ? b : a), quietest = upcoming.reduce((a, b) => b[1] < a[1] ? b : a);
-    const forecast = `Later: busiest ~${Math.round(busiest[1])} around ${clock(busiest[0] % DAY - 30)}`
-      + (quietest !== busiest ? `, quietest ~${Math.round(quietest[1])} around ${clock(quietest[0] % DAY - 30)}` : '');
+    const at = m => (view === 'today' ? '' : `${dayLabel(m)} `) + clock(m % DAY - 30);
+    const forecast = `${start > now ? 'Expected' : 'Later'}: busiest ~${Math.round(busiest[1])} around ${at(busiest[0])}`
+      + (quietest !== busiest ? `, quietest ~${Math.round(quietest[1])} around ${at(quietest[0])}` : '');
     stats.textContent = stats.textContent ? `${stats.textContent} · ${forecast}` : forecast;
   }
-  if (!points.length && typical.length < 2) {
+  if (!points.length && typical.length < 2 && later.length < 2) {
     box.replaceChildren(el('p', 'empty', 'No readings in this period.'));
     return;
   }
-  const all = [...points, ...typical];
+  const all = [...points, ...typical, ...later];
   const chart = frame(box, niceTop(Math.max(...all.map(p => p[1]))), { label: `Reported check-ins, ${crowdTitle(view, back, window_)}` });
   const axisEnd = Math.max(end, start + 60, later.length ? later.at(-1)[0] + 30 : 0);
   const x = m => chart.L + (m - start) / (axisEnd - start) * (chart.W - chart.L - chart.R);
@@ -254,12 +271,14 @@ function renderAttendance(crowd) {
   if (later.length) {
     // Forecast: the typical curve right of now, shaded and drawn stronger via a clip at now.
     const clip = svgEl('clipPath', { id: 'crowd-ahead' });
-    clip.append(svgEl('rect', { x: x(now), y: 0, width: chart.W, height: chart.H }));
+    clip.append(svgEl('rect', { x: Math.max(0, x(now)), y: 0, width: chart.W, height: chart.H }));
     chart.svg.append(clip);
-    for (const run of runs(typical)) if (run.length > 1 && run.at(-1)[0] > now) {
+    for (const run of runs(view === 'today' ? typical : later)) if (run.length > 1 && run.at(-1)[0] > now) {
       chart.svg.append(svgEl('path', { d: `${path(run)} L${x(run.at(-1)[0])},${chart.y(0)} L${x(run[0][0])},${chart.y(0)} Z`, class: 'forecast-area', 'clip-path': 'url(#crowd-ahead)' }));
       chart.svg.append(svgEl('path', { d: path(run), class: 'forecast', 'clip-path': 'url(#crowd-ahead)' }));
     }
+  }
+  if (now >= start && now <= axisEnd && (ahead || later.length)) {
     chart.svg.append(svgEl('line', { x1: x(now), x2: x(now), y1: chart.T, y2: chart.H - chart.B, class: 'now' }));
     chart.svg.append(svgText(x(now), chart.T - 2, 'now', { 'text-anchor': 'middle', class: 'label now-label' }));
   }
@@ -274,7 +293,7 @@ function renderAttendance(crowd) {
   }
   const typicalAt = m => typical.find(([t]) => Math.floor(t / 60) === Math.floor(m / 60))?.[1];
   // Readings first, then the forecast hours past the last reading.
-  const hover = points.length ? [...points, ...later.filter(([m]) => m > points.at(-1)[0])] : typical;
+  const hover = points.length ? [...points, ...later.filter(([m]) => m > points.at(-1)[0])] : later.length ? later : typical;
   crosshair(chart, hover.map(([m]) => x(m)), index => {
     const [m, v] = hover[index];
     const reading = index < points.length;
@@ -283,6 +302,7 @@ function renderAttendance(crowd) {
     const rows = reading ? [[v, view === 'month' ? 'avg checked in' : 'checked in', 'today']] : [];
     const usual = typicalAt(m);
     if (usual !== undefined) rows.push([usual, `typical ${dateLabel(start, { weekday: 'long' })}`, 'typical']);
+    else if (!reading) rows.push([v, 'expected', 'typical']);
     return { title, rows, y: chart.y(v) };
   });
 }
@@ -741,7 +761,7 @@ document.querySelectorAll('.segmented button').forEach(button => button.addEvent
   crowdView.view = button.dataset.view; crowdView.back = 0; renderAttendance(state.crowd);
 }));
 document.getElementById('crowd-prev').addEventListener('click', () => { crowdView.back += 1; renderAttendance(state.crowd); });
-document.getElementById('crowd-next').addEventListener('click', () => { crowdView.back = Math.max(0, crowdView.back - 1); renderAttendance(state.crowd); });
+document.getElementById('crowd-next').addEventListener('click', () => { crowdView.back = Math.max(-CROWD_AHEAD[crowdView.view], crowdView.back - 1); renderAttendance(state.crowd); });
 refresh();
 // Live state refreshes itself every 10 s while the page is visible (a refresh is ~70 ms server-side),
 // and at once when you come back to the tab. The demo is static.
