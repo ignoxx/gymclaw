@@ -12,10 +12,11 @@ pub mod turnlog;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -127,6 +128,20 @@ pub fn tool_specs() -> Vec<Value> {
     }
     specs.push(json!({"type": "function", "function": {"name": REPLY, "description": "Finish the turn: what the owner gets. Call it once, last. With no fields the owner gets nothing.", "parameters": schema}}));
     specs
+}
+
+/// Start of tool-call markup models write as text: `<tool_call>`, `<|tool_call|>`, `<function_call>`,
+/// `<tool_calls>`, `<function=workout>`.
+static CALL_MARKUP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<\|?(tool_calls?|function_calls?)\b|<function=").unwrap());
+
+/// A tool call written as text instead of made (markup, or the whole message as a `{"name", "arguments"}`
+/// object). Returns the text before it, or None when there is none.
+fn written_tool_call(text: &str) -> Option<&str> {
+    if let Some(found) = CALL_MARKUP.find(text) {
+        return Some(text[..found.start()].trim());
+    }
+    let json: Value = serde_json::from_str(text.trim()).ok()?;
+    (json.get("name").is_some() && (json.get("arguments").is_some() || json.get("parameters").is_some())).then_some("")
 }
 
 fn cut(text: String) -> String {
@@ -259,6 +274,15 @@ impl Agent {
                 if reply.finish_reason.as_deref() == Some("length") && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("OUTPUT_LIMIT", "model stopped at the output limit");
                 }
+                let written = content.and_then(written_tool_call);
+                if written.is_some() && !force_text {
+                    // It meant to call a tool: nothing ran, so say so and let it call properly.
+                    steps += 1;
+                    messages.push(json!({"role": "assistant", "content": content}));
+                    messages.push(json!({"role": "user", "content": "[system] That tool call was written as text, so it did not run and the owner would have seen it. Call tools as function calls, or answer the owner."}));
+                    continue;
+                }
+                let content = written.or(content);
                 if force_text && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("STUCK", "step limit reached without an answer");
                 }
@@ -276,6 +300,12 @@ impl Agent {
                 let (result, ok) = match (name.as_str(), args) {
                     (_, Err(e)) => (Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}")).to_json(), false),
                     (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
+                        // The call it meant didn't run; the owner must not get its markup or a silent reply.
+                        Ok(reply) if reply.text.as_deref().and_then(written_tool_call).is_some() => {
+                            // Counts as a step, so a model that keeps doing it is forced to answer in text.
+                            steps += 1;
+                            (Error::domain("WRITTEN_TOOL_CALL", "The reply text contains a tool call written as text; it did not run. Make it as a function call, then reply.").to_json(), false)
+                        }
                         Ok(reply) => {
                             finished = Some(reply);
                             (json!({"ok": true}), true)
@@ -439,5 +469,41 @@ mod tests {
         assert!(seen.last().unwrap().1, "the last call forbids tools");
         // The script's 13th message still has tool calls; with tools forbidden its text is the answer.
         assert_eq!(outcome.reply.text.as_deref(), Some("Working on it…"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_written_as_text_never_reaches_the_owner() {
+        let written = || json!({"content": "<tool_call>workout<arg_key>action</arg_key><arg_value>start</arg_value></tool_call>"});
+        let (agent, script, _) = scripted(vec![written(), json!({"content": "Started."})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Started."));
+        assert_eq!(script.seen.lock().unwrap().len(), 2);
+        // Forced to answer, it can't retry: an honest failure beats leaking the markup.
+        let calls: Vec<Value> = (0..STEP_CAP).map(|i| call("sql_query", json!({"sql": format!("SELECT {i}")}))).chain([written()]).collect();
+        let (agent, _, _) = scripted(calls);
+        let outcome = agent.turn(input()).await;
+        assert!(outcome.failed && !outcome.reply.text.unwrap().contains("<tool_call>"));
+    }
+
+    #[test]
+    fn written_tool_calls_in_other_formats() {
+        for text in ["<|tool_call|>workout", "Starting.\n<function_call>workout</function_call>", "<function=workout>{}</function>", r#"{"name": "workout", "arguments": {"action": "start"}}"#] {
+            assert!(written_tool_call(text).is_some(), "{text}");
+        }
+        for text in ["Use the function of the hips.", r#"{"name": "Bench"}"#, "**Pull** at 13:30"] {
+            assert_eq!(written_tool_call(text), None, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reply_tool_with_a_written_call_goes_back_to_the_model() {
+        let written = || call("reply", json!({"text": "<tool_call>workout</tool_call>"}));
+        let (agent, script, _) = scripted(vec![written(), json!({"content": "Started."})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Started."));
+        assert_eq!(script.seen.lock().unwrap().len(), 2);
+        // Doing it over and over still ends at the step cap with a forced text answer.
+        let (agent, script, _) = scripted((0..20).map(|_| written()).collect());
+        agent.turn(input()).await;
+        let seen = script.seen.lock().unwrap();
+        assert!(seen.len() == STEP_CAP + 1 && seen.last().unwrap().1, "{seen:?}");
     }
 }
