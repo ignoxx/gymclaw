@@ -64,6 +64,20 @@ fn deleted(cards: Vec<Card>) -> CoachView {
     CoachView { cleanup: Some(Cleanup::Delete), cards, ..handled() }
 }
 
+/// The next working set as (weight, reps): this workout's last set once one is logged; before that the
+/// prescribed target, unless the owner already lifted heavier last time. The set card, its quick button
+/// and the rest countdown all show this, so they never disagree.
+fn next_set(active: &workout::Active) -> Option<(f64, i64)> {
+    let target = (active.target_weight != 0.0).then_some((active.target_weight, active.rep_min));
+    let last = active.last_set.as_ref().map(|l| (l.weight, l.reps));
+    match (last, target) {
+        (Some(last), _) if active.set_number > 1 => Some(last),
+        (Some(last), Some(target)) => Some(if last.0 > target.0 { last } else { target }),
+        // Bodyweight: reps are the whole set, no weight to ask for.
+        (last, target) => last.or(target).or(active.bodyweight.then_some((0.0, active.rep_min))),
+    }
+}
+
 /// Card for whatever the owner should do next. Every set card carries the illustration.
 pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card> {
     let data = workout::state(db, workout_id, now)?;
@@ -81,7 +95,7 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     if let Some(rest) = data.rest_job {
         // Resting there is nothing to log yet: just the countdown and ways to shorten it.
         let upcoming = if active.new_exercise { format!("next: **{}**", active.name) } else { format!("**{}** set {}/{}", active.name, active.set_number, active.working_sets) };
-        let weight = if active.set_type == SetType::Warmup { active.target_weight } else { active.last_set.as_ref().map_or(active.target_weight, |last| last.weight) };
+        let weight = if active.set_type == SetType::Warmup { active.target_weight } else { next_set(&active).map_or(0.0, |(w, _)| w) };
         let target = if weight > 0.0 { kg(weight) } else if active.bodyweight { "Bodyweight".into() } else { "? kg".into() };
         return Ok(Card {
             text: format!("until {upcoming} · {target}"),
@@ -92,24 +106,16 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
         });
     }
     let head = format!("**{}**{}", active.name, active.primary_muscle.as_ref().map(|m| format!(" · {m}")).unwrap_or_default());
-    let target = format_target(active.rep_min, active.rep_max, active.target_weight);
     let (lines, mut buttons) = if active.set_type == SetType::Warmup {
         (
-            vec![head, format!("Warm-up · {target}")],
+            vec![head, format!("Warm-up · {}", format_target(active.rep_min, active.rep_max, active.target_weight))],
             vec![vec![button("✅ Warm-up done", &["warm", r])?, button("Skip warm-up", &["nowarm", r])?], vec![button("🔄 Swap", &["swap", r])?]],
         )
     } else {
-        let quick = match (&active.last_set, active.target_weight) {
-            (Some(last), _) => Some((last.weight, last.reps)),
-            (None, w) if w != 0.0 => Some((w, active.rep_min)),
-            // Bodyweight: reps are the whole set, no weight to ask for.
-            _ if active.bodyweight => Some((0.0, active.rep_min)),
-            _ => None,
-        };
         let set_line = format!("Set {}/{}", active.set_number, active.working_sets);
         let (mut lines, mut buttons) = (vec![head], vec![]);
-        if let Some((weight, reps)) = quick {
-            lines.push(format!("{set_line} · {target}"));
+        if let Some((weight, reps)) = next_set(&active) {
+            lines.push(format!("{set_line} · {}", format_target(active.rep_min, active.rep_max, weight)));
             buttons.push(vec![button(format!("✅ {}", done(reps, weight)), &["log", r, &g(weight), &reps.to_string()])?]);
         } else {
             // Unknown weight: the gap is the headline and the reply format is impossible to miss.
@@ -594,6 +600,29 @@ mod tests {
         let card = live(&db, at(801));
         assert!(card.text.contains("💡 Guess from Incline Dumbbell Press") && card.text.contains("`8x90`"), "{}", card.text);
         data(&card, "✅ 8 × 90 kg?");
+    }
+
+    #[test]
+    fn set_card_and_quick_button_show_the_same_weight() {
+        let db = db();
+        push(&db);
+        // Shoulder press: target 25 kg, but the owner lifts heavier.
+        handle_tap(&db, &data(&live(&db, at(0)), "⏭ Skip"), at(1), "cb-skip").unwrap();
+        let first = live(&db, at(2));
+        assert!(first.text.contains("Set 1/2 · 8–10 × 25 kg"), "{}", first.text);
+        handle_text(&db, "8x30", at(10), "m1").unwrap();
+        handle_rest_over(&db, at(101)).unwrap();
+        let second = live(&db, at(110));
+        assert!(second.text.contains("Set 2/2 · 8–10 × 30 kg"), "{}", second.text);
+        data(&second, "✅ 8 × 30 kg");
+        handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
+        // A stale target below last time's weight doesn't win the next first set.
+        db.execute("UPDATE exercise_progression SET next_weight = 25 WHERE exercise_id = 'shoulder'", []).unwrap();
+        start(&db, Some("push"), None, false, at(1000), "start-2").unwrap();
+        handle_tap(&db, &data(&live(&db, at(1001)), "⏭ Skip"), at(1002), "cb-skip-2").unwrap();
+        let next_time = live(&db, at(1003));
+        assert!(next_time.text.contains("Set 1/2 · 8–10 × 30 kg"), "{}", next_time.text);
+        data(&next_time, "✅ 8 × 30 kg");
     }
 
     #[test]
