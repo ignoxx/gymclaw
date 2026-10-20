@@ -767,6 +767,7 @@ mod tests {
         assert_eq!(card.text.lines().next(), Some("**Push** · Mon 10:30")); // Europe/Berlin, not UTC
         assert!(card.text.contains("1. Machine incline press · 2 sets of 8–10") && card.text.contains("3. Cable fly · 2 sets of 8–10"), "{}", card.text);
         let photo = card.photo.clone().unwrap();
+        assert_eq!(card.kind, CardKind::Preview);
         assert!(std::path::Path::new(&photo).is_file() && photo.starts_with(dir.to_str().unwrap()));
         assert_eq!(crate::domain::preview::session_preview(&db, at(0), None, &dir).unwrap().photo, card.photo); // cached
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,7 +1,8 @@
 //! Session previews: plan lines and the exercise grid image (port of gymclaw/services/preview.py). Owner: WP-train.
 //!
-//! Used when the owner asks "what's on today?". One photo with every exercise's illustration plus a
-//! short caption, instead of a stack of messages; rendered once per plan content under `data/previews/`.
+//! Used when the owner asks "what's on today?". One photo with every exercise's illustration, sent
+//! without a caption (the plan lines go to chat history), instead of a stack of messages; rendered
+//! once per plan content under `data/previews/`.
 use std::path::{Path, PathBuf};
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
@@ -65,7 +66,8 @@ pub fn session_preview(db: &Connection, now: Ts, planned_session_id: Option<&str
     lines.extend(plan_lines(db, &session)?);
     let items: Vec<(String, String)> = template.exercises.iter().filter_map(|s| for_exercise(&s.name, s.guide_id.as_deref()).map(|p| (s.name.clone(), p.telegram_png))).collect();
     let photo = if items.is_empty() { None } else { Some(render_grid(&items, &data_dir.join("previews"))?) };
-    Ok(Card { text: lines.join("\n"), photo, buttons: vec![], rest_until: None, kind: CardKind::Other })
+    let kind = if photo.is_some() { CardKind::Preview } else { CardKind::Other };
+    Ok(Card { text: lines.join("\n"), photo, buttons: vec![], rest_until: None, kind })
 }
 
 /// Python `json.dumps` escaping (ASCII only), so keys and fingerprints match the old app.

@@ -19,6 +19,8 @@ pub enum CardKind {
     Rest,
     /// Swap option; deleted once the owner picks or the workout moves on.
     Option,
+    /// Session overview image. The photo goes out alone; `text` is for chat history and the agent.
+    Preview,
     #[serde(other)]
     Other,
 }
@@ -26,7 +28,7 @@ pub enum CardKind {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Card {
     pub text: String,
-    /// Local PNG path sent as a photo with `text` as its caption.
+    /// Local PNG path sent as a photo with `text` as its caption (no caption for previews).
     pub photo: Option<String>,
     pub buttons: Vec<Vec<Button>>,
     /// Rest cards count down to this.
