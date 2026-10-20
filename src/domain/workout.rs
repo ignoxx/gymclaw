@@ -441,11 +441,12 @@ pub fn make_exercise(db: &Connection, workout_id: &str, spec: &ExerciseSpec, pos
     Ok(row)
 }
 
-/// The startable planned session on the owner's local today closest to now, even if its slot already passed.
+/// The startable planned session on the owner's local today closest to now, even if its slot already passed
+/// or was already marked missed (the owner showed up late).
 pub fn todays_session(db: &Connection, now: Ts) -> Result<Option<PlannedSession>> {
     let zone = get_profile(db)?.tz();
     let today = now.local(&zone).date();
-    let rows = PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND workout_template_id IS NOT NULL", [])?;
+    let rows = PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED', 'MISSED') AND workout_template_id IS NOT NULL", [])?;
     Ok(rows.into_iter().filter(|s| s.planned_start_at.local(&zone).date() == today).min_by_key(|s| (s.planned_start_at - now).abs()))
 }
 
