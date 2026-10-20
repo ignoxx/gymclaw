@@ -299,6 +299,8 @@ impl Agent {
                     (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
                         // The call it meant didn't run; the owner must not get its markup or a silent reply.
                         Ok(reply) if reply.text.as_deref().and_then(written_tool_call).is_some() => {
+                            // Counts as a step, so a model that keeps doing it is forced to answer in text.
+                            steps += 1;
                             (Error::domain("WRITTEN_TOOL_CALL", "The reply text contains a tool call written as text; it did not run. Make it as a function call, then reply.").to_json(), false)
                         }
                         Ok(reply) => {
@@ -473,8 +475,14 @@ mod tests {
 
     #[tokio::test]
     async fn reply_tool_with_a_written_call_goes_back_to_the_model() {
-        let (agent, script, _) = scripted(vec![call("reply", json!({"text": "<tool_call>workout</tool_call>"})), json!({"content": "Started."})]);
+        let written = || call("reply", json!({"text": "<tool_call>workout</tool_call>"}));
+        let (agent, script, _) = scripted(vec![written(), json!({"content": "Started."})]);
         assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Started."));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
+        // Doing it over and over still ends at the step cap with a forced text answer.
+        let (agent, script, _) = scripted((0..20).map(|_| written()).collect());
+        agent.turn(input()).await;
+        let seen = script.seen.lock().unwrap();
+        assert!(seen.len() == STEP_CAP + 1 && seen.last().unwrap().1, "{seen:?}");
     }
 }
