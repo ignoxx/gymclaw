@@ -1,7 +1,8 @@
 //! Session previews: plan lines and the exercise grid image (port of gymclaw/services/preview.py). Owner: WP-train.
 //!
-//! Used when the owner asks "what's on today?". One photo with every exercise's illustration plus a
-//! short caption, instead of a stack of messages; rendered once per plan content under `data/previews/`.
+//! Used when the owner asks "what's on today?". One photo with every exercise's illustration, sent
+//! without a caption (the plan lines go to chat history), instead of a stack of messages; rendered
+//! once per plan content under `data/previews/`.
 use std::path::{Path, PathBuf};
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};

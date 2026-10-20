@@ -479,12 +479,18 @@ pub mod tests {
     #[tokio::test(start_paused = true)]
     async fn standalone_preview_leaves_the_live_card() {
         let tg = FakeTelegram::new();
-        let coach = Coach::new(tg.clone(), 1, clock(), None, None);
+        let recorded = Arc::new(StdMutex::new(vec![]));
+        let record: Record = {
+            let recorded = recorded.clone();
+            Arc::new(move |text: &str, _| recorded.lock().unwrap().push(text.to_string()))
+        };
+        let coach = Coach::new(tg.clone(), 1, clock(), None, Some(record));
         coach.apply(&view(vec![card("Bench · set 1")]), None, None).await.unwrap();
         let preview = Card { photo: Some("/x/pull.png".into()), kind: CardKind::Preview, ..card("Pull · Mon 10:30") };
         coach.apply(&CoachView { standalone: true, ..view(vec![preview]) }, None, None).await.unwrap();
-        // The overview image goes out without a caption.
+        // The overview image goes out without a caption; history still gets the plan text.
         assert!(matches!(&tg.calls()[..], [_, Call::Send(text, _)] if text.is_empty()));
+        assert_eq!(recorded.lock().unwrap().last().map(String::as_str), Some("Pull · Mon 10:30"));
         assert_eq!(coach.shown().await.0.unwrap(), "Bench · set 1");
     }
 
