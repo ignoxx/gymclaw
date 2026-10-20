@@ -146,18 +146,17 @@ fn cut(text: String) -> String {
 /// History prefix the model sometimes copies onto its own reply ("[Tue 14:22, sent automatically] …").
 static ECHOED_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[[^\]\n]*sent automatically\]\s*").unwrap());
 
-/// The whole reply is a note that there's nothing to say ("No reply needed.", "Nothing to report").
+/// The whole reply is a note that there's nothing to say: "No reply needed.", "Nothing to report",
+/// "(background events handled — nothing to report)".
 static NOTHING_TO_SAY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(heartbeat_ok|no (reply|response|message|action) (is )?(needed|required|necessary)|nothing (to (report|say|do|add)|(needs|requires) (saying|attention|action)))[.!]?$").unwrap()
+    Regex::new(r"(?i)^\(?([^()]*\s[—–-]\s*)?(heartbeat_ok|no (reply|response|message|action) (is )?(needed|required|necessary)|nothing (to (report|say|do|add)|(needs|requires) (saying|attention|action)))[.!]?\)?$").unwrap()
 });
 
-/// "NO_REPLY" and empty text mean silence. On a background turn so do a note to itself ("No reply
-/// needed.") and a parenthesized aside ("(nothing to report)"); to the owner those can be real answers.
+/// "NO_REPLY" and empty text mean silence. On a background turn so does a note to itself ("No reply
+/// needed."); to the owner the same words can be a real answer.
 fn as_reply(text: Option<&str>, background: bool) -> Reply {
     let text = text.map(|t| ECHOED_PREFIX.replace(t.trim(), "").trim().to_string());
-    let aside = |t: &str| t.starts_with('(') && t.ends_with(')') && !t[1..].contains('(');
-    let note = |t: &str| background && (NOTHING_TO_SAY.is_match(t) || aside(t));
-    let text = text.filter(|t| !t.is_empty() && t != "NO_REPLY" && !note(t));
+    let text = text.filter(|t| !t.is_empty() && t != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(t)));
     Reply { text, ..Reply::default() }
 }
 
@@ -418,8 +417,10 @@ mod tests {
             let (agent, _, _) = scripted(vec![json!({"content": answer})]);
             assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some(answer));
         }
-        let (agent, _, _) = scripted(vec![json!({"content": "Nothing to report on the crowd yet: no data for Fridays."})]);
-        assert!(agent.turn(background()).await.reply.text.is_some());
+        for message in ["Nothing to report on the crowd yet: no data for Fridays.", "(Pull moved to 13:30)", "Wed clash — move Pull?"] {
+            let (agent, _, _) = scripted(vec![json!({"content": message})]);
+            assert_eq!(agent.turn(background()).await.reply.text.as_deref(), Some(message));
+        }
         let (agent, _, _) = scripted(vec![call("reply", json!({"react": "👍"}))]);
         assert_eq!(agent.turn(input()).await.reply.react.as_deref(), Some("👍"));
     }
