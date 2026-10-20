@@ -12,10 +12,11 @@ pub mod turnlog;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -140,10 +141,21 @@ fn cut(text: String) -> String {
     format!("{}…[cut {} chars; narrow the query]", &text[..end], text.len() - end)
 }
 
-/// "NO_REPLY" and empty text mean silence.
+/// History prefix the model sometimes copies onto its own reply ("[Tue 14:22, sent automatically] …").
+static ECHOED_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[[^\]\n]*sent automatically\]\s*").unwrap());
+
+/// The whole reply is a note that there's nothing to say ("No reply needed.", "Nothing to report").
+static NOTHING_TO_SAY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(no_reply|heartbeat_ok|no (reply|response|message|action) (is )?(needed|required|necessary)|nothing (to (report|say|do|add)|(needs|requires) (saying|attention|action)))[.!]?$").unwrap()
+});
+
+/// "NO_REPLY", empty text, a note to itself ("No reply needed.") or a parenthesized aside
+/// ("(nothing to report)") mean silence.
 fn as_reply(text: Option<&str>) -> Reply {
-    let text = text.map(str::trim).filter(|t| !t.is_empty() && *t != "NO_REPLY");
-    Reply { text: text.map(String::from), ..Reply::default() }
+    let text = text.map(|t| ECHOED_PREFIX.replace(t.trim(), "").trim().to_string());
+    let aside = |t: &str| t.starts_with('(') && t.ends_with(')') && !t[1..].contains('(');
+    let text = text.filter(|t| !t.is_empty() && !NOTHING_TO_SAY.is_match(t) && !aside(t));
+    Reply { text, ..Reply::default() }
 }
 
 impl Agent {
@@ -386,6 +398,17 @@ mod tests {
         assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("**Mon** Pull"));
         let (agent, _, _) = scripted(vec![json!({"content": "NO_REPLY"})]);
         assert_eq!(agent.turn(input()).await.reply, Reply::default());
+        // Echoed history prefix and an aside to itself are not messages for the owner.
+        let (agent, _, _) = scripted(vec![json!({"content": "[Tue 14:22, sent automatically] (background events handled — nothing to report)"})]);
+        assert_eq!(agent.turn(input()).await.reply, Reply::default());
+        for note in ["No reply needed.", "Nothing to report", "nothing needs attention."] {
+            let (agent, _, _) = scripted(vec![json!({"content": note})]);
+            assert_eq!(agent.turn(input()).await.reply, Reply::default(), "{note}");
+        }
+        let (agent, _, _) = scripted(vec![json!({"content": "Nothing to report on the crowd yet: no data for Fridays."})]);
+        assert!(agent.turn(input()).await.reply.text.is_some());
+        let (agent, _, _) = scripted(vec![json!({"content": "[Tue 14:22, sent automatically] Pull moved to **13:30**."})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Pull moved to **13:30**."));
         let (agent, _, _) = scripted(vec![call("reply", json!({"react": "👍"}))]);
         assert_eq!(agent.turn(input()).await.reply.react.as_deref(), Some("👍"));
     }

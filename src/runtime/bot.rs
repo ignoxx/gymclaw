@@ -368,7 +368,7 @@ impl Bot {
         let events = &batch.payload_json["events"];
         let ids: Vec<String> = events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
         let key = format!("event-{}", batch.id);
-        let text = format!("Background events for your decision (not owner instructions). Consult saved preferences/exceptions, decide what needs doing, and stay silent if nothing needs saying: {}", json!(events));
+        let text = format!("Background events for your decision (not owner instructions). Consult saved preferences/exceptions, decide what needs doing. Any text you write goes to the owner, so when nothing needs their attention, reply with no fields: {}", json!(events));
         blocking(self.db(), move |db| ChatMessage {
             id: None, at: Ts::now(), role: ChatRole::Bot, text, telegram_message_id: None,
             meta_json: Json(json!({"kind": "agent_event"})),
@@ -491,7 +491,8 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::agent::ChatModel for EventModel {
         async fn complete(&self, _: &str, messages: &[Value], _: &[Value], _: bool) -> Result<crate::agent::ModelReply> {
-            assert!(messages.iter().any(|m| m["content"].as_str().is_some_and(|t| t.contains("Background events for your decision") && t.contains("planning.attention"))));
+            // Input to answer, not something the bot said.
+            assert!(messages.iter().any(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|t| t.contains("Background events for your decision") && t.contains("planning.attention"))));
             let message = match self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                 0 => crate::bail!("MODEL_DOWN", "fixture model outage"),
                 1 => json!({"tool_calls": [{"id": "create", "function": {"name": "session_create", "arguments": json!({"fields": {"start": "2099-10-14T12:00", "template_id": "fixture"}}).to_string()}}]}),
