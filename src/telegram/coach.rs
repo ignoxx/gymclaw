@@ -93,7 +93,8 @@ impl Coach {
     }
 
     async fn send(&self, text: &str, card: &Card) -> Result<i64> {
-        let id = self.tg.send(self.chat, text, card.photo.as_deref().map(Path::new), keyboard(card)).await?;
+        let caption = if card.kind == CardKind::Preview { "" } else { text };
+        let id = self.tg.send(self.chat, caption, card.photo.as_deref().map(Path::new), keyboard(card)).await?;
         if let Some(record) = &self.record {
             record(text, id);
         }
@@ -480,8 +481,10 @@ pub mod tests {
         let tg = FakeTelegram::new();
         let coach = Coach::new(tg.clone(), 1, clock(), None, None);
         coach.apply(&view(vec![card("Bench · set 1")]), None, None).await.unwrap();
-        coach.apply(&CoachView { standalone: true, ..view(vec![card("Pull · Mon 10:30")]) }, None, None).await.unwrap();
-        assert_eq!(tg.calls().len(), 2);
+        let preview = Card { photo: Some("/x/pull.png".into()), kind: CardKind::Preview, ..card("Pull · Mon 10:30") };
+        coach.apply(&CoachView { standalone: true, ..view(vec![preview]) }, None, None).await.unwrap();
+        // The overview image goes out without a caption.
+        assert!(matches!(&tg.calls()[..], [_, Call::Send(text, _)] if text.is_empty()));
         assert_eq!(coach.shown().await.0.unwrap(), "Bench · set 1");
     }
 

@@ -65,7 +65,8 @@ pub fn session_preview(db: &Connection, now: Ts, planned_session_id: Option<&str
     lines.extend(plan_lines(db, &session)?);
     let items: Vec<(String, String)> = template.exercises.iter().filter_map(|s| for_exercise(&s.name, s.guide_id.as_deref()).map(|p| (s.name.clone(), p.telegram_png))).collect();
     let photo = if items.is_empty() { None } else { Some(render_grid(&items, &data_dir.join("previews"))?) };
-    Ok(Card { text: lines.join("\n"), photo, buttons: vec![], rest_until: None, kind: CardKind::Other })
+    let kind = if photo.is_some() { CardKind::Preview } else { CardKind::Other };
+    Ok(Card { text: lines.join("\n"), photo, buttons: vec![], rest_until: None, kind })
 }
 
 /// Python `json.dumps` escaping (ASCII only), so keys and fingerprints match the old app.
