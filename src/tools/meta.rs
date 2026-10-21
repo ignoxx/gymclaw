@@ -37,13 +37,13 @@ fn cell(value: rusqlite::types::ValueRef<'_>) -> Value {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SqlQuery {
-    /// One read-only SQLite statement. Timestamps are naive UTC text; JSON columns are text.
+    /// One read-only SQLite statement. Timestamps are stored as naive UTC text; JSON columns are text.
     pub sql: String,
 }
 
 impl Tool for SqlQuery {
     const NAME: &'static str = "sql_query";
-    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. The schema is in your instructions (\"Database\"); JOIN on *_id. UTC text timestamps, JSON text columns. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
+    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. The schema is in your instructions (\"Database\"); JOIN on *_id. Timestamps are stored as naive UTC text (compare against UTC in WHERE) but come back in the owner's local time with offset. JSON text columns. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         // File-backed tools use an OS read-only handle. Tests/ephemeral databases get an

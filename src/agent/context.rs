@@ -150,7 +150,8 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<String> {
 
     let marks = ACTIONABLE.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(", ");
     let events = AgentEvent::select(db, &format!("WHERE handled_at IS NULL AND type IN ({marks}) ORDER BY created_at DESC LIMIT 5"), [])?;
-    for e in events {
+    for mut e in events {
+        crate::time::localize(&mut e.payload_json.0, &tz);
         writeln!(out, "Open issue: {} at {} {}", e.r#type, e.created_at.local(&tz).strftime("%a %H:%M"), e.payload_json.0).unwrap();
     }
     Ok(out)

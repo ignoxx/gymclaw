@@ -236,7 +236,8 @@ impl Agent {
 
     async fn run(&self, input: &TurnInput, run_id: &str, state: &mut FailureState, calls_log: &mut Vec<Value>) -> Result<Reply> {
         let now = (self.clock)();
-        let (system, history) = blocking(&self.db_path, move |db| Ok((context::system(db, now)?, context::history(db)?))).await?;
+        let (system, history, tz) =
+            blocking(&self.db_path, move |db| Ok((context::system(db, now)?, context::history(db)?, crate::domain::profile::get_profile(db)?.tz()))).await?;
         let mut messages = vec![json!({"role": "system", "content": system})];
         let history_chars = Value::Array(history.clone()).to_string().len();
         let history_len = history.len();
@@ -310,7 +311,7 @@ impl Agent {
                 let raw = tc.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
                 let args: std::result::Result<Value, _> = if raw.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str(raw) };
                 let started = Instant::now();
-                let (result, ok) = match (name.as_str(), args) {
+                let (mut result, ok) = match (name.as_str(), args) {
                     (_, Err(e)) => (Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}")).to_json(), false),
                     (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
                         // The call it meant didn't run; the owner must not get its markup or a silent reply.
@@ -346,6 +347,7 @@ impl Agent {
                         }
                     }
                 };
+                crate::time::localize(&mut result, &tz);
                 self.log_tool(run_id, &id, &name, &serde_json::from_str(raw).unwrap_or(Value::Null), &result, ok, started);
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": cut(result.to_string())}));
             }
