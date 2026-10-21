@@ -84,6 +84,37 @@ pub fn iso(z: &Zoned) -> String {
     if micros == 0 { format!("{base}{offset}") } else { format!("{base}.{micros:06}{offset}") }
 }
 
+/// Rewrites every timestamp string in `value` as owner-local ISO with offset, so the model never has
+/// to convert UTC itself (it reads naive `13:15` as local). Applied to everything the agent reads:
+/// tool results, SQL rows (naive UTC DB text) and event payloads. Dates and other strings stay as they are.
+pub fn localize(value: &mut serde_json::Value, zone: &TimeZone) {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => {
+            let ts = if is_db_text(text) { Ts::from_db(text) } else { text.parse::<Timestamp>().ok().map(Ts) };
+            if let Some(ts) = ts {
+                *text = iso(&ts.local(zone));
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| localize(v, zone)),
+        Value::Object(map) => map.values_mut().for_each(|v| localize(v, zone)),
+        _ => {}
+    }
+}
+
+/// Exactly the `Ts::db` shape (`2026-10-22 13:15:00` with optional fraction), nothing looser.
+fn is_db_text(text: &str) -> bool {
+    let b = text.as_bytes();
+    (b.len() == 19 || (b.len() > 20 && b[19] == b'.'))
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b' ',
+            13 | 16 => *c == b':',
+            19 => *c == b'.',
+            _ => c.is_ascii_digit(),
+        })
+}
+
 pub fn zone(name: &str) -> Result<TimeZone> {
     TimeZone::get(name).map_err(|_| Error::domain("INVALID_TIMEZONE", format!("Unknown timezone: {name}")))
 }
@@ -142,5 +173,21 @@ mod tests {
         let local = Ts::parse("2026-10-16T12:00", Some(&berlin)).unwrap();
         assert_eq!(local.iso(), "2026-10-16T10:00:00+00:00");
         assert_eq!(iso(&local.local(&berlin)), "2026-10-16T12:00:00+02:00");
+    }
+
+    // The prod bug: a blocker stored as 13:15 UTC was read by the agent as 13:15 local (really 15:15).
+    #[test]
+    fn localize_rewrites_utc_for_the_agent() {
+        let mut value = serde_json::json!({
+            "rows": [["2026-10-22 13:15:00.000000", "2026-10-22 14:15:00"]],
+            "start": "2026-10-22T10:45:00+00:00",
+            "keep": ["2026-10-22", "Move Legs to 11:15", "2026-10-22 13:15", 7],
+        });
+        localize(&mut value, &zone("Europe/Berlin").unwrap());
+        assert_eq!(value, serde_json::json!({
+            "rows": [["2026-10-22T15:15:00+02:00", "2026-10-22T16:15:00+02:00"]],
+            "start": "2026-10-22T12:45:00+02:00",
+            "keep": ["2026-10-22", "Move Legs to 11:15", "2026-10-22 13:15", 7],
+        }));
     }
 }
