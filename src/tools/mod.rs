@@ -77,13 +77,25 @@ pub fn call(cx: &mut Ctx, name: &str, args: Value) -> Result<Value> {
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         crate::bail!("UNKNOWN_TOOL", "No tool {name}. Tools: {}", names.join(", "));
     };
-    (tool.call)(cx, args).map_err(|e| match e.code() {
-        // Wrong arguments: show how the tool is called, so the model fixes the call instead of repeating it.
-        "INVALID_ARGUMENTS" | "ARGUMENT_REQUIRED" | "TEMPLATE_REQUIRED" | "INVALID_DATE" | "INVALID_TIME" | "INVALID_JSON" => {
-            Error::domain(e.code().to_string(), format!("{e}\nUsage of {name}:\n{}", usage(&(tool.schema)(), 0)))
-        }
-        _ => e,
-    })
+    (tool.call)(cx, args).map_err(|e| guide(name, e))
+}
+
+/// Turns a failed call's error into one the model can act on: what to do next, plus the tool's
+/// usage so it can fix the call or pick another option instead of repeating it. Every tool error,
+/// from argument parsing to domain rules, passes through here.
+pub fn guide(name: &str, e: Error) -> Error {
+    let code = e.code().to_string();
+    let system = matches!(code.as_str(), "DATABASE_ERROR" | "NETWORK_ERROR" | "IO_ERROR" | "INTERNAL" | "TELEGRAM_ERROR")
+        || code.ends_with("_UNAVAILABLE")
+        || code.starts_with("CALENDAR_AUTH");
+    let next = if system {
+        "A system problem, not a wrong call: don't retry it this turn. Tell the owner what didn't happen.".to_string()
+    } else {
+        let lookup = if code.ends_with("_NOT_FOUND") || code.ends_with("_AMBIGUOUS") { "Look the id up (sql_query, get_week) instead of guessing it. " } else { "" };
+        let usage = all().iter().find(|t| t.name == name).map(|t| format!("\nUsage of {name}:\n{}", usage(&(t.schema)(), 0))).unwrap_or_default();
+        format!("{lookup}Fix the call, use another tool, or ask the owner; don't repeat it unchanged.{usage}")
+    };
+    Error::domain(code, format!("{e}\n{next}"))
 }
 
 /// The argument list of a tool schema, one line per field, nested objects indented:
@@ -125,4 +137,18 @@ fn kind(spec: &Value) -> String {
         .filter(|t| *t != "null")
         .collect();
     if types.is_empty() { "any".into() } else { types.join("|") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_say_what_to_do_next() {
+        let wrong = guide("session_update", Error::domain("SESSION_NOT_FOUND", "Unknown session")).to_string();
+        assert!(wrong.contains("Look the id up") && wrong.contains("- session_id (string, required)"), "{wrong}");
+        // Retrying or rewriting the call can't fix a system problem, so no usage there.
+        let down = guide("crowd_forecast", Error::domain("GYM_API_UNAVAILABLE", "No source")).to_string();
+        assert!(down.contains("don't retry") && !down.contains("Usage"), "{down}");
+    }
 }

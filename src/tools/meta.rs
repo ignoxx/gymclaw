@@ -70,7 +70,8 @@ impl Tool for SqlQuery {
             let mut stmt = match db.prepare(&self.sql) {
                 Ok(stmt) => stmt,
                 Err(e) if e.to_string().contains("no such ") => crate::bail!("SQL_SCHEMA", "{e}. {}", schema_hint(&db, &self.sql)?),
-                Err(e) => return Err(e.into()),
+                // Syntax errors and denied tables are a wrong query, not a broken database.
+                Err(e) => crate::bail!("INVALID_SQL", "{e}"),
             };
             if !stmt.readonly() {
                 crate::bail!("NOT_READ_ONLY", "sql_query only reads; use the session tools to change sessions");

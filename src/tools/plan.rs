@@ -135,6 +135,7 @@ impl Tool for SessionCreate {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionUpdate {
+    /// planned_session.id from sql_query or get_week; a unique prefix works.
     pub session_id: String,
     /// Change any combination in one call. Omitted fields stay as saved.
     pub fields: SessionFields,

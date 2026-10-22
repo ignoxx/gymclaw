@@ -313,7 +313,7 @@ impl Agent {
                 let args: std::result::Result<Value, _> = if raw.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str(raw) };
                 let started = Instant::now();
                 let (mut result, ok) = match (name.as_str(), args) {
-                    (_, Err(e)) => (Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}")).to_json(), false),
+                    (_, Err(e)) => (tools::guide(&name, Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}"))).to_json(), false),
                     (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
                         // The call it meant didn't run; the owner must not get its markup or a silent reply.
                         Ok(reply) if reply.text.as_deref().and_then(written_tool_call).is_some() => {
