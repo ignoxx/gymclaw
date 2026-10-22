@@ -501,7 +501,7 @@ mod tests {
             assert!(messages.iter().any(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|t| t.contains("Background events for your decision") && t.contains("planning.attention"))));
             let message = match self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                 0 => crate::bail!("MODEL_DOWN", "fixture model outage"),
-                1 => json!({"tool_calls": [{"id": "create", "function": {"name": "session_create", "arguments": json!({"fields": {"start": "2099-10-14T12:00", "template_id": "fixture"}}).to_string()}}]}),
+                1 => json!({"tool_calls": [{"id": "create", "function": {"name": "session_create", "arguments": json!({"start": "2099-10-14T12:00", "template_id": "fixture"}).to_string()}}]}),
                 _ => json!({"content": ""}),
             };
             Ok(crate::agent::ModelReply { message, ..Default::default() })

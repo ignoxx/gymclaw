@@ -92,14 +92,14 @@ impl Tool for GetWeek {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionFields {
-    /// Exact start, owner-local unless an offset is supplied. Required on create.
+    /// Exact start, owner-local unless an offset is supplied.
     pub start: Option<String>,
-    /// Exact end. Default: preserve duration (create: profile duration).
+    /// Exact end. Default: preserve duration.
     pub end: Option<String>,
-    /// A real workout template. Required on create.
+    /// A real workout template id.
     pub template_id: Option<String>,
     /// Any scheduling status; this does not create workout/set logs. CANCELLED deletes the owned
-    /// calendar event; SKIPPED/MISSED keep it as history. Default: preserve (create: COMMITTED within 48h, otherwise TENTATIVE).
+    /// calendar event; SKIPPED/MISSED keep it as history. Default: preserve.
     pub status: Option<crate::db::models::SessionStatus>,
 }
 
@@ -112,7 +112,14 @@ impl SessionFields {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCreate {
-    pub fields: SessionFields,
+    /// Exact start, owner-local unless an offset is supplied, e.g. "2026-10-25T09:00".
+    pub start: String,
+    /// A real workout template id, e.g. "push" (the workout_template table).
+    pub template_id: String,
+    /// Exact end. Default: start + the profile's workout duration.
+    pub end: Option<String>,
+    /// Default: COMMITTED within 48h, otherwise TENTATIVE.
+    pub status: Option<crate::db::models::SessionStatus>,
 }
 
 impl Tool for SessionCreate {
@@ -120,13 +127,15 @@ impl Tool for SessionCreate {
     const DESCRIPTION: &'static str = "Create an upcoming session at exact times with a real template. Rules are defaults: violations return warnings, never silently change your choice. Locks the session. Calendar writes, allocation, reminders and retries are handled together.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        replanning::edit_session(cx.db, None, self.fields.patch(cx)?, cx.now, &cx.request_id)
+        let fields = SessionFields { start: Some(self.start), end: self.end, template_id: Some(self.template_id), status: self.status };
+        replanning::edit_session(cx.db, None, fields.patch(cx)?, cx.now, &cx.request_id)
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionUpdate {
+    /// planned_session.id from sql_query or get_week; a unique prefix works.
     pub session_id: String,
     /// Change any combination in one call. Omitted fields stay as saved.
     pub fields: SessionFields,
@@ -469,7 +478,7 @@ mod tests {
     fn raw_session_edits_keep_intent_and_reconcile_mechanics() {
         let db = db();
         let before = week_start_ids(&db);
-        let args = json!({"fields": {"start": "2026-10-13T23:07", "end": "2026-10-13T23:17", "template_id": "short"}});
+        let args = json!({"start": "2026-10-13T23:07", "end": "2026-10-13T23:17", "template_id": "short"});
         let created = call(&db, "session_create", args.clone(), sunday(), "raw-create").unwrap();
         assert_eq!(call(&db, "session_create", args, sunday(), "raw-create").unwrap(), created);
         let id = created["data"]["session"]["id"].as_str().unwrap();

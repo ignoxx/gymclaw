@@ -107,7 +107,7 @@ the session and leave other sessions alone; warnings describe rest-day, weekly m
 calendar and allocation conflicts. Invalid times or unknown templates fail back to the agent.
 
 ```bash
-gymclaw call session_create '{"fields": {"start": "2026-10-17T10:00", "end": "2026-10-17T11:10", "template_id": "legs"}}'
+gymclaw call session_create '{"start": "2026-10-17T10:00", "end": "2026-10-17T11:10", "template_id": "legs"}'
 gymclaw call session_update '{"session_id": "…", "fields": {"template_id": "pull", "status": "COMMITTED"}}'
 gymclaw call session_update '{"session_id": "…", "fields": {"status": "CANCELLED"}}'
 gymclaw call sql_query '{"sql": "SELECT workout_template_id, status, planned_start_at FROM planned_session ORDER BY planned_start_at DESC LIMIT 20"}'
