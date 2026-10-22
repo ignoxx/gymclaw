@@ -185,7 +185,7 @@ pub fn import_template(db: &Connection, template: &Template) -> Result<Value> {
 
 pub fn get_template(db: &Connection, template_id: &str) -> Result<Template> {
     let Some(row) = WorkoutTemplate::get(db, template_id)? else {
-        crate::bail!("TEMPLATE_UNKNOWN", "Unknown workout template: {template_id}");
+        crate::bail!("TEMPLATE_UNKNOWN", "Unknown workout template: {template_id}. Templates: {}", template_ids(db)?.join(", "));
     };
     serde_json::from_value(row.definition_json.0).map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Stored template {template_id}: {e}")))
 }

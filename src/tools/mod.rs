@@ -77,5 +77,52 @@ pub fn call(cx: &mut Ctx, name: &str, args: Value) -> Result<Value> {
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         crate::bail!("UNKNOWN_TOOL", "No tool {name}. Tools: {}", names.join(", "));
     };
-    (tool.call)(cx, args)
+    (tool.call)(cx, args).map_err(|e| match e.code() {
+        // Wrong arguments: show how the tool is called, so the model fixes the call instead of repeating it.
+        "INVALID_ARGUMENTS" | "ARGUMENT_REQUIRED" | "TEMPLATE_REQUIRED" | "INVALID_DATE" | "INVALID_TIME" | "INVALID_JSON" => {
+            Error::domain(e.code().to_string(), format!("{e}\nUsage of {name}:\n{}", usage(&(tool.schema)(), 0)))
+        }
+        _ => e,
+    })
+}
+
+/// The argument list of a tool schema, one line per field, nested objects indented:
+/// `- start (string, required): Exact start…`.
+fn usage(schema: &Value, depth: usize) -> String {
+    let required: Vec<&str> = schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let Some(properties) = schema["properties"].as_object() else { return format!("{}(no arguments)", "  ".repeat(depth)) };
+    let mut lines = Vec::new();
+    for (field, spec) in properties {
+        let need = if required.contains(&field.as_str()) { "required" } else { "optional" };
+        let description = spec["description"].as_str().map(|d| format!(": {}", d.replace('\n', " "))).unwrap_or_default();
+        lines.push(format!("{}- {field} ({}, {need}){description}", "  ".repeat(depth), kind(spec)));
+        if spec.get("properties").is_some() {
+            lines.push(usage(spec, depth + 1));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Short type of one schema field: `string`, `integer`, or `one of "A"|"B"` for enums.
+fn kind(spec: &Value) -> String {
+    let variants: Vec<&Value> = [&spec["anyOf"], &spec["oneOf"]].into_iter().filter_map(Value::as_array).flatten().collect();
+    let values: Vec<String> = std::iter::once(spec)
+        .chain(variants.iter().copied())
+        .flat_map(|v| v["enum"].as_array().cloned().unwrap_or_default().into_iter().chain(v.get("const").cloned()))
+        .filter(|v| !v.is_null())
+        .map(|v| v.to_string())
+        .collect();
+    if !values.is_empty() {
+        return format!("one of {}", values.join("|"));
+    }
+    let types: Vec<&str> = std::iter::once(spec)
+        .chain(variants)
+        .flat_map(|v| match &v["type"] {
+            Value::String(t) => vec![t.as_str()],
+            Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+            _ => vec![],
+        })
+        .filter(|t| *t != "null")
+        .collect();
+    if types.is_empty() { "any".into() } else { types.join("|") }
 }

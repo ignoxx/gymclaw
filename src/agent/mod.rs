@@ -255,7 +255,8 @@ impl Agent {
 
         let mut steps = 0usize;
         let mut index = 0usize;
-        let mut seen: HashMap<String, u32> = HashMap::new();
+        // Calls made this turn: how often, and the error of the first run if it failed.
+        let mut seen: HashMap<String, (u32, Option<String>)> = HashMap::new();
         // Set once the model loops on one call: the next turn must answer in text.
         let mut looping = false;
         loop {
@@ -328,17 +329,23 @@ impl Agent {
                     },
                     (_, Ok(args)) => {
                         let key = format!("{name} {args}");
-                        let repeats = seen.entry(key.clone()).or_default();
+                        let (repeats, failed) = seen.entry(key.clone()).or_default();
                         *repeats += 1;
                         if *repeats >= 2 {
                             looping |= *repeats >= 3;
-                            let message = "Same call with the same arguments as before; the result won't change. Use the earlier result, try something else, or reply.";
+                            let message = match failed {
+                                Some(error) => format!("This exact call already failed and will fail again: {error}\nChange the arguments as described, or tell the owner what's blocking."),
+                                None => "Same call with the same arguments as before; the result won't change. Use the earlier result, try something else, or reply.".into(),
+                            };
                             (Error::domain("REPEATED_CALL", message).to_json(), false)
                         } else {
                             steps += 1;
                             index += 1;
                             state.tool_calls += 1;
                             let (result, ok, wrote) = self.tool(&name, args, format!("{}-{index}", input.key)).await;
+                            if !ok && let Some(entry) = seen.get_mut(&key) {
+                                entry.1 = result.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
+                            }
                             // State changed, so other earlier calls may now give a different answer.
                             if wrote {
                                 seen.retain(|k, _| *k == key);
@@ -483,6 +490,19 @@ mod tests {
         assert!(!outcome.failed);
         assert_eq!(outcome.reply.text.as_deref(), Some("Couldn't do that."));
         assert_eq!(script.seen.lock().unwrap().len(), 4);
+    }
+
+    /// Prod 2026-10-22: a call missing required fields was repeated until STUCK. Both the error and
+    /// its repeat must say how to call the tool.
+    #[tokio::test]
+    async fn wrong_arguments_come_back_with_usage_even_when_repeated() {
+        let wrong = || call("session_create", json!({"fields": {"end": "2099-10-25T10:00"}}));
+        let (agent, script, _) = scripted(vec![wrong(), wrong(), json!({"content": "Which workout?"})]);
+        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Which workout?"));
+        let last = script.last.lock().unwrap();
+        let errors: Vec<&str> = last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+        assert!(errors[0].contains("start (string, required)"), "{}", errors[0]);
+        assert!(errors[1].contains("REPEATED_CALL") && errors[1].contains("already failed") && errors[1].contains("template_id (string, required)"), "{}", errors[1]);
     }
 
     #[tokio::test]
