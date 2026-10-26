@@ -144,7 +144,7 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .tabs button[aria-current] { background: var(--white); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(36, 40, 36, .08); }
 .alert { padding: 12px 16px; margin-bottom: 16px; border-radius: 8px; background: #f6e3dd; color: #8f3a2a; font-size: 12px; }
 .alert::before { content: '⚠'; margin-right: 8px; }
-.section-heading > span.warn { color: #a24232; font-weight: 600; }
+.section-heading > span.warn, .usage.warn { color: #a24232; font-weight: 600; }
 
 /* Chart interaction */
 .hit { fill: transparent; cursor: crosshair; }

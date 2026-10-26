@@ -22,7 +22,7 @@ sql_enum!(WriteAction { Create = "CREATE", Update = "UPDATE", Delete = "DELETE" 
 sql_enum!(BlockKind { Travel = "TRAVEL", Sick = "SICK", Unavailable = "UNAVAILABLE" });
 sql_enum!(BlockStatus { Active = "ACTIVE", Retracted = "RETRACTED" });
 sql_enum!(ChatRole { Owner = "owner", Assistant = "assistant", Bot = "bot" });
-sql_enum!(NoteKind { Owner = "owner", Lesson = "lesson" });
+sql_enum!(NoteKind { Owner = "owner", Learned = "learned" });
 
 impl SessionStatus {
     /// Sessions that take a slot in the week.

@@ -319,13 +319,15 @@ fn body_weight(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>> {
         .collect())
 }
 
-/// What the agent remembers: the owner's notes and its own lessons, each oldest first.
+/// What the agent remembers: what the owner told it and what it learned from their behaviour, each oldest first, and how much of
+/// each budget they use.
 fn memory(db: &Connection) -> Result<Value> {
     let notes = crate::tools::meta::notes(db)?;
     let list = |kind: NoteKind| -> Vec<Value> {
         notes.iter().filter(|n| n.kind == kind).map(|n| json!({"id": n.id, "text": n.text, "updated_at": iso(&n.updated_at.local(&TimeZone::UTC))})).collect()
     };
-    Ok(json!({"owner": list(NoteKind::Owner), "lesson": list(NoteKind::Lesson)}))
+    let usage = |kind: NoteKind| -> Result<Value> { Ok(json!({"used": crate::tools::meta::used(db, kind)?, "limit": crate::tools::meta::budget(kind)})) };
+    Ok(json!({"owner": list(NoteKind::Owner), "learned": list(NoteKind::Learned), "usage": {"owner": usage(NoteKind::Owner)?, "learned": usage(NoteKind::Learned)?}}))
 }
 
 /// The whole dashboard state.

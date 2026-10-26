@@ -28,7 +28,7 @@ const ASSETS: [(&str, &[u8], &str); 6] = [
     ("/fonts/DM-Sans.ttf", include_bytes!("../../web/fonts/DM-Sans.ttf"), "font/ttf"),
 ];
 
-/// Tools the dashboard may call: the owner edits the notes and lessons in the agent's prompt.
+/// Tools the dashboard may call: the owner edits the notes in the agent's prompt.
 const NOTE_TOOLS: [&str; 3] = ["note_add", "note_edit", "note_delete"];
 
 struct App {

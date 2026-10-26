@@ -67,7 +67,7 @@ model never has to. Timestamps without an offset are the owner's local time.
   private feed URL stay excluded. There is no raw SQL write tool; session edits reconcile calendar,
   allocation and reminder state through the validated domain layer.
 - The agent owns planning decisions and exceptions. `note_add {kind: owner}` records standing
-  preferences and date-bounded exceptions; notes and lessons appear in every prompt. Background
+  preferences and date-bounded exceptions; owner and learned notes appear in every prompt. Background
   events are observations, never fresh owner permission.
 - One turn ends with one reply: text (+ optional buttons) or a reaction or nothing. Tool errors go
   back to the model. Step cap (12 calls) and an identical-call breaker; on giving up, one sanitized
