@@ -72,11 +72,12 @@ pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result
         if sessions.len() as i64 > profile.weekly_max_sessions {
             warnings.push(format!("Week {week}: exceeds weekly maximum"));
         }
-        let existing: Vec<_> = rows.iter().filter(|s| s.status.is_active() || s.status == SessionStatus::Skipped).map(interval).collect();
+        let existing: Vec<_> = rows.iter().filter(|s| s.status.is_active()).map(interval).collect();
+        let skipped: Vec<_> = rows.iter().filter(|s| s.status == SessionStatus::Skipped).map(interval).collect();
         let (start, end) = busy_window(week, &profile)?;
         let busy = busy_intervals(db, start, end)?;
         let unavailable = crate::domain::scheduling::deleted_intervals(db)?;
-        let plan = plan_week(&profile, week, &Inputs { busy: &busy, unavailable: &unavailable, existing: &existing, signals: &[] }, now, &PlannerConfig::default())?;
+        let plan = plan_week(&profile, week, &Inputs { busy: &busy, unavailable: &unavailable, existing: &existing, skipped: &skipped, signals: &[] }, now, &PlannerConfig::default())?;
         let count = sessions.len() as i64;
         if count < profile.weekly_target_sessions {
             warnings.push(format!("Week {week}: {count}/{} sessions saved; {} additional default slots feasible. Agent decides whether to add or accept shortfall.", profile.weekly_target_sessions, plan.sessions.len()));

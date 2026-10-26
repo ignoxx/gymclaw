@@ -68,7 +68,7 @@ pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Opt
     let config = PlannerConfig::default();
     let signals = if fixture_signals.is_empty() { planning_signals(db, week_start, now, config.step_minutes)? } else { fixture_signals.to_vec() };
     let model = if signals.is_empty() || !fixture_signals.is_empty() { None } else { Some(CrowdModel::new(db, now)?) };
-    let plan = plan_week(&profile, week_start, &Inputs { busy: &busy, unavailable: &deleted, existing: &existing, signals: &signals }, now, &config)?;
+    let plan = plan_week(&profile, week_start, &Inputs { busy: &busy, unavailable: &deleted, existing: &existing, skipped: &[], signals: &signals }, now, &config)?;
     let template = match template_id {
         Some(id) => {
             let mut t = get_template(db, id)?;

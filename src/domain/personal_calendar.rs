@@ -184,7 +184,9 @@ mod tests {
         let result = connect(&db, "webcal://p42-caldav.icloud.com/published/2/secret", sunday, &up).unwrap();
         assert!(result["user_message_hint"].as_str().unwrap().starts_with("Personal calendar changed"));
         assert_eq!(result["changes"], json!([]));
-        assert!(!crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        // The conflict wakes the agent once, as a planning warning; the calendar change itself doesn't.
+        let wake: Vec<Value> = crate::domain::events::wake_pending(&db).unwrap().iter().map(|e| e["type"].clone()).collect();
+        assert_eq!(wake, [json!("planning.weekly_briefing"), json!("planning.attention")]);
         assert_eq!(PlannedSession::get(&db, &id).unwrap().unwrap().planned_start_at, original);
         assert!(busy_intervals(&db, sunday, sunday.mins(8 * 24 * 60)).unwrap().iter().any(|b| b.start == busy_start));
         assert!(!status(&db).unwrap().to_string().contains("secret"));

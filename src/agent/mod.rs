@@ -166,11 +166,12 @@ static NOTHING_TO_SAY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\(?([^()]*\s[—–-]\s*)?(heartbeat_ok|no (reply|response|message|action) (is )?(needed|required|necessary)|nothing (to (report|say|do|add)|(needs|requires) (saying|attention|action)))[.!]?\)?$").unwrap()
 });
 
-/// "NO_REPLY" and empty text mean silence. On a background turn so does a note to itself ("No reply
-/// needed."); to the owner the same words can be a real answer.
+/// "NO_REPLY" and text without a word in it ("", "...", "…") mean silence. On a background turn so does a
+/// note to itself ("No reply needed."); to the owner the same words can be a real answer.
 fn as_reply(text: Option<&str>, background: bool) -> Reply {
     let text = text.map(|t| ECHOED_PREFIX.replace(t.trim(), "").trim().to_string());
-    let text = text.filter(|t| !t.is_empty() && t != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(t)));
+    let wordless = |t: &str| t.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '…');
+    let text = text.filter(|t| !wordless(t) && t != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(t)));
     Reply { text, ..Reply::default() }
 }
 
@@ -451,8 +452,10 @@ mod tests {
     async fn plain_text_is_the_reply_and_no_reply_is_silence() {
         let (agent, _, _) = scripted(vec![json!({"content": "  **Mon** Pull  "})]);
         assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("**Mon** Pull"));
-        let (agent, _, _) = scripted(vec![json!({"content": "NO_REPLY"})]);
-        assert_eq!(agent.turn(input()).await.reply, Reply::default());
+        for silence in ["NO_REPLY", "...", "…"] {
+            let (agent, _, _) = scripted(vec![json!({"content": silence})]);
+            assert_eq!(agent.turn(input()).await.reply, Reply::default(), "{silence}");
+        }
         // An echoed history prefix is never part of the message.
         let (agent, _, _) = scripted(vec![json!({"content": "[Tue 14:22, sent automatically] Pull moved to **13:30**."})]);
         assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Pull moved to **13:30**."));

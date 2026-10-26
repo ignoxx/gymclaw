@@ -108,6 +108,9 @@ pub struct Inputs<'a> {
     pub busy: &'a [Interval],
     pub unavailable: &'a [Interval],
     pub existing: &'a [Interval],
+    /// Skipped sessions: they count toward the week (the owner chose not to make them up) but were never
+    /// trained, so they need no recovery around them.
+    pub skipped: &'a [Interval],
     pub signals: &'a [SlotSignal],
 }
 
@@ -200,7 +203,7 @@ pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs,
 pub fn plan_week(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts, config: &PlannerConfig) -> Result<Plan> {
     let tz = profile.tz();
     let week_end = week_start.checked_add(jiff::Span::new().days(7))?;
-    let existing_count = inputs.existing.iter().filter(|s| (week_start..week_end).contains(&s.start.local(&tz).date())).count() as i64;
+    let existing_count = inputs.existing.iter().chain(inputs.skipped).filter(|s| (week_start..week_end).contains(&s.start.local(&tz).date())).count() as i64;
     let capacity = (profile.weekly_target_sessions.min(profile.weekly_max_sessions) - existing_count).max(0) as usize;
     let candidates = generate_candidates(profile, week_start, inputs, now, config)?;
     let mut by_day: std::collections::BTreeMap<Date, Candidate> = Default::default();
@@ -296,6 +299,15 @@ mod tests {
         let p = plan(&Profile::default(), Inputs { existing: &sunday, ..Inputs::default() });
         assert_eq!(p.sessions.len(), 2);
         assert!(!days(&p).contains(&0));
+    }
+
+    #[test]
+    fn skipped_session_counts_but_needs_no_recovery() {
+        let sunday = [Interval { start: at(11, 0, 0), end: at(11, 0, 20) }];
+        let p = plan(&Profile::default(), Inputs { skipped: &sunday, ..Inputs::default() });
+        assert_eq!(days(&p), [0, 2, 4]);
+        let monday = [Interval { start: at(12, 11, 0), end: at(12, 12, 0) }];
+        assert_eq!(plan(&Profile::default(), Inputs { skipped: &monday, ..Inputs::default() }).sessions.len(), 2);
     }
 
     #[test]

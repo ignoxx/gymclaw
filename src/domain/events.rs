@@ -8,10 +8,12 @@ use crate::time::Ts;
 
 /// Events that need the owner's attention. Everything else is an audit record the code already handled
 /// (state changes, timers, sends, calendar writes).
-pub const ACTIONABLE: [&str; 10] = [
+/// A personal-calendar change is not here: it never moves a session, and a conflict it causes arrives as
+/// `planning.attention`, so waking the agent for the change itself only invites an empty reply.
+pub const ACTIONABLE: [&str; 9] = [
     "notifications.delivery_unknown", "calendar.write_blocked", "crowd.source_unavailable",
     "planning.attention", "planning.replan_required", "planning.no_show", "workout.missed",
-    "planning.weekly_briefing", "calendar.personal_blockers_changed", "workout.stale",
+    "planning.weekly_briefing", "workout.stale",
 ];
 
 /// One event per distinct situation, including across restarts and acknowledgement. A quiet timer
@@ -61,7 +63,7 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
     Ok(pending(db, false)?.into_iter().filter(|e| matches!(e["type"].as_str(), Some(
         "planning.attention" | "planning.replan_required" | "planning.no_show" | "workout.missed" |
-        "planning.weekly_briefing" | "calendar.personal_blockers_changed" | "workout.stale"
+        "planning.weekly_briefing" | "workout.stale"
     ))).take(20).collect())
 }
 

@@ -47,7 +47,7 @@ fn demo(value: &Value) -> bool {
     value.get("demo").and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// What happened in a week: completed workouts vs target, sets, missed/skipped, durations. With
+/// What happened in a week: completed workouts vs target, each workout's outcome, sets, durations. With
 /// `learn`, updates the typical session duration from the last 90 days.
 pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Result<Value> {
     if !crate::domain::planning::monday(week_start) {
@@ -63,7 +63,8 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Re
         sets.extend(SetLog::select(db, "WHERE workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1)", [&w.id])?);
         labels.extend(CrowdFeedback::select(db, "WHERE workout_session_id = ?1", [&w.id])?);
     }
-    let plans: Vec<PlannedSession> = PlannedSession::select(db, "ORDER BY rowid", [])?.into_iter().filter(|p| week_of(p.planned_start_at, &tz) == week_start).collect();
+    let plans: Vec<PlannedSession> = PlannedSession::select(db, "ORDER BY planned_start_at, rowid", [])?.into_iter().filter(|p| week_of(p.planned_start_at, &tz) == week_start).collect();
+    let rotates = OnboardingState::get(db, 1)?.is_some_and(|o| o.split_json.0.len() >= 2);
     let durations: Vec<i64> = completed.iter().filter_map(|w| w.actual_duration_seconds).collect();
     if learn {
         let history: Vec<i64> = workouts
@@ -88,10 +89,8 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Re
             }
         }
     }
-    let count = |status: SessionStatus| plans.iter().filter(|p| p.status == status).count();
     Ok(json!({"week_start": week_start.to_string(), "completed_workouts": completed.len(), "target_sessions": profile.weekly_target_sessions,
-        "planned_sessions": plans.len(), "missed_sessions": count(SessionStatus::Missed),
-        "skipped_sessions": count(SessionStatus::Skipped), "cancelled_sessions": count(SessionStatus::Cancelled),
+        "workouts": workout_outcomes(&plans, &completed, rotates),
         "working_sets": sets.iter().filter(|s| s.set_type == SetType::Working).count(), "warmup_sets": sets.iter().filter(|s| s.set_type == SetType::Warmup).count(),
         "median_duration_seconds": median(&durations), "crowd_labels": labels.len(),
         "demo": completed.iter().any(|w| demo(&w.template_snapshot)) || labels.iter().any(|f| demo(&f.features_json))}))
@@ -143,6 +142,34 @@ fn first_plan_key(db: &Connection, week: Date, now: Ts, template_id: &str) -> Re
     let material = json!({"profile": profile, "calendar": snapshots, "template": template_id, "day": now.local(&profile.tz()).date().to_string()});
     let digest = hex::encode(Sha256::digest(material.to_string()));
     Ok(format!("rolling:{week}:{}", &digest[..32]))
+}
+
+/// What became of each workout slot in the week, in order, e.g. pull completed, legs missed, push skipped.
+/// With a split rotation a missed or skipped workout moves on to the next slot, so a later slot of the same
+/// workout supersedes it: Legs missed Thursday, carried to Friday and missed again is one missed workout,
+/// not two. Cancelled slots were moved or dropped, so they don't count.
+fn workout_outcomes(plans: &[PlannedSession], completed: &[&WorkoutSession], rotates: bool) -> Vec<Value> {
+    let mut outcomes: Vec<(String, &str)> = Vec::new();
+    for plan in plans {
+        let outcome = match plan.status {
+            SessionStatus::Cancelled => continue,
+            SessionStatus::Missed => "missed",
+            SessionStatus::Skipped => "skipped",
+            SessionStatus::Started | SessionStatus::Completed => "completed",
+            SessionStatus::Tentative | SessionStatus::Committed => "planned",
+        };
+        let workout = plan.workout_template_id.clone().unwrap_or_default();
+        let carried = outcomes.iter().rposition(|(w, o)| *w == workout && matches!(*o, "missed" | "skipped")).filter(|_| rotates);
+        match carried {
+            Some(i) => outcomes[i].1 = outcome,
+            None => outcomes.push((workout, outcome)),
+        }
+    }
+    // Workouts started without a planned slot.
+    for workout in completed.iter().filter(|w| w.planned_session_id.is_none()) {
+        outcomes.push((workout.template_id.clone().unwrap_or_default(), "completed"));
+    }
+    outcomes.into_iter().map(|(workout, outcome)| json!({"workout": workout, "outcome": outcome})).collect()
 }
 
 /// Give each upcoming session the split workout (e.g. Push / Pull / Legs) trained least recently, counting
@@ -551,7 +578,7 @@ mod tests {
         assert_eq!(missed.status, SessionStatus::Missed);
         assert!(CalendarWrite::select(&db, "WHERE planned_session_id = ?1 AND status = 'PENDING'", [&missed.id]).unwrap().is_empty());
         let report = audit_week(&db, Date::constant(2026, 10, 12), later, false).unwrap();
-        assert_eq!((&report["missed_sessions"], &report["completed_workouts"]), (&json!(1), &json!(0)));
+        assert_eq!((&report["workouts"][0], &report["completed_workouts"]), (&json!({"workout": "short", "outcome": "missed"}), &json!(0)));
         let before = count(&db, "SELECT count(*) FROM agent_event WHERE type = 'workout.missed'");
         rolling_plan(&db, "short", later.mins(1)).unwrap();
         assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'workout.missed'"), before);
@@ -599,6 +626,24 @@ mod tests {
         rolling_plan(&db, "short", sunday(3)).unwrap();
         assert_eq!(PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at, updated.planned_start_at);
         assert!(AgentEvent::get(&db, &event.id).unwrap().unwrap().handled_at.is_none());
+    }
+
+    #[test]
+    fn carried_workout_counts_once() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let session = PlannedSession::select(&db, "ORDER BY rowid", []).unwrap().remove(0);
+        let slot = |workout: &str, status| PlannedSession { workout_template_id: Some(workout.into()), status, ..session.clone() };
+        use SessionStatus::*;
+        // Last week as the owner lived it: Legs moved Thu -> Fri and missed both times, Push skipped.
+        let week = [slot("pull", Completed), slot("legs", Missed), slot("legs", Missed), slot("push", Skipped), slot("pull", Cancelled)];
+        let outcomes = |week: &[PlannedSession], rotates| -> Vec<String> {
+            workout_outcomes(week, &[], rotates).iter().map(|o| format!("{} {}", o["workout"].as_str().unwrap(), o["outcome"].as_str().unwrap())).collect()
+        };
+        assert_eq!(outcomes(&week, true), ["pull completed", "legs missed", "push skipped"]);
+        assert_eq!(outcomes(&[slot("legs", Missed), slot("legs", Completed)], true), ["legs completed"]);
+        // Without a rotation every slot is its own workout.
+        assert_eq!(outcomes(&week, false).len(), 4);
     }
 
     #[test]
