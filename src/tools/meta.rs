@@ -122,10 +122,12 @@ pub struct NoteAdd {
 
 impl Tool for NoteAdd {
     const NAME: &'static str = "note_add";
-    const DESCRIPTION: &'static str = "Remember something for every future conversation (it goes into your instructions).";
+    const DESCRIPTION: &'static str = "Remember something for every future conversation (it goes into your instructions). Each kind has a \
+character budget, shown with the notes; when it's full, merge, shorten or delete notes first and keep what matters most.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let note = AgentNote { id: None, kind: self.kind, text: self.text.trim().into(), created_at: cx.now, updated_at: cx.now };
+        check_budget(cx.db, note.kind, None, &note.text)?;
         note.insert(cx.db)?;
         Ok(json!({"id": cx.db.last_insert_rowid()}))
     }
@@ -143,6 +145,7 @@ impl Tool for NoteEdit {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let Some(mut note) = AgentNote::get(cx.db, self.id)? else { crate::bail!("NOTE_NOT_FOUND", "No note {}", self.id) };
+        check_budget(cx.db, note.kind, Some(&note), self.text.trim())?;
         note.text = self.text.trim().into();
         note.updated_at = cx.now;
         note.update(cx.db)?;
@@ -170,6 +173,39 @@ pub fn notes(db: &Connection) -> Result<Vec<AgentNote>> {
     AgentNote::select(db, "ORDER BY kind, id", [])
 }
 
+/// Characters each kind of note may use in total. Memory goes into every prompt, so it stays small and
+/// the agent has to choose: a new note past the budget fails until older ones are condensed.
+pub fn budget(kind: NoteKind) -> usize {
+    match kind {
+        NoteKind::Owner => 1500,
+        NoteKind::Lesson => 800,
+    }
+}
+
+/// Characters the notes of `kind` use now.
+pub fn used(db: &Connection, kind: NoteKind) -> Result<usize> {
+    Ok(notes(db)?.iter().filter(|n| n.kind == kind).map(|n| n.text.chars().count()).sum())
+}
+
+/// Refuse a write that grows `kind` past its budget. Shrinking is always allowed, so memory that is
+/// already over (e.g. after the budget was lowered) can be condensed step by step.
+fn check_budget(db: &Connection, kind: NoteKind, replacing: Option<&AgentNote>, text: &str) -> Result<()> {
+    let (old, new) = (replacing.map_or(0, |n| n.text.chars().count()), text.chars().count());
+    let (used, limit) = (used(db, kind)?, budget(kind));
+    if new > old && used - old + new > limit {
+        crate::bail!("NOTE_BUDGET", "{} are at {used}/{limit} chars and this needs {} more. Condense first: merge related notes, shorten wording, \
+delete what no longer matters (note_edit/note_delete), then retry.", label(kind), new - old);
+    }
+    Ok(())
+}
+
+fn label(kind: NoteKind) -> &'static str {
+    match kind {
+        NoteKind::Owner => "Owner notes",
+        NoteKind::Lesson => "Lessons",
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -194,6 +230,29 @@ mod tests {
         assert!(guessed.contains("planned_session(") && guessed.contains("planned_start_at") && !guessed.contains("set_log("), "{guessed}");
         let missing = query(&mut cx, "SELECT * FROM sessions").unwrap_err().to_string();
         assert!(missing.contains("set_log(") && !missing.contains("calendar_credential"), "{missing}");
+    }
+
+    #[test]
+    fn notes_stay_within_budget_but_can_always_shrink() {
+        let db = crate::domain::workout::tests::db();
+        let dir = std::env::temp_dir();
+        let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
+        let limit = budget(NoteKind::Lesson);
+        let add = |cx: &mut Ctx, text: String| NoteAdd { kind: NoteKind::Lesson, text }.run(cx);
+        let id = add(&mut cx, "a".repeat(limit - 10)).unwrap()["id"].as_i64().unwrap();
+        add(&mut cx, "b".repeat(10)).unwrap();
+        let full = add(&mut cx, "c".into()).unwrap_err();
+        assert_eq!(full.code(), "NOTE_BUDGET");
+        assert!(full.to_string().contains(&format!("{limit}/{limit}")), "{full}");
+        // Owner notes have their own budget.
+        NoteAdd { kind: NoteKind::Owner, text: "Trains at noon".into() }.run(&mut cx).unwrap();
+        // Condensing frees room for the new lesson.
+        NoteEdit { id, text: "a".repeat(100) }.run(&mut cx).unwrap();
+        add(&mut cx, "c".into()).unwrap();
+        // Over budget already (budget lowered): shrinking still works, growing doesn't.
+        cx.db.execute("UPDATE agent_note SET text = ?1 WHERE id = ?2", (&"a".repeat(limit), id)).unwrap();
+        assert!(NoteEdit { id, text: "a".repeat(limit + 1) }.run(&mut cx).is_err());
+        NoteEdit { id, text: "a".repeat(limit - 1) }.run(&mut cx).unwrap();
     }
 
 }

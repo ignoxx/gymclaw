@@ -351,13 +351,33 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     let event = match AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])? {
         Some(event) => event,
         None => {
-            let mut event = emit(db, "planning.weekly_briefing", now, json!({"week_start": next_week.to_string(), "template_id": template_id, "audit": report}))?;
+            let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
+            let payload = json!({"week_start": next_week.to_string(), "template_id": template_id, "audit": report, "recent_sessions": recent});
+            let mut event = emit(db, "planning.weekly_briefing", now, payload)?;
             event.correlation_id = Some(key);
             event.update(db)?;
             event
         }
     };
     Ok(json!({"week_start": next_week.to_string(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week)?, "event_id": event.id}))
+}
+
+/// Weeks of sessions the Sunday review looks back on.
+const REVIEW_WEEKS: i64 = 4;
+
+/// Sessions from `from` until `until` for the agent's weekly review, one line each in local time:
+/// "Thu Oct 22 12:45 legs MISSED (owner's pick)". Cancelled slots were moved or dropped, so they're left out.
+fn recent_sessions(db: &Connection, from: Date, until: Date, tz: &TimeZone) -> Result<Vec<String>> {
+    let sessions = PlannedSession::select(db, "WHERE status != 'CANCELLED' ORDER BY planned_start_at", [])?;
+    Ok(sessions
+        .into_iter()
+        .filter(|s| (from..until).contains(&s.planned_start_at.local(tz).date()))
+        .map(|s| {
+            let pick = if s.user_locked { " (owner's pick)" } else { "" };
+            let workout = s.workout_template_id.as_deref().unwrap_or("workout");
+            format!("{} {workout} {}{pick}", s.planned_start_at.local(tz).strftime("%a %b %-d %H:%M"), s.status.as_str())
+        })
+        .collect())
 }
 
 const CROWD_EMOJI: [(&str, &str); 4] = [("Empty", "🟢"), ("A few", "🟡"), ("Busy", "🟠"), ("Packed", "🔴")];
@@ -529,6 +549,24 @@ mod tests {
 
     fn split(db: &Connection, templates: &[&str]) {
         db.execute("INSERT INTO onboarding_state (id, interview_json, split_json) VALUES (1, '{}', ?1)", [json!(templates).to_string()]).unwrap();
+    }
+
+    #[test]
+    fn weekly_briefing_carries_recent_sessions_for_the_review() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let mut first = sessions(&db).remove(0);
+        first.status = SessionStatus::Missed;
+        first.update(&db).unwrap();
+        let mut second = sessions(&db).remove(1);
+        second.status = SessionStatus::Cancelled;
+        second.update(&db).unwrap();
+        let next = weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap();
+        let event = AgentEvent::get(&db, next["event_id"].as_str().unwrap()).unwrap().unwrap();
+        let recent: Vec<String> = serde_json::from_value(event.payload_json["recent_sessions"].clone()).unwrap();
+        // Last week's two remaining slots; the cancelled one and next week's plan are left out.
+        assert_eq!(recent.len(), 2, "{recent:?}");
+        assert!(recent[0].starts_with("Mon Oct 12 ") && recent[0].ends_with(" short MISSED"), "{recent:?}");
     }
 
     #[test]

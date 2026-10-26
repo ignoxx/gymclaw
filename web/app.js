@@ -676,6 +676,12 @@ function editable(text, placeholder, save) {
 }
 
 function renderMemory(memory) {
+  // Memory has a character budget per kind; past it the agent condenses before adding.
+  for (const usage of document.querySelectorAll('.usage')) {
+    const { used, limit } = memory.usage[usage.dataset.kind];
+    usage.textContent = `${used}/${limit} chars`;
+    usage.classList.toggle('warn', used >= limit * 0.9);
+  }
   for (const list of document.querySelectorAll('.notes')) {
     // Don't replace a line while it's being typed in; the next refresh catches up.
     if (list.contains(document.activeElement)) continue;
