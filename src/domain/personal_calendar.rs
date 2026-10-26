@@ -185,8 +185,9 @@ mod tests {
         assert!(result["user_message_hint"].as_str().unwrap().starts_with("Personal calendar changed"));
         assert_eq!(result["changes"], json!([]));
         // The conflict wakes the agent once, as a planning warning; the calendar change itself doesn't.
-        let wake: Vec<Value> = crate::domain::events::wake_pending(&db).unwrap().iter().map(|e| e["type"].clone()).collect();
-        assert_eq!(wake, [json!("planning.weekly_briefing"), json!("planning.attention")]);
+        let mut wake: Vec<String> = crate::domain::events::wake_pending(&db).unwrap().iter().map(|e| e["type"].as_str().unwrap().to_string()).collect();
+        wake.sort(); // Same timestamp, so their order follows random ids.
+        assert_eq!(wake, ["planning.attention", "planning.weekly_briefing"]);
         assert_eq!(PlannedSession::get(&db, &id).unwrap().unwrap().planned_start_at, original);
         assert!(busy_intervals(&db, sunday, sunday.mins(8 * 24 * 60)).unwrap().iter().any(|b| b.start == busy_start));
         assert!(!status(&db).unwrap().to_string().contains("secret"));
