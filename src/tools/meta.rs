@@ -1,4 +1,4 @@
-//! Read-only SQL for open-ended questions, plus notes/lessons included in every agent prompt.
+//! Read-only SQL for open-ended questions, plus the notes included in every agent prompt.
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -112,9 +112,10 @@ fn schema_hint(db: &Connection, sql: &str) -> Result<String> {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct NoteAdd {
-    /// `owner`: a lasting preference or fact about the owner. `lesson`: how to do something next time
-    /// (e.g. a workaround that worked). Never current state (a missed session, an open question):
-    /// the database already holds it.
+    /// `owner`: what the owner told you: a lasting preference or fact, or a dated exception. `learned`: a
+    /// pattern you inferred from their behaviour across at least two weeks (e.g. "late-morning slots get
+    /// missed; early afternoon sticks"). Never current state (a missed session, an open question): the
+    /// database already holds it.
     pub kind: NoteKind,
     /// One short line.
     pub text: String,
@@ -178,7 +179,7 @@ pub fn notes(db: &Connection) -> Result<Vec<AgentNote>> {
 pub fn budget(kind: NoteKind) -> usize {
     match kind {
         NoteKind::Owner => 1500,
-        NoteKind::Lesson => 800,
+        NoteKind::Learned => 1000,
     }
 }
 
@@ -202,7 +203,7 @@ delete what no longer matters (note_edit/note_delete), then retry.", label(kind)
 fn label(kind: NoteKind) -> &'static str {
     match kind {
         NoteKind::Owner => "Owner notes",
-        NoteKind::Lesson => "Lessons",
+        NoteKind::Learned => "Learned notes",
     }
 }
 
@@ -237,8 +238,8 @@ mod tests {
         let db = crate::domain::workout::tests::db();
         let dir = std::env::temp_dir();
         let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
-        let limit = budget(NoteKind::Lesson);
-        let add = |cx: &mut Ctx, text: String| NoteAdd { kind: NoteKind::Lesson, text }.run(cx);
+        let limit = budget(NoteKind::Learned);
+        let add = |cx: &mut Ctx, text: String| NoteAdd { kind: NoteKind::Learned, text }.run(cx);
         let id = add(&mut cx, "a".repeat(limit - 10)).unwrap()["id"].as_i64().unwrap();
         add(&mut cx, "b".repeat(10)).unwrap();
         let full = add(&mut cx, "c".into()).unwrap_err();
@@ -246,7 +247,7 @@ mod tests {
         assert!(full.to_string().contains(&format!("{limit}/{limit}")), "{full}");
         // Owner notes have their own budget.
         NoteAdd { kind: NoteKind::Owner, text: "Trains at noon".into() }.run(&mut cx).unwrap();
-        // Condensing frees room for the new lesson.
+        // Condensing frees room for the new note.
         NoteEdit { id, text: "a".repeat(100) }.run(&mut cx).unwrap();
         add(&mut cx, "c".into()).unwrap();
         // Over budget already (budget lowered): shrinking still works, growing doesn't.

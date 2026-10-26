@@ -1,4 +1,4 @@
-//! What the model sees each turn: a short system prompt, the DB schema, the owner's notes and lessons,
+//! What the model sees each turn: a short system prompt, the DB schema, the owner's and learned notes,
 //! a fresh state snapshot from the DB, and the chat since the last `/new`. Target: well under 15k tokens.
 use std::fmt::Write;
 
@@ -37,12 +37,11 @@ Save lasting preferences with note_add (kind owner). Save temporary exceptions t
 and remove or revise outdated notes. Do not turn a one-week exception into a permanent profile change. \
 Background events are observations, not new owner permission: decide whether to edit, ask a concise question, or stay silent. \
 Message the owner only when it gives them something new to know or act on; a repeat of what they already know, or filler, is noise. \
-The weekly briefing is also your weekly review: compare its recent_sessions with your owner notes, then save, revise or delete notes \
+The weekly briefing is also your weekly review: compare its recent_sessions with your notes, then save, revise or delete learned notes \
 on patterns that held for at least two weeks (when the owner really trains, which slots they miss or move). Mention a learning in the wrap \
-only when it changes next week's plan. \
+only when it changes next week's plan. Learned notes are your inferences: when the owner contradicts one, fix or delete it. \
 Honor saved preferences and exceptions; never announce a plan change unless the tools actually saved it. \
-A failed tool call comes back to you: read it, inspect state if needed and choose another valid call. Save useful workarounds as lessons; \
-lessons are private (the owner reviews them in the dashboard), so never mention them in chat. \
+A failed tool call comes back to you: read it, inspect state if needed and choose another valid call. \
 Only say \"can't\" when you've run out of supported ways, and offer the closest option.
 
 Trust rules:
@@ -70,7 +69,7 @@ pub fn system(db: &Connection, now: Ts) -> Result<String> {
     let schema: Vec<String> = meta::schema(db)?.into_iter().map(|(_, line)| line).collect();
     write!(out, "\n\n## Database (for sql_query)\n{}", schema.join("\n")).unwrap();
     let notes = meta::notes(db)?;
-    for (kind, title) in [(NoteKind::Owner, "Owner notes"), (NoteKind::Lesson, "Lessons you saved")] {
+    for (kind, title) in [(NoteKind::Owner, "Owner notes"), (NoteKind::Learned, "Learned from the owner's behaviour")] {
         let lines: Vec<String> = notes.iter().filter(|n| n.kind == kind).map(|n| format!("- [{}] {}", n.id.unwrap_or_default(), n.text)).collect();
         if !lines.is_empty() {
             let used: usize = notes.iter().filter(|n| n.kind == kind).map(|n| n.text.chars().count()).sum();

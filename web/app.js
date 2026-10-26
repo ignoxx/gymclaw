@@ -649,7 +649,7 @@ function renderHistory(history) {
 
 /* ---------- Memory ---------- */
 
-const PLACEHOLDER = { owner: 'Add something GymClaw should know', lesson: 'Add a lesson' };
+const PLACEHOLDER = { owner: 'Add something GymClaw should know', learned: 'Add a pattern' };
 
 async function noteCall(tool, args) {
   const response = await fetch(`/api/${tool}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
