@@ -420,13 +420,13 @@ impl Bot {
             match self.tg.react(self.owner, message, Some(emoji)).await {
                 Ok(()) => reacted = Some(message),
                 // Not every emoji is an allowed reaction: say it instead.
-                Err(_) if reply.text.is_none() => self.send_reply(outcome, emoji, &[]).await,
+                Err(_) if reply.message.is_none() => self.send_reply(outcome, emoji, &[]).await,
                 Err(_) => {}
             }
         }
-        if let Some(text) = &reply.text {
-            let buttons: Vec<(String, String)> = reply.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
-            self.send_reply(outcome, text, &buttons).await;
+        if let Some(message) = &reply.message {
+            let buttons: Vec<(String, String)> = message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
+            self.send_reply(outcome, &message.text, &buttons).await;
         }
         for b in batch.iter().filter(|b| b.message_id != 0 && Some(b.message_id) != reacted) {
             let _ = self.tg.react(self.owner, b.message_id, None).await;
