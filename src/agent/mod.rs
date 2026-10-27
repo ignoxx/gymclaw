@@ -74,16 +74,31 @@ pub struct ReplyButton {
     pub value: String,
 }
 
-/// The `reply` tool: how a turn ends.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema)]
-pub struct Reply {
-    /// The message (Markdown: **bold**, `code`). Omit to send no text.
-    pub text: Option<String>,
-    /// Choices as buttons, one row each (at most 8).
+/// A message to the owner. Buttons hang under its text, so there are no buttons without text.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
+pub struct Message {
+    /// What the owner reads (Markdown: **bold**, `code`). Introduces the buttons when there are any.
+    pub text: String,
+    /// Choices as buttons under the text, one row each (at most 8).
     #[serde(default)]
     pub buttons: Vec<ReplyButton>,
-    /// One emoji reaction on the owner's message instead of (or with) text, e.g. 👍 or 👌.
+}
+
+/// The `reply` tool: how a turn ends. Unknown fields are an error, so a misplaced `text` or
+/// `buttons` goes back to the model instead of becoming silence.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Reply {
+    /// The message to send. Omit to send none.
+    pub message: Option<Message>,
+    /// One emoji reaction on the owner's message instead of (or with) a message, e.g. 👍 or 👌.
     pub react: Option<String>,
+}
+
+impl Reply {
+    fn text(text: String) -> Self {
+        Reply { message: Some(Message { text, buttons: vec![] }), react: None }
+    }
 }
 
 /// How a turn ended. A failure is a reply with the sanitized line.
@@ -166,13 +181,13 @@ static NOTHING_TO_SAY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\(?([^()]*\s[—–-]\s*)?(heartbeat_ok|no (reply|response|message|action) (is )?(needed|required|necessary)|nothing (to (report|say|do|add)|(needs|requires) (saying|attention|action)))[.!]?\)?$").unwrap()
 });
 
-/// "NO_REPLY" and text without a word in it ("", "...", "…") mean silence. On a background turn so does a
-/// note to itself ("No reply needed."); to the owner the same words can be a real answer.
-fn as_reply(text: Option<&str>, background: bool) -> Reply {
-    let text = text.map(|t| ECHOED_PREFIX.replace(t.trim(), "").trim().to_string());
-    let wordless = |t: &str| t.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '…');
-    let text = text.filter(|t| !wordless(t) && t != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(t)));
-    Reply { text, ..Reply::default() }
+/// The text worth sending, if any: "NO_REPLY" and text without a word in it ("", "...", "…") mean
+/// silence. On a background turn so does a note to itself ("No reply needed."); to the owner the same
+/// words can be a real answer.
+fn clean_text(text: &str, background: bool) -> Option<String> {
+    let text = ECHOED_PREFIX.replace(text.trim(), "").trim().to_string();
+    let wordless = text.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '…');
+    (!wordless && text != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(&text))).then_some(text)
 }
 
 impl Agent {
@@ -219,18 +234,18 @@ impl Agent {
             Ok(Ok(reply)) => (reply, false, None),
             Ok(Err(e)) => {
                 state.error = format!("{}: {e}", e.code());
-                (Reply { text: Some(format_failure(&state)), ..Reply::default() }, true, Some(state.error.clone()))
+                (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
             Err(_) => {
                 state.error = "turn deadline exceeded".into();
-                (Reply { text: Some(format_failure(&state)), ..Reply::default() }, true, Some(state.error.clone()))
+                (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
         };
-        let text = reply.text.clone().unwrap_or_default();
+        let text = reply.message.as_ref().map(|m| m.text.as_str()).unwrap_or_default();
         self.log.log(json!({
             "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": "user", "ok": !failed,
             "error": error.map(|e| scrub(&e, 500)), "diagnosis": failed.then(|| diagnose(&state)), "ms": started.elapsed().as_millis() as u64, "calls": calls_log,
-            "noReply": (reply.text.is_none() && reply.react.is_none()).then_some(true), "reply": scrub(&text, 4000),
+            "noReply": (reply.message.is_none() && reply.react.is_none()).then_some(true), "reply": scrub(text, 4000),
         }));
         Outcome { reply, failed, run_id }
     }
@@ -302,7 +317,7 @@ impl Agent {
                 if force_text && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("STUCK", "step limit reached without an answer");
                 }
-                return Ok(as_reply(content, input.background));
+                return Ok(content.and_then(|c| clean_text(c, input.background)).map_or_else(Reply::default, Reply::text));
             }
             // Text next to tool calls is narration ("Moving it now…"): it never reaches the owner.
             messages.push(json!({"role": "assistant", "content": content, "tool_calls": tool_calls}));
@@ -317,7 +332,7 @@ impl Agent {
                     (_, Err(e)) => (tools::guide(&name, Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}"))).to_json(), false),
                     (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
                         // The call it meant didn't run; the owner must not get its markup or a silent reply.
-                        Ok(reply) if reply.text.as_deref().and_then(written_tool_call).is_some() => {
+                        Ok(reply) if reply.message.as_ref().and_then(|m| written_tool_call(&m.text)).is_some() => {
                             // Counts as a step, so a model that keeps doing it is forced to answer in text.
                             steps += 1;
                             (Error::domain("WRITTEN_TOOL_CALL", "The reply text contains a tool call written as text; it did not run. Make it as a function call, then reply.").to_json(), false)
@@ -360,8 +375,12 @@ impl Agent {
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": cut(result.to_string())}));
             }
             if let Some(mut reply) = finished {
-                reply.text = as_reply(reply.text.as_deref(), input.background).text;
-                reply.buttons.truncate(8);
+                // Silence wins over buttons: "NO_REPLY" with buttons sends nothing.
+                reply.message = reply.message.and_then(|mut m| {
+                    m.text = clean_text(&m.text, input.background)?;
+                    m.buttons.truncate(8);
+                    Some(m)
+                });
                 return Ok(reply);
             }
         }
@@ -435,12 +454,13 @@ mod tests {
 
     #[tokio::test]
     async fn tool_then_one_reply_with_buttons_and_narration_dropped() {
-        let reply = call("reply", json!({"text": "Noted.", "buttons": [{"label": "Undo", "value": "Forget the lunges note"}]}));
+        let reply = call("reply", json!({"message": {"text": "Noted.", "buttons": [{"label": "Undo", "value": "Forget the lunges note"}]}}));
         let (agent, script, dir) = scripted(vec![call("note_add", json!({"kind": "owner", "text": "Hates lunges"})), reply]);
         let outcome = agent.turn(input()).await;
         assert!(!outcome.failed);
-        assert_eq!(outcome.reply.text.as_deref(), Some("Noted."));
-        assert_eq!(outcome.reply.buttons[0].value, "Forget the lunges note");
+        let message = outcome.reply.message.unwrap();
+        assert_eq!(message.text, "Noted.");
+        assert_eq!(message.buttons[0].value, "Forget the lunges note");
         let db = crate::db::open(&dir.join("gymclaw.db")).unwrap();
         assert_eq!(AgentNote::select(&db, "", []).unwrap()[0].text, "Hates lunges");
         // The note is in the next turn's prompt.
@@ -451,14 +471,14 @@ mod tests {
     #[tokio::test]
     async fn plain_text_is_the_reply_and_no_reply_is_silence() {
         let (agent, _, _) = scripted(vec![json!({"content": "  **Mon** Pull  "})]);
-        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("**Mon** Pull"));
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("**Mon** Pull"));
         for silence in ["NO_REPLY", "...", "…"] {
             let (agent, _, _) = scripted(vec![json!({"content": silence})]);
             assert_eq!(agent.turn(input()).await.reply, Reply::default(), "{silence}");
         }
         // An echoed history prefix is never part of the message.
         let (agent, _, _) = scripted(vec![json!({"content": "[Tue 14:22, sent automatically] Pull moved to **13:30**."})]);
-        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Pull moved to **13:30**."));
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Pull moved to **13:30**."));
         // After background events, notes to itself are silence; to the owner the same words can be answers.
         let notes = ["[Tue 14:22, sent automatically] (background events handled — nothing to report)", "No reply needed.", "Nothing to report", "nothing needs attention."];
         for note in notes {
@@ -467,11 +487,11 @@ mod tests {
         }
         for answer in ["No action needed.", "(Pull moved to 13:30)"] {
             let (agent, _, _) = scripted(vec![json!({"content": answer})]);
-            assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some(answer));
+            assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some(answer));
         }
         for message in ["Nothing to report on the crowd yet: no data for Fridays.", "(Pull moved to 13:30)", "Wed clash — move Pull?"] {
             let (agent, _, _) = scripted(vec![json!({"content": message})]);
-            assert_eq!(agent.turn(background()).await.reply.text.as_deref(), Some(message));
+            assert_eq!(agent.turn(background()).await.reply.message.map(|m| m.text).as_deref(), Some(message));
         }
         let (agent, _, _) = scripted(vec![call("reply", json!({"react": "👍"}))]);
         assert_eq!(agent.turn(input()).await.reply.react.as_deref(), Some("👍"));
@@ -481,7 +501,7 @@ mod tests {
     async fn tool_errors_go_back_to_the_model() {
         let (agent, script, _) = scripted(vec![call("sql_query", json!({"sql": "DELETE FROM agent_note"})), json!({"content": "Done."})]);
         let outcome = agent.turn(input()).await;
-        assert_eq!(outcome.reply.text.as_deref(), Some("Done."));
+        assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Done."));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
     }
 
@@ -491,7 +511,7 @@ mod tests {
         let (agent, script, _) = scripted(vec![same(), same(), same(), json!({"content": "Couldn't do that."})]);
         let outcome = agent.turn(input()).await;
         assert!(!outcome.failed);
-        assert_eq!(outcome.reply.text.as_deref(), Some("Couldn't do that."));
+        assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Couldn't do that."));
         assert_eq!(script.seen.lock().unwrap().len(), 4);
     }
 
@@ -501,7 +521,7 @@ mod tests {
     async fn wrong_arguments_come_back_with_usage_even_when_repeated() {
         let wrong = || call("session_create", json!({"fields": {"end": "2099-10-25T10:00"}}));
         let (agent, script, _) = scripted(vec![wrong(), wrong(), json!({"content": "Which workout?"})]);
-        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Which workout?"));
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Which workout?"));
         let last = script.last.lock().unwrap();
         let errors: Vec<&str> = last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
         assert!(errors[0].contains("start (string, required)"), "{}", errors[0]);
@@ -512,7 +532,7 @@ mod tests {
     async fn a_write_lets_earlier_calls_run_again() {
         let check = || call("sql_query", json!({"sql": "SELECT count(*) AS n FROM agent_note"}));
         let (agent, script, _) = scripted(vec![check(), call("note_add", json!({"kind": "owner", "text": "Hates lunges"})), check(), json!({"content": "Saved."})]);
-        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Saved."));
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Saved."));
         let last = script.last.lock().unwrap();
         let rerun = last.last().unwrap()["content"].as_str().unwrap();
         assert!(rerun.contains("[[1]]"), "{rerun}");
@@ -527,20 +547,20 @@ mod tests {
         assert_eq!(seen.len(), STEP_CAP + 1);
         assert!(seen.last().unwrap().1, "the last call forbids tools");
         // The script's 13th message still has tool calls; with tools forbidden its text is the answer.
-        assert_eq!(outcome.reply.text.as_deref(), Some("Working on it…"));
+        assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Working on it…"));
     }
 
     #[tokio::test]
     async fn tool_call_written_as_text_never_reaches_the_owner() {
         let written = || json!({"content": "<tool_call>workout<arg_key>action</arg_key><arg_value>start</arg_value></tool_call>"});
         let (agent, script, _) = scripted(vec![written(), json!({"content": "Started."})]);
-        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Started."));
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Started."));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
         // Forced to answer, it can't retry: an honest failure beats leaking the markup.
         let calls: Vec<Value> = (0..STEP_CAP).map(|i| call("sql_query", json!({"sql": format!("SELECT {i}")}))).chain([written()]).collect();
         let (agent, _, _) = scripted(calls);
         let outcome = agent.turn(input()).await;
-        assert!(outcome.failed && !outcome.reply.text.unwrap().contains("<tool_call>"));
+        assert!(outcome.failed && !outcome.reply.message.unwrap().text.contains("<tool_call>"));
     }
 
     #[test]
@@ -554,10 +574,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buttons_outside_a_message_go_back_to_the_model() {
+        let buttons = json!([{"label": "10:30", "value": "Move Sunday Pull to 10:30"}]);
+        let (agent, script, _) = scripted(vec![call("reply", json!({"buttons": buttons})), call("reply", json!({"message": {"text": "Pick one:", "buttons": buttons}}))]);
+        let message = agent.turn(input()).await.reply.message.unwrap();
+        assert_eq!((message.text.as_str(), message.buttons.len()), ("Pick one:", 1));
+        assert_eq!(script.seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn reply_tool_with_a_written_call_goes_back_to_the_model() {
-        let written = || call("reply", json!({"text": "<tool_call>workout</tool_call>"}));
+        let written = || call("reply", json!({"message": {"text": "<tool_call>workout</tool_call>"}}));
         let (agent, script, _) = scripted(vec![written(), json!({"content": "Started."})]);
-        assert_eq!(agent.turn(input()).await.reply.text.as_deref(), Some("Started."));
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Started."));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
         // Doing it over and over still ends at the step cap with a forced text answer.
         let (agent, script, _) = scripted((0..20).map(|_| written()).collect());
