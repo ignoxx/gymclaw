@@ -24,6 +24,9 @@ const RATINGS: [(&str, f64); 4] = [("EMPTY", 0.0), ("FINE", 1.0 / 3.0), ("BUSY",
 const MAX_PAIR_AGE: SignedDuration = SignedDuration::from_mins(30);
 const HISTORY: SignedDuration = SignedDuration::from_hours(24 * 90);
 const STALE_AFTER: SignedDuration = SignedDuration::from_mins(45);
+/// The owner hears about an outage only after this long without a reading (~4 missed 15-min polls),
+/// so a slow poll or two that recover on their own stay quiet.
+const ALERT_AFTER: SignedDuration = SignedDuration::from_mins(60);
 const SOURCE: &str = "GYM_API";
 
 fn rating_score(rating: &str) -> Option<f64> {
@@ -280,6 +283,8 @@ pub fn poll(db: &Connection, provider: &dyn CrowdProvider, now: Option<Ts>) -> R
             state.last_error_code = Some(error.code().to_string());
             state.consecutive_failures += 1;
             state.update(db)?;
+            // Messages never carry config or response bodies, so they're safe to log.
+            tracing::warn!("crowd poll failed ({} in a row): {} {error}", state.consecutive_failures, error.code());
             let event = emit(db, "crowd.source_unavailable", now, json!({"source": provider.source(), "code": error.code()}))?;
             return Ok(json!({"data": {"available": false, "source": provider.source(), "error_code": error.code(), "count_stored": false},
                 "events": [{"id": event.id, "type": event.r#type}], "user_message_hint": null}));
@@ -427,14 +432,18 @@ pub fn polling_health(db: &Connection, now: Ts) -> Result<Value> {
         "error": if status == "failing" { json!(state.last_error_code) } else { Value::Null }}))
 }
 
-/// One owner message when check-ins stop arriving, one when they're back. Never repeats. → (event id, message).
+/// One owner message when check-ins stop arriving for `ALERT_AFTER`, one when they're back. Never
+/// repeats. → (event id, message).
 pub fn polling_alert(db: &Connection, now: Ts) -> Result<Option<(String, String)>> {
     let health = polling_health(db, now)?;
     let stale = outage_open(db, "crowd.polling_stale", "crowd.polling_recovered")?;
     let status = health["status"].as_str().unwrap_or("unknown");
-    if matches!(status, "stale" | "failing") && !stale {
-        let tz = get_profile(db)?.tz();
-        let since = Ts::parse(health["last_success_at"].as_str().unwrap_or_default(), None)?.local(&tz);
+    let last_success = health["last_success_at"].as_str().map(|t| Ts::parse(t, None)).transpose()?;
+    if let Some(last) = last_success.filter(|&last| now - last > ALERT_AFTER)
+        && matches!(status, "stale" | "failing")
+        && !stale
+    {
+        let since = last.local(&get_profile(db)?.tz());
         let event = emit(db, "crowd.polling_stale", now, health.clone())?;
         let reason = health["error"].as_str().map(|e| format!(" (gym API: {e})")).unwrap_or_default();
         return Ok(Some((event.id, format!("⚠️ No gym check-in data since {}{reason}. Crowd forecasts are going stale.", since.strftime("%a %H:%M")))));
@@ -653,10 +662,12 @@ mod tests {
         poll(&db, &provider(7), Some(now(0))).unwrap();
         assert_eq!(polling_health(&db, now(30)).unwrap()["status"], "ok");
         assert_eq!(polling_alert(&db, now(30)).unwrap(), None);
-        let (event_id, message) = polling_alert(&db, now(60)).unwrap().unwrap();
+        assert_eq!(polling_health(&db, now(50)).unwrap()["status"], "stale");
+        assert_eq!(polling_alert(&db, now(50)).unwrap(), None); // Stale, but not long enough to message.
+        let (event_id, message) = polling_alert(&db, now(61)).unwrap().unwrap();
         assert!(message.starts_with("⚠️ No gym check-in data since"), "{message}");
         let mut event = AgentEvent::get(&db, &event_id).unwrap().unwrap();
-        event.handled_at = Some(now(60)); // Delivered.
+        event.handled_at = Some(now(61)); // Delivered.
         event.update(&db).unwrap();
         assert_eq!(polling_alert(&db, now(120)).unwrap(), None); // No repeats.
         poll(&db, &provider(9), Some(now(180))).unwrap();

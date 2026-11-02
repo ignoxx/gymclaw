@@ -81,6 +81,14 @@ fn invalid_response(message: &str) -> Error {
     Error::domain("GYM_API_INVALID_RESPONSE", message.to_string())
 }
 
+/// The request never got a response (timeout, DNS, TLS, connection). Transient, so not INVALID_RESPONSE.
+fn unreachable() -> Error {
+    Error::domain("GYM_API_UNAVAILABLE", "Crowd source request failed or timed out; no new count stored")
+}
+
+/// Seconds an HTTP crowd source may take. MySports sometimes stalls past 10 s and then recovers.
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+
 /// Observed public MySports route, not a documented freshness/occupancy guarantee. Only
 /// active-checkin is collected; dated /today percentages and weekly profiles are not headcounts.
 pub struct MySportsProvider<'a> {
@@ -119,11 +127,11 @@ impl CrowdProvider for MySportsProvider<'_> {
 
     fn get_reading(&self) -> Result<CrowdReading> {
         let invalid = || invalid_response("MySports count unavailable or invalid; response/credentials withheld");
-        let mut request = Request::new(Method::Get, &self.url, 10)
+        let mut request = Request::new(Method::Get, &self.url, REQUEST_TIMEOUT_SECS)
             .header("x-tenant", &self.tenant)
             .header("Accept", "application/json");
         request.follow_redirects = false;
-        let response = self.transport.send(&request).map_err(|_| invalid())?;
+        let response = self.transport.send(&request).map_err(|_| unreachable())?;
         if response.status != 200 {
             bail!(
                 "GYM_API_UNAVAILABLE",
@@ -260,10 +268,10 @@ impl CrowdProvider for HttpCountProvider<'_> {
 
     fn get_reading(&self) -> Result<CrowdReading> {
         let invalid = || invalid_response("Crowd count unavailable or invalid; response withheld");
-        let mut request = Request::new(Method::Get, &self.config.url, 10);
+        let mut request = Request::new(Method::Get, &self.config.url, REQUEST_TIMEOUT_SECS);
         request.headers = self.config.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         request.follow_redirects = false;
-        let response = self.transport.send(&request).map_err(|_| invalid())?;
+        let response = self.transport.send(&request).map_err(|_| unreachable())?;
         if response.status != 200 {
             bail!(
                 "GYM_API_UNAVAILABLE",
@@ -453,6 +461,10 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code(), "GYM_API_INVALID_RESPONSE");
         }
+        // No response at all (timeout, DNS, TLS) is an outage, not a malformed body.
+        let transport = |_: &Request| -> Result<Response> { Err(Error::domain("HTTP", "timed out")) };
+        let error = MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap().get_reading().unwrap_err();
+        assert_eq!(error.code(), "GYM_API_UNAVAILABLE");
     }
 
     #[test]
