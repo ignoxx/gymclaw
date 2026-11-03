@@ -60,11 +60,38 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 
 /// Only decisions wake the model. Delivery/permission issues stay in the inbox until explicitly
 /// resolved; acknowledging a model wake must not imply the owner granted authority.
+pub const WAKE: [&str; 6] = [
+    "planning.attention", "planning.replan_required", "planning.no_show", "workout.missed",
+    "planning.weekly_briefing", "workout.stale",
+];
+
 pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
-    Ok(pending(db, false)?.into_iter().filter(|e| matches!(e["type"].as_str(), Some(
-        "planning.attention" | "planning.replan_required" | "planning.no_show" | "workout.missed" |
-        "planning.weekly_briefing" | "workout.stale"
-    ))).take(20).collect())
+    Ok(pending(db, false)?.into_iter().filter(|e| e["type"].as_str().is_some_and(|t| WAKE.contains(&t))).take(20).collect())
+}
+
+/// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context.
+pub fn open_issues(db: &Connection) -> Result<Vec<AgentEvent>> {
+    let marks = ACTIONABLE.map(|t| format!("'{t}'")).join(", ");
+    AgentEvent::select(db, &format!("WHERE handled_at IS NULL AND type IN ({marks}) ORDER BY created_at DESC, rowid DESC LIMIT 5"), [])
+}
+
+/// Position in the event log; pass it to `claim_since` after a tool call.
+pub fn mark(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT coalesce(max(rowid), 0) FROM agent_event", [], |r| r.get(0))?)
+}
+
+/// Wake events written after `mark`, handled now and returned. Inside a tool call's (immediate)
+/// transaction these are that call's own consequences: the agent reads them in the tool result, so
+/// they must not wake a second turn that repeats the question.
+pub fn claim_since(db: &Connection, mark: i64, now: Ts) -> Result<Vec<Value>> {
+    let types = WAKE.map(|t| format!("'{t}'")).join(", ");
+    let mut claimed = vec![];
+    for mut event in AgentEvent::select(db, &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN ({types}) ORDER BY rowid"), [mark])? {
+        event.handled_at = Some(now);
+        event.update(db)?;
+        claimed.push(json!({"type": event.r#type, "payload": event.payload_json}));
+    }
+    Ok(claimed)
 }
 
 /// Freeze a decision batch before calling the model. A retry reuses this batch and its tool request

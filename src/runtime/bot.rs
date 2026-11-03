@@ -15,7 +15,7 @@ use super::{blocking, in_tx};
 use crate::agent::turnlog::{TurnLog, scrub};
 use crate::agent::{Agent, Outcome, TurnInput, media};
 use crate::db::Json;
-use crate::db::models::{AgentButton, ChatMessage, ChatRole, NotificationJob};
+use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
 use crate::domain::view::Button;
 use crate::error::Result;
@@ -362,14 +362,28 @@ impl Bot {
 
     /// Background decisions use the same serialized worker as owner chat. Events survive restarts;
     /// failures remain pending for the next tick, successes acknowledge exactly the supplied events.
+    ///
+    /// One voice: while the owner is mid-conversation no background turn runs. Pending events show in
+    /// the next owner turn's context as open issues and that turn settles them (see `turn`); only
+    /// what is still unhandled once the chat goes quiet wakes the agent here.
     async fn event_turn(&self) -> Result<()> {
         let batch = in_tx(self.db(), |db| {
-            if !super::outbox::runtime_authority(db)?.enabled { return Ok(None); }
+            if !super::outbox::runtime_authority(db)?.enabled || owner_active(db, Ts::now())? { return Ok(None); }
             crate::domain::events::wake_batch(db, Ts::now())
         }).await?;
         let Some(batch) = batch else { return Ok(()); };
-        let tz = blocking(self.db(), |db| Ok(crate::domain::profile::get_profile(db)?.tz())).await?;
+        // A frozen batch may outlive its events: an owner turn settled them meanwhile.
+        let (tz, handled) = blocking(self.db(), |db| {
+            let handled: Vec<String> = AgentEvent::select(db, "WHERE handled_at IS NOT NULL", [])?.into_iter().map(|e| e.id).collect();
+            Ok((crate::domain::profile::get_profile(db)?.tz(), handled))
+        }).await?;
         let mut events = batch.payload_json["events"].clone();
+        if let Some(list) = events.as_array_mut() {
+            list.retain(|e| e["id"].as_str().is_none_or(|id| !handled.iter().any(|h| h == id)));
+        }
+        if events.as_array().is_none_or(Vec::is_empty) {
+            return in_tx(self.db(), move |db| crate::domain::events::ack(db, &batch.id, Ts::now()).map(drop)).await;
+        }
         crate::time::localize(&mut events, &tz);
         let ids: Vec<String> = events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
         let key = format!("event-{}", batch.id);
@@ -402,8 +416,23 @@ impl Bot {
         let last = batch.last().expect("non-empty batch").clone();
         let images = batch.iter().flat_map(|b| b.images.clone()).collect();
         let background = batch.iter().all(|b| b.message_id == 0);
+        // The open issues this owner turn sees in its context; it settles them, so they never wake a
+        // second turn that asks the owner the same thing again.
+        let shown: Vec<String> = if background { vec![] } else {
+            blocking(self.db(), |db| crate::domain::events::open_issues(db)).await.unwrap_or_default()
+                .into_iter().filter(|e| crate::domain::events::WAKE.contains(&e.r#type.as_str())).map(|e| e.id).collect()
+        };
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
         typing.abort();
+        if !outcome.failed && !shown.is_empty() {
+            let settled = in_tx(self.db(), move |db| {
+                for id in shown { crate::domain::events::ack(db, &id, Ts::now())?; }
+                Ok(())
+            }).await;
+            if let Err(e) = settled {
+                tracing::warn!("open issues not settled: {e}");
+            }
+        }
         if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
             self.answer(&outcome, &batch).await;
         }
@@ -462,6 +491,15 @@ impl Bot {
     }
 }
 
+/// How long after the owner's last message the chat counts as a live conversation.
+const QUIET: jiff::SignedDuration = jiff::SignedDuration::from_mins(5);
+
+/// Whether the owner wrote within `QUIET`: background events then wait for their next turn.
+fn owner_active(db: &crate::db::Connection, now: Ts) -> Result<bool> {
+    let last = ChatMessage::first(db, "WHERE role = 'owner' ORDER BY id DESC", [])?;
+    Ok(last.is_some_and(|m| now.0.duration_since(m.at.0) < QUIET))
+}
+
 /// `/status`: runtime health in a few lines, no model.
 fn status_text(db: &crate::db::Connection, health: &super::Health, model: &str) -> Result<String> {
     let authority = super::outbox::runtime_authority(db)?;
@@ -508,31 +546,41 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn event_wake_obeys_authority_retries_failure_and_acknowledges_success() {
+    /// A bot over a fresh DB with one template (`fixture`); runtime authority still off.
+    fn fixture(model: Arc<dyn crate::agent::ChatModel>) -> (Bot, crate::db::Connection, std::path::PathBuf, Arc<crate::telegram::coach::tests::FakeTelegram>) {
         let dir = std::env::temp_dir().join(format!("gymclaw-events-{}", crate::db::new_id()));
         let db_path = dir.join("test.db");
         let mut db = crate::db::open(&db_path).unwrap();
         crate::db::migrate(&mut db).unwrap();
         let template = serde_json::from_value(json!({"id": "fixture", "name": "Fixture", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "target_weight": 0}]})).unwrap();
         crate::domain::templates::import_template(&db, &template).unwrap();
-        // Batch identity stays short enough for mutation request IDs regardless of batch size.
-        for n in 0..6 {
-            crate::domain::events::request(&db, "planning.attention", json!({"warnings": [format!("calendar clash {n}")]}), Ts::now()).unwrap();
-        }
         let tg = crate::telegram::coach::tests::FakeTelegram::new();
-        let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
         let coach = Coach::new(tg.clone(), 42, Arc::new(Ts::now), None, None);
         let (fast, _) = mpsc::unbounded_channel();
         let bot = Bot {
             owner: 42, tg: tg.clone(), coach, log: TurnLog::default(), wake: Arc::new(Notify::new()),
             status: Arc::new(Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
             inbox: Mutex::new(vec![]), inbox_ready: Notify::new(), fast,
-            agent: Agent { db_path, data_dir: dir.clone(), model: model.clone(), chat_model: "fixture".into(), vision_model: "fixture".into(), coach: None, log: TurnLog::default(), clock: Arc::new(Ts::now) },
+            agent: Agent { db_path, data_dir: dir.clone(), model, chat_model: "fixture".into(), vision_model: "fixture".into(), coach: None, log: TurnLog::default(), clock: Arc::new(Ts::now) },
         };
+        (bot, db, dir, tg)
+    }
+
+    fn enable_runtime(db: &crate::db::Connection) {
+        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, enabled, calendar_writes_enabled, crowd_polling_enabled) VALUES (1, 'gymclaw', '42', '', '', 1, 0, 0)", []).unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_wake_obeys_authority_retries_failure_and_acknowledges_success() {
+        let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, tg) = fixture(model.clone());
+        // Batch identity stays short enough for mutation request IDs regardless of batch size.
+        for n in 0..6 {
+            crate::domain::events::request(&db, "planning.attention", json!({"warnings": [format!("calendar clash {n}")]}), Ts::now()).unwrap();
+        }
         bot.event_turn().await.unwrap();
         assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
-        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, enabled, calendar_writes_enabled, crowd_polling_enabled) VALUES (1, 'gymclaw', '42', '', '', 1, 0, 0)", []).unwrap();
+        enable_runtime(&db);
         bot.event_turn().await.unwrap();
         assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 6);
         assert!(!tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))));
@@ -555,6 +603,48 @@ mod tests {
         let fallback = ChatMessage::select(&db, "WHERE meta_json ->> 'kind' = 'coach_fallback' ORDER BY id", []).unwrap();
         assert_eq!(fallback.len(), 2);
         assert!(fallback[0].text.contains("Bench card"));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Answers every call with plain text and counts the calls.
+    struct Chatty(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl crate::agent::ChatModel for Chatty {
+        async fn complete(&self, _: &str, _: &[Value], _: &[Value], _: bool) -> Result<crate::agent::ModelReply> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::agent::ModelReply { message: json!({"content": "Which one drops?"}), ..Default::default() })
+        }
+    }
+
+    /// One voice: mid-conversation, a background event waits for the owner's next turn, which sees
+    /// it as an open issue and settles it; nothing asks the owner a second time.
+    #[tokio::test]
+    async fn owner_turn_settles_open_issues_and_background_waits_for_quiet() {
+        let model = Arc::new(Chatty(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, _tg) = fixture(model.clone());
+        enable_runtime(&db);
+        let calls = || model.0.load(std::sync::atomic::Ordering::SeqCst);
+        let attention = |text: &str| crate::domain::events::request(&db, "planning.attention", json!({"warnings": [text]}), Ts::now()).unwrap();
+
+        // The owner just wrote: the event waits.
+        bot.to_agent(7, "tg-7".into(), "back to 3 a week".into(), vec![], json!({})).await;
+        attention("Week 2026-11-02: 4 sessions saved, target 3");
+        bot.event_turn().await.unwrap();
+        assert_eq!(calls(), 0);
+
+        // Their turn sees it and settles it; no background turn follows.
+        let batch = std::mem::take(&mut *bot.inbox.lock().await);
+        assert!(bot.turn(batch).await);
+        assert_eq!(calls(), 1);
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+
+        // Once the chat is quiet, a new event wakes the agent as before.
+        db.execute("UPDATE chat_message SET at = '2026-01-01 00:00:00'", []).unwrap();
+        attention("Session x: skips a rest day");
+        bot.event_turn().await.unwrap();
+        assert_eq!(calls(), 2);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

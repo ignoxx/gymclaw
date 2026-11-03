@@ -190,20 +190,38 @@ fn clean_text(text: &str, background: bool) -> Option<String> {
     (!wordless && text != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(&text))).then_some(text)
 }
 
+/// Turn-log label: owner turns and background-event turns read differently in `prod turns`.
+fn trigger(input: &TurnInput) -> &'static str {
+    if input.background { "event" } else { "user" }
+}
+
 impl Agent {
     /// Run one tool call in its own transaction. Returns the JSON the model sees, whether it succeeded
-    /// and whether it changed the database.
+    /// and whether it changed the database. Decision events the call itself raised come back in
+    /// `raised` and are handled: this turn answers them, no background turn repeats them.
     async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool, bool) {
         let now = (self.clock)();
         let data_dir = self.data_dir.clone();
         let name_owned = name.to_string();
         let result = blocking(&self.db_path, move |db| {
-            let tx = db.transaction()?;
+            // Immediate: no other writer can slip an event between `mark` and `claim_since`.
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let mark = crate::domain::events::mark(&tx)?;
             let before = tx.total_changes();
             let mut cx = tools::Ctx { db: &tx, now, request_id, data_dir: &data_dir, effects: vec![] };
-            let value = tools::call(&mut cx, &name_owned, args)?;
+            let mut value = tools::call(&mut cx, &name_owned, args)?;
             let effects = std::mem::take(&mut cx.effects);
             let wrote = tx.total_changes() > before;
+            let raised = crate::domain::events::claim_since(&tx, mark, now)?;
+            if !raised.is_empty() {
+                value = match value {
+                    Value::Object(mut map) => {
+                        map.insert("raised".into(), json!(raised));
+                        Value::Object(map)
+                    }
+                    other => json!({"result": other, "raised": raised}),
+                };
+            }
             tx.commit()?;
             Ok((value, effects, wrote))
         })
@@ -243,7 +261,7 @@ impl Agent {
         };
         let text = reply.message.as_ref().map(|m| m.text.as_str()).unwrap_or_default();
         self.log.log(json!({
-            "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": "user", "ok": !failed,
+            "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": trigger(&input), "ok": !failed,
             "error": error.map(|e| scrub(&e, 500)), "diagnosis": failed.then(|| diagnose(&state)), "ms": started.elapsed().as_millis() as u64, "calls": calls_log,
             "noReply": (reply.message.is_none() && reply.react.is_none()).then_some(true), "reply": scrub(text, 4000),
         }));
@@ -263,7 +281,7 @@ impl Agent {
         let specs = tool_specs();
         let prompt = messages.iter().rev().find(|m| m["role"] == "user").map(|m| media::text_of(&m["content"])).unwrap_or_default();
         self.log.log(json!({
-            "ev": "llm_input", "run": run_id, "session": "telegram:owner", "trigger": "user", "provider": "openrouter", "model": model,
+            "ev": "llm_input", "run": run_id, "session": "telegram:owner", "trigger": trigger(input), "provider": "openrouter", "model": model,
             "history": history_len, "historyChars": history_chars, "systemChars": system.chars().count(), "systemSha": sha(&system),
             "tools": specs.len(), "toolsChars": Value::Array(specs.clone()).to_string().len(), "images": (images > 0).then_some(images),
             "chars": prompt.chars().count(), "prompt": scrub(&prompt, 4000),
@@ -593,5 +611,24 @@ mod tests {
         agent.turn(input()).await;
         let seen = script.seen.lock().unwrap();
         assert!(seen.len() == STEP_CAP + 1 && seen.last().unwrap().1, "{seen:?}");
+    }
+
+    /// A decision event the agent's own call raised is answered in that turn, not by a second turn
+    /// that asks the owner the same question (2026-11-03: "which one drops?" sent twice).
+    #[tokio::test]
+    async fn own_warnings_come_back_in_the_tool_result_and_wake_nothing() {
+        let create = call("session_create", json!({"start": "2026-10-13T12:00", "template_id": "push"}));
+        let bump = call("profile_update", json!({"changes": {"weekly_target_sessions": 4, "weekly_max_sessions": 4}}));
+        let (agent, script, dir) = scripted(vec![create, bump, json!({"content": "Target is 4 now."})]);
+        let db = crate::db::open(&agent.db_path).unwrap();
+        let template = serde_json::from_value(json!({"id": "push", "name": "Push", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "target_weight": 0}]})).unwrap();
+        crate::domain::templates::import_template(&db, &template).unwrap();
+        assert!(!agent.turn(input()).await.failed);
+        let messages = script.last.lock().unwrap().clone();
+        let results: Vec<&str> = messages.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+        assert!(results.iter().any(|r| r.contains("\"raised\"") && r.contains("/4 sessions saved")), "{results:?}");
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

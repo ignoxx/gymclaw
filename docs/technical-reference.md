@@ -208,7 +208,9 @@ updates may refresh description/revision on locked events; never their chosen ti
 
 Upcoming sessions commit within 48 hours; get-ready/leave/start jobs become durable.
 The watcher syncs every 60 seconds and reconciles reminders. Decision events wake the agent;
-quiet ticks do not call the model.
+quiet ticks do not call the model. The owner hears one voice: events a tool call raises come back
+in its result (`raised`) and are handled; while the owner wrote in the last 5 minutes, other events
+wait and show as open issues in their next turn, which settles them.
 
 ### Safety and retries
 
