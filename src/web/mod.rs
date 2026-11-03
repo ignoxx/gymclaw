@@ -19,11 +19,13 @@ use axum::response::Response;
 use crate::error::Result;
 use crate::time::Ts;
 
-const ASSETS: [(&str, &[u8], &str); 6] = [
+const ASSETS: [(&str, &[u8], &str); 7] = [
     ("/", include_bytes!("../../web/index.html"), "text/html"),
     ("/styles.css", include_bytes!("../../web/styles.css"), "text/css"),
     ("/app.js", include_bytes!("../../web/app.js"), "text/javascript"),
     ("/favicon.svg", include_bytes!("../../web/favicon.svg"), "image/svg+xml"),
+    // Home screen icon: iOS ignores SVG icons and falls back to a letter without it.
+    ("/apple-touch-icon.png", include_bytes!("../../web/apple-touch-icon.png"), "image/png"),
     ("/fonts/BarlowCondensed-SemiBold.ttf", include_bytes!("../../web/fonts/BarlowCondensed-SemiBold.ttf"), "font/ttf"),
     ("/fonts/DM-Sans.ttf", include_bytes!("../../web/fonts/DM-Sans.ttf"), "font/ttf"),
 ];
