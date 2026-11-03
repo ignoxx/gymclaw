@@ -235,7 +235,8 @@ pub fn remember_swap(db: &Connection, template_id: &str, original_id: &str, repl
 pub enum ExerciseEdit<'a> {
     /// ExerciseSpec fields to change; a new target_weight also resets the learned next weight.
     Change(&'a Map<String, Value>),
-    /// `exercise` is a catalog guide_id or name; fields override the defaults.
+    /// `exercise` is a catalog guide_id or name; fields override the defaults. A `name` of its own
+    /// adds a variant: another machine for the same movement, with its own weights.
     Add(&'a Map<String, Value>),
     Remove,
 }
@@ -247,8 +248,19 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
     let name = definition["name"].as_str().unwrap_or_default().to_string();
     let rows = definition["exercises"].as_array_mut().expect("exercises array");
     let key = exercise.trim().to_lowercase();
-    let matches = |e: &Value| [&e["id"], &e["name"], &e["guide_id"]].iter().any(|v| v.as_str().is_some_and(|s| s.to_lowercase() == key));
-    let index = rows.iter().position(matches);
+    let is = |v: &Value, key: &str| v.as_str().is_some_and(|s| s.to_lowercase() == key);
+    // ID or name first; a guide_id only when it names exactly one exercise (variants share one).
+    let index = match rows.iter().position(|e| is(&e["id"], &key) || is(&e["name"], &key)) {
+        Some(i) => Some(i),
+        None => {
+            let shared: Vec<usize> = (0..rows.len()).filter(|&i| is(&rows[i]["guide_id"], &key)).collect();
+            if shared.len() > 1 && !matches!(edit, ExerciseEdit::Add(_)) {
+                let names: Vec<&str> = shared.iter().filter_map(|&i| rows[i]["name"].as_str()).collect();
+                crate::bail!("EXERCISE_AMBIGUOUS", "'{exercise}' matches {} in {name}; pass one of those names", names.join(", "));
+            }
+            shared.first().copied()
+        }
+    };
     match edit {
         ExerciseEdit::Add(changes) => {
             let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
@@ -257,11 +269,18 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
                 let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
                 crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{exercise}'. Pass one guide_id: {options}");
             };
-            if let Some(i) = index {
-                crate::bail!("EXERCISE_EXISTS", "{} is already in {name}; edit it instead", rows[i]["name"].as_str().unwrap_or_default());
-            }
             let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
+            // A variant (another machine for the same movement) is named by the owner; it gets its own
+            // ID and so its own weight progression, and shares the catalog illustration.
+            if let Some(variant) = changes.get("name").and_then(Value::as_str).filter(|_| !changes.contains_key("id")) {
+                spec["id"] = serde_json::json!(slug(variant));
+            }
             spec.as_object_mut().unwrap().extend(changes.clone());
+            let (id, new_name) = (spec["id"].as_str().unwrap_or_default().to_lowercase(), spec["name"].as_str().unwrap_or_default().to_lowercase());
+            if let Some(existing) = rows.iter().find(|e| is(&e["id"], &id) || is(&e["name"], &new_name)) {
+                crate::bail!("EXERCISE_EXISTS", "{} is already in {name}; edit it, or add a variant with its own fields.name (e.g. \"{} (45°)\")",
+                    existing["name"].as_str().unwrap_or_default(), item.name);
+            }
             let at = position.unwrap_or(rows.len()).min(rows.len());
             rows.insert(at, spec);
         }
@@ -292,6 +311,13 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
     }
     let template: Template = serde_json::from_value(definition).map_err(|e| Error::domain("INVALID_TEMPLATE", e.to_string()))?;
     import_template(db, &template)
+}
+
+/// Exercise ID from an owner-given name: "Leg press (45°)" → "leg-press-45".
+fn slug(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    words.join("-")
 }
 
 fn not_found<T>(exercise: &str, name: &str, rows: &[Value]) -> Result<T> {
@@ -349,5 +375,24 @@ mod tests {
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();
         assert_eq!(missing.code(), "EXERCISE_NOT_FOUND");
         assert!(missing.to_string().contains("Bench Press"), "{missing}");
+    }
+
+    /// Two machines for one movement (the owner's horizontal and 45° leg presses): each is its own
+    /// exercise with its own ID, so weights never mix; a bare guide_id must then say which one.
+    #[test]
+    fn named_variants_of_one_catalog_exercise() {
+        let db = db();
+        import_template(&db, &seed()).unwrap();
+        let add = |exercise: &str, fields: Value| edit_exercise(&db, "upper-a", exercise, ExerciseEdit::Add(&object(fields)), None);
+        add("face-pull", json!({"name": "Face pull (rope)", "target_weight": 20})).unwrap();
+        let both = add("face-pull", json!({"name": "Face pull (bar)", "target_weight": 35})).unwrap();
+        let pulls: Vec<(&str, &str, f64)> = both["exercises"].as_array().unwrap().iter().filter(|e| e["guide_id"] == "face-pull")
+            .map(|e| (e["id"].as_str().unwrap(), e["name"].as_str().unwrap(), e["target_weight"].as_f64().unwrap())).collect();
+        assert_eq!(pulls, [("face-pull-rope", "Face pull (rope)", 20.0), ("face-pull-bar", "Face pull (bar)", 35.0)]);
+        assert_eq!(add("face-pull", json!({"name": "face pull (ROPE)"})).unwrap_err().code(), "EXERCISE_EXISTS");
+        let ambiguous = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Change(&object(json!({"target_weight": 1}))), None).unwrap_err();
+        assert_eq!(ambiguous.code(), "EXERCISE_AMBIGUOUS");
+        let edited = edit_exercise(&db, "upper-a", "Face pull (bar)", ExerciseEdit::Change(&object(json!({"target_weight": 40}))), None).unwrap();
+        assert!(edited["exercises"].as_array().unwrap().iter().any(|e| e["id"] == "face-pull-bar" && e["target_weight"] == 40.0));
     }
 }
