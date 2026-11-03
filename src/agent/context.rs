@@ -65,8 +65,9 @@ pub const HISTORY: i64 = 30;
 pub const BOUNDARY: &str = "boundary";
 
 /// System prompt with schema, notes and the state snapshot. Most stable first, so provider prompt
-/// caching covers as much as possible.
-pub fn system(db: &Connection, now: Ts) -> Result<String> {
+/// caching covers as much as possible. Also returns the wake events shown as open issues: the turn
+/// that sees them settles them.
+pub fn system(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     let mut out = String::from(SYSTEM_PROMPT);
     let schema: Vec<String> = meta::schema(db)?.into_iter().map(|(_, line)| line).collect();
     write!(out, "\n\n## Database (for sql_query)\n{}", schema.join("\n")).unwrap();
@@ -78,12 +79,14 @@ pub fn system(db: &Connection, now: Ts) -> Result<String> {
             write!(out, "\n\n## {title} ({used}/{} chars; ids for note_edit/note_delete)\n{}", meta::budget(kind), lines.join("\n")).unwrap();
         }
     }
-    write!(out, "\n\n## Now\n{}", snapshot(db, now)?).unwrap();
-    Ok(out)
+    let (now_state, shown) = snapshot(db, now)?;
+    write!(out, "\n\n## Now\n{now_state}").unwrap();
+    Ok((out, shown))
 }
 
-/// Fresh state the model would otherwise have to look up every turn.
-pub fn snapshot(db: &Connection, now: Ts) -> Result<String> {
+/// Fresh state the model would otherwise have to look up every turn, and the wake events among its
+/// open issues.
+pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let local = now.local(&tz);
@@ -154,11 +157,15 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<String> {
         writeln!(out, "No workout running.").unwrap();
     }
 
+    let mut shown = vec![];
     for mut e in crate::domain::events::open_issues(db)? {
+        if crate::domain::events::WAKE.contains(&e.r#type.as_str()) {
+            shown.push(e.id.clone());
+        }
         crate::time::localize(&mut e.payload_json.0, &tz);
         writeln!(out, "Open issue: {} at {} {}", e.r#type, e.created_at.local(&tz).strftime("%a %H:%M"), e.payload_json.0).unwrap();
     }
-    Ok(out)
+    Ok((out, shown))
 }
 
 /// Chat since the last `/new` as OpenAI messages, oldest first. Owner and automatic messages carry
@@ -199,7 +206,7 @@ mod tests {
         let path = std::env::var("GYMCLAW_COMPAT_DB").expect("GYMCLAW_COMPAT_DB");
         let mut db = crate::db::open(std::path::Path::new(&path)).unwrap();
         crate::db::migrate(&mut db).unwrap();
-        let system = system(&db, Ts::now()).unwrap();
+        let (system, _) = system(&db, Ts::now()).unwrap();
         let history = Value::Array(history(&db).unwrap()).to_string();
         let tools = Value::Array(crate::agent::tool_specs()).to_string();
         println!("{system}\n---\nsystem {} chars, history {} chars, tools {} chars, ≈{} tokens", system.len(), history.len(), tools.len(), (system.len() + history.len() + tools.len()) / 4);

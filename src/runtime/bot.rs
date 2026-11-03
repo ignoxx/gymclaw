@@ -381,7 +381,10 @@ impl Bot {
         if let Some(list) = events.as_array_mut() {
             list.retain(|e| e["id"].as_str().is_none_or(|id| !handled.iter().any(|h| h == id)));
         }
-        if events.as_array().is_none_or(Vec::is_empty) {
+        // Settled events leave the batch; the rest go out in a fresh batch on the next tick, since a
+        // retry under this batch's request IDs with different intents would hit IDEMPOTENCY_CONFLICT.
+        let frozen = batch.payload_json["events"].as_array().map_or(0, Vec::len);
+        if events.as_array().map_or(0, Vec::len) != frozen {
             return in_tx(self.db(), move |db| crate::domain::events::ack(db, &batch.id, Ts::now()).map(drop)).await;
         }
         crate::time::localize(&mut events, &tz);
@@ -416,53 +419,49 @@ impl Bot {
         let last = batch.last().expect("non-empty batch").clone();
         let images = batch.iter().flat_map(|b| b.images.clone()).collect();
         let background = batch.iter().all(|b| b.message_id == 0);
-        // The open issues this owner turn sees in its context; it settles them, so they never wake a
-        // second turn that asks the owner the same thing again.
-        let shown: Vec<String> = if background { vec![] } else {
-            blocking(self.db(), |db| crate::domain::events::open_issues(db)).await.unwrap_or_default()
-                .into_iter().filter(|e| crate::domain::events::WAKE.contains(&e.r#type.as_str())).map(|e| e.id).collect()
-        };
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
         typing.abort();
-        if !outcome.failed && !shown.is_empty() {
-            let settled = in_tx(self.db(), move |db| {
-                for id in shown { crate::domain::events::ack(db, &id, Ts::now())?; }
-                Ok(())
-            }).await;
-            if let Err(e) = settled {
-                tracing::warn!("open issues not settled: {e}");
-            }
+        // The owner wrote while a background turn ran: their turn speaks instead, and sees the same
+        // events as open issues. Nothing is settled, so the batch retries if they stay open.
+        if background && !self.inbox.lock().await.is_empty() {
+            return false;
         }
-        if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
-            self.answer(&outcome, &batch).await;
-        }
+        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id != 0) { self.answer(&outcome, &batch).await } else { false };
+        // What the owner has now been told about never wakes a second turn that asks again.
+        let settles = outcome.settles.clone();
+        let settled = !outcome.failed && delivered && in_tx(self.db(), move |db| {
+            for id in settles { crate::domain::events::ack(db, &id, Ts::now())?; }
+            Ok(())
+        }).await.inspect_err(|e| tracing::warn!("seen events not settled: {e}")).is_ok();
         self.wake.notify_one();
-        !outcome.failed
+        settled
     }
 
-    /// Send the turn's one outcome and clear the 👀 acks.
-    async fn answer(&self, outcome: &Outcome, batch: &[Inbound]) {
+    /// Send the turn's one outcome and clear the 👀 acks. False when the owner may not have got it.
+    async fn answer(&self, outcome: &Outcome, batch: &[Inbound]) -> bool {
         let reply = &outcome.reply;
         let target = batch.iter().rev().find(|b| b.message_id != 0).map(|b| b.message_id);
         let mut reacted = None;
+        let mut delivered = true;
         if let (Some(emoji), Some(message)) = (&reply.react, target) {
             match self.tg.react(self.owner, message, Some(emoji)).await {
                 Ok(()) => reacted = Some(message),
                 // Not every emoji is an allowed reaction: say it instead.
-                Err(_) if reply.message.is_none() => self.send_reply(outcome, emoji, &[]).await,
+                Err(_) if reply.message.is_none() => delivered &= self.send_reply(outcome, emoji, &[]).await,
                 Err(_) => {}
             }
         }
         if let Some(message) = &reply.message {
             let buttons: Vec<(String, String)> = message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
-            self.send_reply(outcome, &message.text, &buttons).await;
+            delivered &= self.send_reply(outcome, &message.text, &buttons).await;
         }
         for b in batch.iter().filter(|b| b.message_id != 0 && Some(b.message_id) != reacted) {
             let _ = self.tg.react(self.owner, b.message_id, None).await;
         }
+        delivered
     }
 
-    async fn send_reply(&self, outcome: &Outcome, text: &str, buttons: &[(String, String)]) {
+    async fn send_reply(&self, outcome: &Outcome, text: &str, buttons: &[(String, String)]) -> bool {
         let rows: Vec<(String, String, String)> = buttons.iter().map(|(label, value)| (crate::db::new_id()[..8].to_string(), label.clone(), value.clone())).collect();
         if !rows.is_empty() {
             let stored = rows.clone();
@@ -485,8 +484,12 @@ impl Bot {
             Ok(id) => {
                 let meta = json!({"kind": if outcome.failed { "failure" } else { "reply" }, "run": outcome.run_id, "buttons": buttons.iter().map(|b| &b.0).collect::<Vec<_>>()});
                 self.remember(ChatRole::Assistant, text.to_string(), Some(id), meta).await;
+                true
             }
-            Err(e) => tracing::warn!("reply not sent: {e}"),
+            Err(e) => {
+                tracing::warn!("reply not sent: {e}");
+                false
+            }
         }
     }
 }
@@ -587,12 +590,12 @@ mod tests {
         let batch = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
         crate::domain::events::request(&db, "planning.attention", json!({"warnings": ["new event during failure"]}), Ts::now()).unwrap();
         assert_eq!(crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap().id, batch.id);
-        bot.event_turn().await.unwrap();
-        assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
+        // The retry answers the frozen batch; the newer event was in its context as an open issue, so
+        // it is settled too instead of waking another turn.
         bot.event_turn().await.unwrap();
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
         bot.event_turn().await.unwrap();
-        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 3);
         let sessions = crate::db::models::PlannedSession::select(&db, "", []).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].user_locked);
@@ -623,7 +626,7 @@ mod tests {
     #[tokio::test]
     async fn owner_turn_settles_open_issues_and_background_waits_for_quiet() {
         let model = Arc::new(Chatty(std::sync::atomic::AtomicUsize::new(0)));
-        let (bot, db, dir, _tg) = fixture(model.clone());
+        let (bot, db, dir, tg) = fixture(model.clone());
         enable_runtime(&db);
         let calls = || model.0.load(std::sync::atomic::Ordering::SeqCst);
         let attention = |text: &str| crate::domain::events::request(&db, "planning.attention", json!({"warnings": [text]}), Ts::now()).unwrap();
@@ -645,6 +648,28 @@ mod tests {
         attention("Session x: skips a rest day");
         bot.event_turn().await.unwrap();
         assert_eq!(calls(), 2);
+
+        // The owner writes while a background turn thinks: it stays silent and settles nothing.
+        attention("Session y: skips a rest day");
+        bot.inbox.lock().await.push(Inbound { message_id: 8, key: "tg-8".into(), images: vec![] });
+        let sent = |tg: &crate::telegram::coach::tests::FakeTelegram| tg.calls().iter().filter(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))).count();
+        let before = sent(&tg);
+        bot.event_turn().await.unwrap();
+        assert_eq!((calls(), sent(&tg)), (3, before));
+        assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
+        bot.inbox.lock().await.clear();
+
+        // A frozen batch that lost an event to an owner turn is retired, not retried under its old
+        // request IDs; the survivor goes out in a fresh batch.
+        attention("Session z: skips a rest day");
+        let frozen = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
+        let first = frozen.payload_json["events"][0]["id"].as_str().unwrap().to_string();
+        crate::domain::events::ack(&db, &first, Ts::now()).unwrap();
+        bot.event_turn().await.unwrap();
+        assert_eq!(calls(), 3);
+        let fresh = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
+        assert_ne!(fresh.id, frozen.id);
+        assert_eq!(fresh.payload_json["events"].as_array().unwrap().len(), 1);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

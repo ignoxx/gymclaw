@@ -75,23 +75,16 @@ pub fn open_issues(db: &Connection) -> Result<Vec<AgentEvent>> {
     AgentEvent::select(db, &format!("WHERE handled_at IS NULL AND type IN ({marks}) ORDER BY created_at DESC, rowid DESC LIMIT 5"), [])
 }
 
-/// Position in the event log; pass it to `claim_since` after a tool call.
+/// Position in the event log; pass it to `raised_since` after a tool call.
 pub fn mark(db: &Connection) -> Result<i64> {
     Ok(db.query_row("SELECT coalesce(max(rowid), 0) FROM agent_event", [], |r| r.get(0))?)
 }
 
-/// Wake events written after `mark`, handled now and returned. Inside a tool call's (immediate)
-/// transaction these are that call's own consequences: the agent reads them in the tool result, so
-/// they must not wake a second turn that repeats the question.
-pub fn claim_since(db: &Connection, mark: i64, now: Ts) -> Result<Vec<Value>> {
+/// Unhandled wake events written after `mark`. Inside the transaction that read `mark` these are
+/// that transaction's own: no other connection can commit while it holds its read lock.
+pub fn raised_since(db: &Connection, mark: i64) -> Result<Vec<AgentEvent>> {
     let types = WAKE.map(|t| format!("'{t}'")).join(", ");
-    let mut claimed = vec![];
-    for mut event in AgentEvent::select(db, &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN ({types}) ORDER BY rowid"), [mark])? {
-        event.handled_at = Some(now);
-        event.update(db)?;
-        claimed.push(json!({"type": event.r#type, "payload": event.payload_json}));
-    }
-    Ok(claimed)
+    AgentEvent::select(db, &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN ({types}) ORDER BY rowid"), [mark])
 }
 
 /// Freeze a decision batch before calling the model. A retry reuses this batch and its tool request
