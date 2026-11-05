@@ -299,8 +299,8 @@ impl Agent {
 
         let mut steps = 0usize;
         let mut index = 0usize;
-        // Calls made this turn: how often, and the error of the first run if it failed.
-        let mut seen: HashMap<String, (u32, Option<String>)> = HashMap::new();
+        // Calls made this turn: how often, the error of the first run if it failed, its result if it worked.
+        let mut seen: HashMap<String, (u32, Option<String>, Option<Value>)> = HashMap::new();
         // Set once the model loops on one call: the next turn must answer in text.
         let mut looping = false;
         loop {
@@ -373,9 +373,14 @@ impl Agent {
                     },
                     (_, Ok(args)) => {
                         let key = format!("{name} {args}");
-                        let (repeats, failed) = seen.entry(key.clone()).or_default();
+                        let (repeats, failed, done) = seen.entry(key.clone()).or_default();
                         *repeats += 1;
-                        if *repeats >= 2 {
+                        if *repeats == 2 && let Some(earlier) = done.clone() {
+                            // A model that repeats a call that worked wants confirmation, not an error to loop on.
+                            let mut replay = earlier;
+                            replay["already_done"] = json!(true);
+                            (replay, true)
+                        } else if *repeats >= 2 {
                             looping |= *repeats >= 3;
                             let message = match failed {
                                 Some(error) => format!("This exact call already failed and will fail again: {error}\nChange the arguments as described, or tell the owner what's blocking."),
@@ -388,8 +393,12 @@ impl Agent {
                             state.tool_calls += 1;
                             let (result, ok, wrote, raised) = self.tool(&name, args, format!("{}-{index}", input.key)).await;
                             settles.extend(raised);
-                            if !ok && let Some(entry) = seen.get_mut(&key) {
-                                entry.1 = result.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
+                            if let Some(entry) = seen.get_mut(&key) {
+                                if ok {
+                                    entry.2 = Some(result.clone());
+                                } else {
+                                    entry.1 = result.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
+                                }
                             }
                             // State changed, so other earlier calls may now give a different answer.
                             if wrote {
@@ -555,6 +564,19 @@ mod tests {
         let errors: Vec<&str> = last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
         assert!(errors[0].contains("start (string, required)"), "{}", errors[0]);
         assert!(errors[1].contains("REPEATED_CALL") && errors[1].contains("already failed") && errors[1].contains("template_id (string, required)"), "{}", errors[1]);
+    }
+
+    /// Prod 2026-11-04: the model repeated a session_update that had worked, got REPEATED_CALL twice and
+    /// ended STUCK. A repeat of a successful call gets the earlier result back, flagged, and does not write again.
+    #[tokio::test]
+    async fn repeating_a_call_that_worked_replays_its_result() {
+        let add = || call("note_add", json!({"kind": "owner", "text": "Hates lunges"}));
+        let (agent, script, _) = scripted(vec![add(), add(), json!({"content": "Saved."})]);
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Saved."));
+        let last = script.last.lock().unwrap();
+        let results: Vec<&str> = last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+        assert!(results[1].contains("already_done") && !results[1].contains("REPEATED_CALL"), "{}", results[1]);
+        assert_eq!(results.len(), 2);
     }
 
     #[tokio::test]
