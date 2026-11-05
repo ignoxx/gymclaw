@@ -278,6 +278,7 @@ pub struct TemplateAddExercise {
     /// Catalog guide_id or exact catalog name (see catalog_search).
     pub exercise: String,
     /// Fields overriding the defaults, e.g. {"working_sets":3,"rep_min":10,"rep_max":12,"target_weight":20}.
+    /// A "name" of its own adds a variant of an exercise already in the plan, e.g. "Leg press (45°)".
     #[serde(default)]
     pub fields: Map<String, Value>,
     /// 0-based place in the order; default last.
@@ -286,7 +287,7 @@ pub struct TemplateAddExercise {
 
 impl Tool for TemplateAddExercise {
     const NAME: &'static str = "template_add_exercise";
-    const DESCRIPTION: &'static str = "Add a catalog exercise to a saved plan.";
+    const DESCRIPTION: &'static str = "Add a catalog exercise to a saved plan. When the owner uses two machines for one movement (two leg presses), add each as a named variant (fields.name): each keeps its own weights and shares the catalog illustration.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Add(&self.fields), self.position)?)
