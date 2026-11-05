@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{ExerciseStatus, PlannedSession, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
+use crate::db::models::{ExerciseStatus, PlannedSession, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::adaptation::{self, spec_of};
 use crate::domain::audit;
 use crate::domain::crowd::{LABELS, record_feedback};
@@ -157,19 +157,64 @@ fn guess_set(db: &Connection, row: &WorkoutExercise, reps: i64) -> Result<Option
     Ok(None)
 }
 
-fn summary_card(result: &Value) -> Result<Card> {
+/// Heaviest working weight of an exercise in its most recent earlier session, and in all earlier
+/// sessions (the PR bar). Either is `None` the first time the exercise is done.
+fn prior_tops(db: &Connection, exercise_id: &str, workout_id: &str) -> Result<(Option<f64>, Option<f64>)> {
+    let sets = SetLog::select(
+        db,
+        "WHERE set_type = 'WORKING' AND workout_exercise_id IN (SELECT we.id FROM workout_exercise we WHERE we.exercise_id = ?1 AND we.workout_session_id != ?2) ORDER BY logged_at",
+        [exercise_id, workout_id],
+    )?;
+    let top = |sets: &mut dyn Iterator<Item = &SetLog>| sets.map(|s| s.weight).reduce(f64::max);
+    let last = sets.last().map(|l| &l.workout_exercise_id);
+    Ok((top(&mut sets.iter().filter(|s| Some(&s.workout_exercise_id) == last)), top(&mut sets.iter())))
+}
+
+/// Minutes the earlier workout from the same template took, if there is one.
+fn last_minutes(db: &Connection, template: &str, workout_id: &str) -> Result<Option<i64>> {
+    let previous = WorkoutSession::first(
+        db,
+        "WHERE status = 'PLAN_UPDATED' AND id != ?1 AND json_extract(template_snapshot, '$.name') = ?2 ORDER BY completed_at DESC",
+        [workout_id, template],
+    )?;
+    Ok(previous.and_then(|w| w.actual_duration_seconds).map(|s| s.div_euclid(60)))
+}
+
+/// The wrap-up card: pace against the last session of the same template, every lift that went up
+/// (🏆 when it beats everything before), then the crowd question.
+fn summary_card(db: &Connection, result: &Value) -> Result<Card> {
     let report = &result["data"];
+    let workout_id = report["workout_id"].as_str().unwrap_or_default();
+    let template = report["template_name"].as_str().unwrap_or_default();
     let minutes = report["actual_duration_seconds"].as_i64().unwrap_or(0).div_euclid(60);
-    let mut lines = vec![format!("🏁 **{} done** · {} sets · {minutes} min", report["template_name"].as_str().unwrap_or_default(), report["completed_sets"])];
+    let mut lines = vec![format!("🏁 **{template} done** · {} sets · {minutes} min", report["completed_sets"])];
+    if let Some(last) = last_minutes(db, template, workout_id)?.filter(|last| last.abs_diff(minutes) >= 3) {
+        let pace = if minutes < last { format!("⚡ {} min faster", last - minutes) } else { format!("{} min slower", minutes - last) };
+        lines.push(format!("{pace} than last {template} ({last})"));
+    }
     let exercises = report["exercises"].as_array().cloned().unwrap_or_default();
     let progressions = report["progressions"].as_array().cloned().unwrap_or_default();
     for (e, p) in exercises.iter().zip(&progressions) {
-        if p["progressed"].as_bool() == Some(true) {
-            lines.push(format!("↑ {}: next {}", e["name"].as_str().unwrap_or_default(), kg(p["next_weight"].as_f64().unwrap_or(0.0))));
+        let name = e["name"].as_str().unwrap_or_default();
+        let sets = e["sets"].as_array().cloned().unwrap_or_default();
+        let top = sets.iter().max_by(|a, b| a["weight"].as_f64().partial_cmp(&b["weight"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+        let (last, best) = prior_tops(db, e["exercise_id"].as_str().unwrap_or_default(), workout_id)?;
+        let next = (p["progressed"].as_bool() == Some(true)).then(|| format!(" · next {}", kg(p["next_weight"].as_f64().unwrap_or(0.0))));
+        match top {
+            Some(set) if last.is_some_and(|l| set["weight"].as_f64().unwrap_or(0.0) > l) => {
+                let weight = set["weight"].as_f64().unwrap_or(0.0);
+                let pr = if best.is_some_and(|b| weight > b) { " 🏆" } else { "" };
+                lines.push(format!("↑ {name} {} (was {}){pr}{}", done(set["reps"].as_i64().unwrap_or(0), weight), g(last.unwrap_or(0.0)), next.unwrap_or_default()));
+            }
+            _ => {
+                if let Some(next) = next {
+                    lines.push(format!("↑ {name}:{}", next.trim_start_matches(" ·")));
+                }
+            }
         }
     }
     lines.push("How busy was the gym?".into());
-    let r = reference(report["workout_id"].as_str().unwrap_or_default()).to_string();
+    let r = reference(workout_id).to_string();
     let buttons = LABELS.iter().map(|(value, label)| button(*label, &["crowd", value, &r])).collect::<Result<Vec<_>>>()?;
     Ok(card(lines.join("\n"), vec![buttons]))
 }
@@ -178,7 +223,7 @@ fn summary_card(result: &Value) -> Result<Card> {
 fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Vec<Card>> {
     let workout = workout::load_workout(db, workout_id, None)?;
     if workout.status == WorkoutStatus::WorkoutComplete {
-        return Ok(vec![summary_card(&audit::finish(db, workout_id, now, &format!("{request_id}:finish"))?)?]);
+        return Ok(vec![summary_card(db, &audit::finish(db, workout_id, now, &format!("{request_id}:finish"))?)?]);
     }
     Ok(vec![exercise_card(db, workout_id, now)?])
 }
@@ -568,6 +613,21 @@ mod tests {
         let again = handle_tap(&db, &data(&live(&db, at(11)), "🔄 Swap"), at(11), "cb-7").unwrap();
         let back = handle_tap(&db, &data(&again.cards[0], "↩ Back to Machine incline press"), at(12), "cb-8").unwrap();
         assert!(back.cards[0].text.starts_with("**Machine incline press**"));
+    }
+
+    #[test]
+    fn summary_shows_pace_and_lifts_that_went_up() {
+        let db = db();
+        push(&db);
+        handle_text(&db, "10x90", at(10), "m1").unwrap();
+        let first = handle_action(&db, Action::End, None, None, None, false, at(600), "end-1").unwrap().cards.remove(0);
+        // First time doing anything: nothing to compare against.
+        assert!(!first.text.contains("than last") && !first.text.contains('↑'), "{}", first.text);
+        start(&db, Some("push"), None, false, at(1000), "start-2").unwrap();
+        handle_text(&db, "10x95", at(1010), "m2").unwrap();
+        let second = handle_action(&db, Action::End, None, None, None, false, at(1240), "end-2").unwrap().cards.remove(0);
+        assert!(second.text.contains("⚡ 6 min faster than last Push (10)"), "{}", second.text);
+        assert!(second.text.contains("↑ Machine incline press 10 × 95 kg (was 90) 🏆"), "{}", second.text);
     }
 
     #[test]
