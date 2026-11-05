@@ -46,7 +46,7 @@ fn number(text: &str) -> f64 {
     text.replace(',', ".").parse().unwrap_or(f64::NAN)
 }
 
-/// Order is decided by unit words, then closeness to `expected_weight`, then rep plausibility, then reps-first.
+/// Order is decided by unit words, then rep plausibility (only one side above 30 is the weight), then closeness to `expected_weight`, then reps-first.
 pub fn parse_set(text: &str, set_type: SetType, expected_weight: Option<f64>, bodyweight: bool) -> Result<SetInput> {
     let clean = text.trim().to_lowercase();
     let set = |weight: f64, reps: i64| Ok(SetInput { weight, reps, set_type, rir: None });
@@ -74,10 +74,10 @@ pub fn parse_set(text: &str, set_type: SetType, expected_weight: Option<f64>, bo
         (b, a)
     } else if !integer(a) || !integer(b) {
         if !integer(a) { (a, b) } else { (b, a) }
-    } else if let Some(expected) = expected_weight.filter(|e| (a - e).abs() != (b - e).abs()) {
-        if (a - expected).abs() < (b - expected).abs() { (a, b) } else { (b, a) }
     } else if (a > MAX_PLAUSIBLE_REPS) != (b > MAX_PLAUSIBLE_REPS) {
         if a > MAX_PLAUSIBLE_REPS { (a, b) } else { (b, a) }
+    } else if let Some(expected) = expected_weight.filter(|e| (a - e).abs() != (b - e).abs()) {
+        if (a - expected).abs() < (b - expected).abs() { (a, b) } else { (b, a) }
     } else {
         (b, a)
     };
@@ -111,6 +111,13 @@ mod tests {
         assert_eq!(parse_set("12x10", SetType::Working, Some(10.0), false).unwrap(), set(10.0, 12));
         assert_eq!(parse("12x10").unwrap(), set(10.0, 12)); // reps first by default
         assert_eq!(parse("8x22,5").unwrap(), set(22.5, 8));
+    }
+
+    #[test]
+    fn implausible_reps_beat_a_stale_expected_weight() {
+        // Expected 10 kg (a stale target) must not turn "49x10" into 49 reps at 10 kg.
+        assert_eq!(parse_set("49x10", SetType::Working, Some(10.0), false).unwrap(), set(49.0, 10));
+        assert_eq!(parse_set("59x7", SetType::Working, Some(7.0), false).unwrap(), set(59.0, 7));
     }
 
     #[test]
