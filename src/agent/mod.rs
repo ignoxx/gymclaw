@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
-use crate::runtime::blocking;
+use crate::runtime::{blocking, in_tx};
 use crate::telegram::Media;
 use crate::telegram::coach::Coach;
 use crate::time::Ts;
@@ -107,6 +107,9 @@ pub struct Outcome {
     pub reply: Reply,
     pub failed: bool,
     pub run_id: String,
+    /// Wake events this turn saw (open issues, `raised` results). Settled once its reply is delivered;
+    /// empty when the turn failed, so they stay pending.
+    pub settles: Vec<String>,
 }
 
 /// What a turn answers.
@@ -190,26 +193,46 @@ fn clean_text(text: &str, background: bool) -> Option<String> {
     (!wordless && text != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(&text))).then_some(text)
 }
 
+/// Turn-log label: owner turns and background-event turns read differently in `prod turns`.
+fn trigger(input: &TurnInput) -> &'static str {
+    if input.background { "event" } else { "user" }
+}
+
 impl Agent {
     /// Run one tool call in its own transaction. Returns the JSON the model sees, whether it succeeded
-    /// and whether it changed the database.
-    async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool, bool) {
+    /// and whether it changed the database. Decision events the call itself raised come back in
+    /// `raised` (with their IDs, for `Outcome::settles`): this turn answers them, no background turn
+    /// repeats them.
+    async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool, bool, Vec<String>) {
         let now = (self.clock)();
         let data_dir = self.data_dir.clone();
         let name_owned = name.to_string();
         let result = blocking(&self.db_path, move |db| {
+            // Reading `mark` takes the read lock, so until commit only this call adds events.
             let tx = db.transaction()?;
+            let mark = crate::domain::events::mark(&tx)?;
             let before = tx.total_changes();
             let mut cx = tools::Ctx { db: &tx, now, request_id, data_dir: &data_dir, effects: vec![] };
-            let value = tools::call(&mut cx, &name_owned, args)?;
+            let mut value = tools::call(&mut cx, &name_owned, args)?;
             let effects = std::mem::take(&mut cx.effects);
             let wrote = tx.total_changes() > before;
+            let raised = crate::domain::events::raised_since(&tx, mark)?;
+            if !raised.is_empty() {
+                let shown: Vec<Value> = raised.iter().map(|e| json!({"type": e.r#type, "payload": e.payload_json})).collect();
+                value = match value {
+                    Value::Object(mut map) => {
+                        map.insert("raised".into(), json!(shown));
+                        Value::Object(map)
+                    }
+                    other => json!({"result": other, "raised": shown}),
+                };
+            }
             tx.commit()?;
-            Ok((value, effects, wrote))
+            Ok((value, effects, wrote, raised.into_iter().map(|e| e.id).collect()))
         })
         .await;
         match result {
-            Ok((value, effects, wrote)) => {
+            Ok((value, effects, wrote, raised)) => {
                 for Effect::Coach(view) in effects {
                     if let Some(coach) = &self.coach
                         && let Err(e) = coach.apply(&view, None, None).await
@@ -217,9 +240,9 @@ impl Agent {
                         tracing::warn!("coach card from {name} not shown: {e}");
                     }
                 }
-                (value, true, wrote)
+                (value, true, wrote, raised)
             }
-            Err(e) => (e.to_json(), false, false),
+            Err(e) => (e.to_json(), false, false, vec![]),
         }
     }
 
@@ -229,7 +252,8 @@ impl Agent {
         let started = Instant::now();
         let mut state = FailureState::default();
         let mut calls_log = vec![];
-        let result = tokio::time::timeout(DEADLINE, self.run(&input, &run_id, &mut state, &mut calls_log)).await;
+        let mut settles = vec![];
+        let result = tokio::time::timeout(DEADLINE, self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles)).await;
         let (reply, failed, error) = match result {
             Ok(Ok(reply)) => (reply, false, None),
             Ok(Err(e)) => {
@@ -243,17 +267,21 @@ impl Agent {
         };
         let text = reply.message.as_ref().map(|m| m.text.as_str()).unwrap_or_default();
         self.log.log(json!({
-            "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": "user", "ok": !failed,
+            "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": trigger(&input), "ok": !failed,
             "error": error.map(|e| scrub(&e, 500)), "diagnosis": failed.then(|| diagnose(&state)), "ms": started.elapsed().as_millis() as u64, "calls": calls_log,
             "noReply": (reply.message.is_none() && reply.react.is_none()).then_some(true), "reply": scrub(text, 4000),
         }));
-        Outcome { reply, failed, run_id }
+        if failed {
+            settles.clear();
+        }
+        Outcome { reply, failed, run_id, settles }
     }
 
-    async fn run(&self, input: &TurnInput, run_id: &str, state: &mut FailureState, calls_log: &mut Vec<Value>) -> Result<Reply> {
+    async fn run(&self, input: &TurnInput, run_id: &str, state: &mut FailureState, calls_log: &mut Vec<Value>, settles: &mut Vec<String>) -> Result<Reply> {
         let now = (self.clock)();
-        let (system, history, tz) =
-            blocking(&self.db_path, move |db| Ok((context::system(db, now)?, context::history(db)?, crate::domain::profile::get_profile(db)?.tz()))).await?;
+        let ((system, shown), history, tz) =
+            in_tx(&self.db_path, move |db| Ok((context::system(db, now)?, context::history(db)?, crate::domain::profile::get_profile(db)?.tz()))).await?;
+        settles.extend(shown);
         let mut messages = vec![json!({"role": "system", "content": system})];
         let history_chars = Value::Array(history.clone()).to_string().len();
         let history_len = history.len();
@@ -263,7 +291,7 @@ impl Agent {
         let specs = tool_specs();
         let prompt = messages.iter().rev().find(|m| m["role"] == "user").map(|m| media::text_of(&m["content"])).unwrap_or_default();
         self.log.log(json!({
-            "ev": "llm_input", "run": run_id, "session": "telegram:owner", "trigger": "user", "provider": "openrouter", "model": model,
+            "ev": "llm_input", "run": run_id, "session": "telegram:owner", "trigger": trigger(input), "provider": "openrouter", "model": model,
             "history": history_len, "historyChars": history_chars, "systemChars": system.chars().count(), "systemSha": sha(&system),
             "tools": specs.len(), "toolsChars": Value::Array(specs.clone()).to_string().len(), "images": (images > 0).then_some(images),
             "chars": prompt.chars().count(), "prompt": scrub(&prompt, 4000),
@@ -358,7 +386,8 @@ impl Agent {
                             steps += 1;
                             index += 1;
                             state.tool_calls += 1;
-                            let (result, ok, wrote) = self.tool(&name, args, format!("{}-{index}", input.key)).await;
+                            let (result, ok, wrote, raised) = self.tool(&name, args, format!("{}-{index}", input.key)).await;
+                            settles.extend(raised);
                             if !ok && let Some(entry) = seen.get_mut(&key) {
                                 entry.1 = result.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
                             }
@@ -464,7 +493,7 @@ mod tests {
         let db = crate::db::open(&dir.join("gymclaw.db")).unwrap();
         assert_eq!(AgentNote::select(&db, "", []).unwrap()[0].text, "Hates lunges");
         // The note is in the next turn's prompt.
-        assert!(context::system(&db, Ts::now()).unwrap().contains("- [1] Hates lunges"));
+        assert!(context::system(&db, Ts::now()).unwrap().0.contains("- [1] Hates lunges"));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
     }
 
@@ -593,5 +622,28 @@ mod tests {
         agent.turn(input()).await;
         let seen = script.seen.lock().unwrap();
         assert!(seen.len() == STEP_CAP + 1 && seen.last().unwrap().1, "{seen:?}");
+    }
+
+    /// A decision event the agent's own call raised is answered in that turn, not by a second turn
+    /// that asks the owner the same question (2026-11-03: "which one drops?" sent twice).
+    #[tokio::test]
+    async fn own_warnings_come_back_in_the_tool_result_and_wake_nothing() {
+        let create = call("session_create", json!({"start": "2026-10-13T12:00", "template_id": "push"}));
+        let bump = call("profile_update", json!({"changes": {"weekly_target_sessions": 4, "weekly_max_sessions": 4}}));
+        let (agent, script, dir) = scripted(vec![create, bump, json!({"content": "Target is 4 now."})]);
+        let db = crate::db::open(&agent.db_path).unwrap();
+        let template = serde_json::from_value(json!({"id": "push", "name": "Push", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "target_weight": 0}]})).unwrap();
+        crate::domain::templates::import_template(&db, &template).unwrap();
+        let outcome = agent.turn(input()).await;
+        assert!(!outcome.failed);
+        let messages = script.last.lock().unwrap().clone();
+        let results: Vec<&str> = messages.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+        assert!(results.iter().any(|r| r.contains("\"raised\"") && r.contains("/4 sessions saved")), "{results:?}");
+        // The turn settles exactly what it raised once its reply is out; until then nothing is lost.
+        let pending: Vec<String> = crate::domain::events::wake_pending(&db).unwrap().iter().map(|e| e["id"].as_str().unwrap().to_string()).collect();
+        assert!(!pending.is_empty());
+        assert_eq!(outcome.settles, pending);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -60,11 +60,31 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 
 /// Only decisions wake the model. Delivery/permission issues stay in the inbox until explicitly
 /// resolved; acknowledging a model wake must not imply the owner granted authority.
+pub const WAKE: [&str; 6] = [
+    "planning.attention", "planning.replan_required", "planning.no_show", "workout.missed",
+    "planning.weekly_briefing", "workout.stale",
+];
+
 pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
-    Ok(pending(db, false)?.into_iter().filter(|e| matches!(e["type"].as_str(), Some(
-        "planning.attention" | "planning.replan_required" | "planning.no_show" | "workout.missed" |
-        "planning.weekly_briefing" | "workout.stale"
-    ))).take(20).collect())
+    Ok(pending(db, false)?.into_iter().filter(|e| e["type"].as_str().is_some_and(|t| WAKE.contains(&t))).take(20).collect())
+}
+
+/// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context.
+pub fn open_issues(db: &Connection) -> Result<Vec<AgentEvent>> {
+    let marks = ACTIONABLE.map(|t| format!("'{t}'")).join(", ");
+    AgentEvent::select(db, &format!("WHERE handled_at IS NULL AND type IN ({marks}) ORDER BY created_at DESC, rowid DESC LIMIT 5"), [])
+}
+
+/// Position in the event log; pass it to `raised_since` after a tool call.
+pub fn mark(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT coalesce(max(rowid), 0) FROM agent_event", [], |r| r.get(0))?)
+}
+
+/// Unhandled wake events written after `mark`. Inside the transaction that read `mark` these are
+/// that transaction's own: no other connection can commit while it holds its read lock.
+pub fn raised_since(db: &Connection, mark: i64) -> Result<Vec<AgentEvent>> {
+    let types = WAKE.map(|t| format!("'{t}'")).join(", ");
+    AgentEvent::select(db, &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN ({types}) ORDER BY rowid"), [mark])
 }
 
 /// Freeze a decision batch before calling the model. A retry reuses this batch and its tool request

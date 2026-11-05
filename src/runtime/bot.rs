@@ -15,7 +15,7 @@ use super::{blocking, in_tx};
 use crate::agent::turnlog::{TurnLog, scrub};
 use crate::agent::{Agent, Outcome, TurnInput, media};
 use crate::db::Json;
-use crate::db::models::{AgentButton, ChatMessage, ChatRole, NotificationJob};
+use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
 use crate::domain::view::Button;
 use crate::error::Result;
@@ -362,14 +362,31 @@ impl Bot {
 
     /// Background decisions use the same serialized worker as owner chat. Events survive restarts;
     /// failures remain pending for the next tick, successes acknowledge exactly the supplied events.
+    ///
+    /// One voice: while the owner is mid-conversation no background turn runs. Pending events show in
+    /// the next owner turn's context as open issues and that turn settles them (see `turn`); only
+    /// what is still unhandled once the chat goes quiet wakes the agent here.
     async fn event_turn(&self) -> Result<()> {
         let batch = in_tx(self.db(), |db| {
-            if !super::outbox::runtime_authority(db)?.enabled { return Ok(None); }
+            if !super::outbox::runtime_authority(db)?.enabled || owner_active(db, Ts::now())? { return Ok(None); }
             crate::domain::events::wake_batch(db, Ts::now())
         }).await?;
         let Some(batch) = batch else { return Ok(()); };
-        let tz = blocking(self.db(), |db| Ok(crate::domain::profile::get_profile(db)?.tz())).await?;
+        // A frozen batch may outlive its events: an owner turn settled them meanwhile.
+        let (tz, handled) = blocking(self.db(), |db| {
+            let handled: Vec<String> = AgentEvent::select(db, "WHERE handled_at IS NOT NULL", [])?.into_iter().map(|e| e.id).collect();
+            Ok((crate::domain::profile::get_profile(db)?.tz(), handled))
+        }).await?;
         let mut events = batch.payload_json["events"].clone();
+        if let Some(list) = events.as_array_mut() {
+            list.retain(|e| e["id"].as_str().is_none_or(|id| !handled.iter().any(|h| h == id)));
+        }
+        // Settled events leave the batch; the rest go out in a fresh batch on the next tick, since a
+        // retry under this batch's request IDs with different intents would hit IDEMPOTENCY_CONFLICT.
+        let frozen = batch.payload_json["events"].as_array().map_or(0, Vec::len);
+        if events.as_array().map_or(0, Vec::len) != frozen {
+            return in_tx(self.db(), move |db| crate::domain::events::ack(db, &batch.id, Ts::now()).map(drop)).await;
+        }
         crate::time::localize(&mut events, &tz);
         let ids: Vec<String> = events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
         let key = format!("event-{}", batch.id);
@@ -404,36 +421,47 @@ impl Bot {
         let background = batch.iter().all(|b| b.message_id == 0);
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
         typing.abort();
-        if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
-            self.answer(&outcome, &batch).await;
+        // The owner wrote while a background turn ran: their turn speaks instead, and sees the same
+        // events as open issues. Nothing is settled, so the batch retries if they stay open.
+        if background && !self.inbox.lock().await.is_empty() {
+            return false;
         }
+        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id != 0) { self.answer(&outcome, &batch).await } else { false };
+        // What the owner has now been told about never wakes a second turn that asks again.
+        let settles = outcome.settles.clone();
+        let settled = !outcome.failed && delivered && in_tx(self.db(), move |db| {
+            for id in settles { crate::domain::events::ack(db, &id, Ts::now())?; }
+            Ok(())
+        }).await.inspect_err(|e| tracing::warn!("seen events not settled: {e}")).is_ok();
         self.wake.notify_one();
-        !outcome.failed
+        settled
     }
 
-    /// Send the turn's one outcome and clear the 👀 acks.
-    async fn answer(&self, outcome: &Outcome, batch: &[Inbound]) {
+    /// Send the turn's one outcome and clear the 👀 acks. False when the owner may not have got it.
+    async fn answer(&self, outcome: &Outcome, batch: &[Inbound]) -> bool {
         let reply = &outcome.reply;
         let target = batch.iter().rev().find(|b| b.message_id != 0).map(|b| b.message_id);
         let mut reacted = None;
+        let mut delivered = true;
         if let (Some(emoji), Some(message)) = (&reply.react, target) {
             match self.tg.react(self.owner, message, Some(emoji)).await {
                 Ok(()) => reacted = Some(message),
                 // Not every emoji is an allowed reaction: say it instead.
-                Err(_) if reply.message.is_none() => self.send_reply(outcome, emoji, &[]).await,
+                Err(_) if reply.message.is_none() => delivered &= self.send_reply(outcome, emoji, &[]).await,
                 Err(_) => {}
             }
         }
         if let Some(message) = &reply.message {
             let buttons: Vec<(String, String)> = message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
-            self.send_reply(outcome, &message.text, &buttons).await;
+            delivered &= self.send_reply(outcome, &message.text, &buttons).await;
         }
         for b in batch.iter().filter(|b| b.message_id != 0 && Some(b.message_id) != reacted) {
             let _ = self.tg.react(self.owner, b.message_id, None).await;
         }
+        delivered
     }
 
-    async fn send_reply(&self, outcome: &Outcome, text: &str, buttons: &[(String, String)]) {
+    async fn send_reply(&self, outcome: &Outcome, text: &str, buttons: &[(String, String)]) -> bool {
         let rows: Vec<(String, String, String)> = buttons.iter().map(|(label, value)| (crate::db::new_id()[..8].to_string(), label.clone(), value.clone())).collect();
         if !rows.is_empty() {
             let stored = rows.clone();
@@ -456,10 +484,23 @@ impl Bot {
             Ok(id) => {
                 let meta = json!({"kind": if outcome.failed { "failure" } else { "reply" }, "run": outcome.run_id, "buttons": buttons.iter().map(|b| &b.0).collect::<Vec<_>>()});
                 self.remember(ChatRole::Assistant, text.to_string(), Some(id), meta).await;
+                true
             }
-            Err(e) => tracing::warn!("reply not sent: {e}"),
+            Err(e) => {
+                tracing::warn!("reply not sent: {e}");
+                false
+            }
         }
     }
+}
+
+/// How long after the owner's last message the chat counts as a live conversation.
+const QUIET: jiff::SignedDuration = jiff::SignedDuration::from_mins(5);
+
+/// Whether the owner wrote within `QUIET`: background events then wait for their next turn.
+fn owner_active(db: &crate::db::Connection, now: Ts) -> Result<bool> {
+    let last = ChatMessage::first(db, "WHERE role = 'owner' ORDER BY id DESC", [])?;
+    Ok(last.is_some_and(|m| now.0.duration_since(m.at.0) < QUIET))
 }
 
 /// `/status`: runtime health in a few lines, no model.
@@ -508,43 +549,53 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn event_wake_obeys_authority_retries_failure_and_acknowledges_success() {
+    /// A bot over a fresh DB with one template (`fixture`); runtime authority still off.
+    fn fixture(model: Arc<dyn crate::agent::ChatModel>) -> (Bot, crate::db::Connection, std::path::PathBuf, Arc<crate::telegram::coach::tests::FakeTelegram>) {
         let dir = std::env::temp_dir().join(format!("gymclaw-events-{}", crate::db::new_id()));
         let db_path = dir.join("test.db");
         let mut db = crate::db::open(&db_path).unwrap();
         crate::db::migrate(&mut db).unwrap();
         let template = serde_json::from_value(json!({"id": "fixture", "name": "Fixture", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "target_weight": 0}]})).unwrap();
         crate::domain::templates::import_template(&db, &template).unwrap();
-        // Batch identity stays short enough for mutation request IDs regardless of batch size.
-        for n in 0..6 {
-            crate::domain::events::request(&db, "planning.attention", json!({"warnings": [format!("calendar clash {n}")]}), Ts::now()).unwrap();
-        }
         let tg = crate::telegram::coach::tests::FakeTelegram::new();
-        let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
         let coach = Coach::new(tg.clone(), 42, Arc::new(Ts::now), None, None);
         let (fast, _) = mpsc::unbounded_channel();
         let bot = Bot {
             owner: 42, tg: tg.clone(), coach, log: TurnLog::default(), wake: Arc::new(Notify::new()),
             status: Arc::new(Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
             inbox: Mutex::new(vec![]), inbox_ready: Notify::new(), fast,
-            agent: Agent { db_path, data_dir: dir.clone(), model: model.clone(), chat_model: "fixture".into(), vision_model: "fixture".into(), coach: None, log: TurnLog::default(), clock: Arc::new(Ts::now) },
+            agent: Agent { db_path, data_dir: dir.clone(), model, chat_model: "fixture".into(), vision_model: "fixture".into(), coach: None, log: TurnLog::default(), clock: Arc::new(Ts::now) },
         };
+        (bot, db, dir, tg)
+    }
+
+    fn enable_runtime(db: &crate::db::Connection) {
+        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, enabled, calendar_writes_enabled, crowd_polling_enabled) VALUES (1, 'gymclaw', '42', '', '', 1, 0, 0)", []).unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_wake_obeys_authority_retries_failure_and_acknowledges_success() {
+        let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, tg) = fixture(model.clone());
+        // Batch identity stays short enough for mutation request IDs regardless of batch size.
+        for n in 0..6 {
+            crate::domain::events::request(&db, "planning.attention", json!({"warnings": [format!("calendar clash {n}")]}), Ts::now()).unwrap();
+        }
         bot.event_turn().await.unwrap();
         assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
-        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, enabled, calendar_writes_enabled, crowd_polling_enabled) VALUES (1, 'gymclaw', '42', '', '', 1, 0, 0)", []).unwrap();
+        enable_runtime(&db);
         bot.event_turn().await.unwrap();
         assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 6);
         assert!(!tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))));
         let batch = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
         crate::domain::events::request(&db, "planning.attention", json!({"warnings": ["new event during failure"]}), Ts::now()).unwrap();
         assert_eq!(crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap().id, batch.id);
-        bot.event_turn().await.unwrap();
-        assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
+        // The retry answers the frozen batch; the newer event was in its context as an open issue, so
+        // it is settled too instead of waking another turn.
         bot.event_turn().await.unwrap();
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
         bot.event_turn().await.unwrap();
-        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 3);
         let sessions = crate::db::models::PlannedSession::select(&db, "", []).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].user_locked);
@@ -555,6 +606,70 @@ mod tests {
         let fallback = ChatMessage::select(&db, "WHERE meta_json ->> 'kind' = 'coach_fallback' ORDER BY id", []).unwrap();
         assert_eq!(fallback.len(), 2);
         assert!(fallback[0].text.contains("Bench card"));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Answers every call with plain text and counts the calls.
+    struct Chatty(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl crate::agent::ChatModel for Chatty {
+        async fn complete(&self, _: &str, _: &[Value], _: &[Value], _: bool) -> Result<crate::agent::ModelReply> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::agent::ModelReply { message: json!({"content": "Which one drops?"}), ..Default::default() })
+        }
+    }
+
+    /// One voice: mid-conversation, a background event waits for the owner's next turn, which sees
+    /// it as an open issue and settles it; nothing asks the owner a second time.
+    #[tokio::test]
+    async fn owner_turn_settles_open_issues_and_background_waits_for_quiet() {
+        let model = Arc::new(Chatty(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, tg) = fixture(model.clone());
+        enable_runtime(&db);
+        let calls = || model.0.load(std::sync::atomic::Ordering::SeqCst);
+        let attention = |text: &str| crate::domain::events::request(&db, "planning.attention", json!({"warnings": [text]}), Ts::now()).unwrap();
+
+        // The owner just wrote: the event waits.
+        bot.to_agent(7, "tg-7".into(), "back to 3 a week".into(), vec![], json!({})).await;
+        attention("Week 2026-11-02: 4 sessions saved, target 3");
+        bot.event_turn().await.unwrap();
+        assert_eq!(calls(), 0);
+
+        // Their turn sees it and settles it; no background turn follows.
+        let batch = std::mem::take(&mut *bot.inbox.lock().await);
+        assert!(bot.turn(batch).await);
+        assert_eq!(calls(), 1);
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+
+        // Once the chat is quiet, a new event wakes the agent as before.
+        db.execute("UPDATE chat_message SET at = '2026-01-01 00:00:00'", []).unwrap();
+        attention("Session x: skips a rest day");
+        bot.event_turn().await.unwrap();
+        assert_eq!(calls(), 2);
+
+        // The owner writes while a background turn thinks: it stays silent and settles nothing.
+        attention("Session y: skips a rest day");
+        bot.inbox.lock().await.push(Inbound { message_id: 8, key: "tg-8".into(), images: vec![] });
+        let sent = |tg: &crate::telegram::coach::tests::FakeTelegram| tg.calls().iter().filter(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))).count();
+        let before = sent(&tg);
+        bot.event_turn().await.unwrap();
+        assert_eq!((calls(), sent(&tg)), (3, before));
+        assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
+        bot.inbox.lock().await.clear();
+
+        // A frozen batch that lost an event to an owner turn is retired, not retried under its old
+        // request IDs; the survivor goes out in a fresh batch.
+        attention("Session z: skips a rest day");
+        let frozen = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
+        let first = frozen.payload_json["events"][0]["id"].as_str().unwrap().to_string();
+        crate::domain::events::ack(&db, &first, Ts::now()).unwrap();
+        bot.event_turn().await.unwrap();
+        assert_eq!(calls(), 3);
+        let fresh = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
+        assert_ne!(fresh.id, frozen.id);
+        assert_eq!(fresh.payload_json["events"].as_array().unwrap().len(), 1);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }
