@@ -175,8 +175,11 @@ fn cut(text: String) -> String {
     format!("{}…[cut {} chars; narrow the query]", &text[..end], text.len() - end)
 }
 
-/// History prefix the model sometimes copies onto its own reply ("[Tue 14:22, sent automatically] …").
-static ECHOED_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[[^\]\n]*sent automatically\]\s*").unwrap());
+/// History prefix the model sometimes copies onto its own reply ("[Tue 14:22, sent automatically] …", "[Sun 13:46] …").
+static ECHOED_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[(?:[^\]\n]*sent automatically|[A-Z][a-z]{2} \d{1,2}:\d{2})\]\s*").unwrap());
+
+/// A parenthesised note to itself with an explanation: "(nothing — already asked about Pull)".
+static NOTE_TO_SELF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)^\((nothing|no (reply|response|message|action)|already (asked|handled|sent))\b.*\)$").unwrap());
 
 /// The whole reply is a note that there's nothing to say: "No reply needed.", "Nothing to report",
 /// "(background events handled — nothing to report)".
@@ -190,7 +193,7 @@ static NOTHING_TO_SAY: LazyLock<Regex> = LazyLock::new(|| {
 fn clean_text(text: &str, background: bool) -> Option<String> {
     let text = ECHOED_PREFIX.replace(text.trim(), "").trim().to_string();
     let wordless = text.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '…');
-    (!wordless && text != "NO_REPLY" && !(background && NOTHING_TO_SAY.is_match(&text))).then_some(text)
+    (!wordless && text != "NO_REPLY" && !(background && (NOTHING_TO_SAY.is_match(&text) || NOTE_TO_SELF.is_match(&text)))).then_some(text)
 }
 
 /// Turn-log label: owner turns and background-event turns read differently in `prod turns`.
@@ -518,6 +521,12 @@ mod tests {
             let (agent, _, _) = scripted(vec![json!({"content": answer})]);
             assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some(answer));
         }
+        // Prod 2026-11-01: a note to itself, with the history timestamp copied on, reached the owner.
+        let leak = "[Sun 13:46] (nothing — already asked whether to move or skip Pull; mark it as missed if the owner doesn't answer)";
+        let (agent, _, _) = scripted(vec![json!({"content": leak})]);
+        assert!(agent.turn(background()).await.reply.message.is_none());
+        let (agent, _, _) = scripted(vec![json!({"content": "[Sun 13:46] Pull missed. Move it?"})]);
+        assert_eq!(agent.turn(background()).await.reply.message.map(|m| m.text).as_deref(), Some("Pull missed. Move it?"));
         for message in ["Nothing to report on the crowd yet: no data for Fridays.", "(Pull moved to 13:30)", "Wed clash — move Pull?"] {
             let (agent, _, _) = scripted(vec![json!({"content": message})]);
             assert_eq!(agent.turn(background()).await.reply.message.map(|m| m.text).as_deref(), Some(message));
