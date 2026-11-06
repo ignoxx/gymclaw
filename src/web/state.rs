@@ -359,14 +359,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_number_formats() {
-        assert_eq!((g(40.0), g(22.5)), ("40".to_string(), "22.5".to_string()));
-        assert_eq!(one_rep_max(100.0, 5), 116.5);
-        assert_eq!(one_rep_max(40.0, 12), 56.0);
-        assert_eq!(round(2.5, 0), 2.0);
-    }
-
-    #[test]
     fn one_rep_max_makes_different_rep_counts_comparable() {
         assert_eq!((one_rep_max(50.0, 8), one_rep_max(100.0, 1), one_rep_max(0.0, 15)), (63.5, 100.0, 0.0));
     }

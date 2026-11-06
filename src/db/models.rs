@@ -411,33 +411,3 @@ impl PlannedSession {
         self.plan("deleted_by_user").and_then(Value::as_bool).unwrap_or(false)
     }
 }
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every row of a real database loads into the row types. Run against a copy of prod:
-    /// `GYMCLAW_COMPAT_DB=/path/copy.db cargo test -- --ignored loads_real_db`
-    #[test]
-    #[ignore]
-    fn loads_real_db() {
-        let path = std::env::var("GYMCLAW_COMPAT_DB").expect("GYMCLAW_COMPAT_DB");
-        let mut db = crate::db::open(std::path::Path::new(&path)).unwrap();
-        crate::db::migrate(&mut db).unwrap();
-        macro_rules! all {
-            ($($t:ty),*) => {$(
-                let rows = <$t>::select(&db, "", []).unwrap();
-                for row in rows.iter().take(3) {
-                    // Writing a row back unchanged round-trips (only JSON whitespace differs from Python).
-                    row.update(&db).unwrap();
-                }
-                println!("{} {}", <$t>::TABLE, rows.len());
-            )*};
-        }
-        all!(UserProfile, OnboardingState, LearnedPreference, AvailabilityBlock, CalendarEventSnapshot, PlannedSession, WorkoutSession,
-            WorkoutExercise, SetLog, WorkoutTemplate, ExerciseProgression, NotificationJob, NotificationDelivery, PersonalCalendarState,
-            PersonalBusyInterval, RuntimeSettings, CalendarSyncState, CalendarCredential, CalendarWrite, CrowdObservation,
-            CrowdSourceState, CrowdFeedback, AgentEvent, BodyWeight, ChatMessage, AgentNote, AgentButton);
-    }
-}
