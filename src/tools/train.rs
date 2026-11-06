@@ -10,8 +10,9 @@ use crate::domain::coach::{self, Action};
 use crate::domain::illustrations::search;
 use crate::domain::onboarding::{self, Update};
 use crate::domain::profile::get_profile;
+use crate::domain::proposals::{self, NewLine};
 use crate::domain::templates::{ExerciseEdit, Template, edit_exercise, get_template, import_template, require_illustrations};
-use crate::domain::view::CoachView;
+use crate::domain::view::{Card, CoachView};
 use crate::domain::{audit, workout};
 use crate::error::Result;
 use crate::time::Ts;
@@ -27,6 +28,7 @@ pub fn tools() -> Vec<ToolDef> {
         def::<TemplateEditExercise>(),
         def::<TemplateAddExercise>(),
         def::<TemplateRemoveExercise>(),
+        def::<ProposalCreate>(),
         def::<CatalogSearch>(),
         def::<OnboardingStatus>(),
         def::<OnboardingAnswer>(),
@@ -307,6 +309,45 @@ impl Tool for TemplateRemoveExercise {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Remove, None)?)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalLine {
+    /// The exercise in the plan: ID or name.
+    pub exercise: String,
+    /// Fields to change, e.g. {"target_weight":82.5,"working_sets":3,"rep_min":6,"rep_max":8}.
+    #[serde(default)]
+    pub changes: Map<String, Value>,
+    /// 0-based new place in the order (e.g. last, for an exercise the owner keeps skipping).
+    pub position: Option<usize>,
+    /// What the owner reads, with the evidence: "Bench stalled at 80×10 for 3 sessions → 82.5 kg, 3×6-8".
+    pub summary: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalCreate {
+    pub template_id: String,
+    /// One line per suggested change. All lines go out in one message.
+    pub lines: Vec<ProposalLine>,
+}
+
+impl Tool for ProposalCreate {
+    const NAME: &'static str = "proposal_create";
+    const DESCRIPTION: &'static str = "Send the owner ONE message proposing plan changes you found in their training data (stalled lifts, \
+        targets never missed, skipped exercises; use sql_query first). Each line gets accept/decline buttons and nothing changes until \
+        the owner accepts it; taps are handled without you. Exercises the owner declined in the last 4 weeks or that still await an \
+        answer are skipped and reported. Only send when the data shows something; never repeat a pending proposal.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        let lines = self.lines.into_iter().map(|l| NewLine { exercise: l.exercise, changes: l.changes, position: l.position, summary: l.summary }).collect();
+        let created = proposals::create(cx.db, &self.template_id, lines, cx.now)?;
+        let card = Card { text: created.rendered.text, buttons: created.rendered.buttons, ..Card::default() };
+        cx.effects.push(Effect::Coach(CoachView { handled: true, standalone: true, cards: vec![card], ..CoachView::default() }));
+        let skipped: Vec<Value> = created.skipped.iter().map(|(exercise, reason)| json!({"exercise": exercise, "reason": reason})).collect();
+        Ok(json!({"sent": true, "batch_id": created.batch_id, "skipped": skipped, "instruction": "The owner got the proposal; wait for their taps. Do not repeat it in your reply."}))
     }
 }
 

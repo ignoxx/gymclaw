@@ -22,6 +22,7 @@ sql_enum!(WriteAction { Create = "CREATE", Update = "UPDATE", Delete = "DELETE" 
 sql_enum!(BlockKind { Travel = "TRAVEL", Sick = "SICK", Unavailable = "UNAVAILABLE" });
 sql_enum!(BlockStatus { Active = "ACTIVE", Retracted = "RETRACTED" });
 sql_enum!(ChatRole { Owner = "owner", Assistant = "assistant", Bot = "bot" });
+sql_enum!(ProposalStatus { Pending = "PENDING", Accepted = "ACCEPTED", Declined = "DECLINED" });
 sql_enum!(NoteKind { Owner = "owner", Learned = "learned" });
 
 impl SessionStatus {
@@ -368,6 +369,24 @@ table!(AgentButton = "agent_button" {
     created_at: Ts,
 });
 
+table!(TemplateProposal = "template_proposal" {
+    /// First 8 characters go in the button's callback data.
+    id: String,
+    /// All lines of one Telegram message.
+    batch_id: String,
+    template_id: String,
+    /// Exercise ID within the template.
+    exercise: String,
+    /// ExerciseSpec fields to change, applied exactly as proposed.
+    changes_json: Json<serde_json::Map<String, Value>>,
+    /// 0-based new place in the order.
+    position: Option<i64>,
+    summary: String,
+    status: ProposalStatus,
+    created_at: Ts,
+    decided_at: Option<Ts>,
+});
+
 impl PlannedSession {
     /// A new, unplaced session; `replanning::place` sets its times.
     pub fn new(week_id: String, workout_template_id: Option<String>, user_locked: bool) -> PlannedSession {
@@ -438,6 +457,6 @@ mod tests {
         all!(UserProfile, OnboardingState, LearnedPreference, AvailabilityBlock, CalendarEventSnapshot, PlannedSession, WorkoutSession,
             WorkoutExercise, SetLog, WorkoutTemplate, ExerciseProgression, NotificationJob, NotificationDelivery, PersonalCalendarState,
             PersonalBusyInterval, RuntimeSettings, CalendarSyncState, CalendarCredential, CalendarWrite, CrowdObservation,
-            CrowdSourceState, CrowdFeedback, AgentEvent, BodyWeight, ChatMessage, AgentNote, AgentButton);
+            CrowdSourceState, CrowdFeedback, AgentEvent, BodyWeight, ChatMessage, AgentNote, AgentButton, TemplateProposal);
     }
 }

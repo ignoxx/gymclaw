@@ -16,7 +16,7 @@ use crate::agent::turnlog::{TurnLog, scrub};
 use crate::agent::{Agent, Outcome, TurnInput, media};
 use crate::db::Json;
 use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
-use crate::domain::coach;
+use crate::domain::{coach, proposals};
 use crate::domain::view::Button;
 use crate::error::Result;
 use crate::telegram::coach::{Coach, Tapped};
@@ -146,6 +146,9 @@ impl Bot {
             let _ = self.fast.send(Fast::Tap(Box::new(q)));
             return;
         }
+        if data.starts_with("tp:") {
+            return self.proposal_tap(q).await;
+        }
         let Some(id) = data.strip_prefix("btn:").map(String::from) else {
             let _ = self.tg.answer_callback(&q.id, Some("⌛ Old button.")).await;
             return;
@@ -162,6 +165,30 @@ impl Bot {
             let _ = self.tg.edit_buttons(self.owner, message_id, &vec![]).await;
         }
         self.to_agent(message_id, format!("tg-cb:{}", q.id), button.value, vec![], json!({"kind": "button", "label": button.label})).await;
+    }
+
+    /// Accept/decline on one proposal line, no model: the line is applied or dropped, and the message
+    /// is redrawn with the remaining buttons.
+    async fn proposal_tap(&self, q: CallbackQuery) {
+        let data = q.data.clone().unwrap_or_default();
+        let request_id = format!("tg-cb:{}", q.id);
+        let result = in_tx(self.db(), move |db| proposals::decide(db, &data, Ts::now(), &request_id)).await;
+        let decision = match result {
+            Ok(decision) => decision,
+            Err(e) => {
+                tracing::warn!("proposal tap: {} {e}", e.code());
+                let toast = if e.code() == "PROPOSAL_UNKNOWN" { "⌛ Old button.".to_string() } else { format!("Couldn't apply: {e}") };
+                let _ = self.tg.answer_callback(&q.id, Some(&toast)).await;
+                return;
+            }
+        };
+        let _ = self.tg.answer_callback(&q.id, Some(&decision.toast)).await;
+        let message_id = q.message.as_ref().map(|m| m.message_id).unwrap_or_default();
+        if message_id != 0 {
+            let _ = self.tg.edit(self.owner, message_id, &decision.rendered.text, &decision.rendered.buttons, false).await;
+        }
+        let verdict = if decision.applied { "✅ Accepted" } else { "✖️ Declined" };
+        self.remember(ChatRole::Owner, format!("{verdict}: {}", decision.summary), Some(message_id), json!({"kind": "proposal"})).await;
     }
 
     async fn message(&self, message: Message) {

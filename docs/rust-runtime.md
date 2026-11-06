@@ -95,6 +95,17 @@ model never has to. Timestamps without an offset are the owner's local time.
 - Turn log: JSONL events in `data/turns/YYYY-MM-DD.jsonl`, secrets redacted
   ([format](../src/agent/turnlog.rs)).
 
+## Template change proposals
+
+The agent spots trends with `sql_query` (stalled lifts, targets never missed, skipped exercises) and
+calls `proposal_create {template_id, lines[]}`: one Telegram message, one line per change, each with
+✅/✖️ buttons (`tp:a|d:<id>`, handled in `Bot::proposal_tap` without the model). Nothing changes until
+a line is accepted; then `domain::proposals::decide` applies exactly the stored fields through
+`templates::edit_exercise` (as `template_edit_exercise` does; there is no template revision history)
+and refreshes upcoming plans. Lines are checked by a rolled-back dry run at creation. Taps are
+idempotent (`mutate` per callback, and a decided line is never re-applied). An exercise with a
+pending line or a decline in the last 28 days is skipped by later proposals. State: `template_proposal`.
+
 ## Scheduler and outbox
 
 - In-process: `ticks::watch` every 60 s (calendar sync, personal feed, reminders), `ticks::weekly`

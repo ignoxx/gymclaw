@@ -16,6 +16,7 @@ pub mod body;
 pub mod coach;
 pub mod onboarding;
 pub mod preview;
+pub mod proposals;
 pub mod workout;
 
 // Lead (planning)
