@@ -72,6 +72,13 @@ model never has to. Timestamps without an offset are the owner's local time.
 - One turn ends with one reply: text (+ optional buttons) or a reaction or nothing. Tool errors go
   back to the model. Step cap (12 calls) and an identical-call breaker; on giving up, one sanitized
   line to the owner.
+- Guards in `src/agent/mod.rs` (look here before adding another): `STEP_CAP` and `DEADLINE` end a
+  turn; an identical-call breaker forces a text reply; a rejected reply counts as a step; tool calls
+  written as text in the reply are caught and never reach the owner; `NO_REPLY`/empty text is
+  silence, and on background turns so is an explicit note-to-self; failures reach the owner as one
+  plain sentence from `failure.rs` that never claims nothing was saved. Fix a misbehaving turn at its
+  source (event, prompt, tool result) rather than adding a filter, and pin the fix with a test next
+  to the existing ones.
 - Models via OpenRouter: `GYMCLAW_MODEL` (chat, default GLM), `GYMCLAW_MODEL_FAST`,
   `GYMCLAW_MODEL_VISION`; `GYMCLAW_PROVIDER` pins the provider (`reasoning.effort: minimal`).
 
@@ -120,5 +127,4 @@ model never has to. Timestamps without an offset are the owner's local time.
 
 `cargo test` and `cargo clippy --all-targets -- -D warnings`. Tests pin down behavior that's easy
 to get subtly wrong (planner choices, set parsing, progression math, rest timing, stale-delivery
-rules); the compiler covers shape. `scripts/diff-replay` compares Rust against the last Python
-release on a copy of a real backup. Never test against the production DB; use copies in `/tmp`.
+rules); the compiler covers shape. Never test against the production DB; use copies in `/tmp`.
