@@ -5,6 +5,8 @@ name: Image
 on:
   push:
     branches: [main]
+    # Docs and tests don't change the image, so they don't redeploy it.
+    paths-ignore: ['docs/**', '**/*.md', '.githooks/**', 'scripts/**']
   workflow_dispatch:
 
 concurrency:

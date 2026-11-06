@@ -1,6 +1,20 @@
 name: Tests
 
-on: [push, pull_request]
+# Feature branches run once, via their PR. main runs again after a merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch/PR supersedes the run in flight.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Debug info is never read in CI; skipping it shortens every compile and shrinks the cache.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_INCREMENTAL: 0
 
 permissions:
   contents: read
