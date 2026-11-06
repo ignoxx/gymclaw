@@ -34,4 +34,4 @@ Early as it is, it works. You need a Telegram bot, an OpenRouter key, a Google c
 
 ## License
 
-MIT. Exercise art from [Workout Guide](https://github.com/bryllim/workout-guide).
+[Business Source License 1.1](LICENSE): free to clone, self-host and modify for noncommercial use; commercial use needs a license from the author. Each release becomes Apache 2.0 four years after it is published. Exercise art from [Workout Guide](https://github.com/bryllim/workout-guide).
