@@ -447,13 +447,13 @@ impl Bot {
             match self.tg.react(self.owner, message, Some(emoji)).await {
                 Ok(()) => reacted = Some(message),
                 // Not every emoji is an allowed reaction: say it instead.
-                Err(_) if reply.message.is_none() => delivered &= self.send_reply(outcome, emoji, &[]).await,
+                Err(_) if reply.message.is_none() => delivered &= self.send_reply(outcome, emoji, None, &[]).await,
                 Err(_) => {}
             }
         }
         if let Some(message) = &reply.message {
             let buttons: Vec<(String, String)> = message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
-            delivered &= self.send_reply(outcome, &message.text, &buttons).await;
+            delivered &= self.send_reply(outcome, &message.text, message.photo.as_deref(), &buttons).await;
         }
         for b in batch.iter().filter(|b| b.message_id != 0 && Some(b.message_id) != reacted) {
             let _ = self.tg.react(self.owner, b.message_id, None).await;
@@ -461,7 +461,7 @@ impl Bot {
         delivered
     }
 
-    async fn send_reply(&self, outcome: &Outcome, text: &str, buttons: &[(String, String)]) -> bool {
+    async fn send_reply(&self, outcome: &Outcome, text: &str, photo: Option<&std::path::Path>, buttons: &[(String, String)]) -> bool {
         let rows: Vec<(String, String, String)> = buttons.iter().map(|(label, value)| (crate::db::new_id()[..8].to_string(), label.clone(), value.clone())).collect();
         if !rows.is_empty() {
             let stored = rows.clone();
@@ -477,8 +477,8 @@ impl Bot {
             }
         }
         let keyboard: Vec<Vec<Button>> = rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
-        let sent = self.tg.send(self.owner, text, None, &keyboard).await;
-        self.log.log(json!({"ev": "outbound", "session": SESSION, "run": outcome.run_id, "channel": "telegram", "msg": sent.as_ref().ok(),
+        let sent = self.tg.send(self.owner, text, photo, &keyboard).await;
+        self.log.log(json!({"ev": "outbound", "session": SESSION, "run": outcome.run_id, "channel": "telegram", "msg": sent.as_ref().ok(), "photo": photo.is_some(),
             "ok": sent.is_ok(), "error": sent.as_ref().err().map(|e| scrub(&e.to_string(), 500)), "text": scrub(text, 4000)}));
         match sent {
             Ok(id) => {
