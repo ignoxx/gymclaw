@@ -240,6 +240,24 @@ pub enum ExerciseEdit<'a> {
     Remove,
 }
 
+/// Index of the exercise `key` names by id, name or guide_id (case-insensitive), from `[id, name,
+/// guide_id]` candidates. Matches on several ids fail: variants share a guide_id, and a guess would
+/// edit or log the wrong one.
+pub fn pick(key: &str, candidates: &[[Option<&str>; 3]]) -> Result<Option<usize>> {
+    let key = key.trim().to_lowercase();
+    let hits: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].iter().flatten().any(|v| v.to_lowercase() == key)).collect();
+    let mut ids: Vec<Option<&str>> = hits.iter().map(|&i| candidates[i][0]).collect();
+    ids.sort();
+    ids.dedup();
+    if ids.len() > 1 {
+        let mut names: Vec<&str> = hits.iter().filter_map(|&i| candidates[i][1]).collect();
+        names.sort();
+        names.dedup();
+        crate::bail!("EXERCISE_AMBIGUOUS", "'{key}' matches several exercises; pass one name: {}", names.join(", "));
+    }
+    Ok(hits.first().copied())
+}
+
 /// Change one exercise of a saved plan without re-importing it. `exercise` is an ID, guide_id or name;
 /// `position` is the 0-based place. Upcoming planned sessions pick the change up via `refresh_plans`.
 pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: ExerciseEdit, position: Option<usize>) -> Result<Value> {
@@ -247,8 +265,7 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
     let name = definition["name"].as_str().unwrap_or_default().to_string();
     let rows = definition["exercises"].as_array_mut().expect("exercises array");
     let key = exercise.trim().to_lowercase();
-    let matches = |e: &Value| [&e["id"], &e["name"], &e["guide_id"]].iter().any(|v| v.as_str().is_some_and(|s| s.to_lowercase() == key));
-    let index = rows.iter().position(matches);
+    let find = |rows: &[Value]| pick(&key, &rows.iter().map(|e| [e["id"].as_str(), e["name"].as_str(), e["guide_id"].as_str()]).collect::<Vec<_>>());
     match edit {
         ExerciseEdit::Add(changes) => {
             let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
@@ -269,7 +286,7 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
             rows.insert(at, spec);
         }
         ExerciseEdit::Remove => {
-            let Some(i) = index else { return not_found(exercise, &name, rows) };
+            let Some(i) = find(rows)? else { return not_found(exercise, &name, rows) };
             let removed = rows.remove(i);
             for row in rows.iter_mut() {
                 if let Some(required) = row["requires_completed"].as_array_mut() {
@@ -278,7 +295,7 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
             }
         }
         ExerciseEdit::Change(changes) => {
-            let Some(i) = index else { return not_found(exercise, &name, rows) };
+            let Some(i) = find(rows)? else { return not_found(exercise, &name, rows) };
             rows[i].as_object_mut().unwrap().extend(changes.clone());
             let id = rows[i]["id"].as_str().unwrap_or_default().to_string();
             if let Some(at) = position {
@@ -353,6 +370,10 @@ mod tests {
         let variant = object(json!({"id": "bench-machine", "name": "Machine bench"}));
         let added = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&variant), None).unwrap();
         assert_eq!(added["exercises"][5]["guide_id"], added["exercises"][0]["guide_id"]);
+        let shared = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Remove, None).unwrap_err();
+        assert_eq!(shared.code(), "EXERCISE_AMBIGUOUS");
+        let named = edit_exercise(&db, "upper-a", "Machine bench", ExerciseEdit::Change(&object(json!({"target_weight": 60}))), None).unwrap();
+        assert_eq!((named["exercises"][0]["target_weight"].as_f64(), named["exercises"][5]["target_weight"].as_f64()), (Some(85.0), Some(60.0)));
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();
