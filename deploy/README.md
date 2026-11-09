@@ -82,8 +82,8 @@ Approve the route in the Tailscale admin console. Linux clients also need
 `--accept-routes`; macOS, iOS and Android accept routes by default.
 
 The bot's **Dashboard** menu button opens the same URL as a Telegram Mini App, so the phone
-needs Tailscale on too. It works in the mobile and desktop apps; web.telegram.org can't
-show it, because the dashboard forbids being framed (`frame-ancestors 'none'`).
+needs Tailscale on too. Only web.telegram.org may frame the dashboard
+(`frame-ancestors https://web.telegram.org`); the mobile and desktop apps use a native webview.
 
 ## Moving hosts
 

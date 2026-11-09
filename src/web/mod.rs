@@ -52,7 +52,7 @@ fn reply(status: StatusCode, body: Vec<u8>, mime: &str) -> Response {
     set(
         headers,
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors 'none'",
+        "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors https://web.telegram.org",
     );
     response
 }
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(get(&app, Method::GET, "/api/state", "evil.example").await.status(), StatusCode::FORBIDDEN);
         let index = get(&app, Method::GET, "/", "gym.example").await;
         assert_eq!(index.status(), StatusCode::OK);
-        assert!(index.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("frame-ancestors 'none'"));
+        assert!(index.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("frame-ancestors https://web.telegram.org"));
         for path in ["/../README.md", "/data/private.sqlite", "/unknown", "/illustrations/../../README.svg"] {
             assert_eq!(get(&app, Method::GET, path, "gym.example").await.status(), StatusCode::NOT_FOUND, "{path}");
         }
