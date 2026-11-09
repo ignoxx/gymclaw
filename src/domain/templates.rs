@@ -133,6 +133,11 @@ impl Template {
         if ids.len() != all.len() {
             return invalid("Exercise IDs must be unique within template");
         }
+        // Names are how the agent picks between variants that share a picture (see `pick`).
+        let names: HashSet<String> = all.iter().map(|s| s.name.trim().to_lowercase()).collect();
+        if names.len() != all.len() {
+            return invalid("Exercise names must be unique within template");
+        }
         let mut seen: HashSet<&str> = HashSet::new();
         for spec in &self.exercises {
             if !spec.requires_completed.iter().all(|r| seen.contains(r.as_str())) {
@@ -240,6 +245,25 @@ pub enum ExerciseEdit<'a> {
     Remove,
 }
 
+/// Index of the exercise `key` names by id, name or guide_id (case-insensitive), from `[id, name,
+/// guide_id]` candidates. Matches on several ids fail, even when one is an exact id: variants share a
+/// guide_id, and the first variant's id often equals it, so a guess would edit or log the wrong one.
+/// Names are unique per template, so the names in the error always resolve.
+pub fn pick(key: &str, candidates: &[[Option<&str>; 3]]) -> Result<Option<usize>> {
+    let key = key.trim().to_lowercase();
+    let hits: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].iter().flatten().any(|v| v.to_lowercase() == key)).collect();
+    let mut ids: Vec<Option<&str>> = hits.iter().map(|&i| candidates[i][0]).collect();
+    ids.sort();
+    ids.dedup();
+    if ids.len() > 1 {
+        let mut names: Vec<&str> = hits.iter().filter_map(|&i| candidates[i][1]).collect();
+        names.sort();
+        names.dedup();
+        crate::bail!("EXERCISE_AMBIGUOUS", "'{key}' matches several exercises; pass one of these names: {}", names.join(", "));
+    }
+    Ok(hits.first().copied())
+}
+
 /// Change one exercise of a saved plan without re-importing it. `exercise` is an ID, guide_id or name;
 /// `position` is the 0-based place. Upcoming planned sessions pick the change up via `refresh_plans`.
 pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: ExerciseEdit, position: Option<usize>) -> Result<Value> {
@@ -247,8 +271,7 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
     let name = definition["name"].as_str().unwrap_or_default().to_string();
     let rows = definition["exercises"].as_array_mut().expect("exercises array");
     let key = exercise.trim().to_lowercase();
-    let matches = |e: &Value| [&e["id"], &e["name"], &e["guide_id"]].iter().any(|v| v.as_str().is_some_and(|s| s.to_lowercase() == key));
-    let index = rows.iter().position(matches);
+    let find = |rows: &[Value]| pick(&key, &rows.iter().map(|e| [e["id"].as_str(), e["name"].as_str(), e["guide_id"].as_str()]).collect::<Vec<_>>());
     match edit {
         ExerciseEdit::Add(changes) => {
             let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
@@ -257,16 +280,20 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
                 let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
                 crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{exercise}'. Pass one guide_id: {options}");
             };
-            if let Some(i) = index {
-                crate::bail!("EXERCISE_EXISTS", "{} is already in {name}; edit it instead", rows[i]["name"].as_str().unwrap_or_default());
-            }
             let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
             spec.as_object_mut().unwrap().extend(changes.clone());
+            // Exercises are told apart by id; the guide_id only picks the picture, so two machine
+            // variants can share one.
+            let same = |a: &Value, b: &Value| a.as_str().zip(b.as_str()).is_some_and(|(a, b)| a.trim().eq_ignore_ascii_case(b.trim()));
+            if let Some(existing) = rows.iter().find(|e| same(&e["id"], &spec["id"]) || same(&e["name"], &spec["name"])) {
+                let existing = existing["name"].as_str().unwrap_or_default();
+                crate::bail!("EXERCISE_EXISTS", "{existing} is already in {name}; edit it, or add a variant with its own id and name in fields");
+            }
             let at = position.unwrap_or(rows.len()).min(rows.len());
             rows.insert(at, spec);
         }
         ExerciseEdit::Remove => {
-            let Some(i) = index else { return not_found(exercise, &name, rows) };
+            let Some(i) = find(rows)? else { return not_found(exercise, &name, rows) };
             let removed = rows.remove(i);
             for row in rows.iter_mut() {
                 if let Some(required) = row["requires_completed"].as_array_mut() {
@@ -275,7 +302,7 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
             }
         }
         ExerciseEdit::Change(changes) => {
-            let Some(i) = index else { return not_found(exercise, &name, rows) };
+            let Some(i) = find(rows)? else { return not_found(exercise, &name, rows) };
             rows[i].as_object_mut().unwrap().extend(changes.clone());
             let id = rows[i]["id"].as_str().unwrap_or_default().to_string();
             if let Some(at) = position {
@@ -344,6 +371,18 @@ mod tests {
         assert_eq!((edited["exercises"][0]["target_weight"].as_f64(), edited["exercises"][0]["working_sets"].as_i64()), (Some(85.0), Some(4)));
         let added = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Add(&Map::new()), Some(2)).unwrap();
         assert_eq!(ids(&added), ["bench", "row", "face-pull", "pec-deck", "lateral-raise"]);
+        let again = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
+        assert_eq!(again.code(), "EXERCISE_EXISTS");
+        // A second machine with the same picture is its own exercise.
+        let variant = object(json!({"id": "bench-machine", "name": "Machine bench"}));
+        let added = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&variant), None).unwrap();
+        assert_eq!(added["exercises"][5]["guide_id"], added["exercises"][0]["guide_id"]);
+        let unnamed = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&object(json!({"id": "bench-2"}))), None).unwrap_err();
+        assert_eq!(unnamed.code(), "EXERCISE_EXISTS", "a second 'Bench Press' could never be told apart");
+        let shared = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Remove, None).unwrap_err();
+        assert_eq!(shared.code(), "EXERCISE_AMBIGUOUS");
+        let named = edit_exercise(&db, "upper-a", "Machine bench", ExerciseEdit::Change(&object(json!({"target_weight": 60}))), None).unwrap();
+        assert_eq!((named["exercises"][0]["target_weight"].as_f64(), named["exercises"][5]["target_weight"].as_f64()), (Some(85.0), Some(60.0)));
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();

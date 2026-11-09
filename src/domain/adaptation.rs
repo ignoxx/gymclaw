@@ -13,7 +13,7 @@ use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
 use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, primary_muscle, search, similar};
-use crate::domain::templates::{ExerciseSpec, get_template, remember_swap};
+use crate::domain::templates::{ExerciseSpec, get_template, pick, remember_swap};
 use crate::domain::workout::{
     active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logs, make_exercise, name, snapshot, touch, transition, unresolved, warmup_pending,
     working_count,
@@ -323,24 +323,25 @@ pub fn skip_exercise(db: &Connection, workout_id: &str, exercise_row_id: &str, r
 }
 
 /// Owner's exercise → (planned row still to do, its spec) or (None, spec to add). Exact ID, guide ID or
-/// name (case-insensitive) from this workout, its template, then the catalog. Anything else fails with
-/// catalog suggestions, so the agent picks one instead of guessing.
+/// name (case-insensitive) from this workout, its template, then the catalog. A key naming several
+/// exercises, or none, fails with the options, so the agent picks one instead of guessing.
 fn resolve(db: &Connection, workout: &WorkoutSession, query: &str, current: Option<&WorkoutExercise>) -> Result<(Option<WorkoutExercise>, ExerciseSpec)> {
     let key = query.trim().to_lowercase();
-    let same = |names: &[Option<&str>]| names.iter().flatten().any(|n| n.to_lowercase() == key);
     let rows = exercises(db, &workout.id)?;
-    for row in &rows {
-        if matches!(row.status, ExerciseStatus::Pending | ExerciseStatus::Deferred) && same(&[Some(&row.exercise_id), Some(name(row)), guide_id(row)]) {
-            return Ok((Some(row.clone()), spec_of(row)?));
-        }
+    // Every row counts for ambiguity: on the horizontal press, "leg-press" must not quietly mean the
+    // 45° one just because it is the only one left to do.
+    if let Some(i) = pick(&key, &rows.iter().map(|r| [Some(r.exercise_id.as_str()), Some(name(r)), guide_id(r)]).collect::<Vec<_>>())?
+        && matches!(rows[i].status, ExerciseStatus::Pending | ExerciseStatus::Deferred)
+    {
+        return Ok((Some(rows[i].clone()), spec_of(&rows[i])?));
     }
     let template = snapshot(workout)?;
     let mut known: Vec<ExerciseSpec> = template.exercises.into_iter().chain(template.alternatives).collect();
     for row in &rows {
         known.push(spec_of(row)?);
     }
-    if let Some(spec) = known.into_iter().find(|s| same(&[Some(&s.id), Some(&s.name), s.guide_id.as_deref()])) {
-        return Ok((None, spec));
+    if let Some(i) = pick(&key, &known.iter().map(|s| [Some(s.id.as_str()), Some(s.name.as_str()), s.guide_id.as_deref()]).collect::<Vec<_>>())? {
+        return Ok((None, known.swap_remove(i)));
     }
     let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
     let Some(item) = item else {
@@ -441,10 +442,11 @@ pub fn relabel(db: &Connection, workout_id: &str, query: &str, which: Option<&st
         let row = if key.is_empty() {
             // Latest last set; the first one on ties.
             rows.into_iter().reduce(|best, next| if next.1 > best.1 { next } else { best }).map(|(e, _)| e)
+        } else if let Some(i) = rows.iter().position(|(e, _)| e.id.chars().take(8).collect::<String>() == key) {
+            Some(rows.swap_remove(i).0)
         } else {
-            rows.into_iter().map(|(e, _)| e).find(|e| {
-                [e.id.chars().take(8).collect::<String>(), e.exercise_id.to_lowercase(), name(e).to_lowercase(), guide_id(e).unwrap_or_default().to_lowercase()].contains(&key)
-            })
+            let named = pick(&key, &rows.iter().map(|(e, _)| [Some(e.exercise_id.as_str()), Some(name(e)), guide_id(e)]).collect::<Vec<_>>())?;
+            named.map(|i| rows.swap_remove(i).0)
         };
         let Some(mut row) = row else {
             crate::bail!("EXERCISE_NOT_FOUND", "No logged exercise matches; pass which= with its name");
@@ -553,6 +555,36 @@ mod tests {
         assert_eq!(WorkoutExercise::get(&db, row).unwrap().unwrap().target_weight, 82.5);
         let replans: i64 = db.query_row("SELECT count(*) FROM agent_event WHERE type = 'planning.replan_required'", [], |r| r.get(0)).unwrap();
         assert_eq!(replans, 1);
+    }
+
+    #[test]
+    fn variants_sharing_a_picture_are_never_guessed() {
+        let db = db();
+        let template = Template {
+            id: "legs".into(),
+            name: "Legs".into(),
+            exercises: vec![
+                spec(json!({"id": "squat", "name": "Squat", "role": "squat", "working_sets": 1, "target_weight": 60})),
+                spec(json!({"id": "leg-press", "name": "Leg press (horizontal)", "role": "legs", "guide_id": "leg-press", "working_sets": 1, "target_weight": 85})),
+                spec(json!({"id": "leg-press-45", "name": "Leg press (45°)", "role": "legs", "guide_id": "leg-press", "working_sets": 1, "target_weight": 140})),
+            ],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(&db, &template).unwrap();
+        let id = start(&db, Some("legs"), None, false, at(0), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        assert_eq!(switch_to(&db, &id, "leg-press", false, at(10), "guess").unwrap_err().code(), "EXERCISE_AMBIGUOUS");
+        // On one variant, the other being the only one left is still not a reason to guess.
+        switch_to(&db, &id, "Leg press (horizontal)", false, at(12), "on-flat").unwrap();
+        assert_eq!(switch_to(&db, &id, "leg-press", false, at(14), "left").unwrap_err().code(), "EXERCISE_AMBIGUOUS");
+        let switched = switch_to(&db, &id, "Leg press (45°)", false, at(20), "named").unwrap();
+        assert_eq!(switched["data"]["active_exercise"]["exercise_id"], "leg-press-45");
+        log_set(&db, &id, &set(140.0, 10), at(60), "45").unwrap();
+        switch_to(&db, &id, "Leg press (horizontal)", false, at(120), "horizontal").unwrap();
+        log_set(&db, &id, &set(85.0, 10), at(160), "flat").unwrap();
+        assert_eq!(relabel(&db, &id, "Squat", Some("leg-press"), at(200), "relabel").unwrap_err().code(), "EXERCISE_AMBIGUOUS");
     }
 
     #[test]

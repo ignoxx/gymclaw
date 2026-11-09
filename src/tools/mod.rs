@@ -91,7 +91,8 @@ pub fn guide(name: &str, e: Error) -> Error {
     let next = if system {
         "A system problem, not a wrong call: don't retry it this turn. Tell the owner what didn't happen.".to_string()
     } else {
-        let lookup = if code.ends_with("_NOT_FOUND") || code.ends_with("_AMBIGUOUS") { "Look the id up (sql_query, get_week) instead of guessing it. " } else { "" };
+        // The exercise error already lists the names to pass; an id lookup would lead back to the same key.
+        let lookup = if code.ends_with("_NOT_FOUND") || code == "SESSION_AMBIGUOUS" { "Look the id up (sql_query, get_week) instead of guessing it. " } else { "" };
         let usage = all().iter().find(|t| t.name == name).map(|t| format!("\nUsage of {name}:\n{}", usage(&(t.schema)(), 0))).unwrap_or_default();
         format!("{lookup}Fix the call, use another tool, or ask the owner; don't repeat it unchanged.{usage}")
     };

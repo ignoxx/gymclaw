@@ -12,6 +12,7 @@ use crate::domain::coach::end_workout;
 use crate::domain::core::mutate;
 use crate::domain::profile::get_profile;
 use crate::domain::set_parser::SetInput;
+use crate::domain::templates::pick;
 use crate::domain::workout::{active_workout, exercises, guide_id, log_set, name, start};
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -61,10 +62,9 @@ pub fn log_past(db: &Connection, sets: &[PastSet], at: Ts, template_id: Option<&
         let workout = active_workout(db)?.ok_or_else(|| Error::domain("NO_ACTIVE_WORKOUT", "Workout did not start"))?;
         let mut when = at;
         for (index, item) in sets.iter().enumerate() {
-            let key = item.exercise.trim().to_lowercase();
-            let active = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
-            let matches = active.as_ref().is_some_and(|a| [a.exercise_id.to_lowercase(), name(a).to_lowercase(), guide_id(a).unwrap_or_default().to_lowercase()].contains(&key));
-            if !matches {
+            let rows = exercises(db, &workout.id)?;
+            let named = pick(&item.exercise, &rows.iter().map(|e| [Some(e.exercise_id.as_str()), Some(name(e)), guide_id(e)]).collect::<Vec<_>>())?;
+            if named.is_none_or(|i| rows[i].status != ExerciseStatus::Active) {
                 switch_to(db, &workout.id, &item.exercise, false, when, &format!("{request_id}:switch:{index}"))?;
             }
             let value = SetInput { weight: item.weight, reps: item.reps, set_type: SetType::Working, rir: None };
