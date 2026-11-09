@@ -278,7 +278,8 @@ pub struct TemplateAddExercise {
     /// Catalog guide_id or exact catalog name (see catalog_search).
     pub exercise: String,
     /// Fields overriding the defaults, e.g. {"working_sets":3,"rep_min":10,"rep_max":12,"target_weight":20}.
-    /// A variant of an exercise already in the plan needs its own "id" and "name".
+    /// A variant of an exercise already in the plan needs its own "id", "name" and, when known,
+    /// "target_weight" (otherwise its first card suggests the other variant's weight).
     #[serde(default)]
     pub fields: Map<String, Value>,
     /// 0-based place in the order; default last.

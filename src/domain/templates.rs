@@ -133,6 +133,11 @@ impl Template {
         if ids.len() != all.len() {
             return invalid("Exercise IDs must be unique within template");
         }
+        // Names are how the agent picks between variants that share a picture (see `pick`).
+        let names: HashSet<String> = all.iter().map(|s| s.name.trim().to_lowercase()).collect();
+        if names.len() != all.len() {
+            return invalid("Exercise names must be unique within template");
+        }
         let mut seen: HashSet<&str> = HashSet::new();
         for spec in &self.exercises {
             if !spec.requires_completed.iter().all(|r| seen.contains(r.as_str())) {
@@ -241,8 +246,9 @@ pub enum ExerciseEdit<'a> {
 }
 
 /// Index of the exercise `key` names by id, name or guide_id (case-insensitive), from `[id, name,
-/// guide_id]` candidates. Matches on several ids fail: variants share a guide_id, and a guess would
-/// edit or log the wrong one.
+/// guide_id]` candidates. Matches on several ids fail, even when one is an exact id: variants share a
+/// guide_id, and the first variant's id often equals it, so a guess would edit or log the wrong one.
+/// Names are unique per template, so the names in the error always resolve.
 pub fn pick(key: &str, candidates: &[[Option<&str>; 3]]) -> Result<Option<usize>> {
     let key = key.trim().to_lowercase();
     let hits: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].iter().flatten().any(|v| v.to_lowercase() == key)).collect();
@@ -253,7 +259,7 @@ pub fn pick(key: &str, candidates: &[[Option<&str>; 3]]) -> Result<Option<usize>
         let mut names: Vec<&str> = hits.iter().filter_map(|&i| candidates[i][1]).collect();
         names.sort();
         names.dedup();
-        crate::bail!("EXERCISE_AMBIGUOUS", "'{key}' matches several exercises; pass one name: {}", names.join(", "));
+        crate::bail!("EXERCISE_AMBIGUOUS", "'{key}' matches several exercises; pass one of these names: {}", names.join(", "));
     }
     Ok(hits.first().copied())
 }
@@ -278,7 +284,8 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
             spec.as_object_mut().unwrap().extend(changes.clone());
             // Exercises are told apart by id; the guide_id only picks the picture, so two machine
             // variants can share one.
-            if let Some(existing) = rows.iter().find(|e| e["id"] == spec["id"]) {
+            let same = |a: &Value, b: &Value| a.as_str().zip(b.as_str()).is_some_and(|(a, b)| a.trim().eq_ignore_ascii_case(b.trim()));
+            if let Some(existing) = rows.iter().find(|e| same(&e["id"], &spec["id"]) || same(&e["name"], &spec["name"])) {
                 let existing = existing["name"].as_str().unwrap_or_default();
                 crate::bail!("EXERCISE_EXISTS", "{existing} is already in {name}; edit it, or add a variant with its own id and name in fields");
             }
@@ -370,6 +377,8 @@ mod tests {
         let variant = object(json!({"id": "bench-machine", "name": "Machine bench"}));
         let added = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&variant), None).unwrap();
         assert_eq!(added["exercises"][5]["guide_id"], added["exercises"][0]["guide_id"]);
+        let unnamed = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&object(json!({"id": "bench-2"}))), None).unwrap_err();
+        assert_eq!(unnamed.code(), "EXERCISE_EXISTS", "a second 'Bench Press' could never be told apart");
         let shared = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Remove, None).unwrap_err();
         assert_eq!(shared.code(), "EXERCISE_AMBIGUOUS");
         let named = edit_exercise(&db, "upper-a", "Machine bench", ExerciseEdit::Change(&object(json!({"target_weight": 60}))), None).unwrap();

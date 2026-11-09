@@ -439,10 +439,11 @@ pub fn relabel(db: &Connection, workout_id: &str, query: &str, which: Option<&st
         let row = if key.is_empty() {
             // Latest last set; the first one on ties.
             rows.into_iter().reduce(|best, next| if next.1 > best.1 { next } else { best }).map(|(e, _)| e)
+        } else if let Some(i) = rows.iter().position(|(e, _)| e.id.chars().take(8).collect::<String>() == key) {
+            Some(rows.swap_remove(i).0)
         } else {
-            rows.into_iter().map(|(e, _)| e).find(|e| {
-                [e.id.chars().take(8).collect::<String>(), e.exercise_id.to_lowercase(), name(e).to_lowercase(), guide_id(e).unwrap_or_default().to_lowercase()].contains(&key)
-            })
+            let named = pick(&key, &rows.iter().map(|(e, _)| [Some(e.exercise_id.as_str()), Some(name(e)), guide_id(e)]).collect::<Vec<_>>())?;
+            named.map(|i| rows.swap_remove(i).0)
         };
         let Some(mut row) = row else {
             crate::bail!("EXERCISE_NOT_FOUND", "No logged exercise matches; pass which= with its name");
@@ -574,6 +575,10 @@ mod tests {
         assert_eq!(switch_to(&db, &id, "leg-press", false, at(10), "guess").unwrap_err().code(), "EXERCISE_AMBIGUOUS");
         let switched = switch_to(&db, &id, "Leg press (45°)", false, at(20), "named").unwrap();
         assert_eq!(switched["data"]["active_exercise"]["exercise_id"], "leg-press-45");
+        log_set(&db, &id, &set(140.0, 10), at(60), "45").unwrap();
+        switch_to(&db, &id, "Leg press (horizontal)", false, at(120), "horizontal").unwrap();
+        log_set(&db, &id, &set(85.0, 10), at(160), "flat").unwrap();
+        assert_eq!(relabel(&db, &id, "Squat", Some("leg-press"), at(200), "relabel").unwrap_err().code(), "EXERCISE_AMBIGUOUS");
     }
 
     #[test]
