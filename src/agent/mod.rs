@@ -1,5 +1,5 @@
 //! The conversational agent: one turn = context from the DB, a tool loop over OpenRouter, and exactly
-//! one outcome (reply text with optional buttons, a reaction, or silence). Owner: WP-runtime.
+//! one outcome (reply text with optional buttons or exercise picture, a reaction, or silence). Owner: WP-runtime.
 //!
 //! Tools are `tools::all()` plus `reply`, the turn's final answer. Each tool call runs in its own DB
 //! transaction on the blocking pool; errors go back to
@@ -82,6 +82,13 @@ pub struct Message {
     /// Choices as buttons under the text, one row each (at most 8).
     #[serde(default)]
     pub buttons: Vec<ReplyButton>,
+    /// Catalog guide_ids to show as one picture (at most 12), e.g. alternatives or a template's
+    /// exercises. The text becomes its caption.
+    #[serde(default)]
+    pub exercises: Vec<String>,
+    /// The rendered picture of `exercises`, set by the agent loop.
+    #[serde(skip)]
+    pub photo: Option<PathBuf>,
 }
 
 /// The `reply` tool: how a turn ends. Unknown fields are an error, so a misplaced `text` or
@@ -97,7 +104,7 @@ pub struct Reply {
 
 impl Reply {
     fn text(text: String) -> Self {
-        Reply { message: Some(Message { text, buttons: vec![] }), react: None }
+        Reply { message: Some(Message { text, buttons: vec![], exercises: vec![], photo: None }), react: None }
     }
 }
 
@@ -368,10 +375,13 @@ impl Agent {
                             steps += 1;
                             (Error::domain("WRITTEN_TOOL_CALL", "The reply text contains a tool call written as text; it did not run. Make it as a function call, then reply.").to_json(), false)
                         }
-                        Ok(reply) => {
-                            finished = Some(reply);
-                            (json!({"ok": true}), true)
-                        }
+                        Ok(mut reply) => match self.picture(reply.message.as_mut()).await {
+                            Ok(()) => {
+                                finished = Some(reply);
+                                (json!({"ok": true}), true)
+                            }
+                            Err(e) => (e.to_json(), false),
+                        },
                         Err(e) => (Error::domain("INVALID_ARGUMENTS", format!("reply: {e}")).to_json(), false),
                     },
                     (_, Ok(args)) => {
@@ -425,6 +435,32 @@ impl Agent {
                 return Ok(reply);
             }
         }
+    }
+
+    /// Renders the message's `exercises` into one picture. Unknown ids or a caption Telegram would
+    /// reject go back to the model to fix.
+    async fn picture(&self, message: Option<&mut Message>) -> Result<()> {
+        let Some(message) = message.filter(|m| !m.exercises.is_empty()) else { return Ok(()) };
+        if message.exercises.len() > 12 {
+            crate::bail!("TOO_MANY_EXERCISES", "Show at most 12 exercises in one picture.");
+        }
+        if message.text.chars().count() > 1000 {
+            crate::bail!("CAPTION_TOO_LONG", "With exercises the text is the picture's caption: keep it under 1000 characters.");
+        }
+        let (mut items, mut unknown) = (vec![], vec![]);
+        for id in &message.exercises {
+            match crate::domain::illustrations::for_exercise(id, Some(id)) {
+                Some(e) => items.push((e.name, e.telegram_png)),
+                None => unknown.push(id.as_str()),
+            }
+        }
+        if !unknown.is_empty() {
+            crate::bail!("EXERCISE_UNKNOWN", "Not catalog guide_ids: {}. Find them with catalog_search.", unknown.join(", "));
+        }
+        let root = self.data_dir.join("previews");
+        let path = tokio::task::spawn_blocking(move || crate::domain::preview::render_grid(&items, &root)).await.map_err(|e| Error::domain("RENDER_FAILED", e.to_string()))??;
+        message.photo = Some(path.into());
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -507,6 +543,19 @@ mod tests {
         // The note is in the next turn's prompt.
         assert!(context::system(&db, Ts::now()).unwrap().0.contains("- [1] Hates lunges"));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
+    }
+
+    /// "Send them as pic here": the reply carries one picture of the named exercises; a wrong id goes
+    /// back to the model instead of reaching the owner.
+    #[tokio::test]
+    async fn reply_shows_exercises_as_one_picture() {
+        let show = |ids: &[&str]| call("reply", json!({"message": {"text": "Your triceps options:", "exercises": ids}}));
+        let (agent, script, dir) = scripted(vec![show(&["tricep-pushdown-rope", "skull-crusher"]), show(&["dumbbell-overhead-tricep-extension", "skull-crusher", "tricep-kickback"])]);
+        let message = agent.turn(input()).await.reply.message.unwrap();
+        assert!(Value::Array(script.last.lock().unwrap().clone()).to_string().contains("Not catalog guide_ids: tricep-pushdown-rope."));
+        let photo = message.photo.unwrap();
+        assert!(photo.starts_with(dir.join("previews")) && photo.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
