@@ -60,7 +60,9 @@ fn watch_with(db: &Connection, recipient: &str, now: Ts, sync: impl FnOnce() -> 
         Some(template) => weekly::rolling_plan(db, template, now)?,
         None => json!({}),
     };
-    weekly::no_show_nudges(db, now)?;
+    for (event_id, _, message) in weekly::no_show_nudges(db, now)? {
+        prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
+    }
     if authority.crowd_polling_enabled
         && let Some((event_id, message)) = crowd::polling_alert(db, now)?
     {

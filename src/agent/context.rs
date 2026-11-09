@@ -2,7 +2,7 @@
 //! a fresh state snapshot from the DB, and the chat since the last `/new`. Target: well under 15k tokens.
 use std::fmt::Write;
 
-use jiff::ToSpan;
+use jiff::{SignedDuration, ToSpan};
 use serde_json::{Value, json};
 
 use crate::db::Connection;
@@ -161,6 +161,21 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         writeln!(out, "No workout running.").unwrap();
     }
 
+    // What code sent the owner lately and is still in their chat (reminders, cards, briefings).
+    let sent = ChatMessage::select(
+        db,
+        "WHERE role = 'bot' AND telegram_message_id IS NOT NULL AND at > ?1 AND meta_json ->> 'removed' IS NULL ORDER BY id DESC LIMIT 5",
+        [now - SignedDuration::from_hours(24)],
+    )?;
+    if !sent.is_empty() {
+        writeln!(out, "Sent automatically in the last 24 h (the owner sees these; newest last):").unwrap();
+    }
+    for m in sent.iter().rev() {
+        let text: String = m.text.replace('\n', " / ").chars().take(300).collect();
+        let live = m.meta_json["buttons"] == true && m.meta_json.get("settled").is_none();
+        writeln!(out, "- {} {text}{}", m.at.local(&tz).strftime("%a %H:%M"), if live { " [with buttons]" } else { "" }).unwrap();
+    }
+
     let mut shown = vec![];
     for mut e in crate::domain::events::open_issues(db)? {
         if crate::domain::events::WAKE.contains(&e.r#type.as_str()) {
@@ -172,13 +187,17 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     Ok((out, shown))
 }
 
-/// Chat since the last `/new` as OpenAI messages, oldest first. Owner and automatic messages carry
-/// their local time, so "earlier today" and reminders make sense. Background-event prompts are user turns.
+/// The conversation since the last `/new` as OpenAI messages, oldest first: the owner (user), the agent
+/// (assistant) and background-event prompts (user, marked system). Owner turns carry their local time.
+/// Code-sent messages (reminders, coach cards, briefings) are not turns: as assistant turns the model
+/// wrote reminders and fake owner lines itself, and a workout's cards filled the window. `snapshot`
+/// lists the recent ones instead.
 pub fn history(db: &Connection) -> Result<Vec<Value>> {
     let tz = get_profile(db)?.tz();
     let rows = ChatMessage::select(
         db,
-        "WHERE id > coalesce((SELECT max(id) FROM chat_message WHERE meta_json ->> 'kind' = 'boundary'), 0) ORDER BY id DESC LIMIT ?1",
+        "WHERE id > coalesce((SELECT max(id) FROM chat_message WHERE meta_json ->> 'kind' = 'boundary'), 0)
+         AND (role != 'bot' OR meta_json ->> 'kind' = 'agent_event') ORDER BY id DESC LIMIT ?1",
         [HISTORY],
     )?;
     Ok(rows
@@ -189,10 +208,7 @@ pub fn history(db: &Connection) -> Result<Vec<Value>> {
             match m.role {
                 ChatRole::Owner => json!({"role": "user", "content": format!("[{at}] {}", m.text)}),
                 ChatRole::Assistant => json!({"role": "assistant", "content": m.text}),
-                // A wake prompt is input to answer, not something the owner saw; as an assistant turn the
-                // model echoed its prefix and narrated "(nothing to report)" to the owner.
-                ChatRole::Bot if m.meta_json.get("kind").and_then(Value::as_str) == Some("agent_event") => json!({"role": "user", "content": format!("[{at}, system] {}", m.text)}),
-                ChatRole::Bot => json!({"role": "assistant", "content": format!("[{at}, sent automatically] {}", m.text)}),
+                ChatRole::Bot => json!({"role": "user", "content": format!("[{at}, system] {}", m.text)}),
             }
         })
         .collect())

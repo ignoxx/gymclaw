@@ -60,6 +60,11 @@ impl Scheduler {
             }
             Err(e) => tracing::warn!("outbox: {e}"),
         }
+        if let Ok(chat) = self.recipient.parse()
+            && let Err(e) = outbox::settle_session_messages(&self.db_path, self.tg.as_ref(), chat, Ts::now()).await
+        {
+            tracing::warn!("settle session messages: {e}");
+        }
     }
 
     /// The periodic loop. Also writes `data/heartbeat` for the container healthcheck.
