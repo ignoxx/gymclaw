@@ -30,10 +30,18 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
     ("/fonts/DM-Sans.ttf", include_bytes!("../../web/fonts/DM-Sans.ttf"), "font/ttf"),
 ];
 
-/// Tools the dashboard may call: the owner edits the notes in the agent's prompt.
 /// Tools the dashboard may call: note edits (Memory) and plan targets (Exercises). They run exactly
 /// as the agent's calls do, with the same validation.
 const DASHBOARD_TOOLS: [&str; 4] = ["note_add", "note_edit", "note_delete", "template_edit_exercise"];
+/// The only exercise fields the dashboard may change. An id, name or picture change would cut an
+/// exercise off from its history, so those stay with the agent.
+const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];
+
+/// A plan edit that touches only targets: no reordering, no other fields.
+fn targets_only(args: &serde_json::Value) -> bool {
+    args.get("position").is_none_or(serde_json::Value::is_null)
+        && args.get("changes").and_then(|c| c.as_object()).is_some_and(|c| c.keys().all(|k| TARGET_FIELDS.contains(&k.as_str())))
+}
 
 struct App {
     db_path: PathBuf,
@@ -82,6 +90,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         }
         let Ok(body) = axum::body::to_bytes(request.into_body(), 8192).await else { return error(StatusCode::PAYLOAD_TOO_LARGE) };
         let Ok(args) = serde_json::from_slice::<serde_json::Value>(&body) else { return error(StatusCode::BAD_REQUEST) };
+        if tool == "template_edit_exercise" && !targets_only(&args) {
+            return error(StatusCode::FORBIDDEN);
+        }
         let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = crate::db::open(&db_path)?;
@@ -204,14 +215,31 @@ mod tests {
         let add = r#"{"kind":"owner","text":"Weighs in on Sundays"}"#;
         assert_eq!(post(&app, "/api/note_add", add, "cross-site").await.status(), StatusCode::FORBIDDEN);
         assert_eq!(post(&app, "/api/sql_query", r#"{"sql":"SELECT 1"}"#, "same-origin").await.status(), StatusCode::NOT_FOUND);
-        // Plan targets can be edited; removing or replacing exercises stays with the agent.
-        let edit = r#"{"template_id":"legs","exercise":"Leg press","changes":{"target_weight":90}}"#;
-        assert_eq!(post(&app, "/api/template_edit_exercise", edit, "same-origin").await.status(), StatusCode::BAD_REQUEST);
         assert_eq!(post(&app, "/api/template_remove_exercise", r#"{"template_id":"legs","exercise":"Leg press"}"#, "same-origin").await.status(), StatusCode::NOT_FOUND);
         assert_eq!(post(&app, "/api/note_add", add, "same-origin").await.status(), StatusCode::OK);
         assert_eq!(post(&app, "/api/note_edit", r#"{"id":99,"text":"x"}"#, "same-origin").await.status(), StatusCode::BAD_REQUEST);
         let db = crate::db::open_readonly(&app.db_path).unwrap();
         assert_eq!(crate::tools::meta::notes(&db).unwrap()[0].text, "Weighs in on Sundays");
+        let _ = std::fs::remove_file(&app.db_path);
+    }
+
+    #[tokio::test]
+    async fn edits_only_the_targets_of_the_named_variant() {
+        let app = app();
+        let press = |id: &str, name: &str, weight: f64| serde_json::json!({"id": id, "name": name, "role": "legs", "guide_id": "leg-press", "target_weight": weight});
+        let legs = serde_json::json!({"id": "legs", "name": "Legs", "source": "user", "exercises": [press("leg-press", "Leg press", 85.0), press("leg-press-45", "Leg press (45°)", 140.0)]});
+        let template: crate::domain::templates::Template = serde_json::from_value(legs).unwrap();
+        crate::domain::templates::import_template(&crate::db::open(&app.db_path).unwrap(), &template).unwrap();
+        let edit = |changes: &str| format!(r#"{{"template_id":"legs","exercise":"Leg press (45°)","changes":{changes}}}"#);
+        for other in [r#"{"id":"x"}"#, r#"{"guide_id":null}"#, r#"{"name":"Squat"}"#] {
+            assert_eq!(post(&app, "/api/template_edit_exercise", &edit(other), "same-origin").await.status(), StatusCode::FORBIDDEN, "{other}");
+        }
+        let reorder = r#"{"template_id":"legs","exercise":"Leg press (45°)","changes":{},"position":0}"#;
+        assert_eq!(post(&app, "/api/template_edit_exercise", reorder, "same-origin").await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(post(&app, "/api/template_edit_exercise", &edit(r#"{"target_weight":150,"rest_seconds":null}"#), "same-origin").await.status(), StatusCode::OK);
+        let stored = crate::domain::templates::get_template(&crate::db::open_readonly(&app.db_path).unwrap(), "legs").unwrap();
+        let weights: Vec<f64> = stored.exercises.iter().map(|e| e.target_weight).collect();
+        assert_eq!(weights, [85.0, 150.0]);
         let _ = std::fs::remove_file(&app.db_path);
     }
 }

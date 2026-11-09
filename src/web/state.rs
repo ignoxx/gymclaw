@@ -235,8 +235,9 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             let guide = present(row.config_json["guide_id"].as_str())
                 .or_else(|| present(guides.get(&row.exercise_id).and_then(|g| g.as_deref())))
                 .unwrap_or(&row.exercise_id);
+            // An id that isn't a catalog slug falls back to an exact catalog name for its picture.
             let muscle = illustrations::primary_muscle(Some(guide)).or_else(|| illustrations::search(&name, None, None, 1).first().map(|e| e.primary_muscle.clone()));
-            exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, Some(guide)),
+            exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, illustrations::catalog().contains_key(guide).then_some(guide)),
                 "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps})).collect::<Vec<_>>()}));
         }
         let started_at = w.started_at.or(w.completed_at).expect("completed workout");

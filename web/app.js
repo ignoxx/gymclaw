@@ -658,8 +658,8 @@ function renderHistory(history) {
 
 const PLACEHOLDER = { owner: 'Add something GymClaw should know', learned: 'Add a pattern' };
 
-/* Runs one GymClaw tool (the server allows a few), then reloads the state. A refused call throws
-   with the domain's message, e.g. why a plan edit is invalid. */
+/* Runs one GymClaw tool (the server allows a few), then reloads the state; true if that reload
+   worked. A refused call throws with the domain's message, e.g. why a plan edit is invalid. */
 async function toolCall(tool, args) {
   const response = await fetch(`/api/${tool}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
   if (!response.ok) {
@@ -667,7 +667,7 @@ async function toolCall(tool, args) {
     // The first line is the reason; the rest is retry advice for the agent.
     throw new Error(body?.error?.message?.split('\n')[0] || `${tool} failed`);
   }
-  await refresh();
+  return refresh();
 }
 
 /* One line per note: click to edit in place, Enter saves, Esc cancels. An emptied line reverts. */
@@ -843,6 +843,7 @@ function renderExercises() {
    unique within a plan, while an id can also be another variant's picture. */
 function planEditor(plan, exercise) {
   const form = el('form', 'ex-edit');
+  form.dataset.plan = plan.id;
   form.append(el('h3', '', `Plan · ${plan.name}`));
   // Names are ExerciseSpec fields, sent as they are.
   const fields = [['working_sets', 'Sets', exercise.sets, 1], ['rep_min', 'Reps min', exercise.rep_min, 1], ['rep_max', 'Reps max', exercise.rep_max, 1],
@@ -852,8 +853,9 @@ function planEditor(plan, exercise) {
   for (const [name, label, value, step] of fields) {
     const field = el('label', '', label);
     const input = el('input');
-    Object.assign(input, { type: 'number', name, step, min: name === 'rest_seconds' || name === 'target_weight' ? 0 : 1, inputMode: 'decimal' });
+    Object.assign(input, { type: 'number', name, step, min: name === 'target_weight' ? 0 : 1, inputMode: 'decimal' });
     if (value !== null && value !== undefined) input.value = value;
+    // Empty rest means the profile's default for the exercise's role; clearing it goes back to that.
     if (name === 'rest_seconds') input.placeholder = 'default';
     input.dataset.was = input.value;
     field.append(input);
@@ -869,15 +871,21 @@ function planEditor(plan, exercise) {
     event.preventDefault();
     const changes = {};
     for (const input of form.querySelectorAll('input')) {
-      if (input.value === input.dataset.was || input.value === '') continue;
+      if (input.value === input.dataset.was) continue;
+      if (input.value === '') { if (input.name === 'rest_seconds') changes.rest_seconds = null; continue; }
       changes[input.name] = Number(input.value);
     }
     if (!Object.keys(changes).length) { message.textContent = 'Nothing changed'; return; }
     save.disabled = true;
     message.textContent = 'Saving…';
     try {
-      await toolCall('template_edit_exercise', { template_id: plan.id, exercise: exercise.name, changes });
+      if (!await toolCall('template_edit_exercise', { template_id: plan.id, exercise: exercise.name, changes })) {
+        message.textContent = 'Saved · reload to see it';
+        return;
+      }
       openExercise(detailOf);
+      const saved = document.querySelector(`.ex-edit[data-plan="${CSS.escape(plan.id)}"] .ex-message`);
+      if (saved) saved.textContent = 'Saved';
     } catch (error) {
       message.textContent = error.message;
       save.disabled = false;
@@ -886,8 +894,23 @@ function planEditor(plan, exercise) {
   return form;
 }
 
+/* Your exercises drawn with a catalog entry's picture: plan exercises, then ones only in your history.
+   History rows know their picture, not their guide_id, so the picture URL is the link. */
+function exercisesWithPicture(guide) {
+  const yours = state.plans.flatMap(plan => plan.exercises.filter(e => e.guide_id === guide.guide_id).map(e => ({ e, where: plan.name })));
+  for (const e of loggedExercises().values()) {
+    if (e.svg_url === guide.svg_url && !yours.some(y => y.e.id === e.id)) yours.push({ e, where: 'Not in a plan' });
+  }
+  return yours;
+}
+
 /* Detail of an exercise you train or logged ({id}), or of a catalog entry ({guide}). */
 function openExercise(of) {
+  if (of.guide) {
+    const yours = exercisesWithPicture(of.guide);
+    // One exercise of yours uses this picture: its detail says more than the catalog entry.
+    if (yours.length === 1) return openExercise({ id: yours[0].e.id });
+  }
   detailOf = of;
   const dialog = document.getElementById('ex-detail');
   // The sheet holds the content, so a tap on the dialog itself is a tap on the backdrop.
@@ -909,11 +932,11 @@ function openExercise(of) {
   head.append(pose, titles);
   sheet.append(close, head);
   if (of.guide) {
-    const yours = state.plans.flatMap(plan => plan.exercises.filter(e => e.guide_id === of.guide.guide_id).map(e => ({ plan, e })));
+    const yours = exercisesWithPicture(of.guide);
     if (yours.length) {
       sheet.append(el('h3', '', 'Yours with this picture'));
-      for (const { plan, e } of yours) sheet.append(exerciseRow(e, plan.name, `${e.sets} × ${repRange(e)}`, () => openExercise({ id: e.id })));
-    } else sheet.append(el('p', 'empty', 'Not in your plans.'));
+      for (const { e, where } of yours) sheet.append(exerciseRow(e, where, '', () => openExercise({ id: e.id })));
+    } else sheet.append(el('p', 'empty', 'You haven\'t done this one yet.'));
   }
   if (logged) {
     const all = logged.sessions.flatMap(s => s.sets);
@@ -992,8 +1015,10 @@ async function refresh() {
     clockOffset = live ? 0 : Date.parse(data.captured_at) - Date.now();
     render(data);
     document.getElementById('load-error').hidden = true;
+    return true;
   } catch {
     document.getElementById('load-error').hidden = false;
+    return false;
   }
 }
 
