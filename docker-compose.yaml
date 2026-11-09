@@ -18,6 +18,8 @@ services:
       GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-inference-net/fp4}
       GYMCLAW_MODEL_FAST: ${GYMCLAW_MODEL_FAST:-}
       GYMCLAW_MODEL_VISION: ${GYMCLAW_MODEL_VISION:-}
+      # Telegram menu button opens the dashboard as a Mini App; unset leaves the "/" menu.
+      GYMCLAW_DASHBOARD_HOST: ${GYMCLAW_DASHBOARD_HOST:-}
       TZ: ${TZ:-Europe/Berlin}
       # Seeds the profile timezone on first start; later changes go through the profile.
       GYMCLAW_TIMEZONE: ${TZ:-Europe/Berlin}
