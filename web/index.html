@@ -17,7 +17,7 @@
       <span class="updated" id="updated"></span>
     </header>
     <div class="page-heading"><h1>Training</h1>
-      <nav class="tabs" aria-label="Views"><button data-tab="today" aria-current="page">Today</button><button data-tab="progress">Progress</button><button data-tab="history">History</button><button data-tab="memory">Memory</button></nav></div>
+      <nav class="tabs" aria-label="Views"><button data-tab="today" aria-current="page">Today</button><button data-tab="progress">Progress</button><button data-tab="history">History</button><button data-tab="exercises">Exercises</button><button data-tab="memory">Memory</button></nav></div>
     <div id="load-error" role="alert" hidden>Can't reach GymClaw right now.</div>
     <div id="polling-alert" class="alert" role="alert" hidden></div>
     <div class="layout tab" id="tab-today" hidden>
@@ -54,6 +54,15 @@
     <div class="tab" id="tab-history" hidden>
       <section class="panel"><div class="section-heading"><h2>Workouts</h2><span id="history-count"></span></div><div id="history"></div></section>
     </div>
+    <div class="tab" id="tab-exercises" hidden>
+      <div class="ex-bar">
+        <div class="segmented" id="ex-views" role="group" aria-label="Show"><button data-ex="plans" aria-pressed="true">Plans</button><button data-ex="done" aria-pressed="false">All I've done</button><button data-ex="catalog" aria-pressed="false">Catalog</button></div>
+        <input type="search" id="ex-search" placeholder="Search exercises" aria-label="Search exercises" autocomplete="off">
+      </div>
+      <div class="chips" id="ex-chips" role="group" aria-label="Equipment"></div>
+      <div id="ex-list"></div>
+    </div>
+    <dialog class="ex-detail" id="ex-detail" aria-labelledby="ex-detail-title"></dialog>
     <div class="tab" id="tab-memory" hidden>
       <div class="grid-2">
         <section class="panel"><div class="section-heading"><h2>About you</h2><span>Read before every reply · <span class="usage" data-kind="owner"></span></span></div><ul class="notes" data-kind="owner"></ul></section>

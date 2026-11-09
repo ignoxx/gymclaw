@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::db::Connection;
 use crate::db::models::{
-    AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, NoteKind, PlannedSession, RuntimeSettings, SetLog, SetType, UserProfile, WorkoutSession,
+    AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession, RuntimeSettings, SetLog, SetType, UserProfile, WorkoutSession,
     WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
@@ -107,6 +107,34 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     }
     Ok(json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": hhmm(row.leave_home_at, tz),
         "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}))
+}
+
+/// The owner's workout plans (demo fixtures only when there are no others), each exercise with
+/// the weight it will get next: the learned progression, else the plan's target.
+fn plans(db: &Connection) -> Result<Vec<Value>> {
+    let mut templates = WorkoutTemplate::select(db, "ORDER BY id", [])?;
+    if templates.iter().any(|t| t.definition_json.get("source").and_then(Value::as_str) != Some("demo_fixture")) {
+        templates.retain(|t| t.definition_json.get("source").and_then(Value::as_str) != Some("demo_fixture"));
+    }
+    let mut out = vec![];
+    for row in templates {
+        let template = get_template(db, &row.id)?;
+        let mut exercises = vec![];
+        for spec in &template.exercises {
+            let next = ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight);
+            exercises.push(json!({"id": spec.id, "name": spec.name, "guide_id": spec.guide_id, "svg_url": svg(&spec.name, spec.guide_id.as_deref()),
+                "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
+                "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds}));
+        }
+        out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));
+    }
+    Ok(out)
+}
+
+/// Every catalog entry, for the dashboard's catalog browser. Static, so it is not part of the state.
+pub fn catalog() -> Vec<Value> {
+    illustrations::catalog().values().map(|i| json!({"guide_id": i.slug, "name": i.name, "equipment": i.equipment, "muscle": i.primary_muscle,
+        "svg_url": format!("/illustrations/{}.svg", i.slug)})).collect()
 }
 
 fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
@@ -207,8 +235,10 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             let guide = present(row.config_json["guide_id"].as_str())
                 .or_else(|| present(guides.get(&row.exercise_id).and_then(|g| g.as_deref())))
                 .unwrap_or(&row.exercise_id);
+            // An id that isn't a catalog slug falls back to an exact catalog name for its picture.
             let muscle = illustrations::primary_muscle(Some(guide)).or_else(|| illustrations::search(&name, None, None, 1).first().map(|e| e.primary_muscle.clone()));
-            exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps})).collect::<Vec<_>>()}));
+            exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, illustrations::catalog().contains_key(guide).then_some(guide)),
+                "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps})).collect::<Vec<_>>()}));
         }
         let started_at = w.started_at.or(w.completed_at).expect("completed workout");
         let mut seconds = w.actual_duration_seconds.unwrap_or(0);
@@ -348,7 +378,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
         "demo": false, "live_database_accessed": true, "captured_at": iso(&now.local(&TimeZone::UTC)), "timezone": profile.timezone,
         "range": format!("{} – {}", date_fmt(today, "%-d %b"), date_fmt(today.checked_add(6.days())?, "%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
-        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?,
+        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "plans": plans(db)?,
         "activity": events.iter().map(|e| json!({"time": hhmm(e.created_at, &tz), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
     }))

@@ -39,7 +39,7 @@ docker compose up -d --build
 | `GYMCLAW_DASHBOARD_HOST` | no | Hostname for the dashboard behind Traefik. The bot's Telegram menu button opens it as a Mini App. |
 
 The stack is three containers: GymClaw (one Rust binary: bot, agent, coach, scheduler), an egress proxy
-with a host allowlist, and the dashboard (read-only except the agent's notes). Details, Coolify steps, backups and moving hosts:
+with a host allowlist, and the dashboard (read-only except the agent's notes and plan targets). Details, Coolify steps, backups and moving hosts:
 [deploy/README.md](../deploy/README.md).
 
 ## First run
