@@ -369,13 +369,15 @@ const REVIEW_WEEKS: i64 = 4;
 /// "Thu Oct 22 12:45 legs MISSED (owner's pick)". Cancelled slots were moved or dropped, so they're left out.
 fn recent_sessions(db: &Connection, from: Date, until: Date, tz: &TimeZone) -> Result<Vec<String>> {
     let sessions = PlannedSession::select(db, "WHERE status != 'CANCELLED' ORDER BY planned_start_at", [])?;
+    let when = |s: &PlannedSession| format!("{} {}", s.planned_start_at.local(tz).strftime("%a %b %-d %H:%M"), s.workout_template_id.as_deref().unwrap_or("workout"));
     Ok(sessions
-        .into_iter()
+        .iter()
         .filter(|s| (from..until).contains(&s.planned_start_at.local(tz).date()))
         .map(|s| {
             let pick = if s.user_locked { " (owner's pick)" } else { "" };
-            let workout = s.workout_template_id.as_deref().unwrap_or("workout");
-            format!("{} {workout} {}{pick}", s.planned_start_at.local(tz).strftime("%a %b %-d %H:%M"), s.status.as_str())
+            let original = s.follows_session_id.as_ref().and_then(|id| sessions.iter().find(|o| &o.id == id));
+            let follows = original.map(|o| format!(", make-up for {}", when(o))).unwrap_or_default();
+            format!("{} {}{pick}{follows}", when(s), s.status.as_str())
         })
         .collect())
 }

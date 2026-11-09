@@ -22,7 +22,7 @@ pub fn session_data(row: &PlannedSession) -> Value {
         "start": row.planned_start_at, "end": row.planned_end_at, "prep_start": row.prep_start_at,
         "leave_home": row.leave_home_at, "expected_finish": row.expected_finish_at,
         "crowd": row.crowd_prediction, "confidence": row.crowd_confidence, "user_locked": row.user_locked,
-        "workout_template_id": row.workout_template_id, "workout_plan": row.workout_plan_json,
+        "workout_template_id": row.workout_template_id, "workout_plan": row.workout_plan_json, "follows_session_id": row.follows_session_id,
     })
 }
 

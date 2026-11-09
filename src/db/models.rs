@@ -132,6 +132,8 @@ table!(PlannedSession = "planned_session" {
     source_revision: i64,
     created_at: Ts,
     updated_at: Ts,
+    /// The missed or skipped session this one makes up for.
+    follows_session_id: Option<String>,
 });
 
 table!(WorkoutSession = "workout_session" {
@@ -376,7 +378,7 @@ impl PlannedSession {
             id: crate::db::new_id(), week_id, workout_template_id, workout_plan_json: Json(Value::Object(Default::default())),
             status: SessionStatus::Tentative, planned_start_at: now, planned_end_at: now, prep_start_at: now, leave_home_at: now,
             expected_finish_at: now, calendar_event_id: None, crowd_prediction: None, crowd_confidence: None, user_locked,
-            source_revision: 1, created_at: now, updated_at: now,
+            source_revision: 1, created_at: now, updated_at: now, follows_session_id: None,
         }
     }
 

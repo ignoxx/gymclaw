@@ -143,7 +143,7 @@ pub struct SessionUpdate {
 
 impl Tool for SessionUpdate {
     const NAME: &'static str = "session_update";
-    const DESCRIPTION: &'static str = "Edit any upcoming session's exact time, duration, template or status; cancel with status CANCELLED. Owner/agent edits lock it and affect no other sessions. Report warnings. Use sql_query/get_week to choose a session, time or template first.";
+    const DESCRIPTION: &'static str = "Edit any upcoming session's exact time, duration, template or status; cancel with status CANCELLED. Owner/agent edits lock it and affect no other sessions. Rescheduling a missed (or already-begun skipped) session keeps that outcome and returns a new make-up session (new id, follows_session_id). Report warnings. Use sql_query/get_week to choose a session, time or template first.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let id = session_id(cx, &self.session_id)?;

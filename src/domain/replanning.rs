@@ -155,6 +155,8 @@ pub struct SessionPatch {
 
 /// One atomic owner/agent edit. Policy violations warn; malformed times/templates fail. All saved
 /// edits lock the session and reconcile allocation, calendar intent and notification jobs together.
+/// A missed session, or a skipped one whose slot has begun, keeps that outcome: rescheduling it
+/// creates a new session that follows it, so history shows the miss and the make-up.
 pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now: Ts, request_id: &str) -> Result<Value> {
     mutate(db, "planning.session_edited", request_id, json!({"session_id": id, "patch": patch}), now, || {
         let profile = get_profile(db)?;
@@ -164,10 +166,18 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         };
         // Scheduling status alone is editable; actual training history belongs to workout tools.
         let trained = crate::db::models::WorkoutSession::first(db, "WHERE planned_session_id = ?1 AND started_at IS NOT NULL", [&session.id])?.is_some();
-        // An untrained missed slot can still be moved into the future (owner is running late).
-        if id.is_some() && (trained || (session.planned_end_at <= now && session.status != SessionStatus::Missed)) {
+        // A missed or skipped slot can still be rescheduled (owner is running late, or makes it up later).
+        let outcome = session.status == SessionStatus::Missed || (session.status == SessionStatus::Skipped && session.planned_start_at <= now);
+        if id.is_some() && (trained || (session.planned_end_at <= now && !outcome)) {
             crate::bail!("SESSION_NOT_EDITABLE", "Use workout tools for a running or historical workout; session edits are for upcoming slots");
         }
+        let revived = id.is_some() && outcome && patch.status.is_none_or(SessionStatus::is_open);
+        if revived {
+            // Same workout, times and plan as a starting point; its own identity, calendar event and reminders.
+            let original = session.id.clone();
+            session = PlannedSession { id: crate::db::new_id(), calendar_event_id: None, source_revision: 0, created_at: now, follows_session_id: Some(original), ..session };
+        }
+        let new = id.is_none() || revived;
         let start = patch.start.or(id.map(|_| session.planned_start_at)).ok_or_else(|| crate::error::Error::domain("INVALID_ARGUMENTS", "Creating a session requires start"))?;
         let duration = if id.is_some() { (session.planned_end_at - session.planned_start_at).as_mins() } else { profile.preferred_workout_minutes };
         let end = patch.end.unwrap_or_else(|| start.mins(duration));
@@ -183,7 +193,7 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         if id.is_none() && session.workout_template_id.is_none() {
             crate::bail!("TEMPLATE_REQUIRED", "Creating a session requires a real template_id; inspect the split or templates first");
         }
-        let status = patch.status.unwrap_or(if session.status == SessionStatus::Missed { SessionStatus::Committed } else if id.is_some() { session.status } else if start <= now + HOURS_48 { SessionStatus::Committed } else { SessionStatus::Tentative });
+        let status = patch.status.unwrap_or(if !new { session.status } else if start <= now + HOURS_48 { SessionStatus::Committed } else { SessionStatus::Tentative });
         let slot = Candidate::manual(start, end, &profile);
         let mut warnings = if status.is_active() { rule_breaks(db, &session.id, &slot, &profile)? } else { Vec::new() };
         let week = week_of(start, &profile.tz());
@@ -209,7 +219,7 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         if status == SessionStatus::Cancelled {
             session.merge_plan(json!({"deleted_by_user": true}));
         }
-        if id.is_some() { session.save(db)?; } else { session.insert(db)?; }
+        if new { session.insert(db)?; } else { session.save(db)?; }
         if !status.is_open() {
             // Retire old queued writes too; a cancel then queues an owned calendar deletion.
             retire_session(db, &mut session, status, now)?;
@@ -303,5 +313,26 @@ mod tests {
         let count = attention(&db).len();
         drag(&db, &ids[1], late + SignedDuration::from_hours(7 * 24));
         assert!(attention(&db)[count..].iter().all(|e| !e.payload_json.0["warnings"].as_array().unwrap().contains(&json!(window))));
+    }
+
+    /// 2026-11-05: a missed Thursday Push was moved to Sunday as Cardio and skipped there; the row was
+    /// revived in place, so the review only ever saw "Sun cardio SKIPPED". The miss now stays.
+    #[test]
+    fn rescheduling_a_missed_session_keeps_the_miss() {
+        let db = db();
+        let week = jiff::civil::date(2026, 10, 12);
+        let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
+        let planned = schedule_week(&db, week, now, None, None, &[]).unwrap();
+        let id = planned["sessions"][0]["id"].as_str().unwrap().to_string();
+        let first = PlannedSession::get(&db, &id).unwrap().unwrap();
+        let later = first.planned_end_at.mins(1);
+        crate::domain::weekly::mark_missed(&db, later).unwrap();
+
+        let makeup = first.planned_start_at + SignedDuration::from_hours(48);
+        let moved = edit_session(&db, Some(&id), SessionPatch { start: Some(makeup), ..Default::default() }, later, "makeup").unwrap();
+        let new = &moved["data"]["session"];
+        assert_ne!(new["id"], json!(id));
+        assert_eq!((new["follows_session_id"].as_str(), new["status"].as_str()), (Some(id.as_str()), Some("COMMITTED")));
+        assert_eq!(PlannedSession::get(&db, &id).unwrap().unwrap().status, SessionStatus::Missed);
     }
 }

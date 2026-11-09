@@ -116,7 +116,9 @@ to COMMITTED within 48 hours, otherwise TENTATIVE. Update preserves
 omitted fields; moving the start alone preserves duration. Timestamps without offsets use the
 owner's timezone. Cancellation queues deletion of the owned calendar event; SKIPPED/MISSED keep
 calendar history and cancel pending jobs/writes. Any scheduling status can be set, but this never
-fabricates workout or set logs. Running/historical workouts use the workout tools.
+fabricates workout or set logs. Running/historical workouts use the workout tools. Rescheduling a
+MISSED session (or a SKIPPED one whose slot has begun) keeps that outcome and creates a make-up
+session with `follows_session_id` pointing at it.
 
 Session mutations go through the same allocation, calendar outbox, reminder and idempotency
 mechanics as calendar edits. `profile_update` and calendar/feed changes report conflicts without
