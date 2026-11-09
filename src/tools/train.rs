@@ -278,6 +278,7 @@ pub struct TemplateAddExercise {
     /// Catalog guide_id or exact catalog name (see catalog_search).
     pub exercise: String,
     /// Fields overriding the defaults, e.g. {"working_sets":3,"rep_min":10,"rep_max":12,"target_weight":20}.
+    /// A variant of an exercise already in the plan needs its own "id" and "name".
     #[serde(default)]
     pub fields: Map<String, Value>,
     /// 0-based place in the order; default last.
@@ -286,7 +287,7 @@ pub struct TemplateAddExercise {
 
 impl Tool for TemplateAddExercise {
     const NAME: &'static str = "template_add_exercise";
-    const DESCRIPTION: &'static str = "Add a catalog exercise to a saved plan.";
+    const DESCRIPTION: &'static str = "Add an exercise to a saved plan. The catalog entry only gives the picture: a machine variant the catalog lacks (a second leg press) reuses the closest guide_id under its own id and name, and keeps its own weights.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Add(&self.fields), self.position)?)
@@ -313,7 +314,8 @@ impl Tool for TemplateRemoveExercise {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogSearch {
-    /// Words from the exercise name, e.g. "incline db press".
+    /// English exercise-name words, e.g. "incline db press". Translate the owner's description or
+    /// language first; leave it empty to browse by muscle and equipment.
     #[serde(default)]
     pub query: String,
     /// Exact primary muscle, e.g. "Chest".
@@ -326,7 +328,7 @@ pub struct CatalogSearch {
 
 impl Tool for CatalogSearch {
     const NAME: &'static str = "catalog_search";
-    const DESCRIPTION: &'static str = "Find illustrated exercises (guide_id, name, equipment, muscle). Plans and swaps only use catalog exercises.";
+    const DESCRIPTION: &'static str = "Find illustrated exercises (guide_id, name, equipment, muscle). Plans and swaps only use catalog pictures; when unsure which one the owner means, show the candidates with reply exercises.";
 
     fn run(self, _cx: &mut Ctx) -> Result<Value> {
         let results = search(&self.query, self.muscle.as_deref(), self.equipment.as_deref(), self.limit.unwrap_or(8));

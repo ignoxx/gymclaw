@@ -257,11 +257,14 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
                 let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
                 crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{exercise}'. Pass one guide_id: {options}");
             };
-            if let Some(i) = index {
-                crate::bail!("EXERCISE_EXISTS", "{} is already in {name}; edit it instead", rows[i]["name"].as_str().unwrap_or_default());
-            }
             let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
             spec.as_object_mut().unwrap().extend(changes.clone());
+            // Exercises are told apart by id; the guide_id only picks the picture, so two machine
+            // variants can share one.
+            if let Some(existing) = rows.iter().find(|e| e["id"] == spec["id"]) {
+                let existing = existing["name"].as_str().unwrap_or_default();
+                crate::bail!("EXERCISE_EXISTS", "{existing} is already in {name}; edit it, or add a variant with its own id and name in fields");
+            }
             let at = position.unwrap_or(rows.len()).min(rows.len());
             rows.insert(at, spec);
         }
@@ -344,6 +347,12 @@ mod tests {
         assert_eq!((edited["exercises"][0]["target_weight"].as_f64(), edited["exercises"][0]["working_sets"].as_i64()), (Some(85.0), Some(4)));
         let added = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Add(&Map::new()), Some(2)).unwrap();
         assert_eq!(ids(&added), ["bench", "row", "face-pull", "pec-deck", "lateral-raise"]);
+        let again = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
+        assert_eq!(again.code(), "EXERCISE_EXISTS");
+        // A second machine with the same picture is its own exercise.
+        let variant = object(json!({"id": "bench-machine", "name": "Machine bench"}));
+        let added = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&variant), None).unwrap();
+        assert_eq!(added["exercises"][5]["guide_id"], added["exercises"][0]["guide_id"]);
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();
