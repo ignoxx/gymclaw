@@ -107,8 +107,8 @@ pub fn mark_missed(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// 30 min into an unstarted committed slot: queue one agent event. The agent decides how to respond.
-/// An elapsed slot still ends as MISSED; a make-up session requires an agent decision.
+/// 30 min into an unstarted committed slot: one event, sent as the session's last reminder with Start,
+/// Skip and Move buttons (skip and move go to the agent). An elapsed slot still ends as MISSED.
 pub fn no_show_nudges(db: &Connection, now: Ts) -> Result<Vec<(String, String, String)>> {
     let tz = get_profile(db)?.tz();
     let mut nudges = Vec::new();
@@ -122,7 +122,7 @@ pub fn no_show_nudges(db: &Connection, now: Ts) -> Result<Vec<(String, String, S
             continue;
         }
         let name = session.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).unwrap_or("Workout");
-        let message = format!("⏰ {name} was planned for {} and hasn't started. Skip it or move it? Or just start when you're there.", session.planned_start_at.local(&tz).strftime("%H:%M"));
+        let message = format!("⏰ {name} was planned for {} and hasn't started.", session.planned_start_at.local(&tz).strftime("%H:%M"));
         let mut event = emit(db, "planning.no_show", now, json!({"session_id": session.id, "start": session.planned_start_at, "message": message}))?;
         event.correlation_id = Some(key);
         event.update(db)?;
@@ -803,7 +803,7 @@ mod tests {
         let late = first.planned_start_at.mins(31);
         let nudges = no_show_nudges(&db, late).unwrap();
         let [(event_id, session_id, message)] = nudges.as_slice() else { panic!("{nudges:?}") };
-        assert!(session_id == &first.id && message.contains("hasn't started. Skip it or move it?"), "{message}");
+        assert!(session_id == &first.id && message.ends_with("hasn't started."), "{message}");
         assert!(no_show_nudges(&db, late.mins(1)).unwrap().is_empty());
         let delivery = prepare_event_message(&db, event_id, message, late, "123", &[]).unwrap();
         edit_session(&db, Some(&first.id), SessionPatch { status: Some(SessionStatus::Skipped), ..Default::default() }, late, "tg-1-skip").unwrap();

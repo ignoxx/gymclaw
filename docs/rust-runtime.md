@@ -97,7 +97,8 @@ model never has to. Timestamps without an offset are the owner's local time.
 - `/new` clears the chat window; `/status` shows runtime health without the model. Startup sets the
   Telegram "/" menu to exactly these (`bot::COMMANDS`).
 - Every outbound message (agent, coach, reminders, briefings) goes into `chat_message`, so the agent
-  sees what the owner sees.
+  sees what the owner sees. A planned session keeps one message in the chat: get-ready, leave, start
+  and no-show each replace the previous one, and its buttons go once the session can't be started.
 - Per-owner serialized turns; messages arriving during a turn are collected into the next one.
 - Turn log: JSONL events in `data/turns/YYYY-MM-DD.jsonl`, secrets redacted
   ([format](../src/agent/turnlog.rs)).
@@ -106,7 +107,8 @@ model never has to. Timestamps without an offset are the owner's local time.
 
 - In-process: `ticks::watch` every 60 s (calendar sync, personal feed, reminders), `ticks::weekly`
   Sunday from 19:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
-  after ticks when calendar writes are enabled. Conflicts, no-shows, missed slots, stale workouts
+  after ticks when calendar writes are enabled. A no-show is sent as the session's last reminder
+  (Start, plus Skip/Move handed to the agent). Conflicts, missed slots, stale workouts
   and week rollover create durable decision events rather than automatic replans or fixed briefings.
   The bot checks this inbox every minute in its serialized agent worker, gated by runtime authority;
   successful turns acknowledge events and failed turns remain pending. Unchanged conflicts dedupe

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::blocking;
 use crate::db::models::{
-    AgentEvent, ChatMessage, ChatRole, DeliveryStatus, JobKind, JobStatus, NotificationDelivery, NotificationJob, OnboardingState, PlannedSession,
+    AgentButton, AgentEvent, ChatMessage, ChatRole, DeliveryStatus, JobKind, JobStatus, NotificationDelivery, NotificationJob, OnboardingState, PlannedSession,
     RuntimeSettings, SessionStatus, WorkoutSession, WorkoutStatus,
 };
 use crate::db::{Connection, Json, new_id};
@@ -237,7 +237,7 @@ pub fn pending(db: &Connection, recipient: &str) -> Result<Vec<String>> {
 
 enum Claim {
     Done(Value),
-    Send { chat: i64, message: String, buttons: Vec<Vec<Button>> },
+    Send { chat: i64, message: String, buttons: Vec<Vec<Button>>, session: Option<String> },
 }
 
 /// Check route, authority and staleness, then commit SENDING. Nothing goes out unless this says so.
@@ -280,28 +280,54 @@ fn claim(db: &mut Connection, delivery_id: &str, now: Ts) -> Result<Claim> {
     row.status = DeliveryStatus::Sending;
     row.handled_at = Some(now);
     row.update(&tx)?;
-    // The session reminder starts the workout in one tap (handled by the coach, no model).
-    let buttons = match &job {
-        Some(job) if job.kind == JobKind::SessionStart => {
-            let id: String = job.planned_session_id.as_deref().unwrap_or_default().chars().take(8).collect();
-            vec![vec![Button { text: "▶️ Start workout".into(), data: format!("gc:begin:{id}") }]]
-        }
+    let no_show = match &row.agent_event_id {
+        Some(id) => AgentEvent::get(&tx, id)?.filter(|e| e.r#type == "planning.no_show"),
+        None => None,
+    };
+    let session = match (&job, &no_show) {
+        (Some(job), _) => job.planned_session_id.clone(),
+        (None, Some(event)) => event.payload_json["session_id"].as_str().map(String::from),
+        _ => None,
+    };
+    let buttons = match (&job, &session) {
+        (Some(job), Some(id)) if job.kind == JobKind::SessionStart => vec![start_button(id)],
+        (None, Some(id)) => no_show_buttons(&tx, id, now)?,
         _ => vec![],
     };
     let chat = row.recipient.parse().map_err(|_| Error::domain("DELIVERY_ROUTE_MISMATCH", "Recipient is not a Telegram user id"))?;
     let message = row.message.clone();
     tx.commit()?;
-    Ok(Claim::Send { chat, message, buttons })
+    Ok(Claim::Send { chat, message, buttons, session })
+}
+
+/// Starts the workout in one tap (handled by the coach, no model).
+fn start_button(session_id: &str) -> Vec<Button> {
+    let id: String = session_id.chars().take(8).collect();
+    vec![Button { text: "▶️ Start workout".into(), data: format!("gc:begin:{id}") }]
+}
+
+/// Start, or hand skip/move to the agent as if the owner had typed it: those are decisions.
+fn no_show_buttons(db: &Connection, session_id: &str, now: Ts) -> Result<Vec<Vec<Button>>> {
+    let name = PlannedSession::get(db, session_id)?.and_then(|s| s.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).map(String::from));
+    let name = name.unwrap_or_else(|| "workout".into());
+    let mut choices = Vec::new();
+    for (label, value) in [("Skip", format!("Skip today's {name}")), ("Move", format!("Move today's {name}"))] {
+        let id = new_id()[..8].to_string();
+        AgentButton { id: id.clone(), label: label.into(), value, created_at: now }.insert(db)?;
+        choices.push(Button { text: label.into(), data: format!("btn:{id}") });
+    }
+    Ok(vec![start_button(session_id), choices])
 }
 
 /// Send one PENDING delivery. Returns its data; a failed send leaves it UNKNOWN and returns
 /// TELEGRAM_DELIVERY_UNKNOWN.
 pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: Ts) -> Result<Value> {
     let id = delivery_id.to_string();
-    let (chat, message, buttons) = match blocking(db_path, move |db| claim(db, &id, now)).await? {
+    let (chat, message, buttons, session) = match blocking(db_path, move |db| claim(db, &id, now)).await? {
         Claim::Done(data) => return Ok(data),
-        Claim::Send { chat, message, buttons } => (chat, message, buttons),
+        Claim::Send { chat, message, buttons, session } => (chat, message, buttons, session),
     };
+    let has_buttons = !buttons.is_empty();
     let id = delivery_id.to_string();
     match tg.send(chat, &message, None, &buttons).await {
         Err(error) => {
@@ -316,20 +342,71 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
             crate::bail!("TELEGRAM_DELIVERY_UNKNOWN", "Delivery outcome unknown; inspect Telegram, then resolve it. No automatic resend.")
         }
         Ok(message_id) => {
-            blocking(db_path, move |db| {
+            let (data, replaced) = blocking(db_path, move |db| {
                 let tx = db.transaction()?;
                 tx.execute("UPDATE notification_delivery SET status = 'SENT', external_message_id = ?2 WHERE id = ?1 AND status = 'SENDING'", [&id, &message_id.to_string()])?;
                 let row = NotificationDelivery::get(&tx, &id)?.expect("claimed row");
                 acknowledge_delivery_events(&tx, &row, now)?;
                 emit(&tx, "notifications.sent", now, json!({"delivery_id": id, "message_id": message_id.to_string()}))?;
-                let meta = json!({"kind": "delivery", "delivery_id": id});
+                // A session keeps one message in the chat: each step replaces the one before.
+                let replaced = match &session {
+                    Some(session) => retire(&tx, "meta_json ->> 'session_id' = ?1 AND meta_json ->> 'removed' IS NULL", session, "removed")?,
+                    None => vec![],
+                };
+                let meta = json!({"kind": "delivery", "delivery_id": id, "session_id": session, "buttons": has_buttons});
                 ChatMessage { id: None, at: now, role: ChatRole::Bot, text: row.message.clone(), telegram_message_id: Some(message_id), meta_json: Json(meta) }.insert(&tx)?;
                 tx.commit()?;
-                Ok(delivery_data(&row))
+                Ok((delivery_data(&row), replaced))
             })
-            .await
+            .await?;
+            for old in replaced {
+                if let Err(e) = tg.remove(chat, old).await
+                    && !crate::telegram::is_gone(&e)
+                {
+                    tracing::warn!("old session message {old} not removed: {e}");
+                }
+            }
+            Ok(data)
         }
     }
+}
+
+/// Flag matching session messages (`removed` or `settled`) and return their Telegram ids.
+fn retire(db: &Connection, filter: &str, arg: impl rusqlite::ToSql, flag: &str) -> Result<Vec<i64>> {
+    let rows = ChatMessage::select(db, &format!("WHERE telegram_message_id IS NOT NULL AND {filter}"), [arg])?;
+    for row in &rows {
+        db.execute(&format!("UPDATE chat_message SET meta_json = json_set(meta_json, '$.{flag}', json('true')) WHERE id = ?1"), [row.id])?;
+    }
+    Ok(rows.iter().filter_map(|r| r.telegram_message_id).collect())
+}
+
+/// Once a session can't be started anymore (started, skipped, cancelled, missed on an earlier day), its
+/// message drops its buttons, so the chat never offers a choice that no longer applies.
+pub async fn settle_session_messages(db_path: &Path, tg: &dyn Telegram, chat: i64, now: Ts) -> Result<()> {
+    let done = blocking(db_path, move |db| {
+        let tx = db.transaction()?;
+        let live = "meta_json ->> 'buttons' = 1 AND meta_json ->> 'removed' IS NULL AND meta_json ->> 'settled' IS NULL";
+        let mut done = Vec::new();
+        for row in ChatMessage::select(&tx, &format!("WHERE telegram_message_id IS NOT NULL AND {live}"), [])? {
+            let session = row.meta_json["session_id"].as_str().map(|id| PlannedSession::get(&tx, id)).transpose()?.flatten();
+            if session.map(|s| workout::startable(&tx, &s, now)).transpose()? != Some(true) {
+                done.extend(retire(&tx, "id = ?1", row.id, "settled")?);
+            }
+        }
+        tx.commit()?;
+        Ok(done)
+    })
+    .await?;
+    for message in done {
+        // "Not modified": a tap already cleared them.
+        if let Err(e) = tg.edit_buttons(chat, message, &vec![]).await
+            && !crate::telegram::is_gone(&e)
+            && !e.to_string().contains("not modified")
+        {
+            tracing::warn!("buttons of session message {message} not cleared: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// The owner's answer about an ambiguous delivery: `sent` closes it, `not-sent` queues it again.
@@ -521,14 +598,45 @@ mod tests {
         assert!(tg.calls().is_empty());
     }
 
+    /// Next reminder of the same session, due now.
+    fn next_job(db: &Connection, plan: &PlannedSession, kind: JobKind) -> String {
+        let job = NotificationJob {
+            id: new_id(), kind, workout_session_id: None, planned_session_id: Some(plan.id.clone()), set_log_id: None, due_at: now(),
+            status: JobStatus::Pending, payload_json: Json(json!({"revision": 1, "instruction": "Gym session begins."})), external_job_id: None, handled_at: None,
+        };
+        job.insert(db).unwrap();
+        prepare_notification(db, &job.id, now(), "42").unwrap()["delivery_id"].as_str().unwrap().to_string()
+    }
+
+    /// 2026-11-08: get-ready, leave, start and no-show piled up as four messages, and the Start button
+    /// ended up buried under the chat that followed. Each step now replaces the last one.
     #[tokio::test]
-    async fn session_start_reminder_carries_a_start_button() {
+    async fn a_session_keeps_one_message_and_its_start_button() {
         let (dir, db) = fresh();
-        let (plan, id) = planned_job(&db, JobKind::SessionStart, "Gym session begins.");
+        let (plan, ready) = planned_job(&db, JobKind::GetReady, "Gym soon.");
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
-        let Call::Send(_, buttons) = &tg.calls()[0] else { panic!("no send") };
-        assert_eq!(buttons, &vec![vec![Button { text: "▶️ Start workout".into(), data: format!("gc:begin:{}", &plan.id[..8]) }]]);
+        deliver(&dir.db(), tg.as_ref(), &ready, now()).await.unwrap();
+        let start = next_job(&db, &plan, JobKind::SessionStart);
+        deliver(&dir.db(), tg.as_ref(), &start, now()).await.unwrap();
+        let begin = vec![Button { text: "▶️ Start workout".into(), data: format!("gc:begin:{}", &plan.id[..8]) }];
+        assert!(matches!(&tg.calls()[1..], [Call::Send(_, buttons), Call::Remove(100)] if buttons == &vec![begin.clone()]), "{:?}", tg.calls());
+
+        let event = emit(&db, "planning.no_show", now(), json!({"session_id": plan.id, "start": plan.planned_start_at})).unwrap();
+        let nudge = prepare_event_message(&db, &event.id, "Push was planned for 12:00 and hasn't started.", now(), "42", &[]).unwrap()["id"].as_str().unwrap().to_string();
+        deliver(&dir.db(), tg.as_ref(), &nudge, now()).await.unwrap();
+        let Call::Send(_, buttons) = &tg.calls()[3] else { panic!("{:?}", tg.calls()) };
+        assert_eq!((&buttons[0], buttons[1].len()), (&begin, 2));
+        assert_eq!(tg.calls()[4], Call::Remove(101));
+        let shown: Vec<String> = crate::agent::context::history(&db).unwrap().iter().map(|m| m["content"].as_str().unwrap().to_string()).collect();
+        assert!(matches!(shown.as_slice(), [only] if only.ends_with("hasn't started.")), "{shown:?}");
+
+        // Still startable: the buttons stay. Skipped in chat: they go, once.
+        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
+        assert_eq!(tg.calls().len(), 5);
+        db.execute("UPDATE planned_session SET status = 'SKIPPED' WHERE id = ?1", [&plan.id]).unwrap();
+        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
+        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
+        assert_eq!(&tg.calls()[5..], &[Call::Buttons(102, vec![])]);
     }
 
     #[tokio::test]

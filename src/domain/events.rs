@@ -59,9 +59,10 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 }
 
 /// Only decisions wake the model. Delivery/permission issues stay in the inbox until explicitly
-/// resolved; acknowledging a model wake must not imply the owner granted authority.
-pub const WAKE: [&str; 6] = [
-    "planning.attention", "planning.replan_required", "planning.no_show", "workout.missed",
+/// resolved; acknowledging a model wake must not imply the owner granted authority. A no-show is
+/// sent by the outbox as the session's own message; the owner's answer reaches the agent.
+pub const WAKE: [&str; 5] = [
+    "planning.attention", "planning.replan_required", "workout.missed",
     "planning.weekly_briefing", "workout.stale",
 ];
 

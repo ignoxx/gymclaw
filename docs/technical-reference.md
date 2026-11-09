@@ -348,8 +348,8 @@ is empty, and queues a week-rollover event for the agent to assess and communica
 read failure prevents drafting against stale blockers. Crowd labels queue an agent event; existing
 session times are never moved automatically. Default rotation skips locked templates.
 
-Calendar clashes, infeasible weeks, no-shows, missed slots and stale workouts enter a durable event
-inbox. The bot processes decision events in the same serialized worker as owner chat, at most one
+Calendar clashes, infeasible weeks, missed slots and stale workouts enter a durable event
+inbox. Warnings an agent or owner edit causes come back in that edit's result and don't wake the agent again. The bot processes decision events in the same serialized worker as owner chat, at most one
 batch per minute. Successful turns acknowledge their events; failed turns stay pending across
 restarts and retry without repeated failure messages. Each batch is persisted before the model
 call so events arriving during a failure cannot change its mutation request IDs. An unchanged conflict is deduplicated even

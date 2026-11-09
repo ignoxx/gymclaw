@@ -47,6 +47,12 @@ pub fn commit_upcoming(db: &Connection, now: Ts) -> Result<()> {
 /// Inspect existing weeks without changing sessions. Conflicts and infeasibility that just appeared
 /// become durable agent events; only the agent decides whether an exception or an edit is appropriate.
 pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result<Value> {
+    inspect(db, weeks, now, true)
+}
+
+/// `wake: false` records the weeks' warnings as standing without waking the agent: the editor of
+/// those weeks already decided about them.
+fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Result<Value> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let rows = PlannedSession::select(db, "ORDER BY planned_start_at, id", [])?;
@@ -84,7 +90,7 @@ pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result
         }
         fresh.extend(new_warnings(db, week, &warnings[from..], &known, now)?);
     }
-    if !fresh.is_empty() {
+    if wake && !fresh.is_empty() {
         crate::domain::core::emit(db, "planning.attention", now, json!({"warnings": fresh}))?;
     }
     Ok(json!({"changed": [], "warnings": warnings}))
@@ -181,6 +187,8 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         let slot = Candidate::manual(start, end, &profile);
         let mut warnings = if status.is_active() { rule_breaks(db, &session.id, &slot, &profile)? } else { Vec::new() };
         let week = week_of(start, &profile.tz());
+        let mut edited = BTreeSet::from([week]);
+        if id.is_some() { edited.insert(week_of(session.planned_start_at, &profile.tz())); }
         if status.is_active() && active(db, Some(&session.id))?.iter().filter(|s| week_of(s.planned_start_at, &profile.tz()) == week).count() as i64 >= profile.weekly_max_sessions {
             warnings.push("exceeds your weekly maximum".into());
         }
@@ -208,6 +216,8 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         }
         queue_session_write(db, &session, now, false)?;
         if status.is_open() { schedule_session_jobs(db, &session, now)?; }
+        // Its warnings (and what it does to its neighbours) are this edit's answer, not news later.
+        inspect(db, &edited, now, false)?;
         Ok(json!({"session": crate::domain::scheduling::session_data(&session), "warnings": warnings, "side_effects": []}))
     })
 }
@@ -259,37 +269,39 @@ mod tests {
             assert_eq!((after.status, after.planned_start_at), (other.status, other.planned_start_at));
         }
 
-        // A warning wakes the agent when it appears, not again while it persists, and again if it returns.
+        // The agent got its edit's warnings in the tool result: they are not raised again as news.
         let attention = |db: &Connection| AgentEvent::select(db, "WHERE type = 'planning.attention' ORDER BY rowid", []).unwrap();
+        assert!(attention(&db).is_empty());
+
+        // A change from outside (a drag in the calendar) raises a warning when it appears, not again
+        // while it persists, and again if it returns.
+        let drag = |db: &Connection, id: &str, start: Ts| {
+            let mut session = PlannedSession::get(db, id).unwrap().unwrap();
+            session.planned_end_at = start + (session.planned_end_at - session.planned_start_at);
+            session.planned_start_at = start;
+            session.update(db).unwrap();
+            inspect_weeks(db, &BTreeSet::from([week, week.checked_add(7.days()).unwrap()]), now).unwrap()
+        };
         let raised = |db: &Connection| -> Vec<String> { serde_json::from_value(attention(db).last().unwrap().payload_json.0["warnings"].clone()).unwrap() };
+        let thursday = before[2].planned_start_at - SignedDuration::from_hours(24);
+        let all = drag(&db, &ids[2], thursday)["warnings"].as_array().unwrap().len();
         let clash = raised(&db);
-        assert!(!clash.is_empty() && clash.iter().all(|w| w.ends_with("skips a rest day")), "{clash:?}");
+        assert!(!clash.is_empty() && clash.len() < all && clash.iter().all(|w| w.ends_with("skips a rest day")), "{clash:?}");
         let count = attention(&db).len();
         inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
         assert_eq!(attention(&db).len(), count);
-        // Friday's session to Thursday: only the new clash is raised.
-        let thursday = before[2].planned_start_at - SignedDuration::from_hours(24);
-        edit_session(&db, Some(&ids[2]), SessionPatch { start: Some(thursday), ..Default::default() }, now, "move-2").unwrap();
-        let all = inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap()["warnings"].as_array().unwrap().len();
-        let new = raised(&db);
-        assert!(!new.is_empty() && new.len() < all && new.iter().all(|w| !clash.contains(w)), "{new:?}");
-        // Thursday back to Friday resolves it; moving it again raises it again.
-        edit_session(&db, Some(&ids[2]), SessionPatch { start: Some(before[2].planned_start_at), ..Default::default() }, now, "move-3").unwrap();
-        inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
+        // Thursday back to Friday resolves it; dragging it again raises it again.
+        drag(&db, &ids[2], before[2].planned_start_at);
         let count = attention(&db).len();
-        edit_session(&db, Some(&ids[2]), SessionPatch { start: Some(thursday), ..Default::default() }, now, "move-4").unwrap();
-        inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
-        assert_eq!((attention(&db).len(), raised(&db)), (count + 1, new));
+        drag(&db, &ids[2], thursday);
+        assert_eq!((attention(&db).len(), raised(&db)), (count + 1, clash));
 
         // A session moved to the next week with the same problem doesn't raise it again.
         let late = Ts(before[1].planned_start_at.local(&tz).date().at(21, 30, 0, 0).to_zoned(tz.clone()).unwrap().timestamp());
-        edit_session(&db, Some(&ids[1]), SessionPatch { start: Some(late), ..Default::default() }, now, "late-1").unwrap();
-        inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
+        drag(&db, &ids[1], late);
         let window = raised(&db).into_iter().find(|w| w.contains(&ids[1]) && w.contains("outside your workout window")).expect("window warning raised");
         let count = attention(&db).len();
-        let next_week = late + SignedDuration::from_hours(7 * 24);
-        edit_session(&db, Some(&ids[1]), SessionPatch { start: Some(next_week), ..Default::default() }, now, "late-2").unwrap();
-        inspect_weeks(&db, &BTreeSet::from([week, week.checked_add(7.days()).unwrap()]), now).unwrap();
+        drag(&db, &ids[1], late + SignedDuration::from_hours(7 * 24));
         assert!(attention(&db)[count..].iter().all(|e| !e.payload_json.0["warnings"].as_array().unwrap().contains(&json!(window))));
     }
 }
