@@ -328,9 +328,12 @@ pub fn skip_exercise(db: &Connection, workout_id: &str, exercise_row_id: &str, r
 fn resolve(db: &Connection, workout: &WorkoutSession, query: &str, current: Option<&WorkoutExercise>) -> Result<(Option<WorkoutExercise>, ExerciseSpec)> {
     let key = query.trim().to_lowercase();
     let rows = exercises(db, &workout.id)?;
-    let open: Vec<&WorkoutExercise> = rows.iter().filter(|r| matches!(r.status, ExerciseStatus::Pending | ExerciseStatus::Deferred)).collect();
-    if let Some(i) = pick(&key, &open.iter().map(|r| [Some(r.exercise_id.as_str()), Some(name(r)), guide_id(r)]).collect::<Vec<_>>())? {
-        return Ok((Some(open[i].clone()), spec_of(open[i])?));
+    // Every row counts for ambiguity: on the horizontal press, "leg-press" must not quietly mean the
+    // 45° one just because it is the only one left to do.
+    if let Some(i) = pick(&key, &rows.iter().map(|r| [Some(r.exercise_id.as_str()), Some(name(r)), guide_id(r)]).collect::<Vec<_>>())?
+        && matches!(rows[i].status, ExerciseStatus::Pending | ExerciseStatus::Deferred)
+    {
+        return Ok((Some(rows[i].clone()), spec_of(&rows[i])?));
     }
     let template = snapshot(workout)?;
     let mut known: Vec<ExerciseSpec> = template.exercises.into_iter().chain(template.alternatives).collect();
@@ -573,6 +576,9 @@ mod tests {
         import_template(&db, &template).unwrap();
         let id = start(&db, Some("legs"), None, false, at(0), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
         assert_eq!(switch_to(&db, &id, "leg-press", false, at(10), "guess").unwrap_err().code(), "EXERCISE_AMBIGUOUS");
+        // On one variant, the other being the only one left is still not a reason to guess.
+        switch_to(&db, &id, "Leg press (horizontal)", false, at(12), "on-flat").unwrap();
+        assert_eq!(switch_to(&db, &id, "leg-press", false, at(14), "left").unwrap_err().code(), "EXERCISE_AMBIGUOUS");
         let switched = switch_to(&db, &id, "Leg press (45°)", false, at(20), "named").unwrap();
         assert_eq!(switched["data"]["active_exercise"]["exercise_id"], "leg-press-45");
         log_set(&db, &id, &set(140.0, 10), at(60), "45").unwrap();
