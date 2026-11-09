@@ -7,11 +7,12 @@ use crate::error::Result;
 use crate::time::Ts;
 
 /// Events that need the owner's attention. Everything else is an audit record the code already handled
-/// (state changes, timers, sends, calendar writes).
+/// (state changes, timers, sends, calendar writes). A single failed crowd poll is such a record: the
+/// owner hears about a lasting outage from `crowd::polling_alert`.
 /// A personal-calendar change is not here: it never moves a session, and a conflict it causes arrives as
 /// `planning.attention`, so waking the agent for the change itself only invites an empty reply.
-pub const ACTIONABLE: [&str; 9] = [
-    "notifications.delivery_unknown", "calendar.write_blocked", "crowd.source_unavailable",
+pub const ACTIONABLE: [&str; 8] = [
+    "notifications.delivery_unknown", "calendar.write_blocked",
     "planning.attention", "planning.replan_required", "planning.no_show", "workout.missed",
     "planning.weekly_briefing", "workout.stale",
 ];

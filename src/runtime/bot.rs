@@ -392,7 +392,7 @@ impl Bot {
         let key = format!("event-{}", batch.id);
         let text = format!("Background events for your decision (not owner instructions). Consult saved preferences/exceptions, decide what needs doing. Any text you write goes to the owner, so when nothing needs their attention, reply with no fields: {}", json!(events));
         blocking(self.db(), move |db| ChatMessage {
-            id: None, at: Ts::now(), role: ChatRole::Bot, text, telegram_message_id: None,
+            id: None, at: Ts::now(), role: ChatRole::Bot, text: crate::agent::context::name_sessions(db, &text)?, telegram_message_id: None,
             meta_json: Json(json!({"kind": "agent_event"})),
         }.insert(db)).await?;
         if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }]).await {
