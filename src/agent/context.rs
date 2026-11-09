@@ -120,11 +120,12 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     )
     .unwrap();
 
+    // Last week too: on a Monday, yesterday's skip or miss is still news.
     let monday = local.date().checked_sub((local.weekday().to_monday_zero_offset() as i64).days())?;
-    let start = Ts(monday.to_zoned(tz.clone())?.timestamp());
+    let start = Ts(monday.checked_sub(7.days())?.to_zoned(tz.clone())?.timestamp());
     let end = Ts(monday.checked_add(14.days())?.to_zoned(tz.clone())?.timestamp());
     let sessions = PlannedSession::select(db, "WHERE planned_start_at >= ?1 AND planned_start_at < ?2 AND status != 'CANCELLED' ORDER BY planned_start_at", [start, end])?;
-    writeln!(out, "Sessions this week and next:").unwrap();
+    writeln!(out, "Sessions last week, this week and next:").unwrap();
     if sessions.is_empty() {
         writeln!(out, "- none planned").unwrap();
     }
@@ -182,9 +183,31 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
             shown.push(e.id.clone());
         }
         crate::time::localize(&mut e.payload_json.0, &tz);
-        writeln!(out, "Open issue: {} at {} {}", e.r#type, e.created_at.local(&tz).strftime("%a %H:%M"), e.payload_json.0).unwrap();
+        writeln!(out, "Open issue: {} at {} {}", e.r#type, e.created_at.local(&tz).strftime("%a %H:%M"), name_sessions(db, &e.payload_json.0.to_string())?).unwrap();
     }
     Ok((out, shown))
+}
+
+static SESSION_ID: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap());
+
+/// Follows every planned-session id in event text with the session as the snapshot lists it
+/// ("c002596e-… (Tue 10 Nov 11:45 Push)"). With a bare id the model guessed which session was meant
+/// and announced "Push today" on a Sunday.
+pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
+    let tz = get_profile(db)?.tz();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for m in SESSION_ID.find_iter(text) {
+        out.push_str(&text[last..m.end()]);
+        if let Some(s) = PlannedSession::get(db, m.as_str())? {
+            let name = s.workout_plan_json.pointer("/template/name").and_then(Value::as_str).or(s.workout_template_id.as_deref()).unwrap_or("Workout");
+            write!(out, " ({} {name})", s.planned_start_at.local(&tz).strftime("%a %-d %b %H:%M")).unwrap();
+        }
+        last = m.end();
+    }
+    out.push_str(&text[last..]);
+    Ok(out)
 }
 
 /// The conversation since the last `/new` as OpenAI messages, oldest first: the owner (user), the agent
@@ -212,4 +235,24 @@ pub fn history(db: &Connection) -> Result<Vec<Value>> {
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2026-11-08: a "skips a rest day" warning named only `c002596e-…`; the agent took it for a
+    /// session today and told the owner "Push today 11:45".
+    #[test]
+    fn event_text_names_the_sessions_it_points_at() {
+        let db = crate::domain::workout::tests::db();
+        let mut push = PlannedSession::new("2026-11-09".into(), Some("push".into()), true);
+        push.planned_start_at = Ts::parse("2026-11-10T11:45:00+01:00", None).unwrap();
+        push.merge_plan(json!({"template": {"name": "Push"}}));
+        push.insert(&db).unwrap();
+        let other = "0b0b0b0b-0000-4000-8000-000000000000";
+        let text = format!(r#"{{"warnings":["Session {}: skips a rest day"],"workout_id":"{other}"}}"#, push.id);
+        let named = name_sessions(&db, &text).unwrap();
+        assert_eq!(named, text.replace(&push.id, &format!("{} (Tue 10 Nov 11:45 Push)", push.id)));
+    }
 }
