@@ -1,4 +1,5 @@
-/* View of GymClaw state. Presentation only, except the Memory tab, which edits the agent's notes. */
+/* View of GymClaw state. Presentation only, except the Memory tab (the agent's notes) and the
+   Exercises tab (plan targets), which edit through GymClaw's own tools. */
 const SVG = 'http://www.w3.org/2000/svg';
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 let restTimer = null;
@@ -50,6 +51,7 @@ function crowdLabel(session) {
 function thumb(url) {
   const image = el('img');
   image.alt = '';
+  image.loading = 'lazy';
   if (url) image.src = url;
   return image;
 }
@@ -223,7 +225,7 @@ function renderAttendance(crowd) {
   const { view, back } = crowdView;
   const window_ = crowdWindow(view, back, now);
   const { start, end } = window_;
-  document.querySelectorAll('.segmented button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
+  document.querySelectorAll('.crowd-nav .segmented button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
   document.getElementById('crowd-title').textContent = crowdTitle(view, back, window_);
   document.getElementById('crowd-prev').disabled = !series.length || series[0][0] >= start;
   document.getElementById('crowd-next').disabled = back <= -CROWD_AHEAD[view];
@@ -492,7 +494,12 @@ function renderProgress(insights) {
     selectedExercise = [...series].sort((a, b) => b.points.length - a.points.length)[0].id;
   }
   select.replaceChildren(...series.map(s => { const option = el('option', '', s.name); option.value = s.id; option.selected = s.id === selectedExercise; return option; }));
-  const points = series.find(s => s.id === selectedExercise).points;
+  drawProgress(box, series.find(s => s.id === selectedExercise).points);
+}
+
+/* Best set per session as a line: estimated 1RM, or reps for bodyweight. Progress and an exercise's
+   detail both draw it; `box` must be visible, since the chart measures it. */
+function drawProgress(box, points) {
   // Bodyweight exercises have no weight to estimate from: plot reps instead.
   const bodyweight = points.every(p => !p.weight);
   const value = p => bodyweight ? p.reps : p.e1rm;
@@ -651,9 +658,15 @@ function renderHistory(history) {
 
 const PLACEHOLDER = { owner: 'Add something GymClaw should know', learned: 'Add a pattern' };
 
-async function noteCall(tool, args) {
+/* Runs one GymClaw tool (the server allows a few), then reloads the state. A refused call throws
+   with the domain's message, e.g. why a plan edit is invalid. */
+async function toolCall(tool, args) {
   const response = await fetch(`/api/${tool}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
-  if (!response.ok) throw new Error(tool);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    // The first line is the reason; the rest is retry advice for the agent.
+    throw new Error(body?.error?.message?.split('\n')[0] || `${tool} failed`);
+  }
   await refresh();
 }
 
@@ -695,24 +708,249 @@ function renderMemory(memory) {
         // Two taps: the first arms it, the second forgets.
         if (!item.classList.contains('armed')) { item.classList.add('armed'); forget.textContent = 'Forget?'; return; }
         forget.blur();
-        noteCall('note_delete', { id: note.id }).catch(() => item.classList.add('failed'));
+        toolCall('note_delete', { id: note.id }).catch(() => item.classList.add('failed'));
       });
       forget.addEventListener('blur', () => { item.classList.remove('armed'); forget.textContent = '×'; });
-      const text = editable(note.text, '', next => noteCall('note_edit', { id: note.id, text: next }));
+      const text = editable(note.text, '', next => toolCall('note_edit', { id: note.id, text: next }));
       item.append(text, el('time', '', ago(note.updated_at)), forget);
       list.append(item);
     }
     const add = el('li', 'note add');
-    add.append(editable('', PLACEHOLDER[kind], next => noteCall('note_add', { kind, text: next })));
+    add.append(editable('', PLACEHOLDER[kind], next => toolCall('note_add', { kind, text: next })));
     list.append(add);
   }
+}
+
+/* ---------- Exercises ---------- */
+
+// Head to toe, so lists read like a body map; anything else sorts last.
+const MUSCLES = ['Chest', 'Shoulders', 'Rear Delts', 'Triceps', 'Biceps', 'Forearms', 'Back', 'Lats', 'Upper Back', 'Lower Back', 'Core',
+  'Glutes', 'Quads', 'Hamstrings', 'Legs', 'Adductors', 'Hips', 'Calves', 'Posterior Chain', 'Mobility'];
+// Catalog chips: the common kinds; the rest (wall, towel, chair, …) share "Other".
+const EQUIPMENT = ['Machine', 'Cable', 'Dumbbell', 'Barbell', 'Bodyweight', 'Pull-up Bar', 'Resistance Band', 'Cardio'];
+const exView = { view: 'plans', query: '', equipment: null };
+let catalog = null;
+let detailOf = null;
+
+const setText = set => set.weight ? `${set.reps} × ${kgs(set.weight)}` : `${set.reps} reps`;
+const repRange = e => e.rep_min === e.rep_max ? e.rep_min : `${e.rep_min}–${e.rep_max}`;
+// Heaviest set; more reps break a tie.
+const bestSet = sets => sets.reduce((a, b) => (b.weight > a.weight || (b.weight === a.weight && b.reps > a.reps) ? b : a));
+const muscleRank = muscle => { const i = MUSCLES.indexOf(muscle); return i < 0 ? MUSCLES.length : i; };
+
+/* Every exercise ever logged, from History (newest workout first), with its sessions newest first. */
+function loggedExercises() {
+  const byId = new Map();
+  for (const workout of state.history) for (const exercise of workout.exercises) {
+    if (!exercise.sets.length) continue;
+    const entry = byId.get(exercise.id) || { id: exercise.id, name: exercise.name, muscle: exercise.muscle, svg_url: exercise.svg_url, sessions: [] };
+    entry.sessions.push({ label: workout.label, template: workout.template, sets: exercise.sets, pr: workout.prs.includes(exercise.name) });
+    byId.set(exercise.id, entry);
+  }
+  return byId;
+}
+
+/* Items grouped by muscle, head to toe: [[muscle, items], …]. */
+function byMuscle(items) {
+  const groups = new Map();
+  for (const item of items) groups.set(item.muscle || 'Other', [...(groups.get(item.muscle || 'Other') || []), item]);
+  return [...groups.entries()].sort((a, b) => muscleRank(a[0]) - muscleRank(b[0]) || a[0].localeCompare(b[0]));
+}
+
+function exerciseRow(item, sub, aside, open) {
+  const row = el('button', 'ex-row');
+  row.type = 'button';
+  const text = el('div');
+  text.append(el('strong', '', item.name), el('span', '', sub));
+  row.append(thumb(item.svg_url), text, el('em', '', aside || ''));
+  row.addEventListener('click', open);
+  return row;
+}
+
+function group(title, note, children) {
+  const panel = el('section', 'panel ex-group');
+  const heading = el('div', 'section-heading');
+  heading.append(el('h2', '', title), el('span', '', note));
+  panel.append(heading, ...children);
+  return panel;
+}
+
+async function loadCatalog() {
+  if (catalog) return;
+  try {
+    const response = await fetch('/api/catalog');
+    if (!response.ok) throw new Error('catalog');
+    catalog = await response.json();
+  } catch { catalog = []; }
+}
+
+function renderExercises() {
+  document.querySelectorAll('#ex-views button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.ex === exView.view)));
+  const list = document.getElementById('ex-list');
+  list.replaceChildren();
+  const query = exView.query.trim().toLowerCase();
+  const matches = (...texts) => !query || texts.some(text => String(text || '').toLowerCase().includes(query));
+  const logged = loggedExercises();
+  const chips = document.getElementById('ex-chips');
+  chips.hidden = exView.view !== 'catalog';
+  if (exView.view === 'plans') {
+    for (const plan of state.plans) {
+      const exercises = plan.exercises.filter(e => matches(e.name, e.muscle, plan.name));
+      if (!exercises.length) continue;
+      list.append(group(plan.name, `${exercises.length} exercise${exercises.length === 1 ? '' : 's'}`, exercises.map(e => {
+        const last = logged.get(e.id)?.sessions[0];
+        const target = `${e.sets} × ${repRange(e)}${e.weight && !e.bodyweight ? ` · ${kgs(e.weight)}` : ''}`;
+        return exerciseRow(e, target, last ? `Last ${setText(bestSet(last.sets))}` : 'Not logged yet', () => openExercise({ id: e.id }));
+      })));
+    }
+  } else if (exView.view === 'done') {
+    const done = [...logged.values()].filter(e => matches(e.name, e.muscle));
+    for (const [muscle, items] of byMuscle(done)) {
+      list.append(group(muscle, `${items.length}`, items.map(e => {
+        const sessions = `${e.sessions.length} session${e.sessions.length === 1 ? '' : 's'} · last ${e.sessions[0].label}`;
+        return exerciseRow(e, sessions, setText(bestSet(e.sessions[0].sets)), () => openExercise({ id: e.id }));
+      })));
+    }
+  } else {
+    if (!catalog) { loadCatalog().then(() => exView.view === 'catalog' && renderExercises()); list.append(el('p', 'empty', 'Loading…')); return; }
+    const kind = equipment => EQUIPMENT.includes(equipment) ? equipment : 'Other';
+    chips.replaceChildren(...[null, ...EQUIPMENT, 'Other'].map(value => {
+      const chip = el('button', 'chip', value || 'All');
+      chip.type = 'button';
+      chip.setAttribute('aria-pressed', String(exView.equipment === value));
+      chip.addEventListener('click', () => { exView.equipment = value; renderExercises(); });
+      return chip;
+    }));
+    const yours = new Set(state.plans.flatMap(p => p.exercises.map(e => e.guide_id)));
+    const items = catalog.filter(i => matches(i.name, i.muscle, i.equipment) && (!exView.equipment || kind(i.equipment) === exView.equipment));
+    for (const [muscle, entries] of byMuscle(items)) {
+      const tiles = el('div', 'ex-tiles');
+      for (const item of entries) {
+        const tile = el('button', `ex-tile${yours.has(item.guide_id) ? ' yours' : ''}`);
+        tile.type = 'button';
+        tile.append(thumb(item.svg_url), el('span', '', item.name), el('small', '', item.equipment));
+        if (yours.has(item.guide_id)) tile.append(el('em', 'tag', 'In a plan'));
+        tile.addEventListener('click', () => openExercise({ guide: item }));
+        tiles.append(tile);
+      }
+      list.append(group(muscle, `${entries.length}`, [tiles]));
+    }
+  }
+  if (!list.children.length) list.append(el('p', 'empty', query ? `Nothing matches “${exView.query.trim()}”.` : 'Nothing here yet.'));
+}
+
+/* Plan targets of one exercise in one plan. Saves through template_edit_exercise by name: names are
+   unique within a plan, while an id can also be another variant's picture. */
+function planEditor(plan, exercise) {
+  const form = el('form', 'ex-edit');
+  form.append(el('h3', '', `Plan · ${plan.name}`));
+  // Names are ExerciseSpec fields, sent as they are.
+  const fields = [['working_sets', 'Sets', exercise.sets, 1], ['rep_min', 'Reps min', exercise.rep_min, 1], ['rep_max', 'Reps max', exercise.rep_max, 1],
+    ['rest_seconds', 'Rest (s)', exercise.rest_seconds, 5]];
+  if (!exercise.bodyweight) fields.unshift(['target_weight', 'Weight (kg)', exercise.weight, 0.5]);
+  const grid = el('div', 'ex-fields');
+  for (const [name, label, value, step] of fields) {
+    const field = el('label', '', label);
+    const input = el('input');
+    Object.assign(input, { type: 'number', name, step, min: name === 'rest_seconds' || name === 'target_weight' ? 0 : 1, inputMode: 'decimal' });
+    if (value !== null && value !== undefined) input.value = value;
+    if (name === 'rest_seconds') input.placeholder = 'default';
+    input.dataset.was = input.value;
+    field.append(input);
+    grid.append(field);
+  }
+  const save = el('button', 'save', 'Save');
+  save.type = 'submit';
+  const message = el('span', 'ex-message');
+  const actions = el('div', 'ex-actions');
+  actions.append(save, message);
+  form.append(grid, actions);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const changes = {};
+    for (const input of form.querySelectorAll('input')) {
+      if (input.value === input.dataset.was || input.value === '') continue;
+      changes[input.name] = Number(input.value);
+    }
+    if (!Object.keys(changes).length) { message.textContent = 'Nothing changed'; return; }
+    save.disabled = true;
+    message.textContent = 'Saving…';
+    try {
+      await toolCall('template_edit_exercise', { template_id: plan.id, exercise: exercise.name, changes });
+      openExercise(detailOf);
+    } catch (error) {
+      message.textContent = error.message;
+      save.disabled = false;
+    }
+  });
+  return form;
+}
+
+/* Detail of an exercise you train or logged ({id}), or of a catalog entry ({guide}). */
+function openExercise(of) {
+  detailOf = of;
+  const dialog = document.getElementById('ex-detail');
+  // The sheet holds the content, so a tap on the dialog itself is a tap on the backdrop.
+  const sheet = el('div', 'ex-sheet');
+  dialog.replaceChildren(sheet);
+  const close = el('button', 'ex-close', '×');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close');
+  close.addEventListener('click', () => dialog.close());
+  const occurrences = of.id ? state.plans.flatMap(plan => plan.exercises.filter(e => e.id === of.id).map(exercise => ({ plan, exercise }))) : [];
+  const logged = of.id ? loggedExercises().get(of.id) : null;
+  const item = of.guide || occurrences[0]?.exercise || logged;
+  const head = el('div', 'ex-head');
+  const pose = el('div', 'ex-pose');
+  pose.append(thumb(item.svg_url));
+  const titles = el('div');
+  titles.append(el('h2', 'title', item.name), el('p', 'subtitle', [item.muscle, of.guide?.equipment].filter(Boolean).join(' · ')));
+  titles.querySelector('h2').id = 'ex-detail-title';
+  head.append(pose, titles);
+  sheet.append(close, head);
+  if (of.guide) {
+    const yours = state.plans.flatMap(plan => plan.exercises.filter(e => e.guide_id === of.guide.guide_id).map(e => ({ plan, e })));
+    if (yours.length) {
+      sheet.append(el('h3', '', 'Yours with this picture'));
+      for (const { plan, e } of yours) sheet.append(exerciseRow(e, plan.name, `${e.sets} × ${repRange(e)}`, () => openExercise({ id: e.id })));
+    } else sheet.append(el('p', 'empty', 'Not in your plans.'));
+  }
+  if (logged) {
+    const all = logged.sessions.flatMap(s => s.sets);
+    const stats = el('div', 'ex-stats');
+    for (const [label, value, note] of [['Latest', setText(bestSet(logged.sessions[0].sets)), logged.sessions[0].label],
+      ['Best', setText(bestSet(all)), 'heaviest set'], ['Sessions', logged.sessions.length, `${all.length} sets`]]) {
+      const stat = el('div', 'kpi');
+      stat.append(el('span', '', label), el('strong', '', value), el('small', '', note));
+      stats.append(stat);
+    }
+    sheet.append(stats);
+  }
+  for (const { plan, exercise } of occurrences) sheet.append(planEditor(plan, exercise));
+  const points = of.id ? state.insights.progress.find(s => s.id === of.id)?.points || [] : [];
+  const chart = el('div', 'chart');
+  if (points.length > 1) sheet.append(el('h3', '', points.every(p => !p.weight) ? 'Best set reps' : 'Estimated 1RM'), chart);
+  if (logged) {
+    sheet.append(el('h3', '', 'History'));
+    const sessions = el('div', 'ex-history');
+    for (const session of logged.sessions) {
+      const row = el('div', 'ex-session');
+      const when = el('span', 'when-cell', session.label);
+      if (session.pr) when.append(el('em', 'tag pr', 'PR'));
+      row.append(when, el('span', 'set-list', session.sets.map(setText).join('   ')));
+      sessions.append(row);
+    }
+    sheet.append(sessions);
+  }
+  if (!dialog.open) dialog.showModal();
+  if (points.length > 1) drawProgress(chart, points);
 }
 
 /* ---------- Shell ---------- */
 
 function activeTab() {
   const tab = location.hash.slice(1);
-  return ['today', 'progress', 'history', 'memory'].includes(tab) ? tab : 'today';
+  return ['today', 'progress', 'history', 'exercises', 'memory'].includes(tab) ? tab : 'today';
 }
 
 function showTab() {
@@ -725,6 +963,7 @@ function showTab() {
   if (tab === 'today') renderToday(state);
   if (tab === 'progress') renderInsights(state);
   if (tab === 'history') renderHistory(state.history);
+  if (tab === 'exercises') renderExercises();
   if (tab === 'memory') renderMemory(state.memory);
 }
 
@@ -761,9 +1000,13 @@ async function refresh() {
 document.querySelectorAll('.tabs button').forEach(button => button.addEventListener('click', () => { location.hash = button.dataset.tab; }));
 document.getElementById('exercise-select').addEventListener('change', event => { selectedExercise = event.target.value; renderProgress(state.insights); });
 window.addEventListener('hashchange', showTab);
+document.querySelectorAll('#ex-views button').forEach(button => button.addEventListener('click', () => { exView.view = button.dataset.ex; renderExercises(); }));
+document.getElementById('ex-search').addEventListener('input', event => { exView.query = event.target.value; renderExercises(); });
+// A tap on the dimmed backdrop (the dialog itself, outside its sheet) closes it.
+document.getElementById('ex-detail').addEventListener('click', event => { if (event.target === event.currentTarget) event.currentTarget.close(); });
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(showTab, 150); });
-document.querySelectorAll('.segmented button').forEach(button => button.addEventListener('click', () => {
+document.querySelectorAll('.crowd-nav .segmented button').forEach(button => button.addEventListener('click', () => {
   crowdView.view = button.dataset.view; crowdView.back = 0; renderAttendance(state.crowd);
 }));
 document.getElementById('crowd-prev').addEventListener('click', () => { crowdView.back += 1; renderAttendance(state.crowd); });

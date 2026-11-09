@@ -31,7 +31,9 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
 ];
 
 /// Tools the dashboard may call: the owner edits the notes in the agent's prompt.
-const NOTE_TOOLS: [&str; 3] = ["note_add", "note_edit", "note_delete"];
+/// Tools the dashboard may call: note edits (Memory) and plan targets (Exercises). They run exactly
+/// as the agent's calls do, with the same validation.
+const DASHBOARD_TOOLS: [&str; 4] = ["note_add", "note_edit", "note_delete", "template_edit_exercise"];
 
 struct App {
     db_path: PathBuf,
@@ -69,7 +71,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         return error(StatusCode::FORBIDDEN);
     }
     if request.method() == Method::POST {
-        let Some(tool) = request.uri().path().strip_prefix("/api/").filter(|t| NOTE_TOOLS.contains(t)).map(String::from) else {
+        let Some(tool) = request.uri().path().strip_prefix("/api/").filter(|t| DASHBOARD_TOOLS.contains(t)).map(String::from) else {
             return error(StatusCode::NOT_FOUND);
         };
         // A cross-site page can only send JSON after a CORS preflight, which is never answered.
@@ -92,11 +94,11 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
             Ok(Ok(data)) => reply(StatusCode::OK, serde_json::to_vec(&data).unwrap_or_default(), "application/json"),
             Ok(Err(e @ crate::error::Error::Domain { .. })) => reply(StatusCode::BAD_REQUEST, e.to_json().to_string().into_bytes(), "application/json"),
             Ok(Err(e)) => {
-                tracing::warn!("dashboard note write: {} {e}", e.code());
+                tracing::warn!("dashboard write: {} {e}", e.code());
                 error(StatusCode::SERVICE_UNAVAILABLE)
             }
             Err(e) => {
-                tracing::warn!("dashboard note write panicked: {e}");
+                tracing::warn!("dashboard write panicked: {e}");
                 error(StatusCode::SERVICE_UNAVAILABLE)
             }
         };
@@ -125,6 +127,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
             }
         };
     }
+    if path == "/api/catalog" {
+        return reply(StatusCode::OK, serde_json::to_vec(&state::catalog()).unwrap_or_default(), "application/json");
+    }
     if let Some(slug) = path.strip_prefix("/illustrations/").and_then(|p| p.strip_suffix(".svg")) {
         return match crate::domain::illustrations::svg_path(slug).map(std::fs::read) {
             Some(Ok(bytes)) => reply(StatusCode::OK, bytes, "image/svg+xml"),
@@ -137,7 +142,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
     }
 }
 
-/// Serve the dashboard: reads from a read-only connection, note edits through a writable one.
+/// Serve the dashboard: reads from a read-only connection, `DASHBOARD_TOOLS` writes through a writable one.
 /// Requests whose Host isn't `allowed_host` are rejected.
 pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String) -> Result<()> {
     let port = addr.port();
@@ -194,11 +199,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edits_notes_only_from_same_origin() {
+    async fn edits_notes_and_plan_targets_only_from_same_origin() {
         let app = app();
         let add = r#"{"kind":"owner","text":"Weighs in on Sundays"}"#;
         assert_eq!(post(&app, "/api/note_add", add, "cross-site").await.status(), StatusCode::FORBIDDEN);
         assert_eq!(post(&app, "/api/sql_query", r#"{"sql":"SELECT 1"}"#, "same-origin").await.status(), StatusCode::NOT_FOUND);
+        // Plan targets can be edited; removing or replacing exercises stays with the agent.
+        let edit = r#"{"template_id":"legs","exercise":"Leg press","changes":{"target_weight":90}}"#;
+        assert_eq!(post(&app, "/api/template_edit_exercise", edit, "same-origin").await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(post(&app, "/api/template_remove_exercise", r#"{"template_id":"legs","exercise":"Leg press"}"#, "same-origin").await.status(), StatusCode::NOT_FOUND);
         assert_eq!(post(&app, "/api/note_add", add, "same-origin").await.status(), StatusCode::OK);
         assert_eq!(post(&app, "/api/note_edit", r#"{"id":99,"text":"x"}"#, "same-origin").await.status(), StatusCode::BAD_REQUEST);
         let db = crate::db::open_readonly(&app.db_path).unwrap();
