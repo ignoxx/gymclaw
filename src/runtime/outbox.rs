@@ -627,8 +627,9 @@ mod tests {
         let Call::Send(_, buttons) = &tg.calls()[3] else { panic!("{:?}", tg.calls()) };
         assert_eq!((&buttons[0], buttons[1].len()), (&begin, 2));
         assert_eq!(tg.calls()[4], Call::Remove(101));
-        let shown: Vec<String> = crate::agent::context::history(&db).unwrap().iter().map(|m| m["content"].as_str().unwrap().to_string()).collect();
-        assert!(matches!(shown.as_slice(), [only] if only.ends_with("hasn't started.")), "{shown:?}");
+        let (now_state, _) = crate::agent::context::snapshot(&db, now()).unwrap();
+        let sent: Vec<&str> = now_state.lines().skip_while(|l| !l.starts_with("Sent automatically")).skip(1).collect();
+        assert!(matches!(sent.as_slice(), [only] if only.ends_with("hasn't started. [with buttons]")), "{now_state}");
 
         // Still startable: the buttons stay. Skipped in chat: they go, once.
         settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
