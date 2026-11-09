@@ -17,6 +17,8 @@ pub struct Config {
     pub model_vision: String,
     /// OpenRouter provider pin, e.g. `inference-net/fp4`.
     pub provider: Option<String>,
+    /// Dashboard hostname behind Traefik; the Telegram menu button opens it.
+    pub dashboard_host: Option<String>,
 }
 
 fn var(name: &str) -> Option<String> {
@@ -46,6 +48,7 @@ impl Config {
             model_vision: var("GYMCLAW_MODEL_VISION").unwrap_or_else(|| model.clone()),
             model,
             provider: var("GYMCLAW_PROVIDER"),
+            dashboard_host: var("GYMCLAW_DASHBOARD_HOST"),
         })
     }
 }

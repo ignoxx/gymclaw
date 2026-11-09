@@ -36,6 +36,16 @@ impl Bot {
         Ok(())
     }
 
+    /// Point the chat menu button at the dashboard as a Mini App, or back to the "/" menu without one.
+    pub async fn set_menu_button(&self, dashboard_url: Option<&str>) -> Result<()> {
+        let button = match dashboard_url {
+            Some(url) => json!({"type": "web_app", "text": "Dashboard", "web_app": {"url": url}}),
+            None => json!({"type": "commands"}),
+        };
+        let _: bool = self.call("setChatMenuButton", json!({"menu_button": button})).await?;
+        Ok(())
+    }
+
     /// HTML first; if Telegram can't parse the entities, the same text without formatting.
     async fn call_text<T: DeserializeOwned>(&self, method: &str, mut body: Value, text_key: &str, text: &str) -> Result<T> {
         body[text_key] = json!(markdown::to_html(text));

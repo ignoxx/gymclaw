@@ -89,6 +89,10 @@ pub async fn serve(config: Config) -> Result<()> {
     if let Err(e) = telegram.set_commands(bot::COMMANDS).await {
         tracing::warn!("telegram command menu not updated: {e}");
     }
+    let dashboard_url = config.dashboard_host.as_ref().map(|host| format!("https://{host}"));
+    if let Err(e) = telegram.set_menu_button(dashboard_url.as_deref()).await {
+        tracing::warn!("telegram menu button not updated: {e}");
+    }
     let tg: Arc<dyn Telegram> = Arc::new(telegram);
     let model: Arc<dyn ChatModel> = Arc::new(OpenRouter::new(&config.openrouter_key, config.provider.clone())?);
     let log = TurnLog::new(std::env::var("GYMCLAW_TURN_LOG_DIR").ok().filter(|d| !d.is_empty()).map(PathBuf::from));

@@ -81,6 +81,10 @@ tailscale set --advertise-routes=<public-ip>/32 --advertise-exit-node   # keep e
 Approve the route in the Tailscale admin console. Linux clients also need
 `--accept-routes`; macOS, iOS and Android accept routes by default.
 
+The bot's **Dashboard** menu button opens the same URL as a Telegram Mini App, so the phone
+needs Tailscale on too. It works in the mobile and desktop apps; web.telegram.org can't
+show it, because the dashboard forbids being framed (`frame-ancestors 'none'`).
+
 ## Moving hosts
 
 Only one instance may run at a time. Two pollers on one bot token conflict, and
