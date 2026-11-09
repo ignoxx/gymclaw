@@ -17,6 +17,7 @@ use crate::domain::calendar::{allocation, get_week, week_of};
 use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::emit;
 use crate::domain::crowd::{CrowdModel, feel};
+use crate::domain::highlights;
 use crate::domain::profile::get_profile;
 use crate::domain::replanning::{commit_upcoming, inspect_weeks, retire_session};
 use crate::domain::scheduling::schedule_week;
@@ -294,8 +295,10 @@ pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(changed)
 }
 
-/// Deterministic upkeep: mark elapsed slots missed, inspect conflicts, draft previously empty weeks,
-/// rotate defaults, refresh unlocked plan snapshots/crowd, and reconcile reminder jobs.
+/// Deterministic upkeep: mark elapsed slots missed, inspect conflicts, draft the current week when it
+/// is empty, rotate defaults, refresh unlocked plan snapshots/crowd, and reconcile reminder jobs.
+/// Next week is planned only by the Sunday run (`weekly_plan`); if that run never happened, the
+/// current week is drafted here once it starts.
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     get_template(db, template_id)?; // Explicit selected template, never guess from demo import.
     let tz = get_profile(db)?.tz();
@@ -304,17 +307,10 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let missed = mark_missed(db, now)?;
     let repaired = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let mut created: Vec<String> = Vec::new();
-    for week in [current_week, next_week] {
-        let start = Ts(week.to_zoned(tz.clone())?.timestamp());
-        // Start new next-week planning only inside rolling 10-day horizon.
-        if start > now + DAY * 3 {
-            continue;
-        }
-        if PlannedSession::first(db, "WHERE week_id = ?1", [week.to_string()])?.is_none() {
-            let key = first_plan_key(db, week, now, template_id)?;
-            let data = schedule_week(db, week, now, Some(&key), Some(template_id), &[])?;
-            created.extend(data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)));
-        }
+    if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
+        let key = first_plan_key(db, current_week, now, template_id)?;
+        let data = schedule_week(db, current_week, now, Some(&key), Some(template_id), &[])?;
+        created.extend(data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)));
     }
     for id in &created {
         if let Some(session) = PlannedSession::get(db, id)? {
@@ -331,7 +327,8 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     Ok(result)
 }
 
-/// The Sunday run: rolling plan, last week's audit, next week's plan, and the briefing event (once per week).
+/// The Sunday run: rolling plan, last week's audit and next week's plan. `announce` tells the owner and
+/// the agent once the calendar is published.
 pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     let tz = get_profile(db)?.tz();
     let current_week = week_of(now, &tz);
@@ -347,19 +344,29 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     for session in PlannedSession::select(db, "WHERE week_id = ?1 AND status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [next_week.to_string()])? {
         queue_session_write(db, &session, now, false)?;
     }
+    Ok(json!({"week_start": next_week.to_string(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week)?}))
+}
+
+/// After the Sunday run and the calendar publish: queue the recap for the owner, then wake the agent
+/// for its weekly review, once per week. The scheduler sends the recap right away, so the agent's take
+/// on the week arrives after it.
+pub fn announce(db: &Connection, recipient: &str, now: Ts) -> Result<Value> {
+    let tz = get_profile(db)?.tz();
+    let next_week = week_of(now, &tz).checked_add(days(7))?;
     let key = format!("weekly-brief:{next_week}");
-    let event = match AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])? {
-        Some(event) => event,
-        None => {
-            let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
-            let payload = json!({"week_start": next_week.to_string(), "template_id": template_id, "audit": report, "recent_sessions": recent});
-            let mut event = emit(db, "planning.weekly_briefing", now, payload)?;
-            event.correlation_id = Some(key);
-            event.update(db)?;
-            event
-        }
-    };
-    Ok(json!({"week_start": next_week.to_string(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week)?, "event_id": event.id}))
+    if let Some(event) = AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])? {
+        return Ok(json!({"event_id": event.id}));
+    }
+    let (message, effect) = recap(db, next_week, now)?;
+    let source = emit(db, "planning.weekly_recap", now, json!({"week_start": next_week.to_string(), "effect": effect}))?;
+    crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient, &[])?;
+    let previous = next_week.checked_sub(days(7))?;
+    let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
+    let payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent});
+    let mut event = emit(db, "planning.weekly_briefing", now, payload)?;
+    event.correlation_id = Some(key);
+    event.update(db)?;
+    Ok(json!({"event_id": event.id, "recap": message}))
 }
 
 /// Weeks of sessions the Sunday review looks back on.
@@ -429,35 +436,104 @@ fn new_targets(db: &Connection, week_start: Date, zone: &TimeZone) -> Result<Vec
     Ok(targets)
 }
 
-/// Sunday Telegram message: last week's result, next week's sessions, new progression targets and one
-/// body-weight line (the only place GymClaw asks for a weigh-in). Plain text plus emoji (no markdown).
-pub fn briefing(db: &Connection, week_start: Date, report: &Value, published: bool, now: Ts) -> Result<String> {
-    let tz = get_profile(db)?.tz();
-    let plan = get_week(db, week_start)?;
-    let sessions = plan["sessions"].as_array().cloned().unwrap_or_default();
-    let fixture = CalendarSyncState::get(db, 1)?.is_some_and(|s| s.source == "fixture");
-    let is_demo = report["demo"].as_bool().unwrap_or(false) || fixture || sessions.iter().any(|s| s["workout_plan"]["crowd_source"] == "demo_fixture");
+/// "Oct 12–18", or "Oct 26 – Nov 1" across months.
+fn span(week_start: Date) -> Result<String> {
     let end = week_start.checked_add(days(6))?;
-    let span = if week_start.month() == end.month() {
+    Ok(if week_start.month() == end.month() {
         format!("{} {}–{}", week_start.strftime("%b"), week_start.day(), end.day())
     } else {
         format!("{} {} – {} {}", week_start.strftime("%b"), week_start.day(), end.strftime("%b"), end.day())
-    };
-    let mut lines = vec![format!("🏋️ Your week · {span}{}", if is_demo { " · DEMO" } else { "" })];
-    if !published {
-        lines.push("⚠️ Local plan only — calendar publication not confirmed.".into());
+    })
+}
+
+/// "2 h 41 min", or "48 min".
+fn duration(seconds: i64) -> String {
+    let minutes = seconds.div_euclid(60);
+    if minutes >= 60 { format!("{} h {} min", minutes / 60, minutes % 60) } else { format!("{minutes} min") }
+}
+
+/// "Mon Push ✅ · Thu Legs ❌": every workout slot of the week in order, plus workouts done off-plan.
+fn days_line(db: &Connection, week_start: Date, workouts: &[WorkoutSession], tz: &TimeZone) -> Result<String> {
+    let mut days: Vec<(Ts, String)> = Vec::new();
+    for plan in PlannedSession::select(db, "WHERE status != 'CANCELLED' ORDER BY planned_start_at", [])? {
+        if week_of(plan.planned_start_at, tz) != week_start {
+            continue;
+        }
+        let mark = match plan.status {
+            SessionStatus::Started | SessionStatus::Completed => "✅",
+            SessionStatus::Missed => "❌",
+            SessionStatus::Skipped => "⏭",
+            _ => "🕓",
+        };
+        let name = plan.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).map(String::from);
+        let name = name.or(plan.workout_template_id.clone()).unwrap_or_else(|| "Workout".into());
+        days.push((plan.planned_start_at, format!("{} {name} {mark}", plan.planned_start_at.local(tz).strftime("%a"))));
     }
-    let previous: Date = report["week_start"].as_str().unwrap_or_default().parse()?;
-    let (done, target) = (report["completed_workouts"].as_i64().unwrap_or(0), report["target_sessions"].as_i64().unwrap_or(0));
+    for w in workouts.iter().filter(|w| w.planned_session_id.is_none()) {
+        let at = w.started_at.expect("finished workouts started");
+        days.push((at, format!("{} {} ✅", at.local(tz).strftime("%a"), w.template_snapshot["name"].as_str().unwrap_or("Workout"))));
+    }
+    days.sort_by_key(|(at, _)| *at);
+    Ok(days.into_iter().map(|(_, day)| day).collect::<Vec<_>>().join(" · "))
+}
+
+/// Sunday Telegram message, sent by code before the agent's take on it. Last week: workouts by day,
+/// time and volume trained, records, new targets, body weight (the only place GymClaw asks for a
+/// weigh-in). Then next week's sessions. 🔥 effect when the week hit its target.
+pub fn recap(db: &Connection, week_start: Date, now: Ts) -> Result<(String, Option<&'static str>)> {
+    let profile = get_profile(db)?;
+    let tz = profile.tz();
+    let previous = week_start.checked_sub(days(7))?;
+    let plan = get_week(db, week_start)?;
+    let sessions = plan["sessions"].as_array().cloned().unwrap_or_default();
+    let workouts = highlights::finished_in(db, previous, &tz)?;
+    let fixture = CalendarSyncState::get(db, 1)?.is_some_and(|s| s.source == "fixture");
+    let is_demo = fixture || workouts.iter().any(|w| demo(&w.template_snapshot)) || sessions.iter().any(|s| s["workout_plan"]["crowd_source"] == "demo_fixture");
+    let mut lines = vec![format!("📅 **Your week · {}**{}", span(previous)?, if is_demo { " · DEMO" } else { "" })];
+    let (done, target) = (workouts.len() as i64, profile.weekly_target_sessions);
+    let hit = target > 0 && done >= target;
+    let mut result = format!("{}**{done}/{target} workouts**", if hit { "✅ " } else { "" });
     let weeks = streak(db, previous, target, &tz)?;
-    let mut recap = format!("Last week {done}/{target}");
-    if target > 0 && done >= target {
-        recap += " ✅";
-    }
     if weeks >= 2 {
-        recap += &format!(" · {weeks} weeks in a row 🔥");
+        result += &format!(" · {weeks} weeks in a row 🔥");
     }
-    lines.extend([String::new(), recap, String::new()]);
+    lines.push(result);
+    let by_day = days_line(db, previous, &workouts, &tz)?;
+    if !by_day.is_empty() {
+        lines.push(by_day);
+    }
+    if !workouts.is_empty() {
+        let seconds: i64 = workouts.iter().filter_map(|w| w.actual_duration_seconds).sum();
+        let mut trained = format!("⏱ {} trained", duration(seconds));
+        let volume = highlights::total_volume(db, &workouts)?;
+        if volume > 0.0 {
+            trained += &format!(" · 💪 {:.1} t lifted", volume / 1000.0);
+            let before = highlights::total_volume(db, &highlights::finished_in(db, previous.checked_sub(days(7))?, &tz)?)?;
+            let change = if before > 0.0 { ((volume / before - 1.0) * 100.0).round() as i64 } else { 0 };
+            if change != 0 {
+                trained += &format!(" ({change:+}% vs the week before)");
+            }
+        }
+        lines.push(trained);
+    }
+    let mut records = Vec::new();
+    for w in &workouts {
+        for lift in highlights::workout(db, &w.id)?.lifts.into_iter().filter(|l| l.record()) {
+            let set = if lift.weight == 0.0 { format!("{} reps", lift.reps) } else { format!("{} × {} kg", lift.reps, fmt_g(lift.weight)) };
+            records.push(format!("{} {set}", lift.name));
+        }
+    }
+    if !records.is_empty() {
+        lines.push(format!("🏆 {}", records.join(" · ")));
+    }
+    let targets = new_targets(db, previous, &tz)?;
+    if !targets.is_empty() {
+        lines.push(format!("🎯 New targets: {}", targets.join(", ")));
+    }
+    if let Some(weight) = crate::domain::body::briefing_line(db, now)? {
+        lines.push(weight);
+    }
+    lines.extend([String::new(), format!("🗓 **Next week · {}**", span(week_start)?)]);
     let mut listed = Vec::new();
     let mut flexible = Vec::new();
     for session in &sessions {
@@ -470,7 +546,7 @@ pub fn briefing(db: &Connection, week_start: Date, report: &Value, published: bo
         let at = start.local(&tz);
         let minutes = ((finish - start).as_secs_f64() / 60.0).round_ties_even() as i64;
         let name = session["workout_plan"]["template"]["name"].as_str().unwrap_or("Workout");
-        let mut parts = vec![at.strftime("%a %H:%M").to_string(), name.to_string(), format!("~{minutes} min")];
+        let mut parts = vec![at.strftime("%a %H:%M").to_string(), format!("**{name}**"), format!("~{minutes} min")];
         let label = if session["confidence"].as_f64().unwrap_or(0.0) >= CROWD_MIN_CONFIDENCE { feel(session["crowd"].as_f64()) } else { None };
         if let Some(label) = label {
             let emoji = CROWD_EMOJI.iter().find(|(l, _)| *l == label).map_or("", |(_, e)| *e);
@@ -488,16 +564,9 @@ pub fn briefing(db: &Connection, week_start: Date, report: &Value, published: bo
     if !flexible.is_empty() {
         // commit_upcoming confirms sessions 48 h ahead and reconciles reminders.
         let days = if flexible.len() == 1 { flexible[0].clone() } else { format!("{} & {}", flexible[..flexible.len() - 1].join(", "), flexible[flexible.len() - 1]) };
-        lines.extend([String::new(), format!("{days} can still move if your calendar changes.")]);
+        lines.push(format!("*{days} can still move if your calendar changes.*"));
     }
-    let targets = new_targets(db, previous, &tz)?;
-    if !targets.is_empty() {
-        lines.extend([String::new(), format!("🎯 New targets: {}", targets.join(", "))]);
-    }
-    if let Some(weight) = crate::domain::body::briefing_line(db, now)? {
-        lines.extend([String::new(), weight]);
-    }
-    Ok(lines.join("\n"))
+    Ok((lines.join("\n"), hit.then_some(crate::telegram::EFFECT_FIRE)))
 }
 
 #[cfg(test)]
@@ -563,7 +632,8 @@ mod tests {
         let mut second = sessions(&db).remove(1);
         second.status = SessionStatus::Cancelled;
         second.update(&db).unwrap();
-        let next = weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap();
+        weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap();
+        let next = announce(&db, "123", sunday(7 * 24 * 60)).unwrap();
         let event = AgentEvent::get(&db, next["event_id"].as_str().unwrap()).unwrap().unwrap();
         let recent: Vec<String> = serde_json::from_value(event.payload_json["recent_sessions"].clone()).unwrap();
         // Last week's two remaining slots; the cancelled one and next week's plan are left out.
@@ -579,31 +649,56 @@ mod tests {
         assert_eq!(result["plan"]["sessions"].as_array().unwrap().len(), 3);
         assert_eq!(result["audit"]["completed_workouts"], 0);
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
-        let text = briefing(&db, Date::constant(2026, 10, 12), &result["audit"], false, sunday(0)).unwrap();
-        assert!(text.contains("Local plan only") && text.contains("Mon") && text.contains("Last week 0/3"), "{text}");
-        let retry = weekly_plan(&db, "short", sunday(1)).unwrap();
-        assert_eq!(retry["event_id"], result["event_id"]);
+        let first = announce(&db, "123", sunday(0)).unwrap();
+        let text = first["recap"].as_str().unwrap();
+        assert!(text.starts_with("📅 **Your week · Oct 5–11**\n**0/3 workouts**\n") && text.contains("\n🗓 **Next week · Oct 12–18**\nMon "), "{text}");
+        weekly_plan(&db, "short", sunday(1)).unwrap();
+        assert_eq!(announce(&db, "123", sunday(1)).unwrap()["event_id"], first["event_id"]);
         assert_eq!(sessions(&db).len(), 3);
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
         assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'planning.weekly_briefing'"), 1);
+        assert_eq!(count(&db, "SELECT count(*) FROM notification_delivery WHERE message LIKE '📅%'"), 1);
     }
 
     #[test]
     fn briefing_hides_uncertain_crowd_and_lists_new_targets() {
         let db = db();
-        let result = weekly_plan(&db, "short", sunday(0)).unwrap();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
         let mut rows = sessions(&db);
         (rows[0].crowd_prediction, rows[0].crowd_confidence) = (Some(0.9), Some(0.7));
         (rows[1].crowd_prediction, rows[1].crowd_confidence) = (Some(0.1), Some(0.3));
         rows[0].save(&db).unwrap();
         rows[1].save(&db).unwrap();
         emit(&db, "progression.updated", sunday(-2 * 24 * 60), json!({"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"})).unwrap();
-        let text = briefing(&db, Date::constant(2026, 10, 12), &result["audit"], true, sunday(0)).unwrap();
-        assert!(text.starts_with("🏋️ Your week · Oct 12–18"), "{text}");
+        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0)).unwrap();
         assert!(text.contains("🔴 Packed") && !text.contains("Empty") && !text.contains("score"), "{text}");
         assert!(text.contains("can still move if your calendar changes"));
-        assert!(text.contains("\n🎯 New targets: bench 82.5 kg (+2.5)\n"), "{text}");
-        assert!(text.ends_with("⚖️ Snap a photo of your scale anytime and I'll track your weight."));
+        assert!(text.contains("\n🎯 New targets: bench 82.5 kg (+2.5)\n⚖️ Snap a photo of your scale anytime and I'll track your weight.\n"), "{text}");
+        assert_eq!(effect, None);
+    }
+
+    /// A week that hit its target: every day with its outcome, time and volume against the week before,
+    /// the records, and the 🔥 effect.
+    #[test]
+    fn recap_celebrates_a_full_week() {
+        let db = db();
+        let train = |day: i64, weight: f64, key: &str| {
+            let at = sunday(-day * 24 * 60);
+            let id = start(&db, Some("short"), None, false, at, &format!("{key}-start")).unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+            for (n, reps) in [8, 8].iter().enumerate() {
+                let set = crate::domain::set_parser::SetInput { weight, reps: *reps, set_type: SetType::Working, rir: None };
+                crate::domain::workout::log_set(&db, &id, &set, at.mins(5 + n as i64 * 5), &format!("{key}-{n}")).unwrap();
+            }
+            crate::domain::coach::handle_action(&db, crate::domain::coach::Action::End, None, None, None, false, at.mins(45), &format!("{key}-end")).unwrap();
+        };
+        train(10, 80.0, "before");
+        train(6, 80.0, "mon");
+        train(4, 82.5, "wed");
+        train(2, 85.0, "fri");
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0)).unwrap();
+        assert!(text.starts_with("📅 **Your week · Oct 5–11**\n✅ **3/3 workouts**\nMon Short ✅ · Wed Short ✅ · Fri Short ✅\n⏱ 2 h 15 min trained · 💪 4.0 t lifted (+209% vs the week before)\n🏆 Bench 8 × 82.5 kg · Bench 8 × 85 kg\n"), "{text}");
+        assert_eq!(effect, Some(crate::telegram::EFFECT_FIRE));
     }
 
     #[test]
@@ -666,6 +761,19 @@ mod tests {
         rolling_plan(&db, "short", sunday(3)).unwrap();
         assert_eq!(PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at, updated.planned_start_at);
         assert!(AgentEvent::get(&db, &event.id).unwrap().unwrap().handled_at.is_none());
+    }
+
+    /// Next week used to be drafted (and published) from Friday on; only the Sunday run plans it now.
+    #[test]
+    fn next_week_waits_for_sunday() {
+        let db = db();
+        let friday = sunday(-2 * 24 * 60);
+        rolling_plan(&db, "short", friday).unwrap();
+        assert!(sessions(&db).iter().all(|s| s.week_id == "2026-10-05"), "{:?}", sessions(&db).iter().map(|s| &s.week_id).collect::<Vec<_>>());
+        rolling_plan(&db, "short", sunday(-1)).unwrap();
+        assert!(sessions(&db).iter().all(|s| s.week_id != "2026-10-12"));
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        assert!(sessions(&db).iter().any(|s| s.week_id == "2026-10-12"));
     }
 
     #[test]

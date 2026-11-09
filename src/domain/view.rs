@@ -34,6 +34,8 @@ pub struct Card {
     /// Rest cards count down to this.
     pub rest_until: Option<Ts>,
     pub kind: CardKind,
+    /// Animated Telegram effect played when the card arrives (`telegram::EFFECT_*`).
+    pub effect: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

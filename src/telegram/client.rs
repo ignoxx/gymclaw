@@ -59,6 +59,48 @@ impl Bot {
             other => other,
         }
     }
+
+    async fn send_once(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64> {
+        let reply_markup = if buttons.is_empty() { None } else { Some(markup(buttons)) };
+        let sent: Sent = match photo {
+            None => {
+                let mut body = json!({"chat_id": chat, "link_preview_options": {"is_disabled": true}});
+                if let Some(effect) = effect {
+                    body["message_effect_id"] = json!(effect);
+                }
+                if let Some(m) = reply_markup {
+                    body["reply_markup"] = m;
+                }
+                self.call_text("sendMessage", body, "text", text).await?
+            }
+            Some(path) => {
+                let bytes = tokio::fs::read(path).await?;
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "photo.png".into());
+                let form = |html: bool| {
+                    let mut form = reqwest::multipart::Form::new()
+                        .text("chat_id", chat.to_string())
+                        .text("caption", if html { markdown::to_html(text) } else { markdown::plain(text) })
+                        .part("photo", reqwest::multipart::Part::bytes(bytes.clone()).file_name(name.clone()));
+                    if html {
+                        form = form.text("parse_mode", "HTML");
+                    }
+                    if let Some(m) = &reply_markup {
+                        form = form.text("reply_markup", m.to_string());
+                    }
+                    if let Some(effect) = effect {
+                        form = form.text("message_effect_id", effect.to_string());
+                    }
+                    form
+                };
+                let url = format!("{}/sendPhoto", self.base);
+                match parse("sendPhoto", self.http.post(&url).multipart(form(true)).send().await.map_err(scrub)?).await {
+                    Err(e) if e.to_string().contains("can't parse entities") => parse("sendPhoto", self.http.post(&url).multipart(form(false)).send().await.map_err(scrub)?).await?,
+                    other => other?,
+                }
+            }
+        };
+        Ok(sent.message_id)
+    }
 }
 
 /// Errors carry Telegram's description; the token never appears (reqwest URLs are stripped).
@@ -86,40 +128,12 @@ struct Sent {
 
 #[async_trait]
 impl Telegram for Bot {
-    async fn send(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard) -> Result<i64> {
-        let reply_markup = if buttons.is_empty() { None } else { Some(markup(buttons)) };
-        let sent: Sent = match photo {
-            None => {
-                let mut body = json!({"chat_id": chat, "link_preview_options": {"is_disabled": true}});
-                if let Some(m) = reply_markup {
-                    body["reply_markup"] = m;
-                }
-                self.call_text("sendMessage", body, "text", text).await?
-            }
-            Some(path) => {
-                let bytes = tokio::fs::read(path).await?;
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "photo.png".into());
-                let form = |html: bool| {
-                    let mut form = reqwest::multipart::Form::new()
-                        .text("chat_id", chat.to_string())
-                        .text("caption", if html { markdown::to_html(text) } else { markdown::plain(text) })
-                        .part("photo", reqwest::multipart::Part::bytes(bytes.clone()).file_name(name.clone()));
-                    if html {
-                        form = form.text("parse_mode", "HTML");
-                    }
-                    if let Some(m) = &reply_markup {
-                        form = form.text("reply_markup", m.to_string());
-                    }
-                    form
-                };
-                let url = format!("{}/sendPhoto", self.base);
-                match parse("sendPhoto", self.http.post(&url).multipart(form(true)).send().await.map_err(scrub)?).await {
-                    Err(e) if e.to_string().contains("can't parse entities") => parse("sendPhoto", self.http.post(&url).multipart(form(false)).send().await.map_err(scrub)?).await?,
-                    other => other?,
-                }
-            }
-        };
-        Ok(sent.message_id)
+    async fn send(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64> {
+        match self.send_once(chat, text, photo, buttons, effect).await {
+            // An effect is decoration: never lose the message over one Telegram doesn't know.
+            Err(e) if effect.is_some() && e.to_string().contains("EFFECT") => self.send_once(chat, text, photo, buttons, None).await,
+            other => other,
+        }
     }
 
     async fn edit(&self, chat: i64, message: i64, text: &str, buttons: &Keyboard, caption: bool) -> Result<()> {
@@ -138,6 +152,11 @@ impl Telegram for Bot {
 
     async fn remove(&self, chat: i64, message: i64) -> Result<()> {
         self.call::<Value>("deleteMessage", json!({"chat_id": chat, "message_id": message})).await.map(|_| ())
+    }
+
+    async fn pin(&self, chat: i64, message: i64, pinned: bool) -> Result<()> {
+        let method = if pinned { "pinChatMessage" } else { "unpinChatMessage" };
+        self.call::<Value>(method, json!({"chat_id": chat, "message_id": message, "disable_notification": true})).await.map(|_| ())
     }
 
     async fn react(&self, chat: i64, message: i64, emoji: Option<&str>) -> Result<()> {

@@ -105,8 +105,14 @@ impl Scheduler {
         let r = recipient.clone();
         note(in_tx(&self.db_path, move |db| ticks::watch(db, &r, Ts::now())).await, "watch");
         let r = recipient.clone();
-        // Commits per step (plan, publish, briefing), so no outer transaction.
-        note(blocking(&self.db_path, move |db| weekly_if_due(db, &r, Ts::now())).await, "weekly");
+        // Commits per step (plan, publish, recap), so no outer transaction.
+        let weekly = blocking(&self.db_path, move |db| weekly_if_due(db, &r, Ts::now())).await;
+        let ran = weekly.as_ref().is_ok_and(|data| data["due"] != false);
+        note(weekly, "weekly");
+        if ran {
+            // The recap goes out now, before the agent wakes to add its take on the week.
+            self.pump().await;
+        }
         if authority.crowd_polling_enabled && last_crowd.is_none_or(|t| t.elapsed() >= CROWD_EVERY) {
             *last_crowd = Some(Instant::now());
             note(in_tx(&self.db_path, |db| ticks::poll_crowd(db, Ts::now())).await, "crowd poll");
@@ -186,8 +192,9 @@ pub fn fire_at(job: &NotificationJob) -> Ts {
 }
 
 /// Run `ticks::weekly` once per week, on Sunday from 19:00 profile-local (a restart after 19:00
-/// still catches up the same evening), publish calendar writes; the agent handles the briefing.
-pub fn weekly_if_due(db: &crate::db::Connection, _recipient: &str, now: Ts) -> Result<serde_json::Value> {
+/// still catches up the same evening), publish calendar writes, then queue the recap and the agent's
+/// weekly review (`weekly::announce`).
+pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Result<serde_json::Value> {
     let tz = profile::get_profile(db)?.tz();
     let local = now.local(&tz);
     if local.weekday() != jiff::civil::Weekday::Sunday || local.hour() < 19 {
@@ -213,6 +220,7 @@ pub fn weekly_if_due(db: &crate::db::Connection, _recipient: &str, now: Ts) -> R
         };
     let tx = db.unchecked_transaction()?;
     data["published"] = json!(published);
+    data["announced"] = crate::domain::weekly::announce(&tx, recipient, now)?;
     emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
     Ok(data)
