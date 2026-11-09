@@ -132,9 +132,13 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     for s in &sessions {
         let name = s.workout_plan_json.pointer("/template/name").and_then(Value::as_str).or(s.workout_template_id.as_deref()).unwrap_or("Workout");
         let begin = s.planned_start_at.local(&tz);
+        let follows = match &s.follows_session_id {
+            Some(id) => format!(" make-up for {}", name_sessions(db, id)?),
+            None => String::new(),
+        };
         writeln!(
             out,
-            "- {} {}–{} {} {}{} id={}",
+            "- {} {}–{} {} {}{} id={}{follows}",
             begin.strftime("%a %-d %b"), begin.strftime("%H:%M"), s.planned_end_at.local(&tz).strftime("%H:%M"), name, s.status,
             if s.user_locked { " locked" } else { "" }, s.id,
         )
