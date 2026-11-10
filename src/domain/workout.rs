@@ -3,6 +3,10 @@
 //! Every mutation runs through `mutate` with a request ID: a retry returns the original result, reuse
 //! with a different intent fails. Rest jobs are durable `notification_job` rows; the scheduler and the
 //! coach's live countdown fire them. Rows are written back as soon as they change (no autoflush).
+//!
+//! - One unfinished workout at a time (`WORKOUT_ALREADY_ACTIVE`).
+//! - A workout runs on its own snapshot of the template; editing the template doesn't change it.
+//! - Warm-ups never count toward volume or progression, and logging a working set skips a pending one.
 use jiff::SignedDuration;
 use serde::Serialize;
 use serde_json::{Value, json};

@@ -1,5 +1,9 @@
-//! Calendar sync and owner-edit reconciliation. Sync never performs remote
-//! writes.
+//! Calendar sync and owner-edit reconciliation. Sync never performs remote writes.
+//!
+//! - Every page is fetched before anything changes, so a failed fetch leaves cached events, plans and
+//!   the sync token as they were. An expired token (HTTP 410) falls back to a full sync, which turns
+//!   events that disappeared into tombstones instead of wiping history.
+//! - The new sync token is stored only after every event is reconciled.
 use std::collections::{BTreeSet, HashSet};
 
 use jiff::SignedDuration;

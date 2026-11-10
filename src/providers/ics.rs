@@ -168,7 +168,7 @@ fn event(props: &[ContentLine<'_>]) -> Result<Event> {
             other => other.clone(),
         },
     };
-    // recurring-ical-events orders a reversed span.
+    // An end before the start is read as the reversed span.
     let (start, end) = if compare(&start, &raw_end)?.is_gt() { (raw_end, start) } else { (start, raw_end) };
     let mut rdates = Vec::new();
     let mut exdates = Vec::new();
@@ -319,8 +319,8 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
     Ok(out)
 }
 
-/// recurring-ical-events issue 148/164/253: an older override that carries its own rules only
-/// counts when the master still produces its RECURRENCE-ID.
+/// An older override that carries its own rules only counts when the master still produces its
+/// RECURRENCE-ID.
 fn skip_stale_modification(m: &Event, core: &Event, series: &Series) -> Result<bool> {
     if !m.has_rules() || m.sequence >= core.sequence {
         return Ok(false);

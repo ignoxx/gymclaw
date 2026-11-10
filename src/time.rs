@@ -1,4 +1,4 @@
-//! UTC instants stored the way SQLAlchemy's `UTCDateTime` does: naive UTC text with microseconds.
+//! UTC instants, stored as naive UTC text with microseconds.
 use std::fmt;
 
 use jiff::{SignedDuration, Timestamp, Zoned, civil, tz::TimeZone};
@@ -34,7 +34,7 @@ impl Ts {
         Some(Ts(naive.to_zoned(TimeZone::UTC).ok()?.timestamp()))
     }
 
-    /// `2026-10-12 12:07:18.231715`, the SQLAlchemy SQLite storage format.
+    /// `2026-10-12 12:07:18.231715`, the DB storage format.
     pub fn db(self) -> String {
         self.0.strftime("%Y-%m-%d %H:%M:%S%.6f").to_string()
     }

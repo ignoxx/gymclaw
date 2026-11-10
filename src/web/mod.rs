@@ -7,7 +7,7 @@
 pub mod state;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
@@ -168,9 +168,21 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         };
     }
     match ASSETS.iter().find(|(route, _, _)| *route == path) {
-        Some((_, body, mime)) => reply(StatusCode::OK, body.to_vec(), mime),
+        Some((route, embedded, mime)) => reply(StatusCode::OK, asset(route, embedded), mime),
         None => error(StatusCode::NOT_FOUND),
     }
+}
+
+/// Release builds serve the copy embedded at compile time; debug builds read `web/` from disk, so an
+/// edit shows on refresh. Only the routes in `ASSETS` are served either way.
+fn asset(route: &str, embedded: &[u8]) -> Vec<u8> {
+    if cfg!(debug_assertions) {
+        let file = if route == "/" { "index.html" } else { &route[1..] };
+        if let Ok(bytes) = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("web").join(file)) {
+            return bytes;
+        }
+    }
+    embedded.to_vec()
 }
 
 /// Serve the dashboard: reads from a read-only connection, `DASHBOARD_TOOLS` writes through a writable one.

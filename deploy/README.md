@@ -4,7 +4,6 @@ One Docker Compose stack. `gymclaw` and `dashboard` run the same image, which Gi
 ([`image.yml`](../.github/workflows/image.yml)) builds on every push to `main` and pushes to
 `ghcr.io/ignoxx/gymclaw:main` (plus a `:<commit sha>` tag). The host only pulls it.
 
-
 - **gymclaw**: one Rust binary (`gymclaw serve`): Telegram long polling, the agent
   (OpenRouter), the coach, the scheduler and the outbox. No ports are published.
 - **egress**: a Squid proxy that allows HTTPS `CONNECT` to an allowlist only

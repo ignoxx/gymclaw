@@ -166,4 +166,41 @@ mod tests {
         let down = guide("crowd_forecast", Error::domain("GYM_API_UNAVAILABLE", "No source")).to_string();
         assert!(down.contains("don't retry") && !down.contains("Usage"), "{down}");
     }
+
+    /// Docs drift: every backticked `src/…`, `docs/…`, `scripts/…` or `deploy/…` path and every relative
+    /// Markdown link in the docs exists, and every `gymclaw call <tool>` names a registered tool.
+    #[test]
+    fn docs_name_real_paths_and_tools() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let docs = ["README.md", "AGENTS.md", "CODING_STANDARDS.md", "SECURITY.md", "deploy/README.md"]
+            .map(|f| root.join(f))
+            .into_iter()
+            .chain(std::fs::read_dir(root.join("docs")).unwrap().map(|e| e.unwrap().path()));
+        let path = regex::Regex::new(r"`((?:src|docs|scripts|deploy)/[^`\s*<…]*)").unwrap();
+        let link = regex::Regex::new(r"\]\(([^)#\s]+)(?:#[^)]*)?\)").unwrap();
+        let call = regex::Regex::new(r"gymclaw call ([a-z_]+)").unwrap();
+        let tools: Vec<&str> = all().iter().map(|t| t.name).collect();
+        let mut stale = vec![];
+        for doc in docs {
+            let text = std::fs::read_to_string(&doc).unwrap();
+            let name = doc.strip_prefix(root).unwrap().display().to_string();
+            for found in path.captures_iter(&text) {
+                let target = found[1].trim_end_matches([':', '.', ',', ')']);
+                if !root.join(target).exists() {
+                    stale.push(format!("{name}: `{target}` doesn't exist"));
+                }
+            }
+            for found in link.captures_iter(&text).filter(|l| !l[1].contains(':')) {
+                if !doc.parent().unwrap().join(&found[1]).exists() {
+                    stale.push(format!("{name}: link to {} is broken", &found[1]));
+                }
+            }
+            for found in call.captures_iter(&text) {
+                if !tools.contains(&&found[1]) {
+                    stale.push(format!("{name}: `gymclaw call {}` isn't a tool", &found[1]));
+                }
+            }
+        }
+        assert!(stale.is_empty(), "fix these docs:\n{}", stale.join("\n"));
+    }
 }

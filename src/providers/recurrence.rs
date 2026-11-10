@@ -257,7 +257,7 @@ pub struct Series {
     rdates: Vec<RDate>,
     exdate_ids: HashSet<DateTime>,
     exdate_days: HashSet<Date>,
-    /// RFC 5545/recurring-ical-events: DTSTART is always an instance. `dateutil` (Google masters) doesn't add it.
+    /// ICS feeds (RFC 5545): DTSTART is always an instance. Google masters: only when the rule produces it.
     include_start: bool,
 }
 
@@ -399,7 +399,7 @@ impl Series {
     }
 }
 
-/// recurring-ical-events' UNTIL repair, so rules `dateutil` rejects still expand.
+/// Repairs an UNTIL whose type doesn't match DTSTART, so such rules still expand.
 fn repair_until(until: &When, start: &When, all_dates: bool) -> Result<When> {
     Ok(match (until, start) {
         (u, _) if all_dates => When::Date(u.civil().date()),
@@ -411,8 +411,7 @@ fn repair_until(until: &When, start: &When, all_dates: bool) -> Result<When> {
 
 /// Recurrence starts of `lines` (`RRULE:…`, `EXDATE;TZID=…:…`, `RDATE…`, as Google's `recurrence`
 /// array has them) with `lower <= start < upper`, sorted. `dtstart` is the first instance: zoned for
-/// timed events, `When::Date` for all-day ones. Like `dateutil.rrulestr(forceset=True)`, DTSTART only
-/// counts when the rule produces it. More than `limit` instances → CALENDAR_RECURRENCE_TOO_LARGE;
+/// timed events, `When::Date` for all-day ones. DTSTART only counts when the rule produces it. More than `limit` instances → CALENDAR_RECURRENCE_TOO_LARGE;
 /// unparsable lines → CALENDAR_RECURRENCE_INVALID.
 pub fn occurrences(
     lines: &[impl AsRef<str>],
@@ -469,7 +468,7 @@ enum Freq {
     Secondly,
 }
 
-/// A parsed RRULE with `dateutil`'s defaults filled in from DTSTART.
+/// A parsed RRULE with the defaults (BYDAY, BYMONTHDAY, …) filled in from DTSTART.
 #[derive(Clone, Debug)]
 struct Rule {
     freq: Freq,
@@ -558,7 +557,7 @@ impl Rule {
                     })
                 }
                 "INTERVAL" => rule.interval = list(&value, 1..=i64::from(u16::MAX), true)?[0],
-                // recurring-ical-events drops negative counts (issue 128).
+                // A negative COUNT is dropped: the rule runs unbounded.
                 "COUNT" => {
                     rule.count = if value.starts_with('-') { None } else { Some(list(&value, 0..=u32::MAX, false)?[0]) }
                 }
@@ -587,7 +586,7 @@ impl Rule {
             }
         }
         rule.freq = freq.ok_or_else(|| invalid("FREQ missing"))?;
-        // dateutil: nth weekdays only mean something for MONTHLY/YEARLY.
+        // Nth weekdays only mean something for MONTHLY/YEARLY.
         if rule.freq > Freq::Monthly {
             let plain: Vec<Weekday> = rule.by_nth_weekday.drain(..).map(|(_, wd)| wd).collect();
             rule.by_weekday.extend(plain);

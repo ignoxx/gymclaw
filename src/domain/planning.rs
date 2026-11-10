@@ -2,6 +2,13 @@
 //! aggregate score. Recovery uses local calendar dates, not elapsed 24-hour periods. The search keeps
 //! the best slot per day, then considers all weekday combinations (at most 128 per week). No provider
 //! data means unknown crowd, never fabricated occupancy.
+//!
+//! - Candidates every 15 minutes, at the preferred and then the minimum duration. A slot needs the
+//!   workout inside the local window, prep not in the past, and the whole block from prep to getting
+//!   home free (half-open intervals, so touching appointments are fine).
+//! - Existing sessions count toward the weekly target and max, and toward recovery.
+//! - Equal scores keep the earliest candidate, preferred duration first.
+//! - An impossible minimum is reported (`minimum_met`, `shortfall`), never met by relaxing a rule.
 use jiff::SignedDuration;
 use jiff::civil::Date;
 use serde::Serialize;

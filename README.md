@@ -20,7 +20,7 @@ Onboarding happens in the same chat: a short interview, then a photo of an exist
 
 ## How it works
 
-One Rust binary, `gymclaw` ([how it's built](docs/rust-runtime.md)):
+One Rust binary, `gymclaw` ([how it's built](docs/architecture.md)):
 
 - **Typed tools** own all state in SQLite (plans, sets, crowd history, outbox) and validate every action. The agent and `gymclaw call` use the same tools.
 - **The agent** (GLM via OpenRouter) handles conversation and judgment calls with those tools and nothing else.

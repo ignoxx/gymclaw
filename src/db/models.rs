@@ -399,7 +399,7 @@ impl PlannedSession {
         }
     }
 
-    /// Write back a changed row (`updated_at` is wall-clock, like SQLAlchemy's onupdate).
+    /// Write back a changed row (`updated_at` is set to the wall clock).
     pub fn save(&mut self, db: &rusqlite::Connection) -> crate::error::Result<()> {
         self.updated_at = Ts::now();
         self.update(db)

@@ -195,4 +195,27 @@ mod tests {
         assert_eq!(version, BASELINE_MARKER);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// `schema.sql` is the schema a fresh `migrate` produces, so agents can read it in one place.
+    #[test]
+    fn schema_snapshot_is_current() {
+        let mut db = Connection::open_in_memory().unwrap();
+        migrate(&mut db).unwrap();
+        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let mut stmt = db
+            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY tbl_name, type DESC, name")
+            .unwrap();
+        let objects: Vec<String> =
+            stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|s| s.unwrap() + ";").collect();
+        let actual = format!(
+            "-- Generated from a fresh `gymclaw migrate` (user_version {version}); don't edit. When a migration\n\
+             -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.\n\n{}\n",
+            objects.join("\n\n")
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db/schema.sql");
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(actual.as_str()) {
+            std::fs::write(&path, &actual).unwrap();
+            panic!("src/db/schema.sql was stale and has been regenerated; review the diff and commit it");
+        }
+    }
 }
