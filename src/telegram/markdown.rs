@@ -72,7 +72,8 @@ pub fn plain(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').map(|l| quoted(l).1).collect();
     let text = CODE.replace_all(&lines.join("\n"), "$1").into_owned();
     let text = STRIKE.replace_all(&text, "$1").into_owned();
-    BOLD.replace_all(&text, "$1").into_owned()
+    let text = BOLD.replace_all(&text, "$1").into_owned();
+    ITALIC.replace_all(&text, "$1$2$3").into_owned()
 }
 
 #[cfg(test)]
@@ -89,8 +90,8 @@ mod tests {
 
     #[test]
     fn quotes_and_strike() {
-        let text = "**Done**\n>> Bench 8 × 85 kg\n>> ~~Dips~~ skipped\n> a 3 > 2 note\nafter";
-        assert_eq!(to_html(text), "<b>Done</b>\n<blockquote expandable>Bench 8 × 85 kg\n<s>Dips</s> skipped</blockquote>\n<blockquote>a 3 &gt; 2 note</blockquote>\nafter");
+        let text = "**Done**\n>> Bench 8 × 85 kg\n>> ~~Dips~~ skipped\n> a 3 > 2 note\n*after*";
+        assert_eq!(to_html(text), "<b>Done</b>\n<blockquote expandable>Bench 8 × 85 kg\n<s>Dips</s> skipped</blockquote>\n<blockquote>a 3 &gt; 2 note</blockquote>\n<i>after</i>");
         assert_eq!(plain(text), "Done\nBench 8 × 85 kg\nDips skipped\na 3 > 2 note\nafter");
         assert_eq!(to_html(">no space"), "&gt;no space");
     }

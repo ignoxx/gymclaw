@@ -1,6 +1,6 @@
 //! In-process clocks (replace the OpenClaw cron jobs and the heartbeat session).
 //!
-//! - Ticks: `watch` every 60 s, `weekly` Sunday ≥ 19:00 profile-local (once per week), `poll_crowd`
+//! - Ticks: `watch` every 60 s, `weekly` Sunday ≥ 23:00 profile-local (once per week), `poll_crowd`
 //!   every 15 min when enabled, `publish` after ticks when calendar writes are enabled. Then the
 //!   outbox sends whatever the ticks queued.
 //! - Jobs: one loop sleeps until the next `notification_job` is due (or a wake-up after a write) and
@@ -191,13 +191,13 @@ pub fn fire_at(job: &NotificationJob) -> Ts {
     if job.kind == JobKind::Rest { job.due_at + REST_GRACE } else { job.due_at }
 }
 
-/// Run `ticks::weekly` once per week, on Sunday from 19:00 profile-local (a restart after 19:00
-/// still catches up the same evening), publish calendar writes, then queue the recap and the agent's
-/// weekly review (`weekly::announce`).
+/// Run `ticks::weekly` once per week, on Sunday from 23:00 profile-local (late, so a Sunday evening
+/// workout makes the recap; a restart before midnight still catches up), publish calendar writes, then
+/// queue the recap and the agent's weekly review (`weekly::announce`).
 pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Result<serde_json::Value> {
     let tz = profile::get_profile(db)?.tz();
     let local = now.local(&tz);
-    if local.weekday() != jiff::civil::Weekday::Sunday || local.hour() < 19 {
+    if local.weekday() != jiff::civil::Weekday::Sunday || local.hour() < 23 {
         return Ok(json!({"due": false}));
     }
     let week = local.date().checked_add(1.day())?.to_string();
@@ -210,7 +210,8 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
     let mut data = ticks::weekly(&tx, now)?;
     tx.commit()?;
     // Publish before recording the weekly run; the agent reads the actual outbox state.
-    let published = outbox::runtime_authority(db)?.calendar_writes_enabled
+    let writes = outbox::runtime_authority(db)?.calendar_writes_enabled;
+    let published = writes
         && match ticks::publish(db, now) {
             Ok(result) => result["published"] == true,
             Err(e) => {
@@ -220,7 +221,7 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
         };
     let tx = db.unchecked_transaction()?;
     data["published"] = json!(published);
-    data["announced"] = crate::domain::weekly::announce(&tx, recipient, now)?;
+    data["announced"] = crate::domain::weekly::announce(&tx, recipient, now, writes && !published)?;
     emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
     Ok(data)
@@ -231,15 +232,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn weekly_waits_for_sunday_evening() {
+    fn weekly_waits_for_sunday_night() {
         let mut db = crate::db::open(&std::env::temp_dir().join(format!("gymclaw-weekly-{}.db", crate::db::new_id()))).unwrap();
         crate::db::migrate(&mut db).unwrap();
-        // Saturday 20:00 and Sunday 18:59 Berlin: not yet (ticks::weekly isn't even called).
-        for at in ["2026-10-17T18:00:00Z", "2026-10-18T16:59:00Z"] {
+        // Saturday 20:00 and Sunday 22:59 Berlin: not yet (ticks::weekly isn't even called).
+        for at in ["2026-10-17T18:00:00Z", "2026-10-18T20:59:00Z"] {
             assert_eq!(weekly_if_due(&db, "42", Ts::parse(at, None).unwrap()).unwrap(), json!({"due": false}));
         }
         // Already ran for the week starting Monday 19 Oct: not again.
         emit(&db, "runtime.weekly_ran", Ts::now(), json!({"week_start": "2026-10-19"})).unwrap();
-        assert_eq!(weekly_if_due(&db, "42", Ts::parse("2026-10-18T17:30:00Z", None).unwrap()).unwrap(), json!({"due": false}));
+        assert_eq!(weekly_if_due(&db, "42", Ts::parse("2026-10-18T21:30:00Z", None).unwrap()).unwrap(), json!({"due": false}));
     }
 }

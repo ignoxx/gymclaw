@@ -387,12 +387,15 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
                 }
             }
             if let Some(recap) = recap {
-                // The week's plan stays one tap away at the top of the chat.
-                if let Some(old) = recap.unpin {
-                    let _ = tg.pin(chat, old, false).await;
-                }
-                if let Err(e) = tg.pin(chat, message_id, true).await {
-                    tracing::warn!("weekly recap not pinned: {e}");
+                // The week's plan stays one tap away at the top of the chat. Pin first, so a failed pin
+                // leaves last week's in place.
+                match tg.pin(chat, message_id, true).await {
+                    Err(e) => tracing::warn!("weekly recap not pinned: {e}"),
+                    Ok(()) => {
+                        if let Some(old) = recap.unpin {
+                            let _ = tg.pin(chat, old, false).await;
+                        }
+                    }
                 }
             }
             Ok(data)
@@ -525,7 +528,7 @@ mod tests {
         deliver(&dir.db(), tg.as_ref(), &second, now().mins(1)).await.unwrap();
         let calls: Vec<Call> = tg.calls();
         let send = Call::Send("📅 Your week".into(), vec![]);
-        assert_eq!(calls, [send.clone(), Call::Pin(100, true), Call::Effect(crate::telegram::EFFECT_FIRE.into()), send, Call::Pin(100, false), Call::Pin(101, true)]);
+        assert_eq!(calls, [send.clone(), Call::Pin(100, true), Call::Effect(crate::telegram::EFFECT_FIRE.into()), send, Call::Pin(101, true), Call::Pin(100, false)]);
     }
 
     #[tokio::test]

@@ -22,6 +22,7 @@ use crate::domain::profile::get_profile;
 use crate::domain::replanning::{commit_upcoming, inspect_weeks, retire_session};
 use crate::domain::scheduling::schedule_week;
 use crate::domain::templates::get_template;
+use crate::domain::workout::g;
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -347,22 +348,23 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     Ok(json!({"week_start": next_week.to_string(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week)?}))
 }
 
-/// After the Sunday run and the calendar publish: queue the recap for the owner, then wake the agent
-/// for its weekly review, once per week. The scheduler sends the recap right away, so the agent's take
-/// on the week arrives after it.
-pub fn announce(db: &Connection, recipient: &str, now: Ts) -> Result<Value> {
+/// After the Sunday run and the calendar publish: queue the recap for the owner, then the agent's weekly
+/// review, once per week. The review waits until the recap is out (`events::wake_pending`), so the
+/// agent's take on the week arrives after it. `unpublished`: calendar writes are on but next week
+/// didn't reach the calendar.
+pub fn announce(db: &Connection, recipient: &str, now: Ts, unpublished: bool) -> Result<Value> {
     let tz = get_profile(db)?.tz();
     let next_week = week_of(now, &tz).checked_add(days(7))?;
     let key = format!("weekly-brief:{next_week}");
     if let Some(event) = AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])? {
         return Ok(json!({"event_id": event.id}));
     }
-    let (message, effect) = recap(db, next_week, now)?;
+    let (message, effect) = recap(db, next_week, now, unpublished)?;
     let source = emit(db, "planning.weekly_recap", now, json!({"week_start": next_week.to_string(), "effect": effect}))?;
     crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient, &[])?;
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
-    let payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent});
+    let payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent, "calendar_published": !unpublished});
     let mut event = emit(db, "planning.weekly_briefing", now, payload)?;
     event.correlation_id = Some(key);
     event.update(db)?;
@@ -406,11 +408,6 @@ fn streak(db: &Connection, week_start: Date, target: i64, zone: &TimeZone) -> Re
     Ok(weeks)
 }
 
-/// Python's `{x:g}` for weights: no trailing ".0".
-pub fn fmt_g(x: f64) -> String {
-    if x.fract() == 0.0 { format!("{}", x as i64) } else { format!("{x}") }
-}
-
 /// "Bench 82.5 kg (+2.5)" for every exercise that progressed during `week_start`'s week.
 fn new_targets(db: &Connection, week_start: Date, zone: &TimeZone) -> Result<Vec<String>> {
     let mut order: Vec<String> = Vec::new();
@@ -431,7 +428,7 @@ fn new_targets(db: &Connection, week_start: Date, zone: &TimeZone) -> Result<Vec
         let row = WorkoutExercise::first(db, "WHERE workout_session_id = ?1 AND exercise_id = ?2", [workout, &id])?;
         let name = row.and_then(|r| r.config_json.get("name").and_then(Value::as_str).map(String::from)).unwrap_or(id);
         let (next, previous) = (decision["next_weight"].as_f64().unwrap_or(0.0), decision["previous_weight"].as_f64().unwrap_or(0.0));
-        targets.push(format!("{name} {} kg (+{})", fmt_g(next), fmt_g(next - previous)));
+        targets.push(format!("{name} {} kg (+{})", g(next), g(next - previous)));
     }
     Ok(targets)
 }
@@ -480,7 +477,7 @@ fn days_line(db: &Connection, week_start: Date, workouts: &[WorkoutSession], tz:
 /// Sunday Telegram message, sent by code before the agent's take on it. Last week: workouts by day,
 /// time and volume trained, records, new targets, body weight (the only place GymClaw asks for a
 /// weigh-in). Then next week's sessions. 🔥 effect when the week hit its target.
-pub fn recap(db: &Connection, week_start: Date, now: Ts) -> Result<(String, Option<&'static str>)> {
+pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> Result<(String, Option<&'static str>)> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let previous = week_start.checked_sub(days(7))?;
@@ -519,7 +516,7 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts) -> Result<(String, Opti
     let mut records = Vec::new();
     for w in &workouts {
         for lift in highlights::workout(db, &w.id)?.lifts.into_iter().filter(|l| l.record()) {
-            let set = if lift.weight == 0.0 { format!("{} reps", lift.reps) } else { format!("{} × {} kg", lift.reps, fmt_g(lift.weight)) };
+            let set = if lift.weight == 0.0 { format!("{} reps", lift.reps) } else { format!("{} × {} kg", lift.reps, g(lift.weight)) };
             records.push(format!("{} {set}", lift.name));
         }
     }
@@ -534,6 +531,9 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts) -> Result<(String, Opti
         lines.push(weight);
     }
     lines.extend([String::new(), format!("🗓 **Next week · {}**", span(week_start)?)]);
+    if unpublished {
+        lines.push("⚠️ Not on your calendar yet: publishing failed.".into());
+    }
     let mut listed = Vec::new();
     let mut flexible = Vec::new();
     for session in &sessions {
@@ -633,7 +633,7 @@ mod tests {
         second.status = SessionStatus::Cancelled;
         second.update(&db).unwrap();
         weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap();
-        let next = announce(&db, "123", sunday(7 * 24 * 60)).unwrap();
+        let next = announce(&db, "123", sunday(7 * 24 * 60), false).unwrap();
         let event = AgentEvent::get(&db, next["event_id"].as_str().unwrap()).unwrap().unwrap();
         let recent: Vec<String> = serde_json::from_value(event.payload_json["recent_sessions"].clone()).unwrap();
         // Last week's two remaining slots; the cancelled one and next week's plan are left out.
@@ -649,15 +649,20 @@ mod tests {
         assert_eq!(result["plan"]["sessions"].as_array().unwrap().len(), 3);
         assert_eq!(result["audit"]["completed_workouts"], 0);
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
-        let first = announce(&db, "123", sunday(0)).unwrap();
+        let first = announce(&db, "123", sunday(0), false).unwrap();
         let text = first["recap"].as_str().unwrap();
         assert!(text.starts_with("📅 **Your week · Oct 5–11**\n**0/3 workouts**\n") && text.contains("\n🗓 **Next week · Oct 12–18**\nMon "), "{text}");
         weekly_plan(&db, "short", sunday(1)).unwrap();
-        assert_eq!(announce(&db, "123", sunday(1)).unwrap()["event_id"], first["event_id"]);
+        assert_eq!(announce(&db, "123", sunday(1), false).unwrap()["event_id"], first["event_id"]);
         assert_eq!(sessions(&db).len(), 3);
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
         assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'planning.weekly_briefing'"), 1);
         assert_eq!(count(&db, "SELECT count(*) FROM notification_delivery WHERE message LIKE '📅%'"), 1);
+        // The agent's take waits for the recap to go out (or fail), never ahead of it.
+        let wakes = |db: &Connection| crate::domain::events::wake_pending(db).unwrap().iter().filter(|e| e["type"] == "planning.weekly_briefing").count();
+        assert_eq!(wakes(&db), 0);
+        db.execute("UPDATE notification_delivery SET status = 'UNKNOWN' WHERE message LIKE '📅%'", []).unwrap();
+        assert_eq!(wakes(&db), 1);
     }
 
     #[test]
@@ -670,7 +675,8 @@ mod tests {
         rows[0].save(&db).unwrap();
         rows[1].save(&db).unwrap();
         emit(&db, "progression.updated", sunday(-2 * 24 * 60), json!({"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"})).unwrap();
-        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0)).unwrap();
+        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0), true).unwrap();
+        assert!(text.contains("**Next week · Oct 12–18**\n⚠️ Not on your calendar yet"), "{text}");
         assert!(text.contains("🔴 Packed") && !text.contains("Empty") && !text.contains("score"), "{text}");
         assert!(text.contains("can still move if your calendar changes"));
         assert!(text.contains("\n🎯 New targets: bench 82.5 kg (+2.5)\n⚖️ Snap a photo of your scale anytime and I'll track your weight.\n"), "{text}");
@@ -696,7 +702,7 @@ mod tests {
         train(4, 82.5, "wed");
         train(2, 85.0, "fri");
         weekly_plan(&db, "short", sunday(0)).unwrap();
-        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0)).unwrap();
+        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0), false).unwrap();
         assert!(text.starts_with("📅 **Your week · Oct 5–11**\n✅ **3/3 workouts**\nMon Short ✅ · Wed Short ✅ · Fri Short ✅\n⏱ 2 h 15 min trained · 💪 4.0 t lifted (+209% vs the week before)\n🏆 Bench 8 × 82.5 kg · Bench 8 × 85 kg\n"), "{text}");
         assert_eq!(effect, Some(crate::telegram::EFFECT_FIRE));
     }

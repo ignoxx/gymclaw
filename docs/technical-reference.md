@@ -345,7 +345,7 @@ Proactive messages go through an outbox (`deliveries`). A delivery stuck in SEND
 never retried automatically, since Telegram has no exactly-once send. Check the chat, then
 `delivery_resolve` with `sent` or `not-sent` (`not-sent` queues it again).
 
-The weekly tick (Sunday from 19:00 profile-local) audits the week, drafts next week only when it
+The weekly tick (Sunday from 23:00 profile-local) audits the week, drafts next week only when it
 is empty and publishes it. Then code sends the recap (last week by day, time, volume, records,
 targets, body weight; next week's sessions), pinned in place of last week's, and the agent gets a
 week-rollover event to add its take and review its learned notes. Nothing else plans next week; if

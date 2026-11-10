@@ -131,7 +131,10 @@ impl Telegram for Bot {
     async fn send(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64> {
         match self.send_once(chat, text, photo, buttons, effect).await {
             // An effect is decoration: never lose the message over one Telegram doesn't know.
-            Err(e) if effect.is_some() && e.to_string().contains("EFFECT") => self.send_once(chat, text, photo, buttons, None).await,
+            // Only Telegram's own rejection: a timeout may have sent the message already.
+            Err(e) if effect.is_some() && e.code() == "TELEGRAM_ERROR" && e.to_string().to_lowercase().contains("effect") => {
+                self.send_once(chat, text, photo, buttons, None).await
+            }
             other => other,
         }
     }

@@ -10,13 +10,14 @@ use crate::db::models::{SetLog, WorkoutExercise, WorkoutSession};
 use crate::domain::calendar::week_of;
 use crate::domain::workout;
 use crate::error::Result;
+use crate::time::Ts;
 
 /// How a lift's top set beat earlier sessions; each carries the number it beat.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     /// Heaviest working set ever.
     WeightRecord(f64),
-    /// Most reps ever at this weight or heavier.
+    /// Most reps ever at this weight.
     RepRecord(i64),
     /// Heavier than the last session.
     Heavier(f64),
@@ -41,6 +42,7 @@ impl Lift {
 #[derive(Clone, Debug)]
 pub struct Highlights {
     pub name: String,
+    pub started_at: Ts,
     pub minutes: i64,
     pub sets: usize,
     /// Kilograms moved in working sets (weight × reps).
@@ -74,8 +76,10 @@ fn change(best: &SetLog, earlier: &[SetLog]) -> Option<Change> {
     if best.weight > heaviest {
         return Some(Change::WeightRecord(heaviest));
     }
-    let most = earlier.iter().filter(|s| s.weight >= best.weight).map(|s| s.reps).max().unwrap_or(0);
-    if best.reps > most {
+    // Same weight only: an old heavy single must not make every lighter set a record.
+    if let Some(most) = earlier.iter().filter(|s| s.weight == best.weight).map(|s| s.reps).max()
+        && best.reps > most
+    {
         return Some(Change::RepRecord(most));
     }
     let session = &earlier.last()?.workout_exercise_id;
@@ -116,7 +120,7 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
         Some(p) => Some((p.actual_duration_seconds.unwrap_or(0).div_euclid(60), volume(&working(db, &p.id)?))),
         None => None,
     };
-    Ok(Highlights { name, minutes: session.actual_duration_seconds.unwrap_or(0).div_euclid(60), sets: sets.len(), volume: volume(&sets), last, lifts })
+    Ok(Highlights { name, started_at: start, minutes: session.actual_duration_seconds.unwrap_or(0).div_euclid(60), sets: sets.len(), volume: volume(&sets), last, lifts })
 }
 
 /// Finished workouts that started in `week` (Monday, owner-local), oldest first.
@@ -139,7 +143,6 @@ pub fn total_volume(db: &Connection, workouts: &[WorkoutSession]) -> Result<f64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::time::Ts;
 
     fn set(session: &str, weight: f64, reps: i64) -> SetLog {
         SetLog { id: String::new(), workout_exercise_id: session.into(), set_number: 1, set_type: crate::db::models::SetType::Working, weight, reps, rir_optional: None,
@@ -151,12 +154,13 @@ mod tests {
         // Two earlier sessions: a heavy single and last week's 8 × 80.
         let earlier = [set("a", 90.0, 3), set("a", 85.0, 6), set("b", 80.0, 8)];
         assert_eq!(change(&set("x", 92.5, 1), &earlier), Some(Change::WeightRecord(90.0)));
-        // 7 reps at 85 beats the 6 done at 85+ (and the 3 at 90).
+        // 7 reps at 85 beats the 6 done at 85.
         assert_eq!(change(&set("x", 85.0, 7), &earlier), Some(Change::RepRecord(6)));
-        assert_eq!(change(&set("x", 82.5, 6), &earlier), Some(Change::Heavier(80.0)));
         assert_eq!(change(&set("x", 80.0, 9), &earlier), Some(Change::RepRecord(8)));
-        // More reps than last time, still short of an older heavier set: progress, not a record.
-        assert_eq!(change(&set("x", 80.0, 9), &[set("a", 85.0, 10), set("b", 80.0, 8)]), Some(Change::MoreReps(8)));
+        // Never done at 82.5: heavier than last time, not a rep record against the 90 kg triple.
+        assert_eq!(change(&set("x", 82.5, 6), &earlier), Some(Change::Heavier(80.0)));
+        // More reps than last time, still short of an older best at that weight: progress, not a record.
+        assert_eq!(change(&set("x", 80.0, 9), &[set("a", 80.0, 10), set("b", 80.0, 8)]), Some(Change::MoreReps(8)));
         assert_eq!(change(&set("x", 80.0, 8), &earlier), None);
         // First time: nothing to beat. Bodyweight: reps are the record.
         assert_eq!(change(&set("x", 80.0, 8), &[]), None);

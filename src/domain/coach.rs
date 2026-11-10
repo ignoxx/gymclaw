@@ -215,7 +215,7 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
         lines.push(match lift.change {
             Change::WeightRecord(was) => format!("🏆 **{} {set}** · heaviest ever (was {})", lift.name, g(was)),
             Change::RepRecord(was) if lift.weight == 0.0 => format!("🏆 **{} {set}** · most ever (was {was})", lift.name),
-            Change::RepRecord(was) => format!("🏆 **{} {set}** · most reps at {}+ (was {was})", lift.name, g(lift.weight)),
+            Change::RepRecord(was) => format!("🏆 **{} {set}** · most reps at {} kg (was {was})", lift.name, g(lift.weight)),
             Change::Heavier(was) => format!("↑ {} {set} (was {})", lift.name, g(was)),
             Change::MoreReps(was) => format!("↑ {} {set} (+{} reps)", lift.name, lift.reps - was),
         });
@@ -231,7 +231,8 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
     if !targets.is_empty() {
         lines.push(format!("🎯 Next time: {}", targets.join(", ")));
     }
-    let week = highlights::finished_in(db, crate::domain::calendar::week_of(now, &tz), &tz)?.len() as i64;
+    // The week the workout started in: one that runs past Sunday midnight still counts for that week.
+    let week = highlights::finished_in(db, crate::domain::calendar::week_of(h.started_at, &tz), &tz)?.len() as i64;
     let target = profile.weekly_target_sessions;
     let mut standing = if target > 0 && week >= target { format!("🗓 Week done: **{week}/{target}** ✅") } else { format!("🗓 This week **{week}/{target}**") };
     if let Some(next) = next_session(db, now, &tz)? {

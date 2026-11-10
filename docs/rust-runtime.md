@@ -109,7 +109,7 @@ model never has to. Timestamps without an offset are the owner's local time.
 ## Scheduler and outbox
 
 - In-process: `ticks::watch` every 60 s (calendar sync, personal feed, reminders), `ticks::weekly`
-  Sunday from 19:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
+  Sunday from 23:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
   after ticks when calendar writes are enabled. A no-show is sent as the session's last reminder
   (Start, plus Skip/Move handed to the agent). Conflicts, missed slots, stale workouts
   and week rollover create durable decision events rather than automatic replans. The two fixed
