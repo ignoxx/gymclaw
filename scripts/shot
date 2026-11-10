@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Screenshot a page (usually the local dashboard) with headless Chromium.
-#   scripts/shot <url> <out.png> [width=1200] [height=800] [--full]
+#   scripts/shot <url> <out.png> [width=1200] [height=800] [--full] [step…]
 # Viewport-sized at 1x unless --full, so the PNG stays small enough to read back cheaply.
 # Use width 390 for a phone. Playwright and its browser are cached in ~/.cache/gymclaw-shot.
+# Steps run in order before the shot, to click through dialogs and forms:
+#   --click <selector>  --fill <selector> <value>  --text <selector> (prints its text)  --wait <ms>
+#   e.g. scripts/shot localhost:8766/#exercises out.png --click '.ex-row >> nth=0' --text '.ex-message'
 set -euo pipefail
-[ $# -ge 2 ] || { sed -n 2,5p "$0" >&2; exit 2; }
+[ $# -ge 2 ] || { sed -n 2,9p "$0" >&2; exit 2; }
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/gymclaw-shot"
 if [ ! -d "$cache/node_modules/playwright-core" ]; then
@@ -17,7 +20,15 @@ NODE_PATH="$cache/node_modules" node - "$@" <<'JS'
 const { chromium } = require("playwright-core");
 const args = process.argv.slice(2);
 const full = args.includes("--full");
-const [url, out, width = "1200", height = "800"] = args.filter((a) => a !== "--full");
+const positional = [];
+const steps = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--full") continue;
+  if (args[i] === "--fill") steps.push([args[i], args[++i], args[++i]]);
+  else if (["--click", "--text", "--wait"].includes(args[i])) steps.push([args[i], args[++i]]);
+  else positional.push(args[i]);
+}
+const [url, out, width = "1200", height = "800"] = positional;
 (async () => {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: +width, height: +height }, deviceScaleFactor: 1 });
@@ -25,6 +36,14 @@ const [url, out, width = "1200", height = "800"] = args.filter((a) => a !== "--f
   page.on("pageerror", (e) => console.error("pageerror:", e.message));
   await page.goto(url, { waitUntil: "networkidle" });
   await page.waitForTimeout(500);
+  for (const [step, arg, value] of steps) {
+    if (step === "--click") await page.click(arg);
+    if (step === "--fill") await page.fill(arg, value);
+    if (step === "--text") console.log(`${arg}: ${await page.textContent(arg)}`);
+    if (step === "--wait") await page.waitForTimeout(+arg);
+    // Let the page react (re-render, open a dialog) before the next step.
+    if (step !== "--wait") await page.waitForTimeout(300);
+  }
   await page.screenshot({ path: out, fullPage: full });
   await browser.close();
   console.log(out);
