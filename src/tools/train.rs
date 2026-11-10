@@ -30,7 +30,7 @@ pub fn tools() -> Vec<ToolDef> {
         def::<CatalogSearch>(),
         def::<OnboardingStatus>(),
         def::<OnboardingAnswer>(),
-        def::<OnboardingConfirmPlan>(),
+        def::<PlanSet>(),
         def::<OnboardingFinish>(),
         def::<BodyLog>(),
         def::<BodyList>(),
@@ -371,17 +371,22 @@ impl Tool for OnboardingAnswer {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct OnboardingConfirmPlan {
-    /// The owner-confirmed templates, in rotation order.
-    pub template_ids: Vec<String>,
+pub struct PlanSet {
+    /// Every template in the plan, e.g. ["push", "pull", "legs", "cardio"]. Also the default
+    /// rotation order for sessions you haven't given a workout.
+    pub templates: Vec<String>,
+    /// The plan in the owner's words: what they train, how often, what rotates, e.g. "3 a week, one
+    /// always cardio, the others rotate push/pull/legs". Omit to keep the saved text.
+    pub plan: Option<String>,
 }
 
-impl Tool for OnboardingConfirmPlan {
-    const NAME: &'static str = "onboarding_confirm_plan";
-    const DESCRIPTION: &'static str = "Set the owner's confirmed plan (split) during setup.";
+impl Tool for PlanSet {
+    const NAME: &'static str = "plan_set";
+    const DESCRIPTION: &'static str = "Set the owner's training plan: in setup, and whenever the owner changes what they train or how often. \
+        You plan workouts by it; code only rotates the templates as a default for sessions you haven't given one (side_effects).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        onboarding::update(cx.db, Update::ConfirmPlan(&self.template_ids), cx.now, &cx.request_id)
+        onboarding::update(cx.db, Update::ConfirmPlan { templates: &self.templates, plan: self.plan.as_deref() }, cx.now, &cx.request_id)
     }
 }
 

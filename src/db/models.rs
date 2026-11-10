@@ -74,6 +74,8 @@ table!(OnboardingState = "onboarding_state" {
     interview_json: Json<Value>,
     /// Ordered template IDs; planned sessions rotate through them.
     split_json: Json<Vec<String>>,
+    /// The owner's plan in their words: what they train, how often, what rotates. The agent plans by it.
+    plan_text: Option<String>,
 });
 
 table!(LearnedPreference = "learned_preference" {
