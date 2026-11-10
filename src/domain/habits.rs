@@ -37,29 +37,28 @@ pub fn evidence(db: &Connection, now: Ts, zone: &TimeZone) -> Result<Vec<Point>>
         .into_iter()
         .filter_map(|w| w.arrived_at.map(|at| point(at, 1.0)))
         .collect();
-    // One owner decision per session: the slot it was planned at first is disliked, the last explicit
-    // pick is liked. A chain of moves (10:30 → 14:30 → 11:45) only counts its ends.
+    // One owner decision per session: the slot it was planned at first is disliked, the last pick is
+    // liked. A chain of moves (10:30 → 14:30 → 11:45) only counts its ends; edits that keep the time don't count.
     let mut order: Vec<String> = Vec::new();
-    let mut moves: HashMap<String, (Value, Option<Value>)> = HashMap::new();
-    for event in AgentEvent::select(db, "WHERE type = 'planning.session_moved' AND created_at >= ?1 ORDER BY created_at", [since])? {
+    let mut moves: HashMap<String, (Value, Value)> = HashMap::new();
+    for event in AgentEvent::select(db, "WHERE type = 'planning.session_edited' AND created_at >= ?1 ORDER BY created_at", [since])? {
+        if event.payload_json["request"]["intent"]["patch"]["start"].is_null() {
+            continue;
+        }
         let data = &event.payload_json["result"]["data"];
-        let Some(session_id) = data.get("session_id").and_then(Value::as_str) else { continue };
-        let explicit = event.payload_json["request"]["intent"].get("to").is_some_and(|to| !to.is_null() && to != "");
+        let Some(session_id) = data["session"]["id"].as_str() else { continue };
         let entry = moves.entry(session_id.to_string()).or_insert_with(|| {
             order.push(session_id.to_string());
-            (data.clone(), None)
+            (data["from"].clone(), Value::Null)
         });
-        if explicit {
-            entry.1 = Some(data.clone());
-        }
+        entry.1 = data["session"]["start"].clone();
     }
     for id in order {
-        let (first, last) = &moves[&id];
-        if let Some(from) = first["from"].as_str().and_then(|s| Ts::parse(s, None).ok()) {
-            points.push(point(from, -1.0));
-        }
-        if let Some(to) = last.as_ref().and_then(|l| l["to"].as_str()).and_then(|s| Ts::parse(s, None).ok()) {
-            points.push(point(to, 1.0));
+        let (from, to) = &moves[&id];
+        for (at, sign) in [(from, -1.0), (to, 1.0)] {
+            if let Some(at) = at.as_str().and_then(|s| Ts::parse(s, None).ok()) {
+                points.push(point(at, sign));
+            }
         }
     }
     Ok(points)
@@ -73,4 +72,31 @@ pub fn affinity(points: &[Point], minute: f64) -> f64 {
     };
     let net = points.iter().map(|(m, w)| w * bump(*m)).sum::<f64>() / (points.iter().map(|(_, w)| w.abs()).sum::<f64>() + PRIOR_WEIGHT);
     0.5 + 0.5 * net
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::SignedDuration;
+
+    use super::*;
+    use crate::domain::replanning::{SessionPatch, edit_session};
+    use crate::domain::scheduling::schedule_week;
+    use crate::domain::workout::tests::db;
+
+    /// A chain of moves counts once: its first slot is disliked, its last pick liked.
+    #[test]
+    fn a_chain_of_moves_counts_its_ends() {
+        let db = db();
+        let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
+        let planned = schedule_week(&db, jiff::civil::date(2026, 10, 12), now, None, None, &[]).unwrap();
+        let id = planned["sessions"][0]["id"].as_str().unwrap();
+        let first = crate::db::models::PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at;
+        for (hours, request) in [(2, "move-1"), (5, "move-2")] {
+            edit_session(&db, Some(id), SessionPatch { start: Some(first + SignedDuration::from_hours(hours)), ..Default::default() }, now, request).unwrap();
+        }
+        let tz = crate::time::zone("Europe/Berlin").unwrap();
+        let minute = |at: Ts| (at.local(&tz).hour() as i64 * 60 + at.local(&tz).minute() as i64) as f64;
+        let points: Vec<(f64, f64)> = evidence(&db, now, &tz).unwrap().into_iter().map(|(m, w)| (m, w.signum())).collect();
+        assert_eq!(points, vec![(minute(first), -1.0), (minute(first + SignedDuration::from_hours(5)), 1.0)]);
+    }
 }
