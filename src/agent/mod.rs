@@ -563,10 +563,8 @@ mod tests {
     }
 
     fn scripted(replies: Vec<Value>) -> (Agent, Arc<Script>, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("gymclaw-agent-{}", crate::db::new_id()));
-        let db_path = dir.join("gymclaw.db");
-        let mut db = crate::db::open(&db_path).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+        let (db_path, db) = crate::db::test::file();
+        let dir = db_path.parent().unwrap().to_path_buf();
         let now = Ts::parse("2026-10-12T10:00:00Z", None).unwrap();
         ChatMessage {
             id: None,

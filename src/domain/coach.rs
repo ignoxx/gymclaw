@@ -685,8 +685,9 @@ pub fn preview(db: &Connection, now: Ts, planned_session_id: Option<&str>, data_
 mod tests {
     use super::*;
     use crate::db::models::{ExerciseProgression, JobStatus, NotificationJob};
+    use crate::db::test::db;
     use crate::domain::templates::{Template, get_template, import_template};
-    use crate::domain::workout::tests::{at, db, spec};
+    use crate::domain::workout::tests::{at, spec};
 
     /// Plan order puts shoulders between the two chest exercises, like the first real session.
     fn push(db: &Connection) {

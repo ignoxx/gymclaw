@@ -239,9 +239,7 @@ mod tests {
 
     #[test]
     fn weekly_waits_for_sunday_night() {
-        let mut db =
-            crate::db::open(&std::env::temp_dir().join(format!("gymclaw-weekly-{}.db", crate::db::new_id()))).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+        let db = crate::db::test::db();
         // Saturday 20:00 and Sunday 22:59 Berlin: not yet (ticks::weekly isn't even called).
         for at in ["2026-10-17T18:00:00Z", "2026-10-18T20:59:00Z"] {
             assert_eq!(weekly_if_due(&db, "42", Ts::parse(at, None).unwrap()).unwrap(), json!({"due": false}));

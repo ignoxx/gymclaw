@@ -98,8 +98,9 @@ pub fn log_past(
 mod tests {
     use super::*;
     use crate::db::models::{ExerciseProgression, NotificationJob, SetLog};
+    use crate::db::test::db;
     use crate::domain::templates::{Template, get_template, import_template};
-    use crate::domain::workout::tests::{at, db, spec};
+    use crate::domain::workout::tests::{at, spec};
 
     #[test]
     fn past_workout_counts_for_progression_without_rewriting_the_plan() {

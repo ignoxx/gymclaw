@@ -85,9 +85,9 @@ mod tests {
     use jiff::SignedDuration;
 
     use super::*;
+    use crate::db::test::db;
     use crate::domain::replanning::{SessionPatch, edit_session};
     use crate::domain::scheduling::schedule_week;
-    use crate::domain::workout::tests::db;
 
     /// A chain of moves counts once: its first slot is disliked, its last pick liked.
     #[test]

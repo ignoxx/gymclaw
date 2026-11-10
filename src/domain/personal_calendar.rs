@@ -157,7 +157,6 @@ mod tests {
     use super::*;
     use crate::db::models::PlannedSession;
     use crate::domain::calendar_busy::busy_intervals;
-    use crate::domain::templates::{Template, import_template};
     use crate::providers::http::{Request, Response};
 
     /// Stand-in for the iCloud published feed; counts requests.
@@ -180,11 +179,8 @@ mod tests {
 
     #[test]
     fn personal_blocker_reports_conflict_and_outage_keeps_blockers() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::with_short_template();
         let sunday = Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap();
-        let template: Template = serde_json::from_value(json!({"id": "short", "name": "Short",
-            "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]})).unwrap();
-        import_template(&db, &template).unwrap();
         let plan = crate::domain::weekly::weekly_plan(&db, "short", sunday).unwrap();
         let id = plan["plan"]["sessions"].as_array().unwrap().last().unwrap()["id"].as_str().unwrap().to_string();
         let original = PlannedSession::get(&db, &id).unwrap().unwrap().planned_start_at;

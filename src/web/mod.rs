@@ -190,9 +190,7 @@ mod tests {
     use super::*;
 
     fn app() -> Arc<App> {
-        let path = std::env::temp_dir().join(format!("gymclaw-dash-{}.db", crate::db::new_id()));
-        let mut db = crate::db::open(&path).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+        let (path, _) = crate::db::test::file();
         Arc::new(App { db_path: path, hosts: vec!["gym.example".into()] })
     }
 

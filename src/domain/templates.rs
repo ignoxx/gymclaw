@@ -400,7 +400,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::domain::workout::tests::db;
+    use crate::db::test::db;
 
     fn seed() -> Template {
         serde_json::from_str(include_str!("testdata/template.json")).unwrap()

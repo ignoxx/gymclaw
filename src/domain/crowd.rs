@@ -39,7 +39,7 @@ pub fn feel(score: Option<f64>) -> Option<&'static str> {
     LABELS.iter().zip(limits).find(|(_, limit)| score < *limit).map(|((_, label), _)| *label)
 }
 
-fn mean(values: &[f64]) -> f64 {
+pub(crate) fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
@@ -592,6 +592,7 @@ pub fn planning_signals(db: &Connection, week_start: Date, now: Ts, step_minutes
 mod tests {
     use super::*;
     use crate::db::models::{AgentEvent, WorkoutSession};
+    use crate::db::test::db;
     use crate::providers::crowd::{CrowdReading, FixtureCrowdProvider, MySportsProvider};
     use crate::providers::http::{Request, Response};
 
@@ -612,10 +613,6 @@ mod tests {
         )
         .unwrap();
         id
-    }
-
-    fn db() -> Connection {
-        crate::domain::workout::tests::db()
     }
 
     #[test]

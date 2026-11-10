@@ -498,12 +498,7 @@ mod tests {
     }
 
     fn db() -> Connection {
-        let db = crate::domain::workout::tests::db();
-        template(
-            &db,
-            json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}),
-        );
-        db
+        crate::db::test::with_short_template()
     }
 
     /// One tool call, like `gymclaw call <tool> '<json>' --now <now> --request-id <id>` minus the transaction.

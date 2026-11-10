@@ -144,7 +144,6 @@ mod tests {
     use super::*;
     use crate::db::models::NotificationJob;
     use crate::domain::notifications::schedule_session_jobs;
-    use crate::domain::templates::{Template, import_template};
     use crate::domain::weekly::weekly_plan;
     use crate::domain::workout::start;
 
@@ -154,10 +153,7 @@ mod tests {
     }
 
     fn db() -> Connection {
-        let db = crate::domain::workout::tests::db();
-        let short = json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]});
-        import_template(&db, &serde_json::from_value::<Template>(short).unwrap()).unwrap();
-        db
+        crate::db::test::with_short_template()
     }
 
     fn pending_jobs(db: &Connection, session_id: Option<&str>) -> usize {

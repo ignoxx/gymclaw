@@ -12,7 +12,9 @@ use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::mutate;
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
-use crate::domain::planning::{Candidate, Inputs, PlannerConfig, monday, overlaps, plan_week, recovery_ok, weekday};
+use crate::domain::planning::{
+    Candidate, Inputs, PlannerConfig, overlaps, plan_week, recovery_ok, require_monday, weekday,
+};
 use crate::domain::profile::{Profile, get_profile};
 use crate::domain::scheduling::{busy_window, interval};
 use crate::domain::templates::get_template;
@@ -69,9 +71,7 @@ fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Resu
     let known = known_warnings(db)?;
     let (mut warnings, mut fresh) = (Vec::new(), Vec::new());
     for &week in weeks {
-        if !monday(week) {
-            crate::bail!("INVALID_WEEK", "week_start must be Monday");
-        }
+        require_monday(week)?;
         let sessions: Vec<_> =
             rows.iter().filter(|s| week_of(s.planned_start_at, &tz) == week && s.status.is_active()).collect();
         if !rows.iter().any(|s| week_of(s.planned_start_at, &tz) == week) {
@@ -349,8 +349,8 @@ mod tests {
     use super::*;
     use jiff::ToSpan;
 
+    use crate::db::test::db;
     use crate::domain::scheduling::schedule_week;
-    use crate::domain::workout::tests::db;
 
     /// 2026-10-12: "move today's workout to tomorrow, don't update the others". The owner's move skips a
     /// rest day; replanning must not cancel or move the other sessions to "repair" that.

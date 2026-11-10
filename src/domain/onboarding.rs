@@ -271,8 +271,9 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::test::db;
     use crate::domain::templates::{Template, import_template};
-    use crate::domain::workout::tests::{at, db, spec};
+    use crate::domain::workout::tests::{at, spec};
 
     fn object(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()

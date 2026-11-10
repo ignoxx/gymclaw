@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn query_is_read_only_and_capped() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let dir = std::env::temp_dir();
         let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
         let query = |cx: &mut Ctx, sql: &str| SqlQuery { sql: sql.into() }.run(cx);
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn notes_stay_within_budget_but_can_always_shrink() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let dir = std::env::temp_dir();
         let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
         let limit = budget(NoteKind::Learned);

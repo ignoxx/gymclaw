@@ -52,9 +52,7 @@ fn demo(value: &Value) -> bool {
 /// What happened in a week: completed workouts vs target, each workout's outcome, sets, durations. With
 /// `learn`, updates the typical session duration from the last 90 days.
 pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Result<Value> {
-    if !crate::domain::planning::monday(week_start) {
-        crate::bail!("INVALID_WEEK", "week_start must be Monday");
-    }
+    crate::domain::planning::require_monday(week_start)?;
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let workouts =
@@ -85,12 +83,13 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Re
             .collect();
         if history.len() >= 3 {
             let n = history.len() as f64;
+            let confidence = (n / (n + 5.0)).min(0.9);
             let value = json!({"median_seconds": median(&history), "demo": workouts.iter().any(|w| demo(&w.template_snapshot))});
             match LearnedPreference::first(db, "WHERE key = 'typical_session_duration'", [])? {
                 Some(mut pref) => {
                     pref.value_json = Json(value);
                     pref.evidence_count = history.len() as i64;
-                    pref.confidence = (n / (n + 5.0)).min(0.9);
+                    pref.confidence = confidence;
                     pref.last_observed_at = now;
                     pref.update(db)?;
                 }
@@ -98,7 +97,7 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Re
                     id: new_id(),
                     key: "typical_session_duration".into(),
                     value_json: Json(value),
-                    confidence: (n / (n + 5.0)).min(0.9),
+                    confidence,
                     evidence_count: history.len() as i64,
                     first_observed_at: now,
                     last_observed_at: now,
@@ -363,25 +362,28 @@ pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(changed)
 }
 
+/// Ids of the sessions a `schedule_week` result created.
+fn session_ids(data: &Value) -> Vec<String> {
+    data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)).collect()
+}
+
 /// Deterministic upkeep: mark elapsed slots missed, inspect conflicts, draft the current week when it
 /// is empty, rotate defaults, refresh unlocked plan snapshots/crowd, and reconcile reminder jobs.
 /// Next week is planned only by the Sunday run (`weekly_plan`); if that run never happened, the
 /// current week is drafted here once it starts.
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
-    get_template(db, template_id)?; // Explicit selected template, never guess from demo import.
+    get_template(db, template_id)?; // Fails fast on an unknown template.
     let tz = get_profile(db)?.tz();
     let current_week = week_of(now, &tz);
     let next_week = current_week.checked_add(days(7))?;
     let missed = mark_missed(db, now)?;
     let repaired = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
-    let mut created: Vec<String> = Vec::new();
-    if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
+    let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
-        let data = schedule_week(db, current_week, now, Some(&key), Some(template_id), &[])?;
-        created.extend(
-            data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)),
-        );
-    }
+        session_ids(&schedule_week(db, current_week, now, Some(&key), Some(template_id), &[])?)
+    } else {
+        vec![]
+    };
     for id in &created {
         if let Some(session) = PlannedSession::get(db, id)? {
             queue_session_write(db, &session, now, false)?;
@@ -419,13 +421,7 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
             Some(template_id),
             &[],
         )?;
-        let created: Vec<String> = data["sessions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|s| s["id"].as_str().map(String::from))
-            .collect();
-        assign_rotation(db, now, &created)?;
+        assign_rotation(db, now, &session_ids(&data))?;
     }
     commit_upcoming(db, now)?;
     for session in PlannedSession::select(
@@ -715,12 +711,7 @@ mod tests {
 
     /// Fresh DB with the one-exercise "short" template.
     fn db() -> Connection {
-        let db = crate::domain::workout::tests::db();
-        template(
-            &db,
-            json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}),
-        );
-        db
+        crate::db::test::with_short_template()
     }
 
     fn sessions(db: &Connection) -> Vec<PlannedSession> {
@@ -996,7 +987,7 @@ mod tests {
 
     #[test]
     fn split_gives_least_recent_workout_and_respects_locks() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let base = ts("2026-10-05T10:00:00+00:00");
         for name in ["push", "pull", "legs"] {
             let mut title = name.to_string();
@@ -1060,7 +1051,7 @@ mod tests {
 
     #[test]
     fn refresh_crowd_fills_unknown_then_respects_window() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let now = ts("2026-10-02T12:00:00+00:00");
         db.execute("INSERT INTO crowd_observation (id, observed_at, source, raw_value, metadata_json) VALUES ('o', ?1, 'GYM_API', 13, '{}')", [now.mins(-7 * 24 * 60 + 360)]).unwrap();
         let soon = row(&db, "2026-09-28", None, SessionStatus::Committed, now.mins(360), 60);
@@ -1075,7 +1066,7 @@ mod tests {
 
     #[test]
     fn refresh_plans_replaces_stale_copy_once() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let now = ts("2026-10-03T08:00:00+00:00");
         let pull = |sets: i64| json!({"id": "pull", "name": "Pull", "exercises": [{"id": "row", "name": "Row", "role": "pull", "guide_id": "seated-row", "target_weight": 0, "working_sets": sets}]});
         template(&db, pull(3));
@@ -1093,7 +1084,7 @@ mod tests {
 
     #[test]
     fn event_body_has_plan_location_and_split_colour() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         for name in ["push", "pull"] {
             let mut title = name.to_string();
             title[..1].make_ascii_uppercase();

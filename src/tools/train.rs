@@ -271,8 +271,6 @@ impl Tool for TemplateImport {
     }
 }
 
-/// Upcoming sessions should follow the edited plan via the planning side's `weekly::refresh_plans`
-/// (not declared yet; `workout start` always uses the current template regardless).
 /// Upcoming sessions (and their calendar events) follow the edited plan.
 fn edited(cx: &Ctx, definition: Value) -> Result<Value> {
     Ok(json!({"template": definition, "refreshed_sessions": crate::domain::weekly::refresh_plans(cx.db, cx.now)?}))

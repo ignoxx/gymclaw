@@ -645,10 +645,11 @@ pub fn relabel(
 mod tests {
     use super::*;
     use crate::db::models::{ExerciseProgression, NotificationJob};
+    use crate::db::test::db;
     use crate::domain::audit::{finish, get_audit};
     use crate::domain::set_parser::SetInput;
     use crate::domain::templates::{Template, get_template, import_template};
-    use crate::domain::workout::tests::{at, db, spec};
+    use crate::domain::workout::tests::{at, spec};
     use crate::domain::workout::{current, log_set, start};
 
     fn adapt(db: &Connection) {

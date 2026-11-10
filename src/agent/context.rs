@@ -342,7 +342,7 @@ mod tests {
     /// session today and told the owner "Push today 11:45".
     #[test]
     fn event_text_names_the_sessions_it_points_at() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let mut push = PlannedSession::new("2026-11-09".into(), Some("push".into()), true);
         push.planned_start_at = Ts::parse("2026-11-10T11:45:00+01:00", None).unwrap();
         push.merge_plan(json!({"template": {"name": "Push"}}));

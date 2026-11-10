@@ -41,8 +41,8 @@ pub fn uptime(d: Duration) -> String {
     }
 }
 
-/// Run `f` on a fresh connection in the blocking pool. Domain code is synchronous; a panic (e.g. a
-/// `todo!()` contract) becomes an `INTERNAL` error instead of taking the runtime down.
+/// Run `f` on a fresh connection in the blocking pool. Domain code is synchronous; a panic becomes an
+/// `INTERNAL` error instead of taking the runtime down.
 pub async fn blocking<T: Send + 'static>(
     db_path: &Path,
     f: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,

@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn calendar_snapshot_and_locked_session_preserved() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         get_profile(&db).unwrap();
         let (start, end) = (ts("2026-10-15T19:00:00+02:00"), ts("2026-10-15T20:10:00+02:00"));
         CalendarEventSnapshot {

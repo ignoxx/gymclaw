@@ -217,7 +217,7 @@ pub fn briefing_line(db: &Connection, now: Ts) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::workout::tests::db;
+    use crate::db::test::db;
 
     fn now() -> Ts {
         Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap()

@@ -687,10 +687,8 @@ mod tests {
     fn fixture(
         model: Arc<dyn crate::agent::ChatModel>,
     ) -> (Bot, crate::db::Connection, std::path::PathBuf, Arc<crate::telegram::coach::tests::FakeTelegram>) {
-        let dir = std::env::temp_dir().join(format!("gymclaw-events-{}", crate::db::new_id()));
-        let db_path = dir.join("test.db");
-        let mut db = crate::db::open(&db_path).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+        let (db_path, db) = crate::db::test::file();
+        let dir = db_path.parent().unwrap().to_path_buf();
         let template = serde_json::from_value(json!({"id": "fixture", "name": "Fixture", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "target_weight": 0}]})).unwrap();
         crate::domain::templates::import_template(&db, &template).unwrap();
         let tg = crate::telegram::coach::tests::FakeTelegram::new();
@@ -721,7 +719,7 @@ mod tests {
     }
 
     fn enable_runtime(db: &crate::db::Connection) {
-        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, enabled, calendar_writes_enabled, crowd_polling_enabled) VALUES (1, 'gymclaw', '42', '', '', 1, 0, 0)", []).unwrap();
+        crate::db::test::authority().insert(db).unwrap();
     }
 
     #[tokio::test]

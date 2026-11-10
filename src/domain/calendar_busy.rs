@@ -144,7 +144,7 @@ mod tests {
     // following local midnight.
     #[test]
     fn recurring_masters_expand_across_dst() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         event(
             &db,
             "m",
@@ -195,7 +195,7 @@ mod tests {
     fn recurring_blocker_honors_dst_and_moved_exception() {
         use crate::domain::calendar::sync_calendar;
         use crate::providers::fixture_calendar::FixtureCalendarProvider;
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let mut provider = FixtureCalendarProvider::default();
         provider.put(json!({"id": "weekly", "start": {"dateTime": "2026-10-19T19:00:00+02:00", "timeZone": "Europe/Berlin"}, "end": {"dateTime": "2026-10-19T20:00:00+02:00"}, "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=SU"]})).unwrap();
         sync_calendar(&db, &mut provider, berlin(24, 0)).unwrap();
@@ -214,7 +214,7 @@ mod tests {
     fn all_day_recurring_cancellation_and_transparent_event() {
         use crate::domain::calendar::sync_calendar;
         use crate::providers::fixture_calendar::FixtureCalendarProvider;
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let mut provider = FixtureCalendarProvider::default();
         provider.put(json!({"id": "weekly", "start": {"date": "2026-09-28"}, "end": {"date": "2026-09-29"}, "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20261026"]})).unwrap();
         provider.put(json!({"id": "free", "start": {"date": "2026-10-12"}, "end": {"date": "2026-10-19"}, "transparency": "transparent"})).unwrap();

@@ -690,12 +690,7 @@ mod tests {
 
     #[test]
     fn refresh_writes_google_auth_format_back() {
-        let dir = std::env::temp_dir().join(format!("gymclaw-oauth-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("private.db");
-        let _ = std::fs::remove_file(&path);
-        let mut db = crate::db::open(&path).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+        let db = crate::db::test::db();
         let stored = json!({"token": "old", "refresh_token": "r1", "token_uri": "https://oauth2.googleapis.com/token", "client_id": "c",
             "client_secret": "s", "scopes": SCOPES, "universe_domain": "googleapis.com", "account": "", "expiry": "2020-01-01T00:00:00Z"});
         CalendarCredential { id: 1, credentials_json: Json(stored) }.insert(&db).unwrap();
@@ -716,7 +711,6 @@ mod tests {
         );
         assert!(Credentials(saved.as_object().unwrap().clone()).valid(Ts::now()));
         assert_eq!(bind_calendar(&db, "different", "google").unwrap_err().code(), "CALENDAR_SCOPE_MISMATCH");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -730,10 +724,7 @@ mod tests {
 
     #[test]
     fn consent_paste_stores_loadable_credentials() {
-        let dir = std::env::temp_dir().join(format!("gymclaw-consent-{}", crate::db::new_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut db = crate::db::open(&dir.join("gymclaw.db")).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+        let db = crate::db::test::db();
         let consent = Consent::new(br#"{"installed": {"client_id": "cid", "client_secret": "cs", "token_uri": "https://oauth2.googleapis.com/token"}}"#).unwrap();
         let url = consent.url();
         assert!(
@@ -760,6 +751,5 @@ mod tests {
         );
         // Fresh token: loading needs no network.
         assert_eq!(load_credentials(&db, &Script::new(vec![])).unwrap().token(), "a1");
-        std::fs::remove_dir_all(dir).ok();
     }
 }

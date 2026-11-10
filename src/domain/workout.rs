@@ -818,15 +818,9 @@ pub fn snapshot(workout: &WorkoutSession) -> Result<Template> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::db::test::db;
     use crate::domain::set_parser::parse_set;
     use crate::domain::templates::import_template;
-
-    pub fn db() -> Connection {
-        let path = std::env::temp_dir().join(format!("gymclaw-test-{}.db", new_id()));
-        let mut db = crate::db::open(&path).unwrap();
-        crate::db::migrate(&mut db).unwrap();
-        db
-    }
 
     pub fn at(seconds: i64) -> Ts {
         Ts::parse("2026-10-12T18:00:00+00:00", None).unwrap() + SignedDuration::from_secs(seconds)

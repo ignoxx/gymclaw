@@ -118,9 +118,7 @@ pub fn week_lineup(db: &Connection, week_start: Date, now: Ts) -> Result<String>
 
 /// Every session of the week starting `week_start` (any status).
 pub fn get_week(db: &Connection, week_start: Date) -> Result<Value> {
-    if !crate::domain::planning::monday(week_start) {
-        crate::bail!("INVALID_WEEK", "week_start must be Monday");
-    }
+    crate::domain::planning::require_monday(week_start)?;
     let tz = get_profile(db)?.tz();
     let sessions: Vec<Value> = PlannedSession::select(db, "ORDER BY planned_start_at", [])?
         .iter()
@@ -474,7 +472,7 @@ mod tests {
 
     /// Mon/Wed/Fri "Long" sessions (Wed at 20:00, steered by a crowd signal), published and synced back.
     fn setup() -> (Connection, FixtureCalendarProvider, Vec<String>) {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let mut provider = FixtureCalendarProvider::default();
         update_profile(&db, &changes(json!({"earliest_workout_start": "19:00", "latest_workout_finish": "21:10", "minimum_workout_minutes": 70,
             "default_compound_rest_seconds": 180, "default_accessory_rest_seconds": 120}))).unwrap();
@@ -753,7 +751,7 @@ mod tests {
 
     #[test]
     fn live_write_gate_runs_before_any_provider_call() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         assert_eq!(
             apply_write(&db, &mut LiveSpy, "anything", now(0), false).unwrap_err().code(),
             "CALENDAR_WRITES_NOT_APPROVED"

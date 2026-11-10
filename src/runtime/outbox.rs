@@ -532,33 +532,6 @@ mod tests {
     use super::*;
     use crate::telegram::coach::tests::{Call, FakeTelegram};
 
-    fn fresh() -> (tempdir::Dir, Connection) {
-        let dir = tempdir::Dir::new();
-        let mut db = crate::db::open(&dir.db()).unwrap();
-        crate::db::migrate(&mut db).unwrap();
-        (dir, db)
-    }
-
-    /// A throwaway directory under the system temp dir.
-    mod tempdir {
-        pub struct Dir(pub std::path::PathBuf);
-        impl Dir {
-            pub fn new() -> Dir {
-                let path = std::env::temp_dir().join(format!("gymclaw-test-{}", crate::db::new_id()));
-                std::fs::create_dir_all(&path).unwrap();
-                Dir(path)
-            }
-            pub fn db(&self) -> std::path::PathBuf {
-                self.0.join("gymclaw.db")
-            }
-        }
-        impl Drop for Dir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-    }
-
     fn now() -> Ts {
         Ts::parse("2026-10-12T10:00:00Z", None).unwrap()
     }
@@ -573,7 +546,7 @@ mod tests {
 
     #[test]
     fn newer_briefing_supersedes_pending_one_and_old_messages_expire() {
-        let (_dir, db) = fresh();
+        let db = crate::db::test::db();
         let first = briefing(&db, now());
         let second = briefing(&db, now());
         assert_eq!(NotificationDelivery::get(&db, &first).unwrap().unwrap().status, DeliveryStatus::Cancelled);
@@ -586,7 +559,7 @@ mod tests {
     /// Each Sunday recap arrives with its effect and takes over the pin from last week's.
     #[tokio::test]
     async fn weekly_recap_is_pinned_in_place_of_the_last_one() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let recap = |at: Ts, effect: Option<&str>| {
             let event = emit(&db, "planning.weekly_recap", at, json!({"effect": effect})).unwrap();
             prepare_event_message(&db, &event.id, "📅 Your week", at, "42", &[]).unwrap()["id"]
@@ -596,9 +569,9 @@ mod tests {
         };
         let tg = FakeTelegram::new();
         let first = recap(now(), None);
-        deliver(&dir.db(), tg.as_ref(), &first, now()).await.unwrap();
+        deliver(&path, tg.as_ref(), &first, now()).await.unwrap();
         let second = recap(now().mins(1), Some(crate::telegram::EFFECT_FIRE));
-        deliver(&dir.db(), tg.as_ref(), &second, now().mins(1)).await.unwrap();
+        deliver(&path, tg.as_ref(), &second, now().mins(1)).await.unwrap();
         let calls: Vec<Call> = tg.calls();
         let send = Call::Send("📅 Your week".into(), vec![]);
         assert_eq!(
@@ -616,34 +589,34 @@ mod tests {
 
     #[tokio::test]
     async fn failed_send_is_unknown_and_never_resent() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let id = briefing(&db, now());
         drop(db);
         let tg = Arc::new(FakeTelegram { fail_send: true, ..Arc::into_inner(FakeTelegram::new()).unwrap() });
-        let error = deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap_err();
+        let error = deliver(&path, tg.as_ref(), &id, now()).await.unwrap_err();
         assert_eq!(error.code(), "TELEGRAM_DELIVERY_UNKNOWN");
-        let db = crate::db::open(&dir.db()).unwrap();
+        let db = crate::db::open(&path).unwrap();
         assert_eq!(NotificationDelivery::get(&db, &id).unwrap().unwrap().status, DeliveryStatus::Unknown);
         assert!(AgentEvent::first(&db, "WHERE type = 'notifications.delivery_unknown'", []).unwrap().is_some());
         // A second attempt only reports the state; it does not send again.
         let ok = FakeTelegram::new();
-        let data = deliver(&dir.db(), ok.as_ref(), &id, now()).await.unwrap();
+        let data = deliver(&path, ok.as_ref(), &id, now()).await.unwrap();
         assert_eq!(data["status"], "UNKNOWN");
         assert!(ok.calls().is_empty());
         // The owner says it never arrived: queued again, then sent once.
         resolve_delivery(&db, &id, false, now()).unwrap();
-        let data = deliver(&dir.db(), ok.as_ref(), &id, now()).await.unwrap();
+        let data = deliver(&path, ok.as_ref(), &id, now()).await.unwrap();
         assert_eq!((data["status"].as_str(), data["external_message_id"].as_str()), (Some("SENT"), Some("100")));
         assert_eq!(ok.calls().len(), 1);
     }
 
     #[tokio::test]
     async fn paused_runtime_sends_nothing() {
-        let (dir, db) = fresh();
-        db.execute("INSERT INTO runtime_settings VALUES (1, 'gymclaw', '42', '', '', NULL, 0, 0, 0)", []).unwrap();
+        let (path, db) = crate::db::test::file();
+        RuntimeSettings { enabled: false, ..crate::db::test::authority() }.insert(&db).unwrap();
         let id = briefing(&db, now());
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap_err().code(), "RUNTIME_PAUSED");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now()).await.unwrap_err().code(), "RUNTIME_PAUSED");
         assert!(tg.calls().is_empty());
         assert_eq!(NotificationDelivery::get(&db, &id).unwrap().unwrap().status, DeliveryStatus::Pending);
     }
@@ -703,18 +676,18 @@ mod tests {
 
     #[tokio::test]
     async fn rest_output_survives_restart_and_delivery_retries_do_not_duplicate() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (workout_id, job) = rest_job(&db);
         let prepared = prepare_notification(&db, &job, now().mins(0) + SignedDuration::from_secs(100), "42").unwrap();
         assert_eq!(prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap(), prepared);
         let id = prepared["delivery_id"].as_str().unwrap();
         let tg = FakeTelegram::new();
         assert_eq!(
-            deliver(&dir.db(), tg.as_ref(), id, now() + SignedDuration::from_secs(100)).await.unwrap()["status"],
+            deliver(&path, tg.as_ref(), id, now() + SignedDuration::from_secs(100)).await.unwrap()["status"],
             "SENT"
         );
         assert_eq!(
-            deliver(&dir.db(), tg.as_ref(), id, now() + SignedDuration::from_secs(110)).await.unwrap()["status"],
+            deliver(&path, tg.as_ref(), id, now() + SignedDuration::from_secs(110)).await.unwrap()["status"],
             "SENT"
         );
         let sent = tg.calls();
@@ -729,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn crash_after_claim_never_auto_resends() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (_, job) = rest_job(&db);
         let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"]
             .as_str()
@@ -737,13 +710,13 @@ mod tests {
             .to_string();
         db.execute("UPDATE notification_delivery SET status = 'SENDING' WHERE id = ?1", [&id]).unwrap();
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now().mins(5)).await.unwrap()["status"], "SENDING");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now().mins(5)).await.unwrap()["status"], "SENDING");
         assert!(tg.calls().is_empty());
     }
 
     #[tokio::test]
     async fn new_set_suppresses_stale_pending_delivery() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (workout_id, job) = rest_job(&db);
         let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"]
             .as_str()
@@ -759,7 +732,7 @@ mod tests {
         .unwrap();
         let tg = FakeTelegram::new();
         assert_eq!(
-            deliver(&dir.db(), tg.as_ref(), &id, now() + SignedDuration::from_secs(120)).await.unwrap()["status"],
+            deliver(&path, tg.as_ref(), &id, now() + SignedDuration::from_secs(120)).await.unwrap()["status"],
             "CANCELLED"
         );
         assert!(tg.calls().is_empty());
@@ -767,12 +740,12 @@ mod tests {
 
     #[tokio::test]
     async fn moved_plan_suppresses_old_preparation_delivery() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (mut plan, id) = planned_job(&db, JobKind::GetReady, "Get ready.");
         plan.source_revision += 1;
         plan.update(&db).unwrap();
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "CANCELLED");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now()).await.unwrap()["status"], "CANCELLED");
         assert!(tg.calls().is_empty());
     }
 
@@ -798,12 +771,12 @@ mod tests {
     /// ended up buried under the chat that followed. Each step now replaces the last one.
     #[tokio::test]
     async fn a_session_keeps_one_message_and_its_start_button() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (plan, ready) = planned_job(&db, JobKind::GetReady, "Gym soon.");
         let tg = FakeTelegram::new();
-        deliver(&dir.db(), tg.as_ref(), &ready, now()).await.unwrap();
+        deliver(&path, tg.as_ref(), &ready, now()).await.unwrap();
         let start = next_job(&db, &plan, JobKind::SessionStart);
-        deliver(&dir.db(), tg.as_ref(), &start, now()).await.unwrap();
+        deliver(&path, tg.as_ref(), &start, now()).await.unwrap();
         let begin = vec![Button { text: "▶️ Start workout".into(), data: format!("gc:begin:{}", &plan.id[..8]) }];
         assert!(
             matches!(&tg.calls()[1..], [Call::Send(_, buttons), Call::Remove(100)] if buttons == &vec![begin.clone()]),
@@ -820,7 +793,7 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_string();
-        deliver(&dir.db(), tg.as_ref(), &nudge, now()).await.unwrap();
+        deliver(&path, tg.as_ref(), &nudge, now()).await.unwrap();
         let Call::Send(_, buttons) = &tg.calls()[3] else { panic!("{:?}", tg.calls()) };
         assert_eq!((&buttons[0], buttons[1].len()), (&begin, 2));
         assert_eq!(tg.calls()[4], Call::Remove(101));
@@ -829,17 +802,17 @@ mod tests {
         assert!(matches!(sent.as_slice(), [only] if only.ends_with("hasn't started. [with buttons]")), "{now_state}");
 
         // Still startable: the buttons stay. Skipped in chat: they go, once.
-        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
+        settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
         assert_eq!(tg.calls().len(), 5);
         db.execute("UPDATE planned_session SET status = 'SKIPPED' WHERE id = ?1", [&plan.id]).unwrap();
-        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
-        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
+        settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
+        settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
         assert_eq!(&tg.calls()[5..], &[Call::Buttons(102, vec![])]);
     }
 
     #[tokio::test]
     async fn sent_event_message_marks_its_event_handled() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let id = briefing(&db, now());
         let event = NotificationDelivery::get(&db, &id).unwrap().unwrap().agent_event_id.unwrap();
         // Retrying the prepare returns the same delivery.
@@ -848,7 +821,7 @@ mod tests {
             id.as_str()
         );
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
         assert!(AgentEvent::get(&db, &event).unwrap().unwrap().handled_at.is_some());
     }
 }

@@ -139,7 +139,6 @@ mod tests {
     use crate::domain::profile::update_profile;
     use crate::domain::replanning::commit_upcoming;
     use crate::domain::scheduling::schedule_week;
-    use crate::domain::templates::{Template, import_template};
     use crate::error::Error;
     use crate::providers::fixture_calendar::FixtureCalendarProvider;
     use crate::time::iso;
@@ -151,15 +150,17 @@ mod tests {
 
     /// The "short" template planned for next week, the runtime enabled without calendar-write authority.
     fn setup(changes: Value) -> (Connection, FixtureCalendarProvider) {
-        let db = crate::domain::workout::tests::db();
-        let template: Template = serde_json::from_value(json!({"id": "short", "name": "Short",
-            "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]})).unwrap();
-        import_template(&db, &template).unwrap();
+        let db = crate::db::test::with_short_template();
         update_profile(&db, changes.as_object().unwrap()).unwrap();
         schedule_week(&db, Date::constant(2026, 10, 12), sunday(0), None, Some("short"), &[]).unwrap();
         commit_upcoming(&db, sunday(0)).unwrap();
-        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, template_id, enabled, calendar_writes_enabled, crowd_polling_enabled)
-            VALUES (1, 'gymclaw', '123', '', '', 'short', 1, 0, 0)", []).unwrap();
+        crate::db::models::RuntimeSettings {
+            recipient: "123".into(),
+            template_id: Some("short".into()),
+            ..crate::db::test::authority()
+        }
+        .insert(&db)
+        .unwrap();
         (db, FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin"))
     }
 

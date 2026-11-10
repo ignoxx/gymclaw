@@ -2,6 +2,8 @@
 //! transactions, and domain code stays free of async. The async runtime calls in via `spawn_blocking`.
 pub mod models;
 mod table;
+#[cfg(test)]
+pub mod test;
 
 use std::path::Path;
 
@@ -196,7 +198,7 @@ mod tests {
 
     #[test]
     fn foreign_keys_are_enforced() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let orphan = SetLog {
             id: new_id(),
             workout_exercise_id: "missing".into(),

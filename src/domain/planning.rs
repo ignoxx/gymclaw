@@ -120,8 +120,12 @@ pub struct Inputs<'a> {
     pub signals: &'a [SlotSignal],
 }
 
-pub fn monday(day: Date) -> bool {
-    day.weekday() == jiff::civil::Weekday::Monday
+/// Weeks are keyed by their Monday.
+pub fn require_monday(week_start: Date) -> crate::error::Result<()> {
+    if week_start.weekday() != jiff::civil::Weekday::Monday {
+        crate::bail!("INVALID_WEEK", "week_start must be Monday");
+    }
+    Ok(())
 }
 
 pub fn weekday(day: Date) -> i64 {
@@ -144,9 +148,7 @@ pub fn generate_candidates(
     now: Ts,
     config: &PlannerConfig,
 ) -> Result<Vec<Candidate>> {
-    if !monday(week_start) {
-        crate::bail!("INVALID_WEEK", "week_start must be Monday");
-    }
+    require_monday(week_start)?;
     let tz = profile.tz();
     let blockers: Vec<&Interval> = inputs.busy.iter().chain(inputs.unavailable).collect();
     let mut durations = vec![profile.preferred_workout_minutes, profile.minimum_workout_minutes];
