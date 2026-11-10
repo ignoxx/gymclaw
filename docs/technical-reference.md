@@ -52,7 +52,9 @@ count as answers, and GymClaw works for any owner, schedule and gym.
    exercise is mapped to an illustrated catalog entry (`catalog_search`). Unknown weights start at 0
    and are learned from the first session. Several templates form a split that rotates over
    sessions in order (e.g. Push → Pull → Legs); each session gets the one trained longest ago, so a
-   skipped or swapped-out workout comes next instead of repeating the last.
+   skipped or swapped-out workout comes next instead of repeating the last. That rotation is only a
+   default: the plan is also saved in the owner's words, and the agent picks each session's workout
+   by it (Sundays, and after a skip or miss). `plan_set` changes the plan any time.
 3. **Review:** one short summary; the owner confirms.
 4. **Ready:** later profile or plan edits don't restart setup.
 
@@ -61,7 +63,7 @@ gymclaw call onboarding_status
 gymclaw call onboarding_answer '{"answers": {"experience": "2 years"}}'
 gymclaw call onboarding_answer '{"answers": {"schedule": "3x Mon/Wed/Fri"},
   "profile": {"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4]}}'
-gymclaw call onboarding_confirm_plan '{"template_ids": ["push", "pull", "legs"]}'
+gymclaw call plan_set '{"templates": ["push", "pull", "legs"], "plan": "3 a week, rotating"}'
 gymclaw call onboarding_finish '{"fingerprint": "REVIEW_FINGERPRINT"}'
 ```
 

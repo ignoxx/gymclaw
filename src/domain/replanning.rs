@@ -189,7 +189,6 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
             session.workout_template_id = Some(template.clone());
             session.workout_plan_json.0 = session.crowd_keys(true);
         }
-        // A raw create chooses the next split workout without changing any existing session.
         if id.is_none() && session.workout_template_id.is_none() {
             crate::bail!("TEMPLATE_REQUIRED", "Creating a session requires a real template_id; inspect the split or templates first");
         }

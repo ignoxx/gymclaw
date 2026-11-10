@@ -8,7 +8,7 @@ use super::{Ctx, Tool, ToolDef, def};
 use crate::db::models::{BlockKind, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
-use crate::domain::{availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling};
+use crate::domain::{availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling, weekly};
 use crate::providers::google::google_provider;
 use crate::providers::http::Net;
 use crate::error::Result;
@@ -155,7 +155,8 @@ impl Tool for SessionUpdate {
 pub struct PlanWeek {
     /// Any date in the week (YYYY-MM-DD).
     pub day: String,
-    pub template_id: String,
+    /// Only when the owner wants this workout in every new slot. Default: the default rotation; then give each slot its workout.
+    pub template_id: Option<String>,
 }
 
 impl Tool for PlanWeek {
@@ -167,7 +168,15 @@ impl Tool for PlanWeek {
         let result = crate::domain::core::mutate(cx.db, "planning.agent_week_planned", &cx.request_id,
             json!({"week": week.to_string(), "template_id": self.template_id}), cx.now, || {
                 let before: std::collections::BTreeSet<_> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
-                let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, Some(&self.template_id), &[])?;
+                let template = match &self.template_id {
+                    Some(id) => Some(id.clone()),
+                    None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id,
+                };
+                let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, template.as_deref(), &[])?;
+                if self.template_id.is_none() {
+                    // Before the lock below, or every new slot keeps the one template.
+                    weekly::assign_rotation(cx.db, cx.now)?;
+                }
                 replanning::commit_upcoming(cx.db, cx.now)?;
                 let mut saved = Vec::new();
                 for data in planned["sessions"].as_array().into_iter().flatten() {
@@ -472,6 +481,17 @@ mod tests {
     fn writes_start(db: &Connection, session_id: &str) -> Vec<String> {
         let writes = call(db, "calendar_pending_writes", json!({}), sunday(), "w").unwrap()["writes"].as_array().unwrap().clone();
         writes.iter().filter(|w| w["session_id"] == session_id).map(|w| w["body"]["start"]["dateTime"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// plan_week without a template used to lock every new slot to the first one, out of the rotation's reach.
+    #[test]
+    fn plan_week_gives_new_slots_the_default_rotation() {
+        let db = db();
+        template(&db, json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}));
+        call(&db, "plan_set", json!({"templates": ["short", "legs"]}), sunday(), "plan").unwrap();
+        let planned = call(&db, "plan_week", json!({"day": "2026-10-12"}), sunday(), "week").unwrap();
+        let workouts: Vec<&str> = planned["sessions"].as_array().unwrap().iter().map(|s| s["workout_template_id"].as_str().unwrap()).collect();
+        assert_eq!(workouts, ["short", "legs", "short"]);
     }
 
     #[test]

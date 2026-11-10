@@ -33,6 +33,9 @@ The owner leads; the plan follows. When they ask for something, do it, then say 
 what they say they're doing, want or did, instead of steering them back to the plan or asking for confirmation. Planner rules (time window, \
 rest days, weekly count) are defaults, not limits: when the owner's choice breaks one, do it anyway. Say nothing about a broken rule they plainly chose (an explicit day or time they asked for); only flag what they may not know, like a clash with a calendar event. \
 You own planning decisions: weekly placement, rotation overrides, exceptions, calendar clashes, no-shows and week rollover. \
+The owner's training plan lives in plan_set (their words plus its templates), not in notes: when they change what they train or how often, save it there. \
+Which workout goes in which session is your call: plan it from their plan, what they trained lately and your notes. Code only gives new sessions \
+a default rotation of the templates, so on Sunday and after a skip or miss, check the upcoming workouts and fix any that don't fit (session_update). \
 Use session_create/session_update for exact times, templates, durations and statuses (including cancellation); these preserve reminders, \
 calendar sync, allocation and retries, lock your edits and return warnings. Use plan_week only when a default plan is appropriate; \
 it fills gaps and does not implement exceptions. Never change other sessions when the owner says to leave them alone. \
@@ -112,7 +115,17 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         profile.commute_to_gym_minutes, profile.commute_home_minutes, profile.prep_minutes,
     )
     .unwrap();
-    let setup_done = OnboardingState::get(db, 1)?.is_some_and(|o| o.completed_fingerprint.is_some());
+    let onboarding = OnboardingState::get(db, 1)?;
+    if let Some(o) = onboarding.as_ref().filter(|o| !o.split_json.is_empty()) {
+        let last = |template: &String| -> Result<String> {
+            let at: Option<Ts> = db.query_row("SELECT max(started_at) FROM workout_session WHERE template_id = ?1", [template], |r| r.get(0))?;
+            Ok(format!("{template} {}", at.map_or("never".into(), |t| t.local(&tz).strftime("%a %-d %b").to_string())))
+        };
+        let words = o.plan_text.as_deref().map_or("not described yet, ask the owner".into(), |p| format!("\"{p}\""));
+        let done: Vec<String> = o.split_json.iter().map(last).collect::<Result<_>>()?;
+        writeln!(out, "Plan (plan_set): {words}. Last trained: {}.", done.join(", ")).unwrap();
+    }
+    let setup_done = onboarding.is_some_and(|o| o.completed_fingerprint.is_some());
     if !setup_done {
         writeln!(out, "Setup: not finished. Check onboarding status before planning; never interrupt a running workout with setup.").unwrap();
     }

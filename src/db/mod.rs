@@ -15,7 +15,12 @@ use crate::error::Result;
 const BASELINE: &str = include_str!("baseline.sql");
 const ALEMBIC_HEAD: &str = "3d5e7f9a1b20";
 /// Rust-owned migrations after the baseline, applied in order and tracked by `PRAGMA user_version`.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001_agent.sql"), include_str!("migrations/002_learned_notes.sql"), include_str!("migrations/003_session_follows.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001_agent.sql"),
+    include_str!("migrations/002_learned_notes.sql"),
+    include_str!("migrations/003_session_follows.sql"),
+    include_str!("migrations/004_plan_text.sql"),
+];
 
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {

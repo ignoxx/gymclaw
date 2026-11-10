@@ -33,8 +33,9 @@ pub const QUESTIONS: [(&str, &str, &[&str]); 8] = [
 pub enum Update<'a> {
     /// Interview answers (question key → owner's words) and the profile fields backing them.
     Answer { answers: &'a Map<String, Value>, profile: Option<&'a Map<String, Value>> },
-    /// Template IDs in rotation order.
-    ConfirmPlan(&'a [String]),
+    /// The owner's plan, set in setup and whenever it changes: its template IDs (also the default
+    /// rotation order) and, optionally, the plan in the owner's words.
+    ConfirmPlan { templates: &'a [String], plan: Option<&'a str> },
     /// The review fingerprint from `status`.
     Finish(Option<&'a str>),
 }
@@ -70,6 +71,7 @@ fn state(db: &Connection) -> Result<OnboardingState> {
         completed_fingerprint: None,
         interview_json: Json(json!({})),
         split_json: Json(vec![]),
+        plan_text: None,
     };
     row.insert(db)?;
     Ok(row)
@@ -119,7 +121,7 @@ pub fn status(db: &Connection) -> Result<Value> {
     let fingerprint = if row.split_json.is_empty() { None } else { Some(review_fingerprint(db, &row)?) };
     Ok(json!({
         "step": step, "ready": ready, "next_question": missing.first(), "missing": missing,
-        "answers": row.interview_json.0, "profile": get_profile(db)?, "split": row.split_json.0, "templates": template_options(db)?,
+        "answers": row.interview_json.0, "profile": get_profile(db)?, "split": row.split_json.0, "plan": row.plan_text, "templates": template_options(db)?,
         "review_fingerprint": fingerprint,
         "calendar_writes_enabled": settings.as_ref().is_some_and(|s| s.calendar_writes_enabled),
         "runtime_enabled": settings.as_ref().is_some_and(|s| s.enabled), "instruction": instruction,
@@ -152,7 +154,7 @@ fn apply_profile(db: &Connection, changes: &Map<String, Value>) -> Result<()> {
 pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Result<Value> {
     let (operation, intent) = match &update {
         Update::Answer { answers, profile } => ("answer", json!({"answers": answers, "profile": profile, "template_ids": null, "fingerprint": null})),
-        Update::ConfirmPlan(ids) => ("confirm-plan", json!({"answers": null, "profile": null, "template_ids": ids, "fingerprint": null})),
+        Update::ConfirmPlan { templates, plan } => ("confirm-plan", json!({"answers": null, "profile": null, "template_ids": templates, "plan": plan, "fingerprint": null})),
         Update::Finish(fingerprint) => ("finish", json!({"answers": null, "profile": null, "template_ids": null, "fingerprint": fingerprint})),
     };
     mutate(db, &format!("onboarding.{operation}"), request_id, intent, now, || {
@@ -185,17 +187,20 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                     row.goal = Some(goal.trim().into());
                 }
             }
-            Update::ConfirmPlan(ids) => {
-                if ids.is_empty() {
+            Update::ConfirmPlan { templates, plan } => {
+                if templates.is_empty() {
                     crate::bail!("ONBOARDING_TEMPLATE_REQUIRED", "Choose one or more confirmed workout templates, in rotation order");
                 }
-                for id in ids.iter() {
+                for id in templates.iter() {
                     if ["demo", "demo_fixture", "fixture", "synthetic"].contains(&get_template(db, id)?.source.to_lowercase().as_str()) {
                         crate::bail!("ONBOARDING_REAL_TEMPLATE_REQUIRED", "Demo templates are not real owner training plans");
                     }
                 }
-                row.split_json = Json(ids.to_vec());
-                row.template_id = Some(ids[0].clone());
+                row.split_json = Json(templates.to_vec());
+                row.template_id = Some(templates[0].clone());
+                if let Some(plan) = plan {
+                    row.plan_text = Some(plan.trim().to_string()).filter(|p| !p.is_empty());
+                }
             }
             Update::Finish(expected) => {
                 let current = status(db)?;
@@ -207,7 +212,12 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
             }
         }
         row.update(db)?;
-        status(db)
+        let mut result = status(db)?;
+        if matches!(update, Update::ConfirmPlan { .. }) {
+            // Unlocked upcoming sessions get the new default rotation right away.
+            result["side_effects"] = json!(crate::domain::weekly::assign_rotation(db, now)?);
+        }
+        Ok(result)
     })
 }
 
@@ -242,9 +252,9 @@ mod tests {
         let p = get_profile(&db).unwrap();
         assert_eq!((p.weekly_max_sessions, p.minimum_workout_minutes, p.commute_home_minutes), (3, 45, 15));
         template(&db, "demo", "demo");
-        assert_eq!(update(&db, Update::ConfirmPlan(&["demo".into()]), at(0), "demo").unwrap_err().code(), "ONBOARDING_REAL_TEMPLATE_REQUIRED");
+        assert_eq!(update(&db, Update::ConfirmPlan { templates: &["demo".into()], plan: None }, at(0), "demo").unwrap_err().code(), "ONBOARDING_REAL_TEMPLATE_REQUIRED");
         template(&db, "push", "user");
-        let review = update(&db, Update::ConfirmPlan(&["push".into()]), at(0), "plan").unwrap()["data"].clone();
+        let review = update(&db, Update::ConfirmPlan { templates: &["push".into()], plan: None }, at(0), "plan").unwrap()["data"].clone();
         assert_eq!(review["step"], "REVIEW");
         assert_eq!(update(&db, Update::Finish(Some("stale")), at(0), "bad").unwrap_err().code(), "ONBOARDING_INCOMPLETE");
         let done = update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
@@ -274,7 +284,7 @@ mod tests {
         update(&db, Update::Answer { answers: &rest, profile: Some(&profile) }, at(0), "rest").unwrap();
         template(&db, "push", "user");
         template(&db, "pull", "user");
-        let review = update(&db, Update::ConfirmPlan(&["push".into(), "pull".into()]), at(0), "plan").unwrap()["data"].clone();
+        let review = update(&db, Update::ConfirmPlan { templates: &["push".into(), "pull".into()], plan: None }, at(0), "plan").unwrap()["data"].clone();
         assert_eq!(review["split"], json!(["push", "pull"]));
         update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
         let settings: i64 = db.query_row("SELECT count(*) FROM runtime_settings", [], |r| r.get(0)).unwrap();
@@ -283,5 +293,11 @@ mod tests {
         // A later profile tweak (e.g. a sleep floor) doesn't send the owner back into setup.
         crate::domain::profile::update_profile(&db, &object(json!({"earliest_workout_start": "11:00"}))).unwrap();
         assert_eq!(status(&db).unwrap()["step"], "READY");
+        // The owner changes their plan later: still ready, and a template change keeps the words.
+        template(&db, "cardio", "user");
+        let words = "3 a week, one always cardio, the others rotate push/pull";
+        update(&db, Update::ConfirmPlan { templates: &["push".into(), "pull".into(), "cardio".into()], plan: Some(words) }, at(0), "replan").unwrap();
+        let later = update(&db, Update::ConfirmPlan { templates: &["push".into(), "cardio".into()], plan: None }, at(0), "drop-pull").unwrap()["data"].clone();
+        assert_eq!((later["step"].as_str(), later["plan"].as_str()), (Some("READY"), Some(words)));
     }
 }
