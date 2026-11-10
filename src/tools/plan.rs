@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::{Ctx, Tool, ToolDef, def};
-use crate::db::models::{BlockKind, PlannedSession};
+use crate::db::models::{BlockKind, OnboardingState, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
 use crate::domain::{availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling, weekly};
@@ -170,12 +170,14 @@ impl Tool for PlanWeek {
                 let before: std::collections::BTreeSet<_> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
                 let template = match &self.template_id {
                     Some(id) => Some(id.clone()),
-                    None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id,
+                    None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id
+                        .or(OnboardingState::get(cx.db, 1)?.and_then(|o| o.split_json.0.first().cloned())),
                 };
                 let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, template.as_deref(), &[])?;
                 if self.template_id.is_none() {
                     // Before the lock below, or every new slot keeps the one template.
-                    weekly::assign_rotation(cx.db, cx.now)?;
+                    let new: Vec<String> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).filter(|id| !before.contains(id)).collect();
+                    weekly::assign_rotation(cx.db, cx.now, &new)?;
                 }
                 replanning::commit_upcoming(cx.db, cx.now)?;
                 let mut saved = Vec::new();

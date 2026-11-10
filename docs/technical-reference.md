@@ -50,11 +50,10 @@ count as answers, and GymClaw works for any owner, schedule and gym.
    Answers that shape scheduling also write the matching profile fields.
 2. **Plan:** the owner sends a photo of their plan, or GymClaw builds one from the interview. Every
    exercise is mapped to an illustrated catalog entry (`catalog_search`). Unknown weights start at 0
-   and are learned from the first session. Several templates form a split that rotates over
-   sessions in order (e.g. Push → Pull → Legs); each session gets the one trained longest ago, so a
-   skipped or swapped-out workout comes next instead of repeating the last. That rotation is only a
-   default: the plan is also saved in the owner's words, and the agent picks each session's workout
-   by it (Sundays, and after a skip or miss). `plan_set` changes the plan any time.
+   and are learned from the first session. The plan is saved in the owner's words plus its templates;
+   the agent picks each session's workout by it (Sundays, and after a skip or miss). Newly drafted
+   sessions start with a default rotation (the template trained longest ago), which code never
+   changes afterwards. `plan_set` changes the plan any time.
 3. **Review:** one short summary; the owner confirms.
 4. **Ready:** later profile or plan edits don't restart setup.
 

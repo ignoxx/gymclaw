@@ -212,12 +212,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
             }
         }
         row.update(db)?;
-        let mut result = status(db)?;
-        if matches!(update, Update::ConfirmPlan { .. }) {
-            // Unlocked upcoming sessions get the new default rotation right away.
-            result["side_effects"] = json!(crate::domain::weekly::assign_rotation(db, now)?);
-        }
-        Ok(result)
+        status(db)
     })
 }
 

@@ -174,11 +174,11 @@ fn workout_outcomes(plans: &[PlannedSession], completed: &[&WorkoutSession], rot
     outcomes.into_iter().map(|(workout, outcome)| json!({"workout": workout, "outcome": outcome})).collect()
 }
 
-/// Give each upcoming session the split workout (e.g. Push / Pull / Legs) trained least recently, counting
-/// started workouts (a running one too, so starting it doesn't reshuffle the week) and the sessions before
-/// it. In steady state that's the plain rotation; after a skip or an owner swap the missed workout comes
-/// next instead of repeating the last one. Locked sessions keep their template.
-pub fn assign_rotation(db: &Connection, now: Ts) -> Result<Vec<Value>> {
+/// Give each `new` session the default workout: the split template (e.g. Push / Pull / Legs) trained least
+/// recently, counting started workouts (a running one too) and the sessions before it. Only a default for
+/// fresh slots: every other session keeps its workout, since which workout goes where is the agent's call
+/// (re-rotating every tick undid its picks after a skip).
+pub fn assign_rotation(db: &Connection, now: Ts, new: &[String]) -> Result<Vec<Value>> {
     let split = OnboardingState::get(db, 1)?.map(|o| o.split_json.0).unwrap_or_default();
     if split.len() < 2 {
         return Ok(vec![]);
@@ -193,7 +193,7 @@ pub fn assign_rotation(db: &Connection, now: Ts) -> Result<Vec<Value>> {
     for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY planned_start_at, id", [])? {
         // Never-trained workouts go first (None < Some), ties in split order.
         let wanted = split.iter().enumerate().min_by_key(|(i, t)| (last.get(*t).copied(), *i)).map(|(_, t)| t.clone()).expect("split has entries");
-        if session.user_locked {
+        if session.user_locked || !new.contains(&session.id) {
             if let Some(template) = &session.workout_template_id {
                 last.insert(template.clone(), session.planned_start_at);
             }
@@ -275,7 +275,7 @@ pub fn refresh_crowd(db: &Connection, now: Ts) -> Result<Vec<Value>> {
 /// current template so the calendar and the workout use today's plan.
 pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
     let mut changed = Vec::new();
-    for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND workout_template_id IS NOT NULL AND user_locked = 0 ORDER BY rowid", [])? {
+    for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND workout_template_id IS NOT NULL ORDER BY rowid", [])? {
         let template_id = session.workout_template_id.clone().expect("filtered");
         if WorkoutTemplate::get(db, &template_id)?.is_none() {
             continue;
@@ -319,7 +319,7 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
         }
     }
     let stale = detect_stale_workouts(db, now)?;
-    let rotation = assign_rotation(db, now)?;
+    let rotation = assign_rotation(db, now, &created)?;
     let plans = refresh_plans(db, now)?;
     let crowd = refresh_crowd(db, now)?;
     commit_upcoming(db, now)?;
@@ -338,9 +338,10 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     let rolling = rolling_plan(db, template_id, now)?;
     let report = audit_week(db, previous, now, true)?;
     if PlannedSession::first(db, "WHERE week_id = ?1", [next_week.to_string()])?.is_none() {
-        schedule_week(db, next_week, now, Some(&format!("weekly-plan:{next_week}:{template_id}")), Some(template_id), &[])?;
+        let data = schedule_week(db, next_week, now, Some(&format!("weekly-plan:{next_week}:{template_id}")), Some(template_id), &[])?;
+        let created: Vec<String> = data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)).collect();
+        assign_rotation(db, now, &created)?;
     }
-    assign_rotation(db, now)?;
     commit_upcoming(db, now)?;
     for session in PlannedSession::select(db, "WHERE week_id = ?1 AND status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [next_week.to_string()])? {
         queue_session_write(db, &session, now, false)?;
@@ -825,22 +826,15 @@ mod tests {
             ids.push(session.id);
         }
         let templates = |db: &Connection| ids.iter().map(|id| PlannedSession::get(db, id).unwrap().unwrap().workout_template_id.unwrap()).collect::<Vec<_>>();
-        assign_rotation(&db, base.mins(-24 * 60)).unwrap();
+        assign_rotation(&db, base.mins(-24 * 60), &ids).unwrap();
         // Last done: Push → Pull, then the locked Push, then Legs (never trained), then Pull.
         assert_eq!(templates(&db), ["pull", "push", "legs", "pull"]);
         assert_eq!(PlannedSession::get(&db, &ids[0]).unwrap().unwrap().workout_plan_json["template"]["id"], "pull");
-        assert!(assign_rotation(&db, base.mins(-24 * 60)).unwrap().is_empty());
-        // A running workout counts: starting Pull doesn't hand Pull to the next session again.
-        workout("pull", "SET_ACTIVE", base.mins(-60));
-        assign_rotation(&db, base.mins(-24 * 60)).unwrap();
-        assert_eq!(templates(&db), ["legs", "push", "pull", "legs"]);
-        // Owner swapped Push for Pull and Push got skipped: Push comes next, not Legs again.
-        workout("legs", "PLAN_UPDATED", base.mins(-30));
-        let mut swapped = PlannedSession::get(&db, &ids[1]).unwrap().unwrap();
-        swapped.workout_template_id = Some("pull".into());
-        swapped.save(&db).unwrap();
-        assign_rotation(&db, base.mins(-24 * 60)).unwrap();
-        assert_eq!(templates(&db), ["push", "pull", "legs", "push"]);
+        assert!(assign_rotation(&db, base.mins(-24 * 60), &ids).unwrap().is_empty());
+        // Drafted workouts are the agent's from then on: a Legs workout or a later tick moves nothing.
+        workout("legs", "PLAN_UPDATED", base.mins(-60));
+        assert!(assign_rotation(&db, base.mins(-24 * 60), &[]).unwrap().is_empty());
+        assert_eq!(templates(&db), ["pull", "push", "legs", "pull"]);
     }
 
     #[test]
