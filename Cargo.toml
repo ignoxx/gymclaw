@@ -2,6 +2,8 @@
 name = "gymclaw"
 version = "0.1.0"
 edition = "2024"
+description = "A Telegram bot that plans your gym week around your calendar and coaches you through each workout"
+repository = "https://github.com/ignoxx/gymclaw"
 license-file = "LICENSE"
 
 [dependencies]
