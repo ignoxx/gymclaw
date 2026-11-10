@@ -47,11 +47,7 @@ pub fn to_jpeg(bytes: &[u8], max_edge: u32) -> Result<Photo> {
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
         .encode_image(&rgb)
         .map_err(|_| invalid())?;
-    Ok(Photo {
-        jpeg,
-        width: rgb.width(),
-        height: rgb.height(),
-    })
+    Ok(Photo { jpeg, width: rgb.width(), height: rgb.height() })
 }
 
 fn decode_raster(bytes: &[u8]) -> Result<DynamicImage> {

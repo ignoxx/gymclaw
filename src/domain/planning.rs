@@ -44,7 +44,13 @@ pub struct PlannerConfig {
 
 impl Default for PlannerConfig {
     fn default() -> Self {
-        PlannerConfig { step_minutes: 15, adherence_weight: 1.0, preferred_time_weight: 0.4, uncertainty_weight: 0.5, shortened_duration_penalty: 1.0 }
+        PlannerConfig {
+            step_minutes: 15,
+            adherence_weight: 1.0,
+            preferred_time_weight: 0.4,
+            uncertainty_weight: 0.5,
+            shortened_duration_penalty: 1.0,
+        }
     }
 }
 
@@ -131,7 +137,13 @@ pub fn recovery_ok(start: Ts, end: Ts, other: &Interval, profile: &Profile) -> b
     days(first, other_last) >= required || days(other_first, last) >= required
 }
 
-pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts, config: &PlannerConfig) -> Result<Vec<Candidate>> {
+pub fn generate_candidates(
+    profile: &Profile,
+    week_start: Date,
+    inputs: &Inputs,
+    now: Ts,
+    config: &PlannerConfig,
+) -> Result<Vec<Candidate>> {
     if !monday(week_start) {
         crate::bail!("INVALID_WEEK", "week_start must be Monday");
     }
@@ -142,7 +154,14 @@ pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs,
     durations.dedup();
     let step = SignedDuration::from_mins(config.step_minutes);
     let signals: std::collections::HashMap<Ts, &SlotSignal> = inputs.signals.iter().map(|s| (s.start, s)).collect();
-    let neutral = SlotSignal { start: now, crowd: None, confidence: 0.0, calendar_convenience: 0.0, adherence: 0.0, preferred_time: 0.0 };
+    let neutral = SlotSignal {
+        start: now,
+        crowd: None,
+        confidence: 0.0,
+        calendar_convenience: 0.0,
+        adherence: 0.0,
+        preferred_time: 0.0,
+    };
     let mut result = Vec::new();
     for offset in 0..7 {
         let day = week_start.checked_add(jiff::Span::new().days(offset))?;
@@ -180,7 +199,9 @@ pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs,
                     adherence: config.adherence_weight * signal.adherence,
                     preferred_time: config.preferred_time_weight * signal.preferred_time,
                     uncertainty: -config.uncertainty_weight * (1.0 - confidence),
-                    duration: -config.shortened_duration_penalty * (profile.preferred_workout_minutes - duration) as f64 / profile.preferred_workout_minutes as f64,
+                    duration: -config.shortened_duration_penalty
+                        * (profile.preferred_workout_minutes - duration) as f64
+                        / profile.preferred_workout_minutes as f64,
                 };
                 result.push(Candidate {
                     start,
@@ -200,10 +221,21 @@ pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs,
     Ok(result)
 }
 
-pub fn plan_week(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts, config: &PlannerConfig) -> Result<Plan> {
+pub fn plan_week(
+    profile: &Profile,
+    week_start: Date,
+    inputs: &Inputs,
+    now: Ts,
+    config: &PlannerConfig,
+) -> Result<Plan> {
     let tz = profile.tz();
     let week_end = week_start.checked_add(jiff::Span::new().days(7))?;
-    let existing_count = inputs.existing.iter().chain(inputs.skipped).filter(|s| (week_start..week_end).contains(&s.start.local(&tz).date())).count() as i64;
+    let existing_count = inputs
+        .existing
+        .iter()
+        .chain(inputs.skipped)
+        .filter(|s| (week_start..week_end).contains(&s.start.local(&tz).date()))
+        .count() as i64;
     let capacity = (profile.weekly_target_sessions.min(profile.weekly_max_sessions) - existing_count).max(0) as usize;
     let candidates = generate_candidates(profile, week_start, inputs, now, config)?;
     let mut by_day: std::collections::BTreeMap<Date, Candidate> = Default::default();
@@ -231,7 +263,13 @@ pub fn plan_week(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts, 
     }
     let sessions: Vec<Candidate> = best.iter().map(|d| by_day[d].clone()).collect();
     let total = existing_count + sessions.len() as i64;
-    Ok(Plan { week_start, sessions, existing_count, minimum_met: total >= profile.weekly_min_sessions, shortfall: (profile.weekly_target_sessions - total).max(0) })
+    Ok(Plan {
+        week_start,
+        sessions,
+        existing_count,
+        minimum_met: total >= profile.weekly_min_sessions,
+        shortfall: (profile.weekly_target_sessions - total).max(0),
+    })
 }
 
 /// All `size`-subsets in lexicographic order, like itertools.combinations.
@@ -257,11 +295,22 @@ mod tests {
     const WEEK: Date = jiff::civil::date(2026, 10, 12);
 
     fn at(day: i8, hour: i8, minute: i8) -> Ts {
-        Ts(jiff::civil::date(2026, 10, day).at(hour, minute, 0, 0).to_zoned(zone("Europe/Berlin").unwrap()).unwrap().timestamp())
+        Ts(jiff::civil::date(2026, 10, day)
+            .at(hour, minute, 0, 0)
+            .to_zoned(zone("Europe/Berlin").unwrap())
+            .unwrap()
+            .timestamp())
     }
 
     fn signal(start: Ts, crowd: f64, confidence: f64) -> SlotSignal {
-        SlotSignal { start, crowd: Some(crowd), confidence, calendar_convenience: 0.0, adherence: 0.0, preferred_time: 0.0 }
+        SlotSignal {
+            start,
+            crowd: Some(crowd),
+            confidence,
+            calendar_convenience: 0.0,
+            adherence: 0.0,
+            preferred_time: 0.0,
+        }
     }
 
     fn days(plan: &Plan) -> Vec<i64> {
@@ -286,11 +335,33 @@ mod tests {
 
     #[test]
     fn prep_and_travel_must_clear_blockers_but_may_touch() {
-        let p = Profile { earliest_workout_start: jiff::civil::time(19, 0, 0, 0), latest_workout_finish: jiff::civil::time(20, 10, 0, 0), weekdays_allowed: vec![0], minimum_workout_minutes: 70, ..Profile::default() };
-        let candidates = |busy: &[Interval]| generate_candidates(&p, WEEK, &Inputs { busy, ..Inputs::default() }, at(11, 0, 0), &PlannerConfig::default()).unwrap().len();
+        let p = Profile {
+            earliest_workout_start: jiff::civil::time(19, 0, 0, 0),
+            latest_workout_finish: jiff::civil::time(20, 10, 0, 0),
+            weekdays_allowed: vec![0],
+            minimum_workout_minutes: 70,
+            ..Profile::default()
+        };
+        let candidates = |busy: &[Interval]| {
+            generate_candidates(
+                &p,
+                WEEK,
+                &Inputs { busy, ..Inputs::default() },
+                at(11, 0, 0),
+                &PlannerConfig::default(),
+            )
+            .unwrap()
+            .len()
+        };
         assert_eq!(candidates(&[Interval { start: at(12, 18, 40), end: at(12, 19, 0) }]), 0);
         assert_eq!(candidates(&[Interval { start: at(12, 20, 20), end: at(12, 21, 0) }]), 0);
-        assert_eq!(candidates(&[Interval { start: at(12, 18, 0), end: at(12, 18, 25) }, Interval { start: at(12, 20, 30), end: at(12, 21, 0) }]), 1);
+        assert_eq!(
+            candidates(&[
+                Interval { start: at(12, 18, 0), end: at(12, 18, 25) },
+                Interval { start: at(12, 20, 30), end: at(12, 21, 0) }
+            ]),
+            1
+        );
     }
 
     #[test]
@@ -329,14 +400,25 @@ mod tests {
         let p = Profile { weekdays_allowed: vec![0], ..one_a_week() };
         let busy_habit = SlotSignal { preferred_time: 0.9, ..signal(at(12, 13, 0), 2.0 / 3.0, 0.9) };
         let quiet = SlotSignal { preferred_time: 0.2, ..signal(at(12, 16, 0), 1.0 / 3.0, 0.9) };
-        assert_eq!(plan(&p, Inputs { signals: &[busy_habit.clone(), quiet.clone()], ..Inputs::default() }).sessions[0].start, quiet.start);
+        assert_eq!(
+            plan(&p, Inputs { signals: &[busy_habit.clone(), quiet.clone()], ..Inputs::default() }).sessions[0].start,
+            quiet.start
+        );
         let same_crowd = SlotSignal { crowd: Some(2.0 / 3.0), ..quiet };
-        assert_eq!(plan(&p, Inputs { signals: &[busy_habit.clone(), same_crowd], ..Inputs::default() }).sessions[0].start, busy_habit.start);
+        assert_eq!(
+            plan(&p, Inputs { signals: &[busy_habit.clone(), same_crowd], ..Inputs::default() }).sessions[0].start,
+            busy_habit.start
+        );
     }
 
     #[test]
     fn shortened_workout_when_only_minimum_fits() {
-        let p = Profile { earliest_workout_start: jiff::civil::time(19, 0, 0, 0), latest_workout_finish: jiff::civil::time(19, 45, 0, 0), weekdays_allowed: vec![0], ..Profile::default() };
+        let p = Profile {
+            earliest_workout_start: jiff::civil::time(19, 0, 0, 0),
+            latest_workout_finish: jiff::civil::time(19, 45, 0, 0),
+            weekdays_allowed: vec![0],
+            ..Profile::default()
+        };
         let plan = plan(&p, Inputs::default());
         assert_eq!(plan.sessions[0].end - plan.sessions[0].start, SignedDuration::from_mins(45));
         assert!(!plan.minimum_met);
@@ -346,7 +428,12 @@ mod tests {
     fn dst_durations_are_elapsed_time() {
         let tz = zone("Europe/Berlin").unwrap();
         for week in [jiff::civil::date(2026, 3, 23), jiff::civil::date(2026, 10, 19)] {
-            let p = Profile { weekdays_allowed: vec![6], earliest_workout_start: jiff::civil::time(1, 0, 0, 0), latest_workout_finish: jiff::civil::time(5, 0, 0, 0), ..Profile::default() };
+            let p = Profile {
+                weekdays_allowed: vec![6],
+                earliest_workout_start: jiff::civil::time(1, 0, 0, 0),
+                latest_workout_finish: jiff::civil::time(5, 0, 0, 0),
+                ..Profile::default()
+            };
             let now = Ts(week.to_zoned(tz.clone()).unwrap().timestamp());
             let candidates = generate_candidates(&p, week, &Inputs::default(), now, &PlannerConfig::default()).unwrap();
             assert!(!candidates.is_empty());
@@ -378,8 +465,10 @@ mod tests {
     #[test]
     fn weekly_max_counts_existing_sessions() {
         let first = plan(&Profile::default(), Inputs::default());
-        let existing: Vec<Interval> = first.sessions.iter().take(2).map(|c| Interval { start: c.start, end: c.end }).collect();
-        let p = Profile { weekly_min_sessions: 1, weekly_target_sessions: 2, weekly_max_sessions: 2, ..Profile::default() };
+        let existing: Vec<Interval> =
+            first.sessions.iter().take(2).map(|c| Interval { start: c.start, end: c.end }).collect();
+        let p =
+            Profile { weekly_min_sessions: 1, weekly_target_sessions: 2, weekly_max_sessions: 2, ..Profile::default() };
         let full = plan(&p, Inputs { existing: &existing, ..Inputs::default() });
         assert!(full.sessions.is_empty() && full.existing_count == 2);
     }
@@ -387,7 +476,8 @@ mod tests {
     #[test]
     fn no_past_preparation() {
         let now = at(12, 19, 0);
-        let candidates = generate_candidates(&Profile::default(), WEEK, &Inputs::default(), now, &PlannerConfig::default()).unwrap();
+        let candidates =
+            generate_candidates(&Profile::default(), WEEK, &Inputs::default(), now, &PlannerConfig::default()).unwrap();
         assert!(!candidates.is_empty() && candidates.iter().all(|c| c.prep_start >= now));
     }
 
@@ -407,6 +497,11 @@ mod tests {
             assert!(profile.validate().is_err(), "{profile:?}");
         }
         let tuesday = jiff::civil::date(2026, 10, 13);
-        assert_eq!(plan_week(&Profile::default(), tuesday, &Inputs::default(), at(11, 0, 0), &PlannerConfig::default()).unwrap_err().code(), "INVALID_WEEK");
+        assert_eq!(
+            plan_week(&Profile::default(), tuesday, &Inputs::default(), at(11, 0, 0), &PlannerConfig::default())
+                .unwrap_err()
+                .code(),
+            "INVALID_WEEK"
+        );
     }
 }

@@ -133,7 +133,11 @@ impl Scheduler {
         loop {
             let jobs = blocking(&self.db_path, |db| {
                 let enabled = outbox::runtime_authority(db)?.enabled;
-                if enabled { NotificationJob::select(db, "WHERE status = 'PENDING' ORDER BY due_at, id", []) } else { Ok(vec![]) }
+                if enabled {
+                    NotificationJob::select(db, "WHERE status = 'PENDING' ORDER BY due_at, id", [])
+                } else {
+                    Ok(vec![])
+                }
             })
             .await
             .unwrap_or_else(|e| {
@@ -157,7 +161,8 @@ impl Scheduler {
                     failed.insert(job.id.clone(), Instant::now());
                 }
             }
-            let mut sleep = next.map(|n| Duration::try_from(n - Ts::now()).unwrap_or_default()).unwrap_or(JOB_IDLE).min(JOB_IDLE);
+            let mut sleep =
+                next.map(|n| Duration::try_from(n - Ts::now()).unwrap_or_default()).unwrap_or(JOB_IDLE).min(JOB_IDLE);
             if !failed.is_empty() {
                 sleep = sleep.min(JOB_BACKOFF);
             }
@@ -201,7 +206,8 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
         return Ok(json!({"due": false}));
     }
     let week = local.date().checked_add(1.day())?.to_string();
-    let done = AgentEvent::first(db, "WHERE type = 'runtime.weekly_ran' AND payload_json ->> 'week_start' = ?1", [&week])?;
+    let done =
+        AgentEvent::first(db, "WHERE type = 'runtime.weekly_ran' AND payload_json ->> 'week_start' = ?1", [&week])?;
     if done.is_some() {
         return Ok(json!({"due": false}));
     }
@@ -233,7 +239,8 @@ mod tests {
 
     #[test]
     fn weekly_waits_for_sunday_night() {
-        let mut db = crate::db::open(&std::env::temp_dir().join(format!("gymclaw-weekly-{}.db", crate::db::new_id()))).unwrap();
+        let mut db =
+            crate::db::open(&std::env::temp_dir().join(format!("gymclaw-weekly-{}.db", crate::db::new_id()))).unwrap();
         crate::db::migrate(&mut db).unwrap();
         // Saturday 20:00 and Sunday 22:59 Berlin: not yet (ticks::weekly isn't even called).
         for at in ["2026-10-17T18:00:00Z", "2026-10-18T20:59:00Z"] {
@@ -241,6 +248,9 @@ mod tests {
         }
         // Already ran for the week starting Monday 19 Oct: not again.
         emit(&db, "runtime.weekly_ran", Ts::now(), json!({"week_start": "2026-10-19"})).unwrap();
-        assert_eq!(weekly_if_due(&db, "42", Ts::parse("2026-10-18T21:30:00Z", None).unwrap()).unwrap(), json!({"due": false}));
+        assert_eq!(
+            weekly_if_due(&db, "42", Ts::parse("2026-10-18T21:30:00Z", None).unwrap()).unwrap(),
+            json!({"due": false})
+        );
     }
 }

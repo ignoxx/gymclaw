@@ -47,7 +47,10 @@ pub fn compress_template(template: &Template, profile: &Profile, budget_seconds:
             })
             .min_by_key(|(index, e)| (e.priority, std::cmp::Reverse(*index)));
         let Some((_, lowest)) = lowest else {
-            crate::bail!("WORKOUT_SLOT_TOO_SHORT", "Edited slot cannot fit required warm-up and primary movement; event kept, explicit adjustment needed");
+            crate::bail!(
+                "WORKOUT_SLOT_TOO_SHORT",
+                "Edited slot cannot fit required warm-up and primary movement; event kept, explicit adjustment needed"
+            );
         };
         *counts.get_mut(lowest.id.as_str()).expect("known") -= 1;
         // Removing a prerequisite cannot silently create an invalid execution order.
@@ -63,5 +66,7 @@ pub fn compress_template(template: &Template, profile: &Profile, budget_seconds:
         .filter(|e| counts[e.id.as_str()] != e.working_sets)
         .map(|e| json!({"exercise_id": e.id, "from_sets": e.working_sets, "to_sets": counts[e.id.as_str()]}))
         .collect();
-    Ok(json!({"template": template, "sets": sets, "budget_seconds": budget_seconds, "estimated_duration_seconds": duration(&counts), "reduced": reduced}))
+    Ok(
+        json!({"template": template, "sets": sets, "budget_seconds": budget_seconds, "estimated_duration_seconds": duration(&counts), "reduced": reduced}),
+    )
 }

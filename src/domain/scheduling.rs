@@ -8,7 +8,7 @@ use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::compression::compress_template;
 use crate::domain::core::emit;
 use crate::domain::crowd::{CrowdModel, planning_signals};
-use crate::domain::planning::{SlotSignal, Inputs, Interval, PlannerConfig, plan_week};
+use crate::domain::planning::{Inputs, Interval, PlannerConfig, SlotSignal, plan_week};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::get_template;
 use crate::domain::workout::historical_set_duration;
@@ -32,7 +32,11 @@ pub fn interval(session: &PlannedSession) -> Interval {
 
 /// Owner-deleted sessions: the planner never puts a session back there.
 pub fn deleted_intervals(db: &Connection) -> Result<Vec<Interval>> {
-    Ok(PlannedSession::select(db, "WHERE status = 'CANCELLED' ORDER BY rowid", [])?.iter().filter(|s| s.deleted_by_user()).map(interval).collect())
+    Ok(PlannedSession::select(db, "WHERE status = 'CANCELLED' ORDER BY rowid", [])?
+        .iter()
+        .filter(|s| s.deleted_by_user())
+        .map(interval)
+        .collect())
 }
 
 /// Window the planner checks for blockers around a week: Sunday before to Tuesday after, local.
@@ -44,7 +48,14 @@ pub fn busy_window(week_start: Date, profile: &crate::domain::profile::Profile) 
 
 /// Fill a week with new sessions around the existing ones. Idempotent per `request_id`. `fixture_signals`
 /// replace the crowd model's signals (demos and tests); their crowd values are marked demo.
-pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Option<&str>, template_id: Option<&str>, fixture_signals: &[SlotSignal]) -> Result<Value> {
+pub fn schedule_week(
+    db: &Connection,
+    week_start: Date,
+    now: Ts,
+    request_id: Option<&str>,
+    template_id: Option<&str>,
+    fixture_signals: &[SlotSignal],
+) -> Result<Value> {
     let mut request = json!({"week_start": week_start.to_string(), "fixture": {"busy": [], "unavailable": [], "signals": fixture_signals,
         "config": {"step_minutes": 15, "adherence_weight": 1.0, "preferred_time_weight": 0.4, "uncertainty_weight": 0.5, "shortened_duration_penalty": 1.0}}});
     if let Some(id) = template_id {
@@ -60,15 +71,29 @@ pub fn schedule_week(db: &Connection, week_start: Date, now: Ts, request_id: Opt
     }
     let profile = get_profile(db)?;
     let tz = profile.tz();
-    let active = PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') ORDER BY rowid", [])?;
+    let active = PlannedSession::select(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') ORDER BY rowid",
+        [],
+    )?;
     let existing: Vec<Interval> = active.iter().map(interval).collect();
     let (start, end) = busy_window(week_start, &profile)?;
     let busy = busy_intervals(db, start, end)?;
     let deleted = deleted_intervals(db)?;
     let config = PlannerConfig::default();
-    let signals = if fixture_signals.is_empty() { planning_signals(db, week_start, now, config.step_minutes)? } else { fixture_signals.to_vec() };
+    let signals = if fixture_signals.is_empty() {
+        planning_signals(db, week_start, now, config.step_minutes)?
+    } else {
+        fixture_signals.to_vec()
+    };
     let model = if signals.is_empty() || !fixture_signals.is_empty() { None } else { Some(CrowdModel::new(db, now)?) };
-    let plan = plan_week(&profile, week_start, &Inputs { busy: &busy, unavailable: &deleted, existing: &existing, skipped: &[], signals: &signals }, now, &config)?;
+    let plan = plan_week(
+        &profile,
+        week_start,
+        &Inputs { busy: &busy, unavailable: &deleted, existing: &existing, skipped: &[], signals: &signals },
+        now,
+        &config,
+    )?;
     let template = match template_id {
         Some(id) => {
             let mut t = get_template(db, id)?;
@@ -141,18 +166,37 @@ mod tests {
         get_profile(&db).unwrap();
         let (start, end) = (ts("2026-10-15T19:00:00+02:00"), ts("2026-10-15T20:10:00+02:00"));
         CalendarEventSnapshot {
-            calendar_event_id: "travel".into(), ical_uid: None, etag: None, title: "Travel".into(), start_at: ts("2026-10-12T00:00:00+02:00"),
-            end_at: ts("2026-10-14T00:00:00+02:00"), status: "confirmed".into(), updated_at_remote: None, gymclaw_managed: false, gymclaw_session_id: None,
-            gymclaw_plan_revision: None, user_locked: false, last_seen_at: start, raw_json: Json(json!({})),
+            calendar_event_id: "travel".into(),
+            ical_uid: None,
+            etag: None,
+            title: "Travel".into(),
+            start_at: ts("2026-10-12T00:00:00+02:00"),
+            end_at: ts("2026-10-14T00:00:00+02:00"),
+            status: "confirmed".into(),
+            updated_at_remote: None,
+            gymclaw_managed: false,
+            gymclaw_session_id: None,
+            gymclaw_plan_revision: None,
+            user_locked: false,
+            last_seen_at: start,
+            raw_json: Json(json!({})),
         }
         .insert(&db)
         .unwrap();
         let mut locked = PlannedSession::new("2026-10-12".into(), None, true);
         locked.id = "locked".into();
         locked.status = SessionStatus::Tentative;
-        (locked.planned_start_at, locked.planned_end_at, locked.prep_start_at, locked.leave_home_at, locked.expected_finish_at) = (start, end, start, start, end);
+        (
+            locked.planned_start_at,
+            locked.planned_end_at,
+            locked.prep_start_at,
+            locked.leave_home_at,
+            locked.expected_finish_at,
+        ) = (start, end, start, start, end);
         locked.insert(&db).unwrap();
-        let result = schedule_week(&db, jiff::civil::date(2026, 10, 12), ts("2026-10-11T12:00:00+02:00"), None, None, &[]).unwrap();
+        let result =
+            schedule_week(&db, jiff::civil::date(2026, 10, 12), ts("2026-10-11T12:00:00+02:00"), None, None, &[])
+                .unwrap();
         let sessions = result["sessions"].as_array().unwrap();
         assert_eq!((sessions.len(), sessions[0]["id"].as_str()), (1, Some("locked")));
         assert_eq!(PlannedSession::get(&db, "locked").unwrap().unwrap().planned_start_at, start);

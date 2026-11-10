@@ -18,7 +18,8 @@ use crate::time::Ts;
 
 /// Active blocks overlapping [start, end).
 pub fn blocks(db: &Connection, start: Ts, end: Ts) -> Result<Vec<Interval>> {
-    let rows = AvailabilityBlock::select(db, "WHERE status = 'ACTIVE' AND start_at < ?1 AND end_at > ?2", (end, start))?;
+    let rows =
+        AvailabilityBlock::select(db, "WHERE status = 'ACTIVE' AND start_at < ?1 AND end_at > ?2", (end, start))?;
     Ok(rows.into_iter().map(|row| Interval { start: row.start_at, end: row.end_at }).collect())
 }
 
@@ -31,8 +32,10 @@ pub fn session_blocked(db: &Connection, session: &PlannedSession) -> Result<bool
 pub fn list_blocks(db: &Connection, now: Ts) -> Result<Vec<Value>> {
     Ok(AvailabilityBlock::select(db, "ORDER BY start_at, id", [])?
         .into_iter()
-        .map(|row| json!({"id": row.id, "kind": row.kind, "status": row.status, "start": row.start_at, "end": row.end_at,
-            "in_effect": row.status == BlockStatus::Active && row.start_at <= now && now < row.end_at}))
+        .map(|row| {
+            json!({"id": row.id, "kind": row.kind, "status": row.status, "start": row.start_at, "end": row.end_at,
+            "in_effect": row.status == BlockStatus::Active && row.start_at <= now && now < row.end_at})
+        })
         .collect())
 }
 
@@ -40,7 +43,9 @@ pub fn list_blocks(db: &Connection, now: Ts) -> Result<Vec<Value>> {
 pub fn affected_weeks(db: &Connection, now: Ts) -> Result<BTreeSet<Date>> {
     let tz = get_profile(db)?.tz();
     let mut weeks = BTreeSet::from([week_of(now, &tz), week_of(now + jiff::SignedDuration::from_hours(24 * 7), &tz)]);
-    for row in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1", [now])? {
+    for row in
+        PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1", [now])?
+    {
         weeks.insert(week_of(row.planned_start_at, &tz));
     }
     Ok(weeks)
@@ -48,17 +53,37 @@ pub fn affected_weeks(db: &Connection, now: Ts) -> Result<BTreeSet<Date>> {
 
 /// Owner is away/sick/busy over [start, end): sessions in it lose their reminders and report conflicts;
 /// owner-locked ones stay unless `cancel_locked`.
-pub fn add(db: &Connection, start: Ts, end: Ts, kind: BlockKind, now: Ts, request_id: &str, cancel_locked: bool) -> Result<Value> {
+pub fn add(
+    db: &Connection,
+    start: Ts,
+    end: Ts,
+    kind: BlockKind,
+    now: Ts,
+    request_id: &str,
+    cancel_locked: bool,
+) -> Result<Value> {
     if start >= end {
         crate::bail!("INVALID_INTERVAL", "Interval end must follow start");
     }
     let intent = json!({"start": start, "end": end, "kind": kind, "cancel_locked": cancel_locked});
     mutate(db, "availability.added", request_id, intent, now, || {
         let profile = get_profile(db)?;
-        let row = AvailabilityBlock { id: new_id(), start_at: start, end_at: end, kind, status: BlockStatus::Active, created_at: now, retracted_at: None };
+        let row = AvailabilityBlock {
+            id: new_id(),
+            start_at: start,
+            end_at: end,
+            kind,
+            status: BlockStatus::Active,
+            created_at: now,
+            retracted_at: None,
+        };
         row.insert(db)?;
         let mut locked = Vec::new();
-        for mut plan in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at >= ?1 ORDER BY rowid", [now])? {
+        for mut plan in PlannedSession::select(
+            db,
+            "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at >= ?1 ORDER BY rowid",
+            [now],
+        )? {
             let (prep, home) = expanded(&plan, &profile);
             if prep >= end || home <= start {
                 continue;
@@ -76,7 +101,12 @@ pub fn add(db: &Connection, start: Ts, end: Ts, kind: BlockKind, now: Ts, reques
                 plan.merge_plan(json!({"deleted_by_user": true, "manual_lock_cancelled_by_request": request_id}));
                 plan.save(db)?;
                 queue_session_write(db, &plan, now, false)?;
-                emit(db, "availability.locked_session_cancelled", now, json!({"session_id": plan.id, "block_id": row.id, "request_id": request_id}))?;
+                emit(
+                    db,
+                    "availability.locked_session_cancelled",
+                    now,
+                    json!({"session_id": plan.id, "block_id": row.id, "request_id": request_id}),
+                )?;
             }
         }
         let repaired = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
@@ -131,11 +161,16 @@ mod tests {
     }
 
     fn pending_jobs(db: &Connection, session_id: Option<&str>) -> usize {
-        NotificationJob::select(db, "WHERE status = 'PENDING'", []).unwrap().into_iter().filter(|j| session_id.is_none() || j.planned_session_id.as_deref() == session_id).count()
+        NotificationJob::select(db, "WHERE status = 'PENDING'", [])
+            .unwrap()
+            .into_iter()
+            .filter(|j| session_id.is_none() || j.planned_session_id.as_deref() == session_id)
+            .count()
     }
 
     fn first_session_locked(db: &Connection) -> PlannedSession {
-        let id = weekly_plan(db, "short", sunday(0)).unwrap()["plan"]["sessions"][0]["id"].as_str().unwrap().to_string();
+        let id =
+            weekly_plan(db, "short", sunday(0)).unwrap()["plan"]["sessions"][0]["id"].as_str().unwrap().to_string();
         let mut row = PlannedSession::get(db, &id).unwrap().unwrap();
         row.user_locked = true;
         row.update(db).unwrap();
@@ -154,8 +189,15 @@ mod tests {
         assert_eq!(pending_jobs(&db, None), 0);
         let blocked = start(&db, Some("short"), None, false, sunday(60), "blocked-start").unwrap_err();
         assert!(blocked.to_string().contains("availability override"), "{blocked}");
-        assert!(!weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap()["plan"]["sessions"].as_array().unwrap().is_empty());
-        assert!(PlannedSession::select(&db, "WHERE status IN ('TENTATIVE', 'COMMITTED')", []).unwrap().iter().all(|s| s.planned_start_at >= end));
+        assert!(
+            !weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap()["plan"]["sessions"].as_array().unwrap().is_empty()
+        );
+        assert!(
+            PlannedSession::select(&db, "WHERE status IN ('TENTATIVE', 'COMMITTED')", [])
+                .unwrap()
+                .iter()
+                .all(|s| s.planned_start_at >= end)
+        );
         start(&db, Some("short"), None, false, end, "allowed-at-end").unwrap();
     }
 

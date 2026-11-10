@@ -13,7 +13,10 @@ use std::collections::HashSet;
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 
-use super::calendar::{CalendarEvent, CalendarProvider, SyncBatch, already_applied, body_session_id, conflict, parse_event, sync_token_expired};
+use super::calendar::{
+    CalendarEvent, CalendarProvider, SyncBatch, already_applied, body_session_id, conflict, parse_event,
+    sync_token_expired,
+};
 use super::http::{Body, Method, Request, Response, Transport};
 use crate::bail;
 use crate::db::Json;
@@ -52,9 +55,7 @@ pub fn bind_calendar(db: &Connection, calendar_id: &str, source: &str) -> Result
 /// OAuth secrets live only in a persistent, owner-only SQLite file.
 fn private_storage(db: &Connection) -> Result<()> {
     let path = db.path().filter(|p| !p.is_empty() && *p != ":memory:");
-    let Some(path) = path else {
-        bail!("AUTH_STORAGE_REQUIRED", "OAuth requires a persistent private SQLite DB")
-    };
+    let Some(path) = path else { bail!("AUTH_STORAGE_REQUIRED", "OAuth requires a persistent private SQLite DB") };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -90,7 +91,8 @@ impl Credentials {
 
     /// google-auth `valid`: a token that isn't within the refresh threshold of expiring. No expiry = never expires.
     fn valid(&self, now: Ts) -> bool {
-        self.text("token").is_some() && self.expiry().is_none_or(|e| now < e - jiff::SignedDuration::from_secs(REFRESH_THRESHOLD_SECS))
+        self.text("token").is_some()
+            && self.expiry().is_none_or(|e| now < e - jiff::SignedDuration::from_secs(REFRESH_THRESHOLD_SECS))
     }
 
     /// Refresh-token grant against `token_uri`; updates token/refresh_token/expiry like google-auth.
@@ -121,10 +123,8 @@ impl Credentials {
             return Err(fail("Token endpoint refused the refresh"));
         }
         let data = response.json()?;
-        let token = data
-            .get("access_token")
-            .and_then(Value::as_str)
-            .ok_or_else(|| fail("No access token in response"))?;
+        let token =
+            data.get("access_token").and_then(Value::as_str).ok_or_else(|| fail("No access token in response"))?;
         if let Some(granted) = data.get("scope").and_then(Value::as_str) {
             let granted: HashSet<&str> = granted.split(' ').collect();
             if !scopes.iter().all(|s| granted.contains(s.as_str())) {
@@ -134,10 +134,7 @@ impl Credentials {
         self.0.insert("token".into(), json!(token));
         let refresh_token = data.get("refresh_token").and_then(Value::as_str).unwrap_or(&refresh_token).to_string();
         self.0.insert("refresh_token".into(), json!(refresh_token));
-        match data
-            .get("expires_in")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-        {
+        match data.get("expires_in").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))) {
             Some(secs) => {
                 // Naive UTC ISO plus "Z": `2026-10-14T10:30:00Z`.
                 let iso = (now + jiff::SignedDuration::from_secs(secs)).iso();
@@ -170,8 +167,11 @@ pub struct Consent {
 impl Consent {
     /// Parse the downloaded client JSON. Only Desktop clients allow the loopback redirect.
     pub fn new(client_json: &[u8]) -> Result<Consent> {
-        let client: Value = serde_json::from_slice(client_json).map_err(|_| Error::domain("CALENDAR_AUTH_FAILED", "Client file is not JSON"))?;
-        let Some(installed) = client.get("installed") else { bail!("CALENDAR_AUTH_FAILED", "Desktop app OAuth client required") };
+        let client: Value = serde_json::from_slice(client_json)
+            .map_err(|_| Error::domain("CALENDAR_AUTH_FAILED", "Client file is not JSON"))?;
+        let Some(installed) = client.get("installed") else {
+            bail!("CALENDAR_AUTH_FAILED", "Desktop app OAuth client required")
+        };
         let text = |k: &str| installed.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
         let random = || uuid::Uuid::new_v4().simple().to_string();
         Ok(Consent {
@@ -189,11 +189,19 @@ impl Consent {
     pub fn url(&self) -> String {
         use base64::Engine;
         use sha2::Digest;
-        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(self.verifier.as_bytes()));
+        let challenge =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(self.verifier.as_bytes()));
         let params = [
-            ("response_type", "code"), ("client_id", &self.client_id), ("redirect_uri", &self.redirect_uri), ("scope", SCOPES[0]),
-            ("state", &self.state), ("code_challenge", &challenge), ("code_challenge_method", "S256"), ("access_type", "offline"),
-            ("prompt", "consent"), ("include_granted_scopes", "false"),
+            ("response_type", "code"),
+            ("client_id", &self.client_id),
+            ("redirect_uri", &self.redirect_uri),
+            ("scope", SCOPES[0]),
+            ("state", &self.state),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("include_granted_scopes", "false"),
         ];
         let query: Vec<String> = params.iter().map(|(k, v)| format!("{k}={}", quote(v))).collect();
         format!("{AUTH_URI}?{}", query.join("&"))
@@ -201,40 +209,70 @@ impl Consent {
 
     /// Exchange the code from the pasted redirect URL and store the credentials (google-auth format).
     /// Errors never echo the URL, code or tokens.
-    pub fn finish(&self, db: &Connection, calendar_id: &str, pasted: &str, transport: &dyn Transport, now: Ts) -> Result<Value> {
+    pub fn finish(
+        &self,
+        db: &Connection,
+        calendar_id: &str,
+        pasted: &str,
+        transport: &dyn Transport,
+        now: Ts,
+    ) -> Result<Value> {
         bind_calendar(db, calendar_id, "google")?;
         private_storage(db)?;
-        let failed = || Error::domain("CALENDAR_AUTH_FAILED", "Google authorization failed. Check desktop client, test-user access and browser consent; retry.");
+        let failed = || {
+            Error::domain(
+                "CALENDAR_AUTH_FAILED",
+                "Google authorization failed. Check desktop client, test-user access and browser consent; retry.",
+            )
+        };
         let query = pasted.trim().split_once('?').map_or("", |(_, q)| q).split('#').next().unwrap_or_default();
-        let param = |key: &str| query.split('&').find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| unquote(v)));
+        let param = |key: &str| {
+            query.split('&').find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| unquote(v)))
+        };
         if param("state").as_deref() != Some(self.state.as_str()) {
             return Err(failed());
         }
         let code = param("code").ok_or_else(failed)?;
         let mut request = Request::new(Method::Post, &self.token_uri, 120);
         request.body = Body::Form(
-            [("grant_type", "authorization_code"), ("code", &code), ("client_id", &self.client_id), ("client_secret", &self.client_secret),
-                ("redirect_uri", &self.redirect_uri), ("code_verifier", &self.verifier)]
+            [
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("client_id", &self.client_id),
+                ("client_secret", &self.client_secret),
+                ("redirect_uri", &self.redirect_uri),
+                ("code_verifier", &self.verifier),
+            ]
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .to_vec(),
         );
         let response = transport.send(&request).map_err(|_| failed())?;
         let data = response.json().ok().filter(|_| response.status == 200).ok_or_else(failed)?;
-        let (Some(token), Some(refresh_token)) = (data.get("access_token").and_then(Value::as_str), data.get("refresh_token").and_then(Value::as_str)) else {
+        let (Some(token), Some(refresh_token)) =
+            (data.get("access_token").and_then(Value::as_str), data.get("refresh_token").and_then(Value::as_str))
+        else {
             return Err(failed());
         };
-        let granted: HashSet<&str> = data.get("scope").and_then(Value::as_str).unwrap_or(SCOPES[0]).split(' ').collect();
+        let granted: HashSet<&str> =
+            data.get("scope").and_then(Value::as_str).unwrap_or(SCOPES[0]).split(' ').collect();
         if !SCOPES.iter().all(|s| granted.contains(s)) {
             return Err(failed());
         }
         let mut credentials = json!({"token": token, "refresh_token": refresh_token, "token_uri": self.token_uri, "client_id": self.client_id,
             "client_secret": self.client_secret, "scopes": SCOPES, "universe_domain": "googleapis.com", "account": ""});
         if let Some(secs) = data.get("expires_in").and_then(Value::as_i64) {
-            credentials["expiry"] = json!(format!("{}Z", (now + jiff::SignedDuration::from_secs(secs)).iso().trim_end_matches("+00:00")));
+            credentials["expiry"] =
+                json!(format!("{}Z", (now + jiff::SignedDuration::from_secs(secs)).iso().trim_end_matches("+00:00")));
         }
         let row = CalendarCredential { id: 1, credentials_json: Json(credentials) };
-        if CalendarCredential::get(db, 1)?.is_some() { row.update(db)? } else { row.insert(db)? }
-        Ok(json!({"authorized": true, "calendar_id": calendar_id, "scopes": SCOPES, "storage": "private_sqlite", "calendar_events_changed": false}))
+        if CalendarCredential::get(db, 1)?.is_some() {
+            row.update(db)?
+        } else {
+            row.insert(db)?
+        }
+        Ok(
+            json!({"authorized": true, "calendar_id": calendar_id, "scopes": SCOPES, "storage": "private_sqlite", "calendar_events_changed": false}),
+        )
     }
 }
 
@@ -261,12 +299,19 @@ pub fn load_credentials(db: &Connection, transport: &dyn Transport) -> Result<Cr
         bail!("CALENDAR_AUTH_REQUIRED", "Run `gymclaw calendar-auth` before Google sync")
     };
     private_storage(db)?;
-    let expired = || Error::domain("CALENDAR_AUTH_REQUIRED", "Google credentials expired or invalid; run `gymclaw calendar-auth` again");
+    let expired = || {
+        Error::domain(
+            "CALENDAR_AUTH_REQUIRED",
+            "Google credentials expired or invalid; run `gymclaw calendar-auth` again",
+        )
+    };
     let mut credentials = match &row.credentials_json.0 {
         Value::Object(map) => Credentials(map.clone()),
         _ => return Err(expired()),
     };
-    if ["refresh_token", "client_id", "client_secret"].iter().any(|k| !credentials.0.contains_key(*k)) || !credentials.has_scopes() {
+    if ["refresh_token", "client_id", "client_secret"].iter().any(|k| !credentials.0.contains_key(*k))
+        || !credentials.has_scopes()
+    {
         return Err(expired());
     }
     if !credentials.valid(Ts::now()) {
@@ -304,7 +349,11 @@ fn quote(text: &str) -> String {
 }
 
 /// The live provider for the DB's bound calendar (or `calendar_id`, which is then bound).
-pub fn google_provider<'a>(db: &'a Connection, calendar_id: Option<&str>, transport: &'a dyn Transport) -> Result<GoogleCalendarProvider<'a>> {
+pub fn google_provider<'a>(
+    db: &'a Connection,
+    calendar_id: Option<&str>,
+    transport: &'a dyn Transport,
+) -> Result<GoogleCalendarProvider<'a>> {
     let calendar_id = match calendar_id {
         Some(id) => id.to_string(),
         None => match CalendarSyncState::get(db, 1)? {
@@ -335,7 +384,8 @@ impl<'a> GoogleCalendarProvider<'a> {
 
     /// One API call. Transport and refresh failures never expose URLs, tokens or credentials.
     fn request(&mut self, mut request: Request) -> Result<Response> {
-        let unavailable = || Error::domain("CALENDAR_UNAVAILABLE", "Calendar request failed; sync/retry before further changes.");
+        let unavailable =
+            || Error::domain("CALENDAR_UNAVAILABLE", "Calendar request failed; sync/retry before further changes.");
         let mut refreshes = 0;
         loop {
             if let Some(session) = &mut self.session {
@@ -343,9 +393,7 @@ impl<'a> GoogleCalendarProvider<'a> {
                     session.refresh(self.transport).map_err(|_| unavailable())?;
                 }
                 request.headers.retain(|(k, _)| k != "Authorization");
-                request
-                    .headers
-                    .push(("Authorization".into(), format!("Bearer {}", session.credentials.token())));
+                request.headers.push(("Authorization".into(), format!("Bearer {}", session.credentials.token())));
             }
             let response = self.transport.send(&request).map_err(|_| unavailable())?;
             match &mut self.session {
@@ -376,9 +424,8 @@ impl<'a> GoogleCalendarProvider<'a> {
     }
 
     fn parse(&self, response: &Response) -> Result<CalendarEvent> {
-        let body = response
-            .json()
-            .map_err(|_| Error::domain("CALENDAR_INVALID_RESPONSE", "Google returned invalid JSON"))?;
+        let body =
+            response.json().map_err(|_| Error::domain("CALENDAR_INVALID_RESPONSE", "Google returned invalid JSON"))?;
         parse_event(&body, &self.timezone)
     }
 
@@ -393,10 +440,7 @@ impl<'a> GoogleCalendarProvider<'a> {
 impl Session<'_> {
     fn refresh(&mut self, transport: &dyn Transport) -> Result<()> {
         self.credentials.refresh(transport, Ts::now())?;
-        let row = CalendarCredential {
-            id: 1,
-            credentials_json: Json(Value::Object(self.credentials.0.clone())),
-        };
+        let row = CalendarCredential { id: 1, credentials_json: Json(Value::Object(self.credentials.0.clone())) };
         row.update(self.db)
     }
 }
@@ -553,10 +597,7 @@ mod tests {
 
     impl Script {
         fn new(responses: Vec<Result<Response>>) -> Script {
-            Script {
-                responses: RefCell::new(responses.into()),
-                calls: RefCell::new(vec![]),
-            }
+            Script { responses: RefCell::new(responses.into()), calls: RefCell::new(vec![]) }
         }
     }
 
@@ -568,10 +609,7 @@ mod tests {
     }
 
     fn ok(status: u16, body: Value) -> Result<Response> {
-        Ok(Response {
-            status,
-            body: body.to_string().into_bytes(),
-        })
+        Ok(Response { status, body: body.to_string().into_bytes() })
     }
 
     #[test]
@@ -583,7 +621,8 @@ mod tests {
             ),
             ok(200, json!({"items": [], "nextSyncToken": "new"})),
         ]);
-        let mut provider = GoogleCalendarProvider::new("only-this@group.calendar.google.com", &script, "Europe/Berlin").unwrap();
+        let mut provider =
+            GoogleCalendarProvider::new("only-this@group.calendar.google.com", &script, "Europe/Berlin").unwrap();
         let batch = provider.incremental_sync(Some("old")).unwrap();
         assert!(batch.events.len() == 1 && batch.next_sync_token == "new" && !batch.full);
         let calls = script.calls.borrow();
@@ -624,14 +663,11 @@ mod tests {
 
     #[test]
     fn update_uses_if_match_and_detects_conflicts() {
-        let script = Script::new(vec![ok(200, raw_event("s", json!({}))), ok(200, raw_event("s", json!({"etag": "\"v2\""})))]);
+        let script =
+            Script::new(vec![ok(200, raw_event("s", json!({}))), ok(200, raw_event("s", json!({"etag": "\"v2\""})))]);
         let mut provider = GoogleCalendarProvider::new("calendar", &script, "Europe/Berlin").unwrap();
         assert_eq!(
-            provider
-                .update_gym_event("owned", &raw_event("s", json!({})), "\"v1\"")
-                .unwrap()
-                .etag
-                .as_deref(),
+            provider.update_gym_event("owned", &raw_event("s", json!({})), "\"v1\"").unwrap().etag.as_deref(),
             Some("\"v2\"")
         );
         let patch = &script.calls.borrow()[1];
@@ -662,18 +698,10 @@ mod tests {
         crate::db::migrate(&mut db).unwrap();
         let stored = json!({"token": "old", "refresh_token": "r1", "token_uri": "https://oauth2.googleapis.com/token", "client_id": "c",
             "client_secret": "s", "scopes": SCOPES, "universe_domain": "googleapis.com", "account": "", "expiry": "2020-01-01T00:00:00Z"});
-        CalendarCredential {
-            id: 1,
-            credentials_json: Json(stored),
-        }
-        .insert(&db)
-        .unwrap();
+        CalendarCredential { id: 1, credentials_json: Json(stored) }.insert(&db).unwrap();
         bind_calendar(&db, "dedicated", "google").unwrap();
         let script = Script::new(vec![
-            ok(
-                200,
-                json!({"access_token": "fresh", "expires_in": 3599, "scope": SCOPES[0], "token_type": "Bearer"}),
-            ),
+            ok(200, json!({"access_token": "fresh", "expires_in": 3599, "scope": SCOPES[0], "token_type": "Bearer"})),
             ok(200, json!({"items": [], "nextSyncToken": "t"})),
         ]);
         let mut provider = google_provider(&db, None, &script).unwrap();
@@ -708,15 +736,28 @@ mod tests {
         crate::db::migrate(&mut db).unwrap();
         let consent = Consent::new(br#"{"installed": {"client_id": "cid", "client_secret": "cs", "token_uri": "https://oauth2.googleapis.com/token"}}"#).unwrap();
         let url = consent.url();
-        assert!(url.contains("code_challenge_method=S256") && url.contains("access_type=offline") && !url.contains(&consent.verifier));
+        assert!(
+            url.contains("code_challenge_method=S256")
+                && url.contains("access_type=offline")
+                && !url.contains(&consent.verifier)
+        );
         let now = Ts::now();
-        let script = Script::new(vec![ok(200, json!({"access_token": "a1", "refresh_token": "r1", "expires_in": 3599, "scope": SCOPES[0]}))]);
+        let script = Script::new(vec![ok(
+            200,
+            json!({"access_token": "a1", "refresh_token": "r1", "expires_in": 3599, "scope": SCOPES[0]}),
+        )]);
         let wrong_state = format!("http://127.0.0.1:1/?state=other&code=c%2F1&scope={}", quote(SCOPES[0]));
-        assert_eq!(consent.finish(&db, "cal@group", &wrong_state, &script, now).unwrap_err().code(), "CALENDAR_AUTH_FAILED");
+        assert_eq!(
+            consent.finish(&db, "cal@group", &wrong_state, &script, now).unwrap_err().code(),
+            "CALENDAR_AUTH_FAILED"
+        );
         let pasted = format!("http://127.0.0.1:1/?state={}&code=4%2F0Ab&scope={}", consent.state, quote(SCOPES[0]));
         assert_eq!(consent.finish(&db, "cal@group", &pasted, &script, now).unwrap()["authorized"], true);
         let Body::Form(form) = &script.calls.borrow()[0].body else { panic!("form body") };
-        assert!(form.contains(&("code".into(), "4/0Ab".into())) && form.contains(&("code_verifier".into(), consent.verifier.clone())));
+        assert!(
+            form.contains(&("code".into(), "4/0Ab".into()))
+                && form.contains(&("code_verifier".into(), consent.verifier.clone()))
+        );
         // Fresh token: loading needs no network.
         assert_eq!(load_credentials(&db, &Script::new(vec![])).unwrap().token(), "a1");
         std::fs::remove_dir_all(dir).ok();

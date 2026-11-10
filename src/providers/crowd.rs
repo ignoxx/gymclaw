@@ -38,10 +38,7 @@ pub struct CrowdReading {
 
 impl CrowdReading {
     pub fn count(raw_value: u64) -> CrowdReading {
-        CrowdReading {
-            raw_value,
-            freshness_seconds: None,
-        }
+        CrowdReading { raw_value, freshness_seconds: None }
     }
 }
 
@@ -138,12 +135,7 @@ impl CrowdProvider for MySportsProvider<'_> {
             );
         }
         // Strictly a nonnegative JSON integer: no strings, floats or booleans.
-        let value = response
-            .json()
-            .map_err(|_| invalid())?
-            .get("value")
-            .and_then(Value::as_u64)
-            .ok_or_else(invalid)?;
+        let value = response.json().map_err(|_| invalid())?.get("value").and_then(Value::as_u64).ok_or_else(invalid)?;
         Ok(CrowdReading::count(value))
     }
 }
@@ -232,7 +224,8 @@ pub struct HttpCountProvider<'a> {
 
 impl<'a> HttpCountProvider<'a> {
     pub fn new(config: HttpSource, transport: &'a dyn Transport) -> Result<HttpCountProvider<'a>> {
-        let not_configured = || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
+        let not_configured =
+            || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
         if !config.url.starts_with("https://") {
             return Err(not_configured());
         }
@@ -271,15 +264,13 @@ impl CrowdProvider for HttpCountProvider<'_> {
         request.follow_redirects = false;
         let response = self.transport.send(&request).map_err(|_| unreachable())?;
         if response.status != 200 {
-            bail!(
-                "GYM_API_UNAVAILABLE",
-                "Crowd source unavailable (HTTP {}); no new count stored",
-                response.status
-            );
+            bail!("GYM_API_UNAVAILABLE", "Crowd source unavailable (HTTP {}); no new count stored", response.status);
         }
         let value = match &self.extract {
             Extract::JsonPath(path) => count(dig(&response.json().map_err(|_| invalid())?, path).ok_or_else(invalid)?),
-            Extract::Regex(regex) => regex.captures(&response.text()).and_then(|c| c.get(1)).and_then(|m| count(&json!(m.as_str()))),
+            Extract::Regex(regex) => {
+                regex.captures(&response.text()).and_then(|c| c.get(1)).and_then(|m| count(&json!(m.as_str())))
+            }
         };
         Ok(CrowdReading::count(value.ok_or_else(invalid)?))
     }
@@ -297,12 +288,8 @@ pub type Runner = dyn Fn(&[String], Duration) -> Result<CommandOutput>;
 /// The real runner: no shell, stdout/stderr captured, killed after `timeout`.
 pub fn run_command(argv: &[String], timeout: Duration) -> Result<CommandOutput> {
     let (program, args) = argv.split_first().ok_or_else(|| Error::domain("COMMAND_EMPTY", "Empty command"))?;
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child =
+        Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let out = std::thread::spawn(move || {
@@ -325,10 +312,7 @@ pub fn run_command(argv: &[String], timeout: Duration) -> Result<CommandOutput> 
     };
     let stdout = out.join().unwrap_or_default();
     let _ = err.join();
-    Ok(CommandOutput {
-        status: status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-    })
+    Ok(CommandOutput { status: status.code().unwrap_or(-1), stdout: String::from_utf8_lossy(&stdout).into_owned() })
 }
 
 /// Reads a count from a local command.
@@ -343,11 +327,7 @@ impl<'a> CommandCountProvider<'a> {
         if config.argv.is_empty() || !(1..=120).contains(&config.timeout_seconds) {
             bail!("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
         }
-        Ok(CommandCountProvider {
-            provider_id: format!("command:{}", config.argv.join(" ")),
-            config,
-            run,
-        })
+        Ok(CommandCountProvider { provider_id: format!("command:{}", config.argv.join(" ")), config, run })
     }
 }
 
@@ -368,9 +348,7 @@ impl CrowdProvider for CommandCountProvider<'_> {
         } else {
             count(&json!(out))
         };
-        Ok(CrowdReading::count(
-            value.ok_or_else(|| invalid_response("Crowd source command printed no valid count"))?,
-        ))
+        Ok(CrowdReading::count(value.ok_or_else(|| invalid_response("Crowd source command printed no valid count"))?))
     }
 }
 
@@ -378,17 +356,21 @@ impl CrowdProvider for CommandCountProvider<'_> {
 /// Production: `from_environment(&Net::new()?, &run_command)`.
 pub fn from_environment<'a>(transport: &'a dyn Transport, run: &'a Runner) -> Result<Box<dyn CrowdProvider + 'a>> {
     let path = crate::config::crowd_config();
-    let not_configured = || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
-    let values: Value = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .ok_or_else(not_configured)?;
+    let not_configured =
+        || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
+    let values: Value =
+        std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).ok_or_else(not_configured)?;
     from_config(values, transport, run)
 }
 
 /// The provider a crowd-config JSON value describes (see the module docs).
-pub fn from_config<'a>(values: Value, transport: &'a dyn Transport, run: &'a Runner) -> Result<Box<dyn CrowdProvider + 'a>> {
-    let not_configured = || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
+pub fn from_config<'a>(
+    values: Value,
+    transport: &'a dyn Transport,
+    run: &'a Runner,
+) -> Result<Box<dyn CrowdProvider + 'a>> {
+    let not_configured =
+        || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
     let Value::Object(mut values) = values else { return Err(not_configured()) };
     if !values.contains_key("kind") {
         // Original MySports file: only the two identifiers count.
@@ -403,7 +385,9 @@ pub fn from_config<'a>(values: Value, transport: &'a dyn Transport, run: &'a Run
     }
     let config: SourceConfig = serde_json::from_value(Value::Object(values)).map_err(|_| not_configured())?;
     let provider: Box<dyn CrowdProvider + 'a> = match config {
-        SourceConfig::Mysports(c) => Box::new(MySportsProvider::new(&c.studio_id, &c.tenant, transport).map_err(|_| not_configured())?),
+        SourceConfig::Mysports(c) => {
+            Box::new(MySportsProvider::new(&c.studio_id, &c.tenant, transport).map_err(|_| not_configured())?)
+        }
         SourceConfig::Http(c) => Box::new(HttpCountProvider::new(c, transport).map_err(|_| not_configured())?),
         SourceConfig::Command(c) => Box::new(CommandCountProvider::new(c, run).map_err(|_| not_configured())?),
     };
@@ -418,12 +402,7 @@ mod tests {
     use crate::providers::http::Response;
 
     fn body(value: Value) -> impl Fn(&Request) -> Result<Response> {
-        move |_: &Request| {
-            Ok(Response {
-                status: 200,
-                body: value.to_string().into_bytes(),
-            })
-        }
+        move |_: &Request| Ok(Response { status: 200, body: value.to_string().into_bytes() })
     }
 
     #[test]
@@ -431,15 +410,9 @@ mod tests {
         let seen = RefCell::new(None);
         let transport = |r: &Request| {
             *seen.borrow_mut() = Some(r.clone());
-            Ok(Response {
-                status: 200,
-                body: br#"{"value": 7}"#.to_vec(),
-            })
+            Ok(Response { status: 200, body: br#"{"value": 7}"#.to_vec() })
         };
-        let reading = MySportsProvider::new("1234567890", "fixture-tenant", &transport)
-            .unwrap()
-            .get_reading()
-            .unwrap();
+        let reading = MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap().get_reading().unwrap();
         assert_eq!(reading, CrowdReading::count(7));
         let request = seen.borrow().clone().unwrap();
         assert!(request.url.ends_with("/1234567890/utilization/v2/active-checkin") && !request.follow_redirects);
@@ -453,15 +426,14 @@ mod tests {
             json!({"value": null}),
         ] {
             let transport = body(bad);
-            let error = MySportsProvider::new("1234567890", "fixture-tenant", &transport)
-                .unwrap()
-                .get_reading()
-                .unwrap_err();
+            let error =
+                MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap().get_reading().unwrap_err();
             assert_eq!(error.code(), "GYM_API_INVALID_RESPONSE");
         }
         // No response at all (timeout, DNS, TLS) is an outage, not a malformed body.
         let transport = |_: &Request| -> Result<Response> { Err(Error::domain("HTTP", "timed out")) };
-        let error = MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap().get_reading().unwrap_err();
+        let error =
+            MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap().get_reading().unwrap_err();
         assert_eq!(error.code(), "GYM_API_UNAVAILABLE");
     }
 
@@ -480,12 +452,7 @@ mod tests {
         // Pinned: the DB stores this identity, so the same config must keep producing it.
         assert_eq!(source.provider_id(), "http:https://gym.example/live#dcdf56b39c45");
 
-        let transport = |_: &Request| {
-            Ok(Response {
-                status: 200,
-                body: b"<b>12 people</b> training now".to_vec(),
-            })
-        };
+        let transport = |_: &Request| Ok(Response { status: 200, body: b"<b>12 people</b> training now".to_vec() });
         assert_eq!(
             HttpCountProvider::new(config(json!({"regex": r"(\d+) people"})), &transport)
                 .unwrap()
@@ -503,9 +470,7 @@ mod tests {
         let transport = body(json!({"value": 9}));
         let run = |_: &[String], _: Duration| Ok(CommandOutput { status: 0, stdout: "1".into() });
         let id = |config: Value| {
-            from_config(config, &transport, &run)
-                .map(|p| p.provider_id().to_string())
-                .map_err(|e| e.code().to_string())
+            from_config(config, &transport, &run).map(|p| p.provider_id().to_string()).map_err(|e| e.code().to_string())
         };
         // A file in the original shape (no kind, extra field) keeps the identity the live DB is bound to.
         assert_eq!(
@@ -537,20 +502,10 @@ mod tests {
     #[test]
     fn command_source_reads_count() {
         for (stdout, expected) in [("12\n", Some(12)), (r#"{"value": 12}"#, Some(12)), ("busy", None), ("-3", None)] {
-            let run = move |_: &[String], _: Duration| {
-                Ok(CommandOutput {
-                    status: 0,
-                    stdout: stdout.into(),
-                })
-            };
-            let source = CommandCountProvider::new(
-                CommandSource {
-                    argv: vec!["python3".into()],
-                    timeout_seconds: 30,
-                },
-                &run,
-            )
-            .unwrap();
+            let run = move |_: &[String], _: Duration| Ok(CommandOutput { status: 0, stdout: stdout.into() });
+            let source =
+                CommandCountProvider::new(CommandSource { argv: vec!["python3".into()], timeout_seconds: 30 }, &run)
+                    .unwrap();
             match expected {
                 Some(n) => assert_eq!(source.get_reading().unwrap().raw_value, n),
                 None => assert_eq!(source.get_reading().unwrap_err().code(), "GYM_API_INVALID_RESPONSE"),
@@ -561,11 +516,20 @@ mod tests {
     #[test]
     fn http_identity_covers_headers_not_key_order() {
         let transport = body(json!({"n": 1}));
-        let id = |config: Value| HttpCountProvider::new(serde_json::from_value(config).unwrap(), &transport).unwrap().provider_id().to_string();
+        let id = |config: Value| {
+            HttpCountProvider::new(serde_json::from_value(config).unwrap(), &transport)
+                .unwrap()
+                .provider_id()
+                .to_string()
+        };
         let a = id(json!({"url": "https://gym.example/live", "headers": {"x-tenant": "gym-a"}, "json_path": "n"}));
         let b = id(json!({"url": "https://gym.example/live", "headers": {"x-tenant": "gym-b"}, "json_path": "n"}));
-        let first = id(json!({"url": "https://gym.example/live", "headers": {"b": "2", "x-tenant": "gym-b"}, "json_path": "n"}));
-        let reordered = id(json!({"json_path": "n", "headers": {"x-tenant": "gym-b", "b": "2"}, "url": "https://gym.example/live"}));
+        let first = id(
+            json!({"url": "https://gym.example/live", "headers": {"b": "2", "x-tenant": "gym-b"}, "json_path": "n"}),
+        );
+        let reordered = id(
+            json!({"json_path": "n", "headers": {"x-tenant": "gym-b", "b": "2"}, "url": "https://gym.example/live"}),
+        );
         assert!(a != b && first == reordered);
     }
 }

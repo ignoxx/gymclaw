@@ -42,9 +42,14 @@ pub fn plan_lines(db: &Connection, session: &PlannedSession) -> Result<Vec<Strin
     let sets = session.workout_plan_json.get("sets");
     let mut lines = vec![];
     for (index, spec) in template.exercises.iter().enumerate() {
-        let reps = if spec.rep_min == spec.rep_max { spec.rep_min.to_string() } else { format!("{}–{}", spec.rep_min, spec.rep_max) };
+        let reps = if spec.rep_min == spec.rep_max {
+            spec.rep_min.to_string()
+        } else {
+            format!("{}–{}", spec.rep_min, spec.rep_max)
+        };
         let count = sets.and_then(|s| s.get(&spec.id)).and_then(Value::as_i64).unwrap_or(spec.working_sets);
-        let last = last_set(db, &spec.id)?.map(|l| format!(" · last {} × {} kg", l.reps, g(l.weight))).unwrap_or_default();
+        let last =
+            last_set(db, &spec.id)?.map(|l| format!(" · last {} × {} kg", l.reps, g(l.weight))).unwrap_or_default();
         lines.push(format!("{}. {} · {count} sets of {reps}{last}", index + 1, spec.name));
     }
     Ok(lines)
@@ -54,17 +59,31 @@ pub fn plan_lines(db: &Connection, session: &PlannedSession) -> Result<Vec<Strin
 pub fn session_preview(db: &Connection, now: Ts, planned_session_id: Option<&str>, data_dir: &Path) -> Result<Card> {
     let session = match planned_session_id {
         Some(id) => PlannedSession::get(db, id)?,
-        None => PlannedSession::first(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_end_at > ?1 ORDER BY planned_start_at", [now])?,
+        None => PlannedSession::first(
+            db,
+            "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_end_at > ?1 ORDER BY planned_start_at",
+            [now],
+        )?,
     };
     let Some(session) = session.filter(|s| s.workout_template_id.is_some()) else {
         crate::bail!("NO_PLANNED_SESSION", "No upcoming session with a workout plan");
     };
     let template = get_template(db, session.workout_template_id.as_deref().unwrap_or_default())?;
     let start = session.planned_start_at.local(&get_profile(db)?.tz());
-    let crowd = session.workout_plan_json.pointer("/crowd_forecast/feel").and_then(Value::as_str).filter(|f| !f.is_empty());
-    let mut lines = vec![format!("**{}** · {}{}", template.name, start.strftime("%a %H:%M"), crowd.map(|c| format!(" · {c}")).unwrap_or_default())];
+    let crowd =
+        session.workout_plan_json.pointer("/crowd_forecast/feel").and_then(Value::as_str).filter(|f| !f.is_empty());
+    let mut lines = vec![format!(
+        "**{}** · {}{}",
+        template.name,
+        start.strftime("%a %H:%M"),
+        crowd.map(|c| format!(" · {c}")).unwrap_or_default()
+    )];
     lines.extend(plan_lines(db, &session)?);
-    let items: Vec<(String, String)> = template.exercises.iter().filter_map(|s| for_exercise(&s.name, s.guide_id.as_deref()).map(|p| (s.name.clone(), p.telegram_png))).collect();
+    let items: Vec<(String, String)> = template
+        .exercises
+        .iter()
+        .filter_map(|s| for_exercise(&s.name, s.guide_id.as_deref()).map(|p| (s.name.clone(), p.telegram_png)))
+        .collect();
     let photo = if items.is_empty() { None } else { Some(render_grid(&items, &data_dir.join("previews"))?) };
     let kind = if photo.is_some() { CardKind::Preview } else { CardKind::Other };
     Ok(Card { text: lines.join("\n"), photo, buttons: vec![], rest_until: None, kind, effect: None })
@@ -88,12 +107,23 @@ pub(crate) fn ensure_ascii(json: &str) -> String {
 
 /// DM Sans, embedded so previews never depend on the deploy layout.
 fn font() -> Result<FontVec> {
-    FontVec::try_from_vec(include_bytes!("../../web/fonts/DM-Sans.ttf").to_vec()).map_err(|e| Error::domain("ASSET_MISSING", format!("Bad font: {e}")))
+    FontVec::try_from_vec(include_bytes!("../../web/fonts/DM-Sans.ttf").to_vec())
+        .map_err(|e| Error::domain("ASSET_MISSING", format!("Bad font: {e}")))
 }
 
 /// items: (label, png path). Returns a cached PNG path under `root`; same content renders once.
 pub fn render_grid(items: &[(String, String)], root: &Path) -> Result<String> {
-    let dumped = items.iter().map(|(l, p)| format!("[{}, {}]", serde_json::to_string(l).unwrap_or_default(), serde_json::to_string(p).unwrap_or_default())).collect::<Vec<_>>().join(", ");
+    let dumped = items
+        .iter()
+        .map(|(l, p)| {
+            format!(
+                "[{}, {}]",
+                serde_json::to_string(l).unwrap_or_default(),
+                serde_json::to_string(p).unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let key = hex::encode(Sha256::digest(ensure_ascii(&format!("[{dumped}]")).as_bytes()));
     let path: PathBuf = root.join(&key[..16]).join("preview.png");
     if path.exists() {
@@ -114,8 +144,15 @@ pub fn render_grid(items: &[(String, String)], root: &Path) -> Result<String> {
         let art = image::open(png).map_err(|e| Error::domain("ASSET_MISSING", format!("{png}: {e}")))?.to_rgb8();
         // Telegram padding isn't needed inside the grid.
         let margin = art.width() / 12;
-        let cropped = image::imageops::crop_imm(&art, margin, margin, art.width() - 2 * margin, art.height() - 2 * margin).to_image();
-        image::imageops::replace(&mut canvas, &image::imageops::resize(&cropped, TILE, TILE, FilterType::CatmullRom), x as i64, y as i64);
+        let cropped =
+            image::imageops::crop_imm(&art, margin, margin, art.width() - 2 * margin, art.height() - 2 * margin)
+                .to_image();
+        image::imageops::replace(
+            &mut canvas,
+            &image::imageops::resize(&cropped, TILE, TILE, FilterType::CatmullRom),
+            x as i64,
+            y as i64,
+        );
         let mut text: Vec<char> = format!("{}. {label}", index + 1).chars().collect();
         while text_width(&text.iter().collect::<String>()) > TILE as f32 && text.len() > 4 {
             text.truncate(text.len() - 2);
@@ -145,4 +182,3 @@ pub fn render_grid(items: &[(String, String)], root: &Path) -> Result<String> {
     canvas.save(&path).map_err(|e| Error::domain("IO_ERROR", format!("{}: {e}", path.display())))?;
     Ok(path.to_string_lossy().into())
 }
-

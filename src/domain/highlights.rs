@@ -94,7 +94,9 @@ fn change(best: &SetLog, earlier: &[SetLog]) -> Option<Change> {
 }
 
 pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
-    let Some(session) = WorkoutSession::get(db, workout_id)? else { crate::bail!("WORKOUT_NOT_FOUND", "Unknown workout") };
+    let Some(session) = WorkoutSession::get(db, workout_id)? else {
+        crate::bail!("WORKOUT_NOT_FOUND", "Unknown workout")
+    };
     let Some(start) = session.started_at else { crate::bail!("WORKOUT_NOT_STARTED", "Workout has no start time") };
     let name = session.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
     let mut lifts = Vec::new();
@@ -120,7 +122,15 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
         Some(p) => Some((p.actual_duration_seconds.unwrap_or(0).div_euclid(60), volume(&working(db, &p.id)?))),
         None => None,
     };
-    Ok(Highlights { name, started_at: start, minutes: session.actual_duration_seconds.unwrap_or(0).div_euclid(60), sets: sets.len(), volume: volume(&sets), last, lifts })
+    Ok(Highlights {
+        name,
+        started_at: start,
+        minutes: session.actual_duration_seconds.unwrap_or(0).div_euclid(60),
+        sets: sets.len(),
+        volume: volume(&sets),
+        last,
+        lifts,
+    })
 }
 
 /// Finished workouts that started in `week` (Monday, owner-local), oldest first.
@@ -145,8 +155,18 @@ mod tests {
     use super::*;
 
     fn set(session: &str, weight: f64, reps: i64) -> SetLog {
-        SetLog { id: String::new(), workout_exercise_id: session.into(), set_number: 1, set_type: crate::db::models::SetType::Working, weight, reps, rir_optional: None,
-            logged_at: Ts::now(), rest_started_at: None, rest_due_at: None }
+        SetLog {
+            id: String::new(),
+            workout_exercise_id: session.into(),
+            set_number: 1,
+            set_type: crate::db::models::SetType::Working,
+            weight,
+            reps,
+            rir_optional: None,
+            logged_at: Ts::now(),
+            rest_started_at: None,
+            rest_due_at: None,
+        }
     }
 
     #[test]

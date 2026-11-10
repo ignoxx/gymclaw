@@ -36,7 +36,8 @@ pub struct Entry {
 /// Slug → item, sorted by slug (manifest order is not needed for any result).
 pub static CATALOG: LazyLock<BTreeMap<String, Item>> = LazyLock::new(|| {
     let path = crate::config::assets_dir().join("manifest.json");
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("workout guide manifest {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("workout guide manifest {}: {e}", path.display()));
     let items: Vec<Item> = serde_json::from_str(&text).expect("valid workout guide manifest");
     items.into_iter().map(|i| (i.slug.clone(), i)).collect()
 });
@@ -83,10 +84,18 @@ pub fn bodyweight(guide_id: Option<&str>) -> bool {
 
 /// Gym shorthand the owner types ("DB RDL"), spelled out the way catalog names are.
 const ALIASES: &[(&str, &str)] = &[
-    ("db", "dumbbell"), ("bb", "barbell"), ("kb", "kettlebell"), ("rdl", "romanian deadlift"), ("sldl", "stiff leg deadlift"),
-    ("ohp", "overhead press"), ("ext", "extension"), ("tri", "tricep"), ("bi", "bicep"),
+    ("db", "dumbbell"),
+    ("bb", "barbell"),
+    ("kb", "kettlebell"),
+    ("rdl", "romanian deadlift"),
+    ("sldl", "stiff leg deadlift"),
+    ("ohp", "overhead press"),
+    ("ext", "extension"),
+    ("tri", "tricep"),
+    ("bi", "bicep"),
     // A pec deck ("butterfly") is a machine fly.
-    ("butterfly", "fly"), ("deck", "fly"),
+    ("butterfly", "fly"),
+    ("deck", "fly"),
 ];
 /// Name words that say where an exercise is done, not what the movement is.
 const EQUIPMENT_WORDS: &[&str] = &["cable", "dumbbell", "barbell", "machine", "kettlebell", "smith", "band", "plate"];
@@ -118,13 +127,16 @@ pub fn search(query: &str, muscle: Option<&str>, equipment: Option<&str>, limit:
     let wanted = words(query);
     let mut results: Vec<(f64, &Item)> = vec![];
     for item in catalog().values() {
-        if muscle.is_some_and(|m| item.primary_muscle.to_lowercase() != m.to_lowercase()) || equipment.is_some_and(|e| item.equipment.to_lowercase() != e.to_lowercase()) {
+        if muscle.is_some_and(|m| item.primary_muscle.to_lowercase() != m.to_lowercase())
+            || equipment.is_some_and(|e| item.equipment.to_lowercase() != e.to_lowercase())
+        {
             continue;
         }
         let name = words(&item.name);
         let shared: f64 = wanted.intersection(&name).map(|w| RARITY.get(w).copied().unwrap_or(1.0)).sum();
         let context = words(&format!("{} {}", item.equipment, item.primary_muscle));
-        let score = shared + 0.5 * wanted.intersection(&context).count() as f64 - 0.1 * name.difference(&wanted).count() as f64;
+        let score =
+            shared + 0.5 * wanted.intersection(&context).count() as f64 - 0.1 * name.difference(&wanted).count() as f64;
         if !wanted.is_empty() && score <= 0.0 {
             continue;
         }
@@ -150,8 +162,14 @@ pub fn artwork(slug: &str) -> String {
 /// different equipment (the original may be occupied).
 pub fn similar(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<String>, limit: usize) -> Vec<Entry> {
     let Some(original) = catalog().get(guide_id) else { return vec![] };
-    let base: HashSet<String> = words(&original.name).into_iter().filter(|w| !EQUIPMENT_WORDS.contains(&w.as_str())).collect();
-    let taken: HashSet<String> = exclude.iter().chain(std::iter::once(&guide_id.to_string())).filter(|s| catalog().contains_key(*s)).map(|s| artwork(s)).collect();
+    let base: HashSet<String> =
+        words(&original.name).into_iter().filter(|w| !EQUIPMENT_WORDS.contains(&w.as_str())).collect();
+    let taken: HashSet<String> = exclude
+        .iter()
+        .chain(std::iter::once(&guide_id.to_string()))
+        .filter(|s| catalog().contains_key(*s))
+        .map(|s| artwork(s))
+        .collect();
     let mut options: Vec<((isize, bool, bool, String), Entry)> = vec![];
     for item in catalog().values() {
         if exclude.contains(&item.slug) || taken.contains(&artwork(&item.slug)) || item.is_stretch {
@@ -161,7 +179,10 @@ pub fn similar(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<Strin
             continue;
         }
         let shared = base.intersection(&words(&item.name)).count() as isize;
-        options.push(((-shared, !prefer.contains(&item.slug), item.equipment == original.equipment, item.name.clone()), entry(item)));
+        options.push((
+            (-shared, !prefer.contains(&item.slug), item.equipment == original.equipment, item.name.clone()),
+            entry(item),
+        ));
     }
     options.sort_by(|a, b| a.0.cmp(&b.0));
     let ranked: Vec<Entry> = options.into_iter().map(|(_, e)| e).collect();
@@ -172,7 +193,8 @@ pub fn similar(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<Strin
             picked.push(option.clone());
         }
     }
-    let rest: Vec<Entry> = ranked.into_iter().filter(|o| !picked.contains(o)).take(limit.saturating_sub(picked.len())).collect();
+    let rest: Vec<Entry> =
+        ranked.into_iter().filter(|o| !picked.contains(o)).take(limit.saturating_sub(picked.len())).collect();
     picked.extend(rest);
     picked
 }
@@ -217,7 +239,10 @@ mod tests {
     fn swap_never_offers_the_same_movement_under_another_name() {
         // Leg Curl and Lying Leg Curl share one picture: swapping one for the other isn't a swap.
         assert!(!slugs(&similar("lying-leg-curl", &HashSet::new(), &HashSet::new(), 3)).contains(&"leg-curl"));
-        assert!(!slugs(&similar("dumbbell-romanian-deadlift", &set(&["leg-curl"]), &HashSet::new(), 3)).contains(&"lying-leg-curl"));
+        assert!(
+            !slugs(&similar("dumbbell-romanian-deadlift", &set(&["leg-curl"]), &HashSet::new(), 3))
+                .contains(&"lying-leg-curl")
+        );
     }
 
     #[test]

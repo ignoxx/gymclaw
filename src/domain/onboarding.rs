@@ -22,10 +22,22 @@ use crate::time::Ts;
 pub const QUESTIONS: [(&str, &str, &[&str]); 8] = [
     ("goal", "What's your main goal: build muscle, get stronger, lose fat, or general fitness?", &[]),
     ("experience", "How long have you been training consistently?", &[]),
-    ("schedule", "How many days a week do you want to train, and which days work?", &["weekly_target_sessions", "weekdays_allowed"]),
+    (
+        "schedule",
+        "How many days a week do you want to train, and which days work?",
+        &["weekly_target_sessions", "weekdays_allowed"],
+    ),
     ("session_length", "How long can one gym session be?", &["preferred_workout_minutes"]),
-    ("time_window", "When can you train: earliest start and latest finish?", &["earliest_workout_start", "latest_workout_finish"]),
-    ("travel", "Which gym (address), and how long do you need to get ready and to get there?", &["gym_address", "prep_minutes", "commute_to_gym_minutes"]),
+    (
+        "time_window",
+        "When can you train: earliest start and latest finish?",
+        &["earliest_workout_start", "latest_workout_finish"],
+    ),
+    (
+        "travel",
+        "Which gym (address), and how long do you need to get ready and to get there?",
+        &["gym_address", "prep_minutes", "commute_to_gym_minutes"],
+    ),
     ("equipment", "Where do you train: full gym, basic gym, or at home?", &[]),
     ("limitations", "Any injuries or exercises you want to avoid?", &[]),
 ];
@@ -46,7 +58,8 @@ fn canonical(value: &Value) -> String {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            let fields: Vec<String> = keys.iter().map(|k| format!("{}:{}", Value::String((*k).clone()), canonical(&map[*k]))).collect();
+            let fields: Vec<String> =
+                keys.iter().map(|k| format!("{}:{}", Value::String((*k).clone()), canonical(&map[*k]))).collect();
             format!("{{{}}}", fields.join(","))
         }
         Value::Array(items) => format!("[{}]", items.iter().map(canonical).collect::<Vec<_>>().join(",")),
@@ -89,7 +102,11 @@ fn template_options(db: &Connection) -> Result<Vec<Value>> {
 }
 
 fn review_fingerprint(db: &Connection, row: &OnboardingState) -> Result<String> {
-    let templates = row.split_json.iter().map(|t| Ok(serde_json::to_value(get_template(db, t)?)?)).collect::<Result<Vec<Value>>>()?;
+    let templates = row
+        .split_json
+        .iter()
+        .map(|t| Ok(serde_json::to_value(get_template(db, t)?)?))
+        .collect::<Result<Vec<Value>>>()?;
     Ok(fingerprint(&json!({"interview": row.interview_json.0, "profile": get_profile(db)?, "split": templates})))
 }
 
@@ -153,9 +170,16 @@ fn apply_profile(db: &Connection, changes: &Map<String, Value>) -> Result<()> {
 /// Answer questions, confirm the plan or finish. Mutation result envelope with the new `status`.
 pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Result<Value> {
     let (operation, intent) = match &update {
-        Update::Answer { answers, profile } => ("answer", json!({"answers": answers, "profile": profile, "template_ids": null, "fingerprint": null})),
-        Update::ConfirmPlan { templates, plan } => ("confirm-plan", json!({"answers": null, "profile": null, "template_ids": templates, "plan": plan, "fingerprint": null})),
-        Update::Finish(fingerprint) => ("finish", json!({"answers": null, "profile": null, "template_ids": null, "fingerprint": fingerprint})),
+        Update::Answer { answers, profile } => {
+            ("answer", json!({"answers": answers, "profile": profile, "template_ids": null, "fingerprint": null}))
+        }
+        Update::ConfirmPlan { templates, plan } => (
+            "confirm-plan",
+            json!({"answers": null, "profile": null, "template_ids": templates, "plan": plan, "fingerprint": null}),
+        ),
+        Update::Finish(fingerprint) => {
+            ("finish", json!({"answers": null, "profile": null, "template_ids": null, "fingerprint": fingerprint}))
+        }
     };
     mutate(db, &format!("onboarding.{operation}"), request_id, intent, now, || {
         let mut row = state(db)?;
@@ -164,16 +188,30 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                 if answers.is_empty() {
                     crate::bail!("ONBOARDING_ANSWER_REQUIRED", "Supply at least one interview answer");
                 }
-                let unknown: BTreeSet<&str> = answers.keys().map(String::as_str).filter(|k| !QUESTIONS.iter().any(|q| q.0 == *k)).collect();
+                let unknown: BTreeSet<&str> =
+                    answers.keys().map(String::as_str).filter(|k| !QUESTIONS.iter().any(|q| q.0 == *k)).collect();
                 if !unknown.is_empty() {
-                    crate::bail!("ONBOARDING_UNKNOWN_QUESTION", "Unknown interview keys: {}", unknown.into_iter().collect::<Vec<_>>().join(", "));
+                    crate::bail!(
+                        "ONBOARDING_UNKNOWN_QUESTION",
+                        "Unknown interview keys: {}",
+                        unknown.into_iter().collect::<Vec<_>>().join(", ")
+                    );
                 }
                 if answers.values().any(|v| v.as_str().is_none_or(|s| !(1..=300).contains(&s.trim().chars().count()))) {
                     crate::bail!("ONBOARDING_ANSWER_REQUIRED", "Answers are short owner-stated text (1–300 chars)");
                 }
-                let needed: BTreeSet<&str> = QUESTIONS.iter().filter(|q| answers.contains_key(q.0)).flat_map(|q| q.2.iter().copied()).filter(|f| !profile.is_some_and(|p| p.contains_key(*f))).collect();
+                let needed: BTreeSet<&str> = QUESTIONS
+                    .iter()
+                    .filter(|q| answers.contains_key(q.0))
+                    .flat_map(|q| q.2.iter().copied())
+                    .filter(|f| !profile.is_some_and(|p| p.contains_key(*f)))
+                    .collect();
                 if !needed.is_empty() {
-                    crate::bail!("ONBOARDING_PROFILE_REQUIRED", "Also set profile fields: {}", needed.into_iter().collect::<Vec<_>>().join(", "));
+                    crate::bail!(
+                        "ONBOARDING_PROFILE_REQUIRED",
+                        "Also set profile fields: {}",
+                        needed.into_iter().collect::<Vec<_>>().join(", ")
+                    );
                 }
                 if let Some(profile) = profile.filter(|p| !p.is_empty()) {
                     apply_profile(db, profile)?;
@@ -189,11 +227,19 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
             }
             Update::ConfirmPlan { templates, plan } => {
                 if templates.is_empty() {
-                    crate::bail!("ONBOARDING_TEMPLATE_REQUIRED", "Choose one or more confirmed workout templates, in rotation order");
+                    crate::bail!(
+                        "ONBOARDING_TEMPLATE_REQUIRED",
+                        "Choose one or more confirmed workout templates, in rotation order"
+                    );
                 }
                 for id in templates.iter() {
-                    if ["demo", "demo_fixture", "fixture", "synthetic"].contains(&get_template(db, id)?.source.to_lowercase().as_str()) {
-                        crate::bail!("ONBOARDING_REAL_TEMPLATE_REQUIRED", "Demo templates are not real owner training plans");
+                    if ["demo", "demo_fixture", "fixture", "synthetic"]
+                        .contains(&get_template(db, id)?.source.to_lowercase().as_str())
+                    {
+                        crate::bail!(
+                            "ONBOARDING_REAL_TEMPLATE_REQUIRED",
+                            "Demo templates are not real owner training plans"
+                        );
                     }
                 }
                 row.split_json = Json(templates.to_vec());
@@ -205,8 +251,14 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
             Update::Finish(expected) => {
                 let current = status(db)?;
                 let fingerprint = current["review_fingerprint"].as_str();
-                if !matches!(current["step"].as_str(), Some("REVIEW" | "READY")) || fingerprint.is_none() || *expected != fingerprint {
-                    crate::bail!("ONBOARDING_INCOMPLETE", "Finish the interview and confirm a plan, then use the current review fingerprint");
+                if !matches!(current["step"].as_str(), Some("REVIEW" | "READY"))
+                    || fingerprint.is_none()
+                    || *expected != fingerprint
+                {
+                    crate::bail!(
+                        "ONBOARDING_INCOMPLETE",
+                        "Finish the interview and confirm a plan, then use the current review fingerprint"
+                    );
                 }
                 row.completed_fingerprint = fingerprint.map(String::from);
             }
@@ -227,33 +279,66 @@ mod tests {
     }
 
     fn template(db: &Connection, id: &str, source: &str) {
-        let row = spec(json!({"id": "row", "name": "Row", "role": "pull", "guide_id": "seated-row", "target_weight": 40}));
-        import_template(db, &Template { id: id.into(), name: id.into(), exercises: vec![row], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: source.into() }).unwrap();
+        let row =
+            spec(json!({"id": "row", "name": "Row", "role": "pull", "guide_id": "seated-row", "target_weight": 40}));
+        import_template(
+            db,
+            &Template {
+                id: id.into(),
+                name: id.into(),
+                exercises: vec![row],
+                alternatives: vec![],
+                set_duration_seconds: 40,
+                transition_seconds: 60,
+                source: source.into(),
+            },
+        )
+        .unwrap();
     }
 
     #[test]
     fn interview_plan_review_finish() {
         let db = db();
         assert_eq!(status(&db).unwrap()["next_question"], "goal");
-        let schedule = object(json!({"schedule": "3x, Mon/Wed/Fri", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"}));
+        let schedule = object(
+            json!({"schedule": "3x, Mon/Wed/Fri", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"}),
+        );
         let err = update(&db, Update::Answer { answers: &schedule, profile: None }, at(0), "no-profile").unwrap_err();
         assert_eq!(err.code(), "ONBOARDING_PROFILE_REQUIRED");
-        let basics = object(json!({"goal": "Build muscle", "experience": "2 years", "equipment": "full gym", "limitations": "none"}));
+        let basics = object(
+            json!({"goal": "Build muscle", "experience": "2 years", "equipment": "full gym", "limitations": "none"}),
+        );
         update(&db, Update::Answer { answers: &basics, profile: None }, at(0), "basics").unwrap();
-        let profile = object(json!({"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60, "earliest_workout_start": "10:30",
-            "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15, "gym_address": "Example Str. 1, Berlin"}));
-        let result = update(&db, Update::Answer { answers: &schedule, profile: Some(&profile) }, at(0), "schedule").unwrap();
+        let profile = object(
+            json!({"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60, "earliest_workout_start": "10:30",
+            "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15, "gym_address": "Example Str. 1, Berlin"}),
+        );
+        let result =
+            update(&db, Update::Answer { answers: &schedule, profile: Some(&profile) }, at(0), "schedule").unwrap();
         assert_eq!(result["data"]["step"], "PLAN");
         let p = get_profile(&db).unwrap();
         assert_eq!((p.weekly_max_sessions, p.minimum_workout_minutes, p.commute_home_minutes), (3, 45, 15));
         template(&db, "demo", "demo");
-        assert_eq!(update(&db, Update::ConfirmPlan { templates: &["demo".into()], plan: None }, at(0), "demo").unwrap_err().code(), "ONBOARDING_REAL_TEMPLATE_REQUIRED");
+        assert_eq!(
+            update(&db, Update::ConfirmPlan { templates: &["demo".into()], plan: None }, at(0), "demo")
+                .unwrap_err()
+                .code(),
+            "ONBOARDING_REAL_TEMPLATE_REQUIRED"
+        );
         template(&db, "push", "user");
-        let review = update(&db, Update::ConfirmPlan { templates: &["push".into()], plan: None }, at(0), "plan").unwrap()["data"].clone();
+        let review = update(&db, Update::ConfirmPlan { templates: &["push".into()], plan: None }, at(0), "plan")
+            .unwrap()["data"]
+            .clone();
         assert_eq!(review["step"], "REVIEW");
-        assert_eq!(update(&db, Update::Finish(Some("stale")), at(0), "bad").unwrap_err().code(), "ONBOARDING_INCOMPLETE");
+        assert_eq!(
+            update(&db, Update::Finish(Some("stale")), at(0), "bad").unwrap_err().code(),
+            "ONBOARDING_INCOMPLETE"
+        );
         let done = update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
-        assert_eq!((done["data"]["ready"].as_bool(), done["data"]["calendar_writes_enabled"].as_bool()), (Some(true), Some(false)));
+        assert_eq!(
+            (done["data"]["ready"].as_bool(), done["data"]["calendar_writes_enabled"].as_bool()),
+            (Some(true), Some(false))
+        );
         // Later edits don't send the owner back into setup.
         template(&db, "push", "user-edited");
         assert_eq!(status(&db).unwrap()["step"], "READY");
@@ -266,20 +351,35 @@ mod tests {
         assert_eq!(current["step"], "INTERVIEW");
         assert_eq!(current["missing"].as_array().unwrap().len(), QUESTIONS.len());
         assert!(current["instruction"].as_str().unwrap().starts_with("What's your main goal"));
-        assert!(update(&db, Update::Finish(None), at(0), "too-soon").unwrap_err().to_string().contains("Finish the interview"));
+        assert!(
+            update(&db, Update::Finish(None), at(0), "too-soon")
+                .unwrap_err()
+                .to_string()
+                .contains("Finish the interview")
+        );
         let goal = object(json!({"goal": "Fitness"}));
         let first = update(&db, Update::Answer { answers: &goal, profile: None }, at(0), "one").unwrap();
         assert_eq!(update(&db, Update::Answer { answers: &goal, profile: None }, at(0), "one").unwrap(), first);
         let events: i64 = db.query_row("SELECT count(*) FROM agent_event", [], |r| r.get(0)).unwrap();
         assert_eq!(events, 1);
         let other = object(json!({"goal": "Strength"}));
-        assert_eq!(update(&db, Update::Answer { answers: &other, profile: None }, at(0), "one").unwrap_err().code(), "IDEMPOTENCY_CONFLICT");
-        let rest = object(json!({"experience": "2 years", "equipment": "full gym", "limitations": "none", "schedule": "3x", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"}));
-        let profile = object(json!({"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60, "earliest_workout_start": "10:30", "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15, "gym_address": "Example Str. 1, Berlin"}));
+        assert_eq!(
+            update(&db, Update::Answer { answers: &other, profile: None }, at(0), "one").unwrap_err().code(),
+            "IDEMPOTENCY_CONFLICT"
+        );
+        let rest = object(
+            json!({"experience": "2 years", "equipment": "full gym", "limitations": "none", "schedule": "3x", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"}),
+        );
+        let profile = object(
+            json!({"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60, "earliest_workout_start": "10:30", "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15, "gym_address": "Example Str. 1, Berlin"}),
+        );
         update(&db, Update::Answer { answers: &rest, profile: Some(&profile) }, at(0), "rest").unwrap();
         template(&db, "push", "user");
         template(&db, "pull", "user");
-        let review = update(&db, Update::ConfirmPlan { templates: &["push".into(), "pull".into()], plan: None }, at(0), "plan").unwrap()["data"].clone();
+        let review =
+            update(&db, Update::ConfirmPlan { templates: &["push".into(), "pull".into()], plan: None }, at(0), "plan")
+                .unwrap()["data"]
+                .clone();
         assert_eq!(review["split"], json!(["push", "pull"]));
         update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
         let settings: i64 = db.query_row("SELECT count(*) FROM runtime_settings", [], |r| r.get(0)).unwrap();
@@ -291,8 +391,21 @@ mod tests {
         // The owner changes their plan later: still ready, and a template change keeps the words.
         template(&db, "cardio", "user");
         let words = "3 a week, one always cardio, the others rotate push/pull";
-        update(&db, Update::ConfirmPlan { templates: &["push".into(), "pull".into(), "cardio".into()], plan: Some(words) }, at(0), "replan").unwrap();
-        let later = update(&db, Update::ConfirmPlan { templates: &["push".into(), "cardio".into()], plan: None }, at(0), "drop-pull").unwrap()["data"].clone();
+        update(
+            &db,
+            Update::ConfirmPlan { templates: &["push".into(), "pull".into(), "cardio".into()], plan: Some(words) },
+            at(0),
+            "replan",
+        )
+        .unwrap();
+        let later = update(
+            &db,
+            Update::ConfirmPlan { templates: &["push".into(), "cardio".into()], plan: None },
+            at(0),
+            "drop-pull",
+        )
+        .unwrap()["data"]
+            .clone();
         assert_eq!((later["step"].as_str(), later["plan"].as_str()), (Some("READY"), Some(words)));
     }
 }

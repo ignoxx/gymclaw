@@ -1,7 +1,10 @@
 //! Explicit in-memory demo calendar, never used as evidence of live Google behavior.
 use serde_json::{Value, json};
 
-use super::calendar::{CalendarEvent, CalendarProvider, SyncBatch, already_applied, body_session_id, conflict, parse_event, sync_token_expired};
+use super::calendar::{
+    CalendarEvent, CalendarProvider, SyncBatch, already_applied, body_session_id, conflict, parse_event,
+    sync_token_expired,
+};
 use crate::bail;
 use crate::error::Result;
 

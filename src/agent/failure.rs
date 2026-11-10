@@ -22,7 +22,9 @@ fn classify(state: &FailureState) -> (&'static str, &'static str, bool) {
     let has = |patterns: &[&str]| patterns.iter().any(|p| error.contains(p));
     if state.stop.as_deref() == Some("length") {
         ("OUTPUT_LIMIT", "Model exhausted output/reasoning budget before finishing its answer.", true)
-    } else if error.contains("context") && has(&["exceed", "limit", "overflow", "long"]) || error.contains("too many tokens") {
+    } else if error.contains("context") && has(&["exceed", "limit", "overflow", "long"])
+        || error.contains("too many tokens")
+    {
         ("CONTEXT_LIMIT", "Model request exceeded context capacity.", true)
     } else if has(&["429", "rate limit", "rate-limit", "ratelimit", "quota"]) {
         ("RATE_LIMIT", "Provider rate limit or quota blocked response.", false)
@@ -82,11 +84,31 @@ mod tests {
 
     #[test]
     fn owner_line_is_plain_and_the_log_keeps_the_class() {
-        let state = FailureState { stop: Some("length".into()), output: Some(16384), reasoning: Some(15900), tool_calls: 2, observed_input: true, ..Default::default() };
-        assert_eq!(format_failure(&state), "⚠️ I got stuck on that. If it was a change, check whether it saved before sending it again.");
-        assert_eq!(diagnose(&state), "OUTPUT_LIMIT: Model exhausted output/reasoning budget before finishing its answer. output 16,384 tokens · reasoning 15,900 · 2 tool calls");
-        let state = FailureState { error: "MODEL_ERROR: 429 Provider returned error sk-secret".into(), observed_input: true, ..Default::default() };
-        assert_eq!(format_failure(&state), "⚠️ I can't reach my model right now. If it was a change, check whether it saved before sending it again.");
+        let state = FailureState {
+            stop: Some("length".into()),
+            output: Some(16384),
+            reasoning: Some(15900),
+            tool_calls: 2,
+            observed_input: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_failure(&state),
+            "⚠️ I got stuck on that. If it was a change, check whether it saved before sending it again."
+        );
+        assert_eq!(
+            diagnose(&state),
+            "OUTPUT_LIMIT: Model exhausted output/reasoning budget before finishing its answer. output 16,384 tokens · reasoning 15,900 · 2 tool calls"
+        );
+        let state = FailureState {
+            error: "MODEL_ERROR: 429 Provider returned error sk-secret".into(),
+            observed_input: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_failure(&state),
+            "⚠️ I can't reach my model right now. If it was a change, check whether it saved before sending it again."
+        );
         assert!(diagnose(&state).starts_with("RATE_LIMIT:") && !diagnose(&state).contains("sk-secret"));
     }
 }

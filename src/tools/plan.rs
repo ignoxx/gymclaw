@@ -8,10 +8,12 @@ use super::{Ctx, Tool, ToolDef, def};
 use crate::db::models::{BlockKind, OnboardingState, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
-use crate::domain::{availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling, weekly};
+use crate::domain::{
+    availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling, weekly,
+};
+use crate::error::Result;
 use crate::providers::google::google_provider;
 use crate::providers::http::Net;
-use crate::error::Result;
 use crate::time::Ts;
 
 pub fn tools() -> Vec<ToolDef> {
@@ -47,7 +49,9 @@ fn local_opt(cx: &Ctx, text: &Option<String>) -> Result<Option<Ts>> {
 }
 
 fn date(text: &str) -> Result<Date> {
-    text.trim().parse().map_err(|_| crate::error::Error::domain("INVALID_DATE", format!("Not a date (YYYY-MM-DD): {text}")))
+    text.trim()
+        .parse()
+        .map_err(|_| crate::error::Error::domain("INVALID_DATE", format!("Not a date (YYYY-MM-DD): {text}")))
 }
 
 /// The Monday of the week containing `day` (default: today, owner-local).
@@ -82,7 +86,8 @@ pub struct GetWeek {
 
 impl Tool for GetWeek {
     const NAME: &'static str = "get_week";
-    const DESCRIPTION: &'static str = "All planned sessions of a week (any status) with times, workout and crowd forecast.";
+    const DESCRIPTION: &'static str =
+        "All planned sessions of a week (any status) with times, workout and crowd forecast.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         get_week(cx.db, monday_of(cx, &self.day)?)
@@ -105,7 +110,12 @@ pub struct SessionFields {
 
 impl SessionFields {
     fn patch(self, cx: &Ctx) -> Result<replanning::SessionPatch> {
-        Ok(replanning::SessionPatch { start: local_opt(cx, &self.start)?, end: local_opt(cx, &self.end)?, template_id: self.template_id, status: self.status })
+        Ok(replanning::SessionPatch {
+            start: local_opt(cx, &self.start)?,
+            end: local_opt(cx, &self.end)?,
+            template_id: self.template_id,
+            status: self.status,
+        })
     }
 }
 
@@ -127,7 +137,12 @@ impl Tool for SessionCreate {
     const DESCRIPTION: &'static str = "Create an upcoming session at exact times with a real template. Rules are defaults: violations return warnings, never silently change your choice. Locks the session. Calendar writes, allocation, reminders and retries are handled together.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let fields = SessionFields { start: Some(self.start), end: self.end, template_id: Some(self.template_id), status: self.status };
+        let fields = SessionFields {
+            start: Some(self.start),
+            end: self.end,
+            template_id: Some(self.template_id),
+            status: self.status,
+        };
         replanning::edit_session(cx.db, None, fields.patch(cx)?, cx.now, &cx.request_id)
     }
 }
@@ -161,22 +176,34 @@ pub struct PlanWeek {
 
 impl Tool for PlanWeek {
     const NAME: &'static str = "plan_week";
-    const DESCRIPTION: &'static str = "Fill a week with sessions around the existing ones (normally automatic on Sundays and in the rolling plan).";
+    const DESCRIPTION: &'static str =
+        "Fill a week with sessions around the existing ones (normally automatic on Sundays and in the rolling plan).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let week = monday_of(cx, &Some(self.day))?;
-        let result = crate::domain::core::mutate(cx.db, "planning.agent_week_planned", &cx.request_id,
-            json!({"week": week.to_string(), "template_id": self.template_id}), cx.now, || {
-                let before: std::collections::BTreeSet<_> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
+        let result = crate::domain::core::mutate(
+            cx.db,
+            "planning.agent_week_planned",
+            &cx.request_id,
+            json!({"week": week.to_string(), "template_id": self.template_id}),
+            cx.now,
+            || {
+                let before: std::collections::BTreeSet<_> =
+                    PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
                 let template = match &self.template_id {
                     Some(id) => Some(id.clone()),
-                    None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id
+                    None => crate::runtime::outbox::runtime_authority(cx.db)?
+                        .template_id
                         .or(OnboardingState::get(cx.db, 1)?.and_then(|o| o.split_json.0.first().cloned())),
                 };
                 let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, template.as_deref(), &[])?;
                 if self.template_id.is_none() {
                     // Before the lock below, or every new slot keeps the one template.
-                    let new: Vec<String> = PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).filter(|id| !before.contains(id)).collect();
+                    let new: Vec<String> = PlannedSession::select(cx.db, "", [])?
+                        .into_iter()
+                        .map(|s| s.id)
+                        .filter(|id| !before.contains(id))
+                        .collect();
                     weekly::assign_rotation(cx.db, cx.now, &new)?;
                 }
                 replanning::commit_upcoming(cx.db, cx.now)?;
@@ -193,7 +220,8 @@ impl Tool for PlanWeek {
                 }
                 planned["sessions"] = json!(saved);
                 Ok(planned)
-            })?;
+            },
+        )?;
         Ok(result["data"].clone())
     }
 }
@@ -307,7 +335,8 @@ pub struct CrowdFeedback {
 
 impl Tool for CrowdFeedback {
     const NAME: &'static str = "crowd_feedback";
-    const DESCRIPTION: &'static str = "Record how busy the gym felt during a workout. Future crowd estimates learn from it.";
+    const DESCRIPTION: &'static str =
+        "Record how busy the gym felt during a workout. Future crowd estimates learn from it.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         crowd::record_feedback(cx.db, &self.workout_id, &self.rating, cx.now, &cx.request_id)
@@ -322,7 +351,9 @@ impl Tool for CrowdStatus {
     const DESCRIPTION: &'static str = "Whether gym check-in data is flowing, and source health.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        Ok(json!({"polling": crowd::polling_health(cx.db, cx.now)?, "sources": crowd::source_health(cx.db, cx.now)?["sources"]}))
+        Ok(
+            json!({"polling": crowd::polling_health(cx.db, cx.now)?, "sources": crowd::source_health(cx.db, cx.now)?["sources"]}),
+        )
     }
 }
 
@@ -353,7 +384,8 @@ pub struct EventsPending {
 
 impl Tool for EventsPending {
     const NAME: &'static str = "events_pending";
-    const DESCRIPTION: &'static str = "Unhandled events that need attention (unknown deliveries, blocked calendar writes, crowd source down).";
+    const DESCRIPTION: &'static str =
+        "Unhandled events that need attention (unknown deliveries, blocked calendar writes, crowd source down).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         Ok(json!({"events": events::pending(cx.db, self.all)?}))
@@ -420,7 +452,8 @@ pub struct PersonalCalendarStatus {}
 
 impl Tool for PersonalCalendarStatus {
     const NAME: &'static str = "personal_calendar_status";
-    const DESCRIPTION: &'static str = "Whether a personal calendar feed is connected, its host, last fetch and blocker count.";
+    const DESCRIPTION: &'static str =
+        "Whether a personal calendar feed is connected, its host, last fetch and blocker count.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         personal_calendar::status(cx.db)
@@ -432,7 +465,8 @@ pub struct PersonalCalendarDisconnect {}
 
 impl Tool for PersonalCalendarDisconnect {
     const NAME: &'static str = "personal_calendar_disconnect";
-    const DESCRIPTION: &'static str = "Stop using the personal calendar feed; its blockers are dropped; existing sessions stay saved.";
+    const DESCRIPTION: &'static str =
+        "Stop using the personal calendar feed; its blockers are dropped; existing sessions stay saved.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         personal_calendar::disconnect(cx.db, cx.now)
@@ -465,7 +499,10 @@ mod tests {
 
     fn db() -> Connection {
         let db = crate::domain::workout::tests::db();
-        template(&db, json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}));
+        template(
+            &db,
+            json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}),
+        );
         db
     }
 
@@ -481,18 +518,33 @@ mod tests {
     }
 
     fn writes_start(db: &Connection, session_id: &str) -> Vec<String> {
-        let writes = call(db, "calendar_pending_writes", json!({}), sunday(), "w").unwrap()["writes"].as_array().unwrap().clone();
-        writes.iter().filter(|w| w["session_id"] == session_id).map(|w| w["body"]["start"]["dateTime"].as_str().unwrap().to_string()).collect()
+        let writes = call(db, "calendar_pending_writes", json!({}), sunday(), "w").unwrap()["writes"]
+            .as_array()
+            .unwrap()
+            .clone();
+        writes
+            .iter()
+            .filter(|w| w["session_id"] == session_id)
+            .map(|w| w["body"]["start"]["dateTime"].as_str().unwrap().to_string())
+            .collect()
     }
 
     /// plan_week without a template used to lock every new slot to the first one, out of the rotation's reach.
     #[test]
     fn plan_week_gives_new_slots_the_default_rotation() {
         let db = db();
-        template(&db, json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}));
+        template(
+            &db,
+            json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}),
+        );
         call(&db, "plan_set", json!({"templates": ["short", "legs"]}), sunday(), "plan").unwrap();
         let planned = call(&db, "plan_week", json!({"day": "2026-10-12"}), sunday(), "week").unwrap();
-        let workouts: Vec<&str> = planned["sessions"].as_array().unwrap().iter().map(|s| s["workout_template_id"].as_str().unwrap()).collect();
+        let workouts: Vec<&str> = planned["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["workout_template_id"].as_str().unwrap())
+            .collect();
         assert_eq!(workouts, ["short", "legs", "short"]);
     }
 
@@ -509,24 +561,76 @@ mod tests {
         assert_eq!(created["data"]["session"]["user_locked"], true);
         assert!(!writes_start(&db, id).is_empty());
         // A scheduling status edit creates no workout logs and must remain correctable.
-        call(&db, "session_update", json!({"session_id": id, "fields": {"status": "STARTED"}}), sunday(), "status-only").unwrap();
-        template(&db, json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}));
-        assert!(call(&db, "session_update", json!({"session_id": id, "fields": {"template_id": "unknown"}}), sunday(), "bad-template").is_err());
+        call(
+            &db,
+            "session_update",
+            json!({"session_id": id, "fields": {"status": "STARTED"}}),
+            sunday(),
+            "status-only",
+        )
+        .unwrap();
+        template(
+            &db,
+            json!({"id": "legs", "name": "Legs", "exercises": [{"id": "squat", "name": "Squat", "role": "squat", "target_weight": 100}]}),
+        );
+        assert!(
+            call(
+                &db,
+                "session_update",
+                json!({"session_id": id, "fields": {"template_id": "unknown"}}),
+                sunday(),
+                "bad-template"
+            )
+            .is_err()
+        );
         let changed = call(&db, "session_update", json!({"session_id": id, "fields": {"start": "2026-10-14T12:00", "end": "2026-10-14T13:10", "template_id": "legs", "status": "COMMITTED"}}), sunday(), "raw-update").unwrap();
         assert_eq!(changed["data"]["session"]["workout_plan"]["template"]["id"], "legs");
         assert_eq!(changed["data"]["side_effects"], json!([]));
-        let mut calendar = crate::providers::fixture_calendar::FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin");
+        let mut calendar =
+            crate::providers::fixture_calendar::FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin");
         let write = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
-        assert_eq!(calendar_writes::apply_write(&db, &mut calendar, write["id"].as_str().unwrap(), sunday(), false).unwrap()["status"], "APPLIED");
-        let jobs: i64 = db.query_row("SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'", [id], |r| r.get(0)).unwrap();
+        assert_eq!(
+            calendar_writes::apply_write(&db, &mut calendar, write["id"].as_str().unwrap(), sunday(), false).unwrap()["status"],
+            "APPLIED"
+        );
+        let jobs: i64 = db
+            .query_row(
+                "SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(jobs > 0);
-        assert!(call(&db, "session_update", json!({"session_id": id, "fields": {"end": "2026-10-14T11:00"}}), sunday(), "bad-time").is_err());
-        let cancelled = call(&db, "session_update", json!({"session_id": id, "fields": {"status": "CANCELLED"}}), sunday(), "raw-cancel").unwrap();
+        assert!(
+            call(
+                &db,
+                "session_update",
+                json!({"session_id": id, "fields": {"end": "2026-10-14T11:00"}}),
+                sunday(),
+                "bad-time"
+            )
+            .is_err()
+        );
+        let cancelled = call(
+            &db,
+            "session_update",
+            json!({"session_id": id, "fields": {"status": "CANCELLED"}}),
+            sunday(),
+            "raw-cancel",
+        )
+        .unwrap();
         assert_eq!(cancelled["data"]["session"]["status"], "CANCELLED");
         assert!(PlannedSession::get(&db, id).unwrap().unwrap().deleted_by_user());
-        let deletion = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
+        let deletion =
+            calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
         assert_eq!(deletion["action"], "DELETE");
-        let jobs: i64 = db.query_row("SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'", [id], |r| r.get(0)).unwrap();
+        let jobs: i64 = db
+            .query_row(
+                "SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(jobs, 0);
         for row in before {
             let after = PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap();
@@ -538,14 +642,21 @@ mod tests {
     fn profile_window_change_reports_conflicts_and_keeps_sessions() {
         let db = db();
         let before = week_start_ids(&db);
-        let updated = call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p").unwrap();
+        let updated =
+            call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p")
+                .unwrap();
         assert_eq!(updated["replanning"]["changed"], json!([]));
         assert!(!updated["replanning"]["warnings"].as_array().unwrap().is_empty());
         for row in before {
-            assert_eq!(PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap().planned_start_at.iso(), row["start"]);
+            assert_eq!(
+                PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap().planned_start_at.iso(),
+                row["start"]
+            );
         }
         let events = events::wake_pending(&db).unwrap();
-        for event in &events { events::ack(&db, event["id"].as_str().unwrap(), sunday()).unwrap(); }
+        for event in &events {
+            events::ack(&db, event["id"].as_str().unwrap(), sunday()).unwrap();
+        }
         call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p2").unwrap();
         assert!(events::wake_pending(&db).unwrap().is_empty());
     }
@@ -558,14 +669,21 @@ mod tests {
         assert_eq!((ts(first["end"].as_str().unwrap()) - ts(first["start"].as_str().unwrap())).as_hours(), 25);
         assert_eq!(call(&db, "availability_add", args, sunday(), "dst-trip").unwrap()["data"], first);
         assert_eq!(AvailabilityBlock::select(&db, "", []).unwrap().len(), 1);
-        let conflict = json!({"kind": "TRAVEL", "from_date": "2026-10-25", "through": "2026-10-25", "cancel_locked": true});
-        assert_eq!(call(&db, "availability_add", conflict, sunday(), "dst-trip").unwrap_err().code(), "IDEMPOTENCY_CONFLICT");
+        let conflict =
+            json!({"kind": "TRAVEL", "from_date": "2026-10-25", "through": "2026-10-25", "cancel_locked": true});
+        assert_eq!(
+            call(&db, "availability_add", conflict, sunday(), "dst-trip").unwrap_err().code(),
+            "IDEMPOTENCY_CONFLICT"
+        );
     }
 
     #[test]
     fn plan_week_restart_and_idempotency() {
         let db = db();
-        assert_eq!(call(&db, "profile_update", json!({"changes": {"prep_minutes": 25}}), sunday(), "p").unwrap()["prep_minutes"], 25);
+        assert_eq!(
+            call(&db, "profile_update", json!({"changes": {"prep_minutes": 25}}), sunday(), "p").unwrap()["prep_minutes"],
+            25
+        );
         assert_eq!(call(&db, "profile_get", json!({}), sunday(), "g").unwrap()["prep_minutes"], 25);
         let now = ts("2026-10-11T12:00:00+02:00");
         let args = json!({"day": "2026-10-12", "template_id": "short"});
@@ -576,22 +694,38 @@ mod tests {
         let again = call(&db, "plan_week", args, now, "week-2").unwrap();
         assert_eq!((again["created_count"].as_i64(), again["sessions"].as_array().unwrap().len()), (Some(0), 3));
         assert_eq!(PlannedSession::select(&db, "", []).unwrap().len(), 3);
-        let other_week = call(&db, "plan_week", json!({"day": "2026-10-19", "template_id": "short"}), now, "week-1").unwrap_err();
+        let other_week =
+            call(&db, "plan_week", json!({"day": "2026-10-19", "template_id": "short"}), now, "week-1").unwrap_err();
         assert_eq!(other_week.code(), "IDEMPOTENCY_CONFLICT");
     }
 
     #[test]
     fn errors_roll_back_and_naive_times_are_local() {
         let db = db();
-        for (tool, args) in [("profile_update", json!({"changes": {"prep_minutes": -1}})), ("profile_update", json!({"changes": []})), ("unknown", json!({}))] {
+        for (tool, args) in [
+            ("profile_update", json!({"changes": {"prep_minutes": -1}})),
+            ("profile_update", json!({"changes": []})),
+            ("unknown", json!({})),
+        ] {
             let tx = db.unchecked_transaction().unwrap();
             let error: Error = call(&tx, tool, args, sunday(), "bad").unwrap_err();
-            assert!(["INVALID_PROFILE", "INVALID_ARGUMENTS", "UNKNOWN_TOOL"].contains(&error.code()), "{}", error.code());
+            assert!(
+                ["INVALID_PROFILE", "INVALID_ARGUMENTS", "UNKNOWN_TOOL"].contains(&error.code()),
+                "{}",
+                error.code()
+            );
             drop(tx);
         }
         assert_eq!(get_profile(&db).unwrap().prep_minutes, 15);
         // A naive time is the owner's local time (Europe/Berlin).
-        let blocked = call(&db, "availability_add", json!({"kind": "UNAVAILABLE", "start": "2026-10-13T12:00", "end": "2026-10-13T13:00"}), sunday(), "naive").unwrap();
+        let blocked = call(
+            &db,
+            "availability_add",
+            json!({"kind": "UNAVAILABLE", "start": "2026-10-13T12:00", "end": "2026-10-13T13:00"}),
+            sunday(),
+            "naive",
+        )
+        .unwrap();
         assert_eq!(blocked["data"]["start"], "2026-10-13T10:00:00+00:00");
     }
 
@@ -599,11 +733,20 @@ mod tests {
     fn planner_events_are_actionable_until_acknowledged() {
         let db = db();
         crate::domain::core::emit(&db, "planning.replan_required", sunday(), json!({})).unwrap();
-        assert_eq!(call(&db, "events_pending", json!({}), sunday(), "e").unwrap()["events"].as_array().unwrap().len(), 1);
-        let inbox = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"].as_array().unwrap().clone();
+        assert_eq!(
+            call(&db, "events_pending", json!({}), sunday(), "e").unwrap()["events"].as_array().unwrap().len(),
+            1
+        );
+        let inbox = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .clone();
         let actionable = inbox.iter().find(|e| e["type"] == "planning.replan_required").unwrap();
         call(&db, "event_ack", json!({"event_id": actionable["id"]}), sunday(), "ack").unwrap();
-        let after = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"].as_array().unwrap().clone();
+        let after = call(&db, "events_pending", json!({"all": true}), sunday(), "e").unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert!(after.iter().all(|e| e["id"] != actionable["id"]));
         assert!(AgentEvent::get(&db, actionable["id"].as_str().unwrap()).unwrap().unwrap().handled_at.is_some());
     }

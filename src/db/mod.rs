@@ -42,14 +42,18 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    let has_baseline: bool = tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
+    let has_baseline: bool =
+        tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
     if !has_baseline {
         tx.execute_batch(BASELINE)?;
         tx.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [BASELINE_MARKER])?;
     } else {
         let marker: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
         if marker != BASELINE_MARKER {
-            crate::bail!("SCHEMA_MISMATCH", "Database has baseline marker {marker}, expected {BASELINE_MARKER}; it predates the baseline and can't be upgraded");
+            crate::bail!(
+                "SCHEMA_MISMATCH",
+                "Database has baseline marker {marker}, expected {BASELINE_MARKER}; it predates the baseline and can't be upgraded"
+            );
         }
     }
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -170,7 +174,16 @@ mod tests {
         migrate(&mut db).unwrap();
         update_profile(&db, json!({"prep_minutes": 23}).as_object().unwrap()).unwrap();
         let at = Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap();
-        AgentEvent { id: new_id(), r#type: "test".into(), created_at: at, payload_json: Json(json!({})), handled_at: None, correlation_id: None }.insert(&db).unwrap();
+        AgentEvent {
+            id: new_id(),
+            r#type: "test".into(),
+            created_at: at,
+            payload_json: Json(json!({})),
+            handled_at: None,
+            correlation_id: None,
+        }
+        .insert(&db)
+        .unwrap();
         drop(db);
         let mut db = open(&path).unwrap();
         migrate(&mut db).unwrap();
@@ -185,8 +198,16 @@ mod tests {
     fn foreign_keys_are_enforced() {
         let db = crate::domain::workout::tests::db();
         let orphan = SetLog {
-            id: new_id(), workout_exercise_id: "missing".into(), set_number: 1, set_type: SetType::Working, weight: 80.0, reps: 9, rir_optional: None,
-            logged_at: Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap(), rest_started_at: None, rest_due_at: None,
+            id: new_id(),
+            workout_exercise_id: "missing".into(),
+            set_number: 1,
+            set_type: SetType::Working,
+            weight: 80.0,
+            reps: 9,
+            rir_optional: None,
+            logged_at: Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap(),
+            rest_started_at: None,
+            rest_due_at: None,
         };
         assert!(orphan.insert(&db).is_err());
     }

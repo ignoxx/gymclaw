@@ -17,7 +17,14 @@ pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
         [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
-        [_, _, _, _, b'f', b't', b'y', b'p', rest @ ..] if rest.starts_with(b"heic") || rest.starts_with(b"heix") || rest.starts_with(b"mif1") || rest.starts_with(b"msf1") => Some("image/heic"),
+        [_, _, _, _, b'f', b't', b'y', b'p', rest @ ..]
+            if rest.starts_with(b"heic")
+                || rest.starts_with(b"heix")
+                || rest.starts_with(b"mif1")
+                || rest.starts_with(b"msf1") =>
+        {
+            Some("image/heic")
+        }
         _ => None,
     }
 }

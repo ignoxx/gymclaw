@@ -61,7 +61,8 @@ pub fn def<T: Tool>() -> ToolDef {
         },
         call: |cx, args| {
             let args = if args.is_null() { Value::Object(Default::default()) } else { args };
-            let parsed: T = serde_json::from_value(args).map_err(|e| Error::domain("INVALID_ARGUMENTS", format!("{}: {e}", T::NAME)))?;
+            let parsed: T = serde_json::from_value(args)
+                .map_err(|e| Error::domain("INVALID_ARGUMENTS", format!("{}: {e}", T::NAME)))?;
             parsed.run(cx)
         },
     }
@@ -85,15 +86,24 @@ pub fn call(cx: &mut Ctx, name: &str, args: Value) -> Result<Value> {
 /// from argument parsing to domain rules, passes through here.
 pub fn guide(name: &str, e: Error) -> Error {
     let code = e.code().to_string();
-    let system = matches!(code.as_str(), "DATABASE_ERROR" | "NETWORK_ERROR" | "IO_ERROR" | "INTERNAL" | "TELEGRAM_ERROR")
-        || code.ends_with("_UNAVAILABLE")
-        || code.starts_with("CALENDAR_AUTH");
+    let system =
+        matches!(code.as_str(), "DATABASE_ERROR" | "NETWORK_ERROR" | "IO_ERROR" | "INTERNAL" | "TELEGRAM_ERROR")
+            || code.ends_with("_UNAVAILABLE")
+            || code.starts_with("CALENDAR_AUTH");
     let next = if system {
         "A system problem, not a wrong call: don't retry it this turn. Tell the owner what didn't happen.".to_string()
     } else {
         // The exercise error already lists the names to pass; an id lookup would lead back to the same key.
-        let lookup = if code.ends_with("_NOT_FOUND") || code == "SESSION_AMBIGUOUS" { "Look the id up (sql_query, get_week) instead of guessing it. " } else { "" };
-        let usage = all().iter().find(|t| t.name == name).map(|t| format!("\nUsage of {name}:\n{}", usage(&(t.schema)(), 0))).unwrap_or_default();
+        let lookup = if code.ends_with("_NOT_FOUND") || code == "SESSION_AMBIGUOUS" {
+            "Look the id up (sql_query, get_week) instead of guessing it. "
+        } else {
+            ""
+        };
+        let usage = all()
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| format!("\nUsage of {name}:\n{}", usage(&(t.schema)(), 0)))
+            .unwrap_or_default();
         format!("{lookup}Fix the call, use another tool, or ask the owner; don't repeat it unchanged.{usage}")
     };
     Error::domain(code, format!("{e}\n{next}"))
@@ -103,11 +113,14 @@ pub fn guide(name: &str, e: Error) -> Error {
 /// `- start (string, required): Exact start…`.
 fn usage(schema: &Value, depth: usize) -> String {
     let required: Vec<&str> = schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    let Some(properties) = schema["properties"].as_object() else { return format!("{}(no arguments)", "  ".repeat(depth)) };
+    let Some(properties) = schema["properties"].as_object() else {
+        return format!("{}(no arguments)", "  ".repeat(depth));
+    };
     let mut lines = Vec::new();
     for (field, spec) in properties {
         let need = if required.contains(&field.as_str()) { "required" } else { "optional" };
-        let description = spec["description"].as_str().map(|d| format!(": {}", d.replace('\n', " "))).unwrap_or_default();
+        let description =
+            spec["description"].as_str().map(|d| format!(": {}", d.replace('\n', " "))).unwrap_or_default();
         lines.push(format!("{}- {field} ({}, {need}){description}", "  ".repeat(depth), kind(spec)));
         if spec.get("properties").is_some() {
             lines.push(usage(spec, depth + 1));
@@ -118,7 +131,8 @@ fn usage(schema: &Value, depth: usize) -> String {
 
 /// Short type of one schema field: `string`, `integer`, or `one of "A"|"B"` for enums.
 fn kind(spec: &Value) -> String {
-    let variants: Vec<&Value> = [&spec["anyOf"], &spec["oneOf"]].into_iter().filter_map(Value::as_array).flatten().collect();
+    let variants: Vec<&Value> =
+        [&spec["anyOf"], &spec["oneOf"]].into_iter().filter_map(Value::as_array).flatten().collect();
     let values: Vec<String> = std::iter::once(spec)
         .chain(variants.iter().copied())
         .flat_map(|v| v["enum"].as_array().cloned().unwrap_or_default().into_iter().chain(v.get("const").cloned()))

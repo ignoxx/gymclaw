@@ -1,3 +1,2 @@
-# The code is hand-formatted with wide lines and no rustfmt setting reproduces it, so `cargo fmt`
-# would rewrite every file. Off until the repo is formatted once on purpose.
-disable_all_formatting = true
+max_width = 120
+use_small_heuristics = "Max"

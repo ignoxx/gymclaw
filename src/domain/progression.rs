@@ -22,7 +22,14 @@ fn milli(weight: f64) -> i64 {
     (weight * 10_000.0).round() as i64
 }
 
-pub fn double_progression(exercise_id: &str, target_weight: f64, rep_max: i64, required_sets: usize, increment: f64, performance: &[PerformanceSet]) -> ProgressionDecision {
+pub fn double_progression(
+    exercise_id: &str,
+    target_weight: f64,
+    rep_max: i64,
+    required_sets: usize,
+    increment: f64,
+    performance: &[PerformanceSet],
+) -> ProgressionDecision {
     let complete = performance.len() == required_sets;
     let lightest = performance.iter().map(|s| milli(s.weight)).min().unwrap_or(0);
     let base = if complete && lightest > milli(target_weight) { lightest } else { milli(target_weight) };
@@ -37,7 +44,13 @@ pub fn double_progression(exercise_id: &str, target_weight: f64, rep_max: i64, r
     } else {
         "hold_target_not_met"
     };
-    ProgressionDecision { exercise_id: exercise_id.into(), previous_weight: target_weight, next_weight, progressed: achieved, reason }
+    ProgressionDecision {
+        exercise_id: exercise_id.into(),
+        previous_weight: target_weight,
+        next_weight,
+        progressed: achieved,
+        reason,
+    }
 }
 
 #[cfg(test)]
@@ -45,7 +58,8 @@ mod tests {
     use super::*;
 
     fn run(target: f64, rep_max: i64, sets: usize, increment: f64, performance: &[(f64, i64)]) -> ProgressionDecision {
-        let performance: Vec<PerformanceSet> = performance.iter().map(|&(weight, reps)| PerformanceSet { weight, reps }).collect();
+        let performance: Vec<PerformanceSet> =
+            performance.iter().map(|&(weight, reps)| PerformanceSet { weight, reps }).collect();
         double_progression("bench", target, rep_max, sets, increment, &performance)
     }
 

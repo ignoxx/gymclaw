@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::db::models::{
-    AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, LearnedPreference, OnboardingState, PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutSession,
-    WorkoutTemplate,
+    AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, LearnedPreference, OnboardingState,
+    PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutTemplate,
 };
 use crate::db::{Connection, Json, new_id};
 use crate::domain::availability::session_blocked;
@@ -57,15 +57,24 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Re
     }
     let profile = get_profile(db)?;
     let tz = profile.tz();
-    let workouts = WorkoutSession::select(db, "WHERE status = 'PLAN_UPDATED' AND completed_at <= ?1 ORDER BY rowid", [now])?;
-    let completed: Vec<&WorkoutSession> = workouts.iter().filter(|w| w.started_at.is_some_and(|s| week_of(s, &tz) == week_start)).collect();
+    let workouts =
+        WorkoutSession::select(db, "WHERE status = 'PLAN_UPDATED' AND completed_at <= ?1 ORDER BY rowid", [now])?;
+    let completed: Vec<&WorkoutSession> =
+        workouts.iter().filter(|w| w.started_at.is_some_and(|s| week_of(s, &tz) == week_start)).collect();
     let mut sets: Vec<SetLog> = Vec::new();
     let mut labels: Vec<CrowdFeedback> = Vec::new();
     for w in &completed {
-        sets.extend(SetLog::select(db, "WHERE workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1)", [&w.id])?);
+        sets.extend(SetLog::select(
+            db,
+            "WHERE workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1)",
+            [&w.id],
+        )?);
         labels.extend(CrowdFeedback::select(db, "WHERE workout_session_id = ?1", [&w.id])?);
     }
-    let plans: Vec<PlannedSession> = PlannedSession::select(db, "ORDER BY planned_start_at, rowid", [])?.into_iter().filter(|p| week_of(p.planned_start_at, &tz) == week_start).collect();
+    let plans: Vec<PlannedSession> = PlannedSession::select(db, "ORDER BY planned_start_at, rowid", [])?
+        .into_iter()
+        .filter(|p| week_of(p.planned_start_at, &tz) == week_start)
+        .collect();
     let rotates = OnboardingState::get(db, 1)?.is_some_and(|o| o.split_json.0.len() >= 2);
     let durations: Vec<i64> = completed.iter().filter_map(|w| w.actual_duration_seconds).collect();
     if learn {
@@ -85,25 +94,44 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Re
                     pref.last_observed_at = now;
                     pref.update(db)?;
                 }
-                None => LearnedPreference { id: new_id(), key: "typical_session_duration".into(), value_json: Json(value), confidence: (n / (n + 5.0)).min(0.9),
-                    evidence_count: history.len() as i64, first_observed_at: now, last_observed_at: now, source: "completed_workouts".into() }
+                None => LearnedPreference {
+                    id: new_id(),
+                    key: "typical_session_duration".into(),
+                    value_json: Json(value),
+                    confidence: (n / (n + 5.0)).min(0.9),
+                    evidence_count: history.len() as i64,
+                    first_observed_at: now,
+                    last_observed_at: now,
+                    source: "completed_workouts".into(),
+                }
                 .insert(db)?,
             }
         }
     }
-    Ok(json!({"week_start": week_start.to_string(), "completed_workouts": completed.len(), "target_sessions": profile.weekly_target_sessions,
+    Ok(
+        json!({"week_start": week_start.to_string(), "completed_workouts": completed.len(), "target_sessions": profile.weekly_target_sessions,
         "workouts": workout_outcomes(&plans, &completed, rotates),
         "working_sets": sets.iter().filter(|s| s.set_type == SetType::Working).count(), "warmup_sets": sets.iter().filter(|s| s.set_type == SetType::Warmup).count(),
         "median_duration_seconds": median(&durations), "crowd_labels": labels.len(),
-        "demo": completed.iter().any(|w| demo(&w.template_snapshot)) || labels.iter().any(|f| demo(&f.features_json))}))
+        "demo": completed.iter().any(|w| demo(&w.template_snapshot)) || labels.iter().any(|f| demo(&f.features_json))}),
+    )
 }
 
 /// Elapsed slot is missed, never fabricated completion; calendar history stays.
 pub fn mark_missed(db: &Connection, now: Ts) -> Result<Vec<String>> {
     let mut ids = Vec::new();
-    for mut plan in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_end_at < ?1 ORDER BY rowid", [now])? {
+    for mut plan in PlannedSession::select(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_end_at < ?1 ORDER BY rowid",
+        [now],
+    )? {
         retire_session(db, &mut plan, SessionStatus::Missed, now)?;
-        emit(db, "workout.missed", now, json!({"session_id": plan.id, "reason": "planned_window_elapsed_without_start"}))?;
+        emit(
+            db,
+            "workout.missed",
+            now,
+            json!({"session_id": plan.id, "reason": "planned_window_elapsed_without_start"}),
+        )?;
         ids.push(plan.id);
     }
     Ok(ids)
@@ -114,7 +142,11 @@ pub fn mark_missed(db: &Connection, now: Ts) -> Result<Vec<String>> {
 pub fn no_show_nudges(db: &Connection, now: Ts) -> Result<Vec<(String, String, String)>> {
     let tz = get_profile(db)?.tz();
     let mut nudges = Vec::new();
-    for session in PlannedSession::select(db, "WHERE status = 'COMMITTED' AND planned_start_at <= ?1 AND planned_end_at > ?2 ORDER BY rowid", (now - NO_SHOW_AFTER, now))? {
+    for session in PlannedSession::select(
+        db,
+        "WHERE status = 'COMMITTED' AND planned_start_at <= ?1 AND planned_end_at > ?2 ORDER BY rowid",
+        (now - NO_SHOW_AFTER, now),
+    )? {
         let key = format!("no-show:{}:{}", session.id, session.planned_start_at);
         if AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])?.is_some() || session_blocked(db, &session)? {
             continue;
@@ -124,8 +156,16 @@ pub fn no_show_nudges(db: &Connection, now: Ts) -> Result<Vec<(String, String, S
             continue;
         }
         let name = session.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).unwrap_or("Workout");
-        let message = format!("⏰ {name} was planned for {} and hasn't started.", session.planned_start_at.local(&tz).strftime("%H:%M"));
-        let mut event = emit(db, "planning.no_show", now, json!({"session_id": session.id, "start": session.planned_start_at, "message": message}))?;
+        let message = format!(
+            "⏰ {name} was planned for {} and hasn't started.",
+            session.planned_start_at.local(&tz).strftime("%H:%M")
+        );
+        let mut event = emit(
+            db,
+            "planning.no_show",
+            now,
+            json!({"session_id": session.id, "start": session.planned_start_at, "message": message}),
+        )?;
         event.correlation_id = Some(key);
         event.update(db)?;
         nudges.push((event.id, session.id, message));
@@ -161,7 +201,8 @@ fn workout_outcomes(plans: &[PlannedSession], completed: &[&WorkoutSession], rot
             SessionStatus::Tentative | SessionStatus::Committed => "planned",
         };
         let workout = plan.workout_template_id.clone().unwrap_or_default();
-        let carried = outcomes.iter().rposition(|(w, o)| *w == workout && matches!(*o, "missed" | "skipped")).filter(|_| rotates);
+        let carried =
+            outcomes.iter().rposition(|(w, o)| *w == workout && matches!(*o, "missed" | "skipped")).filter(|_| rotates);
         match carried {
             Some(i) => outcomes[i].1 = outcome,
             None => outcomes.push((workout, outcome)),
@@ -190,9 +231,16 @@ pub fn assign_rotation(db: &Connection, now: Ts, new: &[String]) -> Result<Vec<V
         *entry = (*entry).max(at);
     }
     let mut changed = Vec::new();
-    for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY planned_start_at, id", [])? {
+    for mut session in
+        PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY planned_start_at, id", [])?
+    {
         // Never-trained workouts go first (None < Some), ties in split order.
-        let wanted = split.iter().enumerate().min_by_key(|(i, t)| (last.get(*t).copied(), *i)).map(|(_, t)| t.clone()).expect("split has entries");
+        let wanted = split
+            .iter()
+            .enumerate()
+            .min_by_key(|(i, t)| (last.get(*t).copied(), *i))
+            .map(|(_, t)| t.clone())
+            .expect("split has entries");
         if session.user_locked || !new.contains(&session.id) {
             if let Some(template) = &session.workout_template_id {
                 last.insert(template.clone(), session.planned_start_at);
@@ -222,8 +270,17 @@ pub fn assign_rotation(db: &Connection, now: Ts, new: &[String]) -> Result<Vec<V
 /// sets and unfinished movements stay intact until that decision.
 pub fn detect_stale_workouts(db: &Connection, now: Ts) -> Result<Vec<String>> {
     let mut ids = Vec::new();
-    for workout in WorkoutSession::select(db, "WHERE status != 'PLAN_UPDATED' AND last_action_at < ?1 ORDER BY rowid", [now - STALE_WORKOUT])? {
-        crate::domain::events::request(db, "workout.stale", json!({"workout_id": workout.id, "last_action_at": workout.last_action_at}), now)?;
+    for workout in WorkoutSession::select(
+        db,
+        "WHERE status != 'PLAN_UPDATED' AND last_action_at < ?1 ORDER BY rowid",
+        [now - STALE_WORKOUT],
+    )? {
+        crate::domain::events::request(
+            db,
+            "workout.stale",
+            json!({"workout_id": workout.id, "last_action_at": workout.last_action_at}),
+            now,
+        )?;
         ids.push(workout.id);
     }
     Ok(ids)
@@ -237,7 +294,9 @@ fn significant(old: Option<&Value>, new: Option<&Value>) -> bool {
         return true;
     }
     match (old.get("count").and_then(Value::as_f64), new.get("count").and_then(Value::as_f64)) {
-        (Some(before), Some(after)) => (after - before).abs() >= 3.0 && (after - before).abs() >= 0.25 * before.max(1.0),
+        (Some(before), Some(after)) => {
+            (after - before).abs() >= 3.0 && (after - before).abs() >= 0.25 * before.max(1.0)
+        }
         (before, after) => before != after,
     }
 }
@@ -248,7 +307,11 @@ fn significant(old: Option<&Value>, new: Option<&Value>) -> bool {
 pub fn refresh_crowd(db: &Connection, now: Ts) -> Result<Vec<Value>> {
     let model = CrowdModel::new(db, now)?;
     let mut changed = Vec::new();
-    for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 ORDER BY rowid", [now.mins(60)])? {
+    for mut session in PlannedSession::select(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 ORDER BY rowid",
+        [now.mins(60)],
+    )? {
         let old = session.plan("crowd_forecast").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())).cloned();
         let checked = session.plan("crowd_checked_at").and_then(Value::as_str).and_then(|s| Ts::parse(s, None).ok());
         if old.is_some() && (session.planned_start_at > now + DAY || checked.is_some_and(|c| now - c < CROWD_RECHECK)) {
@@ -275,7 +338,11 @@ pub fn refresh_crowd(db: &Connection, now: Ts) -> Result<Vec<Value>> {
 /// current template so the calendar and the workout use today's plan.
 pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
     let mut changed = Vec::new();
-    for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND workout_template_id IS NOT NULL ORDER BY rowid", [])? {
+    for mut session in PlannedSession::select(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED') AND workout_template_id IS NOT NULL ORDER BY rowid",
+        [],
+    )? {
         let template_id = session.workout_template_id.clone().expect("filtered");
         if WorkoutTemplate::get(db, &template_id)?.is_none() {
             continue;
@@ -311,7 +378,9 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
         let data = schedule_week(db, current_week, now, Some(&key), Some(template_id), &[])?;
-        created.extend(data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)));
+        created.extend(
+            data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)),
+        );
     }
     for id in &created {
         if let Some(session) = PlannedSession::get(db, id)? {
@@ -334,19 +403,41 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     let tz = get_profile(db)?.tz();
     let current_week = week_of(now, &tz);
     let next_week = current_week.checked_add(days(7))?;
-    let previous = if now.local(&tz).date().weekday() == jiff::civil::Weekday::Sunday { current_week } else { current_week.checked_sub(days(7))? };
+    let previous = if now.local(&tz).date().weekday() == jiff::civil::Weekday::Sunday {
+        current_week
+    } else {
+        current_week.checked_sub(days(7))?
+    };
     let rolling = rolling_plan(db, template_id, now)?;
     let report = audit_week(db, previous, now, true)?;
     if PlannedSession::first(db, "WHERE week_id = ?1", [next_week.to_string()])?.is_none() {
-        let data = schedule_week(db, next_week, now, Some(&format!("weekly-plan:{next_week}:{template_id}")), Some(template_id), &[])?;
-        let created: Vec<String> = data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)).collect();
+        let data = schedule_week(
+            db,
+            next_week,
+            now,
+            Some(&format!("weekly-plan:{next_week}:{template_id}")),
+            Some(template_id),
+            &[],
+        )?;
+        let created: Vec<String> = data["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s["id"].as_str().map(String::from))
+            .collect();
         assign_rotation(db, now, &created)?;
     }
     commit_upcoming(db, now)?;
-    for session in PlannedSession::select(db, "WHERE week_id = ?1 AND status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [next_week.to_string()])? {
+    for session in PlannedSession::select(
+        db,
+        "WHERE week_id = ?1 AND status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid",
+        [next_week.to_string()],
+    )? {
         queue_session_write(db, &session, now, false)?;
     }
-    Ok(json!({"week_start": next_week.to_string(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week)?}))
+    Ok(
+        json!({"week_start": next_week.to_string(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week)?}),
+    )
 }
 
 /// After the Sunday run and the calendar publish: queue the recap for the owner, then the agent's weekly
@@ -361,7 +452,8 @@ pub fn announce(db: &Connection, recipient: &str, now: Ts, unpublished: bool) ->
         return Ok(json!({"event_id": event.id}));
     }
     let (message, effect) = recap(db, next_week, now, unpublished)?;
-    let source = emit(db, "planning.weekly_recap", now, json!({"week_start": next_week.to_string(), "effect": effect}))?;
+    let source =
+        emit(db, "planning.weekly_recap", now, json!({"week_start": next_week.to_string(), "effect": effect}))?;
     crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient, &[])?;
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
@@ -379,7 +471,13 @@ const REVIEW_WEEKS: i64 = 4;
 /// "Thu Oct 22 12:45 legs MISSED (owner's pick)". Cancelled slots were moved or dropped, so they're left out.
 fn recent_sessions(db: &Connection, from: Date, until: Date, tz: &TimeZone) -> Result<Vec<String>> {
     let sessions = PlannedSession::select(db, "WHERE status != 'CANCELLED' ORDER BY planned_start_at", [])?;
-    let when = |s: &PlannedSession| format!("{} {}", s.planned_start_at.local(tz).strftime("%a %b %-d %H:%M"), s.workout_template_id.as_deref().unwrap_or("workout"));
+    let when = |s: &PlannedSession| {
+        format!(
+            "{} {}",
+            s.planned_start_at.local(tz).strftime("%a %b %-d %H:%M"),
+            s.workout_template_id.as_deref().unwrap_or("workout")
+        )
+    };
     Ok(sessions
         .iter()
         .filter(|s| (from..until).contains(&s.planned_start_at.local(tz).date()))
@@ -428,7 +526,8 @@ fn new_targets(db: &Connection, week_start: Date, zone: &TimeZone) -> Result<Vec
         let workout = decision["workout_id"].as_str().unwrap_or_default();
         let row = WorkoutExercise::first(db, "WHERE workout_session_id = ?1 AND exercise_id = ?2", [workout, &id])?;
         let name = row.and_then(|r| r.config_json.get("name").and_then(Value::as_str).map(String::from)).unwrap_or(id);
-        let (next, previous) = (decision["next_weight"].as_f64().unwrap_or(0.0), decision["previous_weight"].as_f64().unwrap_or(0.0));
+        let (next, previous) =
+            (decision["next_weight"].as_f64().unwrap_or(0.0), decision["previous_weight"].as_f64().unwrap_or(0.0));
         targets.push(format!("{name} {} kg (+{})", g(next), g(next - previous)));
     }
     Ok(targets)
@@ -469,7 +568,10 @@ fn days_line(db: &Connection, week_start: Date, workouts: &[WorkoutSession], tz:
     }
     for w in workouts.iter().filter(|w| w.planned_session_id.is_none()) {
         let at = w.started_at.expect("finished workouts started");
-        days.push((at, format!("{} {} ✅", at.local(tz).strftime("%a"), w.template_snapshot["name"].as_str().unwrap_or("Workout"))));
+        days.push((
+            at,
+            format!("{} {} ✅", at.local(tz).strftime("%a"), w.template_snapshot["name"].as_str().unwrap_or("Workout")),
+        ));
     }
     days.sort_by_key(|(at, _)| *at);
     Ok(days.into_iter().map(|(_, day)| day).collect::<Vec<_>>().join(" · "))
@@ -486,7 +588,9 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
     let sessions = plan["sessions"].as_array().cloned().unwrap_or_default();
     let workouts = highlights::finished_in(db, previous, &tz)?;
     let fixture = CalendarSyncState::get(db, 1)?.is_some_and(|s| s.source == "fixture");
-    let is_demo = fixture || workouts.iter().any(|w| demo(&w.template_snapshot)) || sessions.iter().any(|s| s["workout_plan"]["crowd_source"] == "demo_fixture");
+    let is_demo = fixture
+        || workouts.iter().any(|w| demo(&w.template_snapshot))
+        || sessions.iter().any(|s| s["workout_plan"]["crowd_source"] == "demo_fixture");
     let mut lines = vec![format!("📅 **Your week · {}**{}", span(previous)?, if is_demo { " · DEMO" } else { "" })];
     let (done, target) = (workouts.len() as i64, profile.weekly_target_sessions);
     let hit = target > 0 && done >= target;
@@ -506,7 +610,8 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
         let volume = highlights::total_volume(db, &workouts)?;
         if volume > 0.0 {
             trained += &format!(" · 💪 {:.1} t lifted", volume / 1000.0);
-            let before = highlights::total_volume(db, &highlights::finished_in(db, previous.checked_sub(days(7))?, &tz)?)?;
+            let before =
+                highlights::total_volume(db, &highlights::finished_in(db, previous.checked_sub(days(7))?, &tz)?)?;
             let change = if before > 0.0 { ((volume / before - 1.0) * 100.0).round() as i64 } else { 0 };
             if change != 0 {
                 trained += &format!(" ({change:+}% vs the week before)");
@@ -517,7 +622,11 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
     let mut records = Vec::new();
     for w in &workouts {
         for lift in highlights::workout(db, &w.id)?.lifts.into_iter().filter(|l| l.record()) {
-            let set = if lift.weight == 0.0 { format!("{} reps", lift.reps) } else { format!("{} × {} kg", lift.reps, g(lift.weight)) };
+            let set = if lift.weight == 0.0 {
+                format!("{} reps", lift.reps)
+            } else {
+                format!("{} × {} kg", lift.reps, g(lift.weight))
+            };
             records.push(format!("{} {set}", lift.name));
         }
     }
@@ -548,7 +657,11 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
         let minutes = ((finish - start).as_secs_f64() / 60.0).round_ties_even() as i64;
         let name = session["workout_plan"]["template"]["name"].as_str().unwrap_or("Workout");
         let mut parts = vec![at.strftime("%a %H:%M").to_string(), format!("**{name}**"), format!("~{minutes} min")];
-        let label = if session["confidence"].as_f64().unwrap_or(0.0) >= CROWD_MIN_CONFIDENCE { feel(session["crowd"].as_f64()) } else { None };
+        let label = if session["confidence"].as_f64().unwrap_or(0.0) >= CROWD_MIN_CONFIDENCE {
+            feel(session["crowd"].as_f64())
+        } else {
+            None
+        };
         if let Some(label) = label {
             let emoji = CROWD_EMOJI.iter().find(|(l, _)| *l == label).map_or("", |(_, e)| *e);
             parts.push(format!("{emoji} {label}"));
@@ -564,7 +677,11 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
     lines.extend(listed);
     if !flexible.is_empty() {
         // commit_upcoming confirms sessions 48 h ahead and reconciles reminders.
-        let days = if flexible.len() == 1 { flexible[0].clone() } else { format!("{} & {}", flexible[..flexible.len() - 1].join(", "), flexible[flexible.len() - 1]) };
+        let days = if flexible.len() == 1 {
+            flexible[0].clone()
+        } else {
+            format!("{} & {}", flexible[..flexible.len() - 1].join(", "), flexible[flexible.len() - 1])
+        };
         lines.push(format!("*{days} can still move if your calendar changes.*"));
     }
     Ok((lines.join("\n"), hit.then_some(crate::telegram::EFFECT_FIRE)))
@@ -578,7 +695,7 @@ mod tests {
     use crate::domain::calendar_writes::{describe_crowd, event_body, pending_writes};
     use crate::domain::crowd::record_feedback;
     use crate::domain::profile::update_profile;
-    use crate::domain::replanning::{edit_session, SessionPatch};
+    use crate::domain::replanning::{SessionPatch, edit_session};
     use crate::domain::templates::{Template, import_template};
     use crate::domain::workout::start;
     use crate::runtime::outbox::{event_stale_reason, prepare_event_message};
@@ -599,7 +716,10 @@ mod tests {
     /// Fresh DB with the one-exercise "short" template.
     fn db() -> Connection {
         let db = crate::domain::workout::tests::db();
-        template(&db, json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}));
+        template(
+            &db,
+            json!({"id": "short", "name": "Short", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]}),
+        );
         db
     }
 
@@ -611,16 +731,33 @@ mod tests {
         db.query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
-    fn row(db: &Connection, week: &str, template: Option<&str>, status: SessionStatus, start: Ts, minutes: i64) -> PlannedSession {
+    fn row(
+        db: &Connection,
+        week: &str,
+        template: Option<&str>,
+        status: SessionStatus,
+        start: Ts,
+        minutes: i64,
+    ) -> PlannedSession {
         let mut session = PlannedSession::new(week.into(), template.map(String::from), false);
         session.status = status;
-        (session.planned_start_at, session.planned_end_at, session.prep_start_at, session.leave_home_at, session.expected_finish_at) = (start, start.mins(minutes), start, start, start.mins(minutes));
+        (
+            session.planned_start_at,
+            session.planned_end_at,
+            session.prep_start_at,
+            session.leave_home_at,
+            session.expected_finish_at,
+        ) = (start, start.mins(minutes), start, start, start.mins(minutes));
         session.insert(db).unwrap();
         session
     }
 
     fn split(db: &Connection, templates: &[&str]) {
-        db.execute("INSERT INTO onboarding_state (id, interview_json, split_json) VALUES (1, '{}', ?1)", [json!(templates).to_string()]).unwrap();
+        db.execute(
+            "INSERT INTO onboarding_state (id, interview_json, split_json) VALUES (1, '{}', ?1)",
+            [json!(templates).to_string()],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -652,7 +789,11 @@ mod tests {
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
         let first = announce(&db, "123", sunday(0), false).unwrap();
         let text = first["recap"].as_str().unwrap();
-        assert!(text.starts_with("📅 **Your week · Oct 5–11**\n**0/3 workouts**\n") && text.contains("\n🗓 **Next week · Oct 12–18**\nMon "), "{text}");
+        assert!(
+            text.starts_with("📅 **Your week · Oct 5–11**\n**0/3 workouts**\n")
+                && text.contains("\n🗓 **Next week · Oct 12–18**\nMon "),
+            "{text}"
+        );
         weekly_plan(&db, "short", sunday(1)).unwrap();
         assert_eq!(announce(&db, "123", sunday(1), false).unwrap()["event_id"], first["event_id"]);
         assert_eq!(sessions(&db).len(), 3);
@@ -660,7 +801,13 @@ mod tests {
         assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'planning.weekly_briefing'"), 1);
         assert_eq!(count(&db, "SELECT count(*) FROM notification_delivery WHERE message LIKE '📅%'"), 1);
         // The agent's take waits for the recap to go out (or fail), never ahead of it.
-        let wakes = |db: &Connection| crate::domain::events::wake_pending(db).unwrap().iter().filter(|e| e["type"] == "planning.weekly_briefing").count();
+        let wakes = |db: &Connection| {
+            crate::domain::events::wake_pending(db)
+                .unwrap()
+                .iter()
+                .filter(|e| e["type"] == "planning.weekly_briefing")
+                .count()
+        };
         assert_eq!(wakes(&db), 0);
         db.execute("UPDATE notification_delivery SET status = 'UNKNOWN' WHERE message LIKE '📅%'", []).unwrap();
         assert_eq!(wakes(&db), 1);
@@ -675,7 +822,13 @@ mod tests {
         (rows[1].crowd_prediction, rows[1].crowd_confidence) = (Some(0.1), Some(0.3));
         rows[0].save(&db).unwrap();
         rows[1].save(&db).unwrap();
-        emit(&db, "progression.updated", sunday(-2 * 24 * 60), json!({"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"})).unwrap();
+        emit(
+            &db,
+            "progression.updated",
+            sunday(-2 * 24 * 60),
+            json!({"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"}),
+        )
+        .unwrap();
         let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0), true).unwrap();
         assert!(text.contains("**Next week · Oct 12–18**\n⚠️ Not on your calendar yet"), "{text}");
         assert!(text.contains("🔴 Packed") && !text.contains("Empty") && !text.contains("score"), "{text}");
@@ -691,12 +844,27 @@ mod tests {
         let db = db();
         let train = |day: i64, weight: f64, key: &str| {
             let at = sunday(-day * 24 * 60);
-            let id = start(&db, Some("short"), None, false, at, &format!("{key}-start")).unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+            let id = start(&db, Some("short"), None, false, at, &format!("{key}-start")).unwrap()["data"]["workout_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
             for (n, reps) in [8, 8].iter().enumerate() {
-                let set = crate::domain::set_parser::SetInput { weight, reps: *reps, set_type: SetType::Working, rir: None };
-                crate::domain::workout::log_set(&db, &id, &set, at.mins(5 + n as i64 * 5), &format!("{key}-{n}")).unwrap();
+                let set =
+                    crate::domain::set_parser::SetInput { weight, reps: *reps, set_type: SetType::Working, rir: None };
+                crate::domain::workout::log_set(&db, &id, &set, at.mins(5 + n as i64 * 5), &format!("{key}-{n}"))
+                    .unwrap();
             }
-            crate::domain::coach::handle_action(&db, crate::domain::coach::Action::End, None, None, None, false, at.mins(45), &format!("{key}-end")).unwrap();
+            crate::domain::coach::handle_action(
+                &db,
+                crate::domain::coach::Action::End,
+                None,
+                None,
+                None,
+                false,
+                at.mins(45),
+                &format!("{key}-end"),
+            )
+            .unwrap();
         };
         train(10, 80.0, "before");
         train(6, 80.0, "mon");
@@ -718,9 +886,16 @@ mod tests {
         assert_eq!(missed.len(), 1);
         let missed = PlannedSession::get(&db, missed[0].as_str().unwrap()).unwrap().unwrap();
         assert_eq!(missed.status, SessionStatus::Missed);
-        assert!(CalendarWrite::select(&db, "WHERE planned_session_id = ?1 AND status = 'PENDING'", [&missed.id]).unwrap().is_empty());
+        assert!(
+            CalendarWrite::select(&db, "WHERE planned_session_id = ?1 AND status = 'PENDING'", [&missed.id])
+                .unwrap()
+                .is_empty()
+        );
         let report = audit_week(&db, Date::constant(2026, 10, 12), later, false).unwrap();
-        assert_eq!((&report["workouts"][0], &report["completed_workouts"]), (&json!({"workout": "short", "outcome": "missed"}), &json!(0)));
+        assert_eq!(
+            (&report["workouts"][0], &report["completed_workouts"]),
+            (&json!({"workout": "short", "outcome": "missed"}), &json!(0))
+        );
         let before = count(&db, "SELECT count(*) FROM agent_event WHERE type = 'workout.missed'");
         rolling_plan(&db, "short", later.mins(1)).unwrap();
         assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'workout.missed'"), before);
@@ -738,7 +913,8 @@ mod tests {
         missed.status = SessionStatus::Missed;
         missed.update(&db).unwrap();
         // A missed session from an earlier day stays history.
-        let error = start(&db, None, Some(&first.id), false, first.planned_end_at.mins(24 * 60), "next-day").unwrap_err();
+        let error =
+            start(&db, None, Some(&first.id), false, first.planned_end_at.mins(24 * 60), "next-day").unwrap_err();
         assert_eq!(error.code(), "INVALID_PLAN");
         start(&db, None, None, false, first.planned_end_at.mins(10), "late").unwrap();
         assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Started);
@@ -776,7 +952,11 @@ mod tests {
         let db = db();
         let friday = sunday(-2 * 24 * 60);
         rolling_plan(&db, "short", friday).unwrap();
-        assert!(sessions(&db).iter().all(|s| s.week_id == "2026-10-05"), "{:?}", sessions(&db).iter().map(|s| &s.week_id).collect::<Vec<_>>());
+        assert!(
+            sessions(&db).iter().all(|s| s.week_id == "2026-10-05"),
+            "{:?}",
+            sessions(&db).iter().map(|s| &s.week_id).collect::<Vec<_>>()
+        );
         rolling_plan(&db, "short", sunday(-1)).unwrap();
         assert!(sessions(&db).iter().all(|s| s.week_id != "2026-10-12"));
         weekly_plan(&db, "short", sunday(0)).unwrap();
@@ -788,12 +968,25 @@ mod tests {
         let db = db();
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let session = PlannedSession::select(&db, "ORDER BY rowid", []).unwrap().remove(0);
-        let slot = |workout: &str, status| PlannedSession { workout_template_id: Some(workout.into()), status, ..session.clone() };
+        let slot = |workout: &str, status| PlannedSession {
+            workout_template_id: Some(workout.into()),
+            status,
+            ..session.clone()
+        };
         use SessionStatus::*;
         // Last week as the owner lived it: Legs moved Thu -> Fri and missed both times, Push skipped.
-        let week = [slot("pull", Completed), slot("legs", Missed), slot("legs", Missed), slot("push", Skipped), slot("pull", Cancelled)];
+        let week = [
+            slot("pull", Completed),
+            slot("legs", Missed),
+            slot("legs", Missed),
+            slot("push", Skipped),
+            slot("pull", Cancelled),
+        ];
         let outcomes = |week: &[PlannedSession], rotates| -> Vec<String> {
-            workout_outcomes(week, &[], rotates).iter().map(|o| format!("{} {}", o["workout"].as_str().unwrap(), o["outcome"].as_str().unwrap())).collect()
+            workout_outcomes(week, &[], rotates)
+                .iter()
+                .map(|o| format!("{} {}", o["workout"].as_str().unwrap(), o["outcome"].as_str().unwrap()))
+                .collect()
         };
         assert_eq!(outcomes(&week, true), ["pull completed", "legs missed", "push skipped"]);
         assert_eq!(outcomes(&[slot("legs", Missed), slot("legs", Completed)], true), ["legs completed"]);
@@ -808,7 +1001,10 @@ mod tests {
         for name in ["push", "pull", "legs"] {
             let mut title = name.to_string();
             title[..1].make_ascii_uppercase();
-            template(&db, json!({"id": name, "name": title, "exercises": [{"id": format!("{name}-x"), "name": "X", "role": "x", "guide_id": "bench-press", "target_weight": 0}]}));
+            template(
+                &db,
+                json!({"id": name, "name": title, "exercises": [{"id": format!("{name}-x"), "name": "X", "role": "x", "guide_id": "bench-press", "target_weight": 0}]}),
+            );
         }
         split(&db, &["push", "pull", "legs"]);
         let workout = |template: &str, status: &str, at: Ts| {
@@ -818,14 +1014,19 @@ mod tests {
         workout("push", "PLAN_UPDATED", base.mins(-3 * 24 * 60));
         let mut ids = Vec::new();
         for day in 0..4 {
-            let mut session = row(&db, "2026-10-05", Some("push"), SessionStatus::Tentative, base.mins(day * 2 * 24 * 60), 60);
+            let mut session =
+                row(&db, "2026-10-05", Some("push"), SessionStatus::Tentative, base.mins(day * 2 * 24 * 60), 60);
             if day == 1 {
                 session.user_locked = true; // The owner pinned Push here.
                 session.save(&db).unwrap();
             }
             ids.push(session.id);
         }
-        let templates = |db: &Connection| ids.iter().map(|id| PlannedSession::get(db, id).unwrap().unwrap().workout_template_id.unwrap()).collect::<Vec<_>>();
+        let templates = |db: &Connection| {
+            ids.iter()
+                .map(|id| PlannedSession::get(db, id).unwrap().unwrap().workout_template_id.unwrap())
+                .collect::<Vec<_>>()
+        };
         assign_rotation(&db, base.mins(-24 * 60), &ids).unwrap();
         // Last done: Push → Pull, then the locked Push, then Legs (never trained), then Pull.
         assert_eq!(templates(&db), ["pull", "push", "legs", "pull"]);
@@ -841,8 +1042,14 @@ mod tests {
     fn crowd_forecast_text_and_significant_changes() {
         let start = ts("2026-10-09T19:00:00+00:00").local(&jiff::tz::TimeZone::UTC);
         assert_eq!(describe_crowd(None, &start), "not enough data yet");
-        assert_eq!(describe_crowd(Some(&json!({"count": 13, "basis": "weekday_hour", "days": 2, "feel": "Busy"})), &start), "Busy · ~13 people checked in (Fridays 19:00, 2 wk)");
-        assert_eq!(describe_crowd(Some(&json!({"count": 8, "basis": "hour", "days": 1, "feel": null})), &start), "~8 people checked in (19:00 on other days)");
+        assert_eq!(
+            describe_crowd(Some(&json!({"count": 13, "basis": "weekday_hour", "days": 2, "feel": "Busy"})), &start),
+            "Busy · ~13 people checked in (Fridays 19:00, 2 wk)"
+        );
+        assert_eq!(
+            describe_crowd(Some(&json!({"count": 8, "basis": "hour", "days": 1, "feel": null})), &start),
+            "~8 people checked in (19:00 on other days)"
+        );
         let old = json!({"count": 12, "feel": "Busy"});
         assert!(significant(None, Some(&json!({"count": 5, "feel": null}))));
         assert!(!significant(Some(&old), Some(&json!({"count": 14, "feel": "Busy"})))); // +2: noise
@@ -877,7 +1084,10 @@ mod tests {
         session.save(&db).unwrap();
         template(&db, pull(2));
         assert_eq!(refresh_plans(&db, now).unwrap(), [session.id.clone()]);
-        assert_eq!(PlannedSession::get(&db, &session.id).unwrap().unwrap().workout_plan_json["template"]["exercises"][0]["working_sets"], 2);
+        assert_eq!(
+            PlannedSession::get(&db, &session.id).unwrap().unwrap().workout_plan_json["template"]["exercises"][0]["working_sets"],
+            2
+        );
         assert!(refresh_plans(&db, now).unwrap().is_empty()); // No churn on the next tick.
     }
 
@@ -887,7 +1097,10 @@ mod tests {
         for name in ["push", "pull"] {
             let mut title = name.to_string();
             title[..1].make_ascii_uppercase();
-            template(&db, json!({"id": name, "name": title, "exercises": [{"id": format!("{name}-row"), "name": "Row", "role": "x", "guide_id": "seated-row", "working_sets": 2, "rep_min": 8, "rep_max": 12, "target_weight": 0}]}));
+            template(
+                &db,
+                json!({"id": name, "name": title, "exercises": [{"id": format!("{name}-row"), "name": "Row", "role": "x", "guide_id": "seated-row", "working_sets": 2, "rep_min": 8, "rep_max": 12, "target_weight": 0}]}),
+            );
         }
         split(&db, &["push", "pull"]);
         update_profile(&db, json!({"gym_address": "Example Str. 1, Berlin"}).as_object().unwrap()).unwrap();
@@ -897,7 +1110,10 @@ mod tests {
         allocation(&db, &mut session).unwrap();
         session.save(&db).unwrap();
         let body = event_body(&db, &session).unwrap();
-        assert_eq!((&body["summary"], &body["location"], &body["colorId"]), (&json!("🏋️ Pull"), &json!("Example Str. 1, Berlin"), &json!("6")));
+        assert_eq!(
+            (&body["summary"], &body["location"], &body["colorId"]),
+            (&json!("🏋️ Pull"), &json!("Example Str. 1, Berlin"), &json!("6"))
+        );
         let description = body["description"].as_str().unwrap();
         assert!(description.contains("Get ready 09:55 · Leave 10:10 · Home ~11:50"), "{description}");
         assert!(description.contains("1. Row · 2 sets of 8–12"), "{description}");
@@ -916,7 +1132,14 @@ mod tests {
         assert!(session_id == &first.id && message.ends_with("hasn't started."), "{message}");
         assert!(no_show_nudges(&db, late.mins(1)).unwrap().is_empty());
         let delivery = prepare_event_message(&db, event_id, message, late, "123", &[]).unwrap();
-        edit_session(&db, Some(&first.id), SessionPatch { status: Some(SessionStatus::Skipped), ..Default::default() }, late, "tg-1-skip").unwrap();
+        edit_session(
+            &db,
+            Some(&first.id),
+            SessionPatch { status: Some(SessionStatus::Skipped), ..Default::default() },
+            late,
+            "tg-1-skip",
+        )
+        .unwrap();
         assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Skipped);
         // The skip is final: rolling replanning keeps the other two sessions, no make-up.
         rolling_plan(&db, "short", late.mins(5)).unwrap();
@@ -932,9 +1155,19 @@ mod tests {
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let first = sessions(&db).remove(0);
         let late = first.planned_start_at.mins(31);
-        let moved = edit_session(&db, Some(&first.id), SessionPatch { start: Some(late.mins(60)), ..Default::default() }, late, "tg-2-move").unwrap();
+        let moved = edit_session(
+            &db,
+            Some(&first.id),
+            SessionPatch { start: Some(late.mins(60)), ..Default::default() },
+            late,
+            "tg-2-move",
+        )
+        .unwrap();
         assert!(ts(moved["data"]["session"]["start"].as_str().unwrap()) > late, "{moved}");
-        assert!(matches!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Tentative | SessionStatus::Committed));
+        assert!(matches!(
+            PlannedSession::get(&db, &first.id).unwrap().unwrap().status,
+            SessionStatus::Tentative | SessionStatus::Committed
+        ));
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let first = sessions(&db).remove(0);
         // Started from chat without linking the planned session: still counts as showing up.

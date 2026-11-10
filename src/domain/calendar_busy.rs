@@ -18,13 +18,19 @@ use crate::time::{Ts, zone};
 pub fn busy_intervals(db: &Connection, start: Ts, end: Ts) -> Result<Vec<Interval>> {
     let calendar_zone = CalendarSyncState::get(db, 1)?.map(|s| s.timezone).unwrap_or_else(|| "Europe/Berlin".into());
     let snapshots = CalendarEventSnapshot::select(db, "ORDER BY rowid", [])?;
-    let own_ids: HashSet<String> = PlannedSession::select(db, "WHERE calendar_event_id IS NOT NULL", [])?.into_iter().filter_map(|s| s.calendar_event_id).collect();
+    let own_ids: HashSet<String> = PlannedSession::select(db, "WHERE calendar_event_id IS NOT NULL", [])?
+        .into_iter()
+        .filter_map(|s| s.calendar_event_id)
+        .collect();
     let mut result = availability::blocks(db, start, end)?;
     result.extend(personal_calendar::blocks(db, start, end)?);
     let mut recurring = Vec::new();
     for event in &snapshots {
         let raw = &event.raw_json;
-        if event.status == "cancelled" || own_ids.contains(&event.calendar_event_id) || raw.get("transparency").and_then(Value::as_str) == Some("transparent") {
+        if event.status == "cancelled"
+            || own_ids.contains(&event.calendar_event_id)
+            || raw.get("transparency").and_then(Value::as_str) == Some("transparent")
+        {
             continue;
         }
         if raw.get("recurrence").is_none_or(|r| r.as_array().is_none_or(Vec::is_empty)) {
@@ -44,10 +50,19 @@ pub fn busy_intervals(db: &Connection, start: Ts, end: Ts) -> Result<Vec<Interva
 
 /// Occurrences of recurring masters overlapping [start, end), minus instances that have their own
 /// (moved or cancelled) exception event. All-day masters expand as dates in their zone.
-fn recurring_busy(snapshots: &[CalendarEventSnapshot], masters: &[&CalendarEventSnapshot], calendar_zone: &str, start: Ts, end: Ts, already: usize) -> Result<Vec<Interval>> {
+fn recurring_busy(
+    snapshots: &[CalendarEventSnapshot],
+    masters: &[&CalendarEventSnapshot],
+    calendar_zone: &str,
+    start: Ts,
+    end: Ts,
+    already: usize,
+) -> Result<Vec<Interval>> {
     let mut excluded = HashSet::new();
     for e in snapshots {
-        if let (Some(master), Some(original)) = (e.raw_json.get("recurringEventId").and_then(Value::as_str), e.raw_json.get("originalStartTime")) {
+        if let (Some(master), Some(original)) =
+            (e.raw_json.get("recurringEventId").and_then(Value::as_str), e.raw_json.get("originalStartTime"))
+        {
             excluded.insert((master.to_string(), parse_time(original, calendar_zone)?));
         }
     }
@@ -55,7 +70,8 @@ fn recurring_busy(snapshots: &[CalendarEventSnapshot], masters: &[&CalendarEvent
     for event in masters {
         let raw = &event.raw_json;
         let lines: Vec<&str> = raw["recurrence"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        let tz = zone(raw.get("start").and_then(|s| s.get("timeZone")).and_then(Value::as_str).unwrap_or(calendar_zone))?;
+        let tz =
+            zone(raw.get("start").and_then(|s| s.get("timeZone")).and_then(Value::as_str).unwrap_or(calendar_zone))?;
         let all_day = raw.get("start").is_some_and(|s| s.get("date").is_some());
         let local_start = event.start_at.local(&tz);
         let duration = event.end_at - event.start_at;
@@ -82,7 +98,10 @@ fn recurring_busy(snapshots: &[CalendarEventSnapshot], masters: &[&CalendarEvent
                 result.push(interval);
             }
             if already + result.len() > 5000 {
-                crate::bail!("CALENDAR_RECURRENCE_TOO_LARGE", "Too many recurring blockers; simplify calendar recurrence");
+                crate::bail!(
+                    "CALENDAR_RECURRENCE_TOO_LARGE",
+                    "Too many recurring blockers; simplify calendar recurrence"
+                );
             }
         }
     }
@@ -102,9 +121,20 @@ mod tests {
 
     fn event(db: &Connection, id: &str, status: &str, start: &str, end: &str, raw: Value) {
         CalendarEventSnapshot {
-            calendar_event_id: id.into(), ical_uid: None, etag: None, title: "t".into(), start_at: ts(start), end_at: ts(end), status: status.into(),
-            updated_at_remote: None, gymclaw_managed: false, gymclaw_session_id: None, gymclaw_plan_revision: None, user_locked: false,
-            last_seen_at: ts(start), raw_json: Json(raw),
+            calendar_event_id: id.into(),
+            ical_uid: None,
+            etag: None,
+            title: "t".into(),
+            start_at: ts(start),
+            end_at: ts(end),
+            status: status.into(),
+            updated_at_remote: None,
+            gymclaw_managed: false,
+            gymclaw_session_id: None,
+            gymclaw_plan_revision: None,
+            user_locked: false,
+            last_seen_at: ts(start),
+            raw_json: Json(raw),
         }
         .insert(db)
         .unwrap();
@@ -115,12 +145,35 @@ mod tests {
     #[test]
     fn recurring_masters_expand_across_dst() {
         let db = crate::domain::workout::tests::db();
-        event(&db, "m", "confirmed", "2026-10-05T16:00:00Z", "2026-10-05T17:00:00Z",
-            json!({"start": {"dateTime": "2026-10-05T18:00:00+02:00", "timeZone": "Europe/Berlin"}, "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE"]}));
-        event(&db, "x", "cancelled", "2026-10-28T17:00:00Z", "2026-10-28T18:00:00Z",
-            json!({"recurringEventId": "m", "originalStartTime": {"dateTime": "2026-10-28T18:00:00+01:00", "timeZone": "Europe/Berlin"}}));
-        event(&db, "d", "confirmed", "2026-10-02T22:00:00Z", "2026-10-04T22:00:00Z", json!({"start": {"date": "2026-10-03"}, "recurrence": ["RRULE:FREQ=WEEKLY;COUNT=5"]}));
-        let busy: Vec<(String, String)> = busy_intervals(&db, ts("2026-10-23T00:00:00Z"), ts("2026-11-03T00:00:00Z")).unwrap().into_iter().map(|i| (i.start.iso(), i.end.iso())).collect();
+        event(
+            &db,
+            "m",
+            "confirmed",
+            "2026-10-05T16:00:00Z",
+            "2026-10-05T17:00:00Z",
+            json!({"start": {"dateTime": "2026-10-05T18:00:00+02:00", "timeZone": "Europe/Berlin"}, "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE"]}),
+        );
+        event(
+            &db,
+            "x",
+            "cancelled",
+            "2026-10-28T17:00:00Z",
+            "2026-10-28T18:00:00Z",
+            json!({"recurringEventId": "m", "originalStartTime": {"dateTime": "2026-10-28T18:00:00+01:00", "timeZone": "Europe/Berlin"}}),
+        );
+        event(
+            &db,
+            "d",
+            "confirmed",
+            "2026-10-02T22:00:00Z",
+            "2026-10-04T22:00:00Z",
+            json!({"start": {"date": "2026-10-03"}, "recurrence": ["RRULE:FREQ=WEEKLY;COUNT=5"]}),
+        );
+        let busy: Vec<(String, String)> = busy_intervals(&db, ts("2026-10-23T00:00:00Z"), ts("2026-11-03T00:00:00Z"))
+            .unwrap()
+            .into_iter()
+            .map(|i| (i.start.iso(), i.end.iso()))
+            .collect();
         let expected = [
             ("2026-10-26T17:00:00+00:00", "2026-10-26T18:00:00+00:00"),
             ("2026-11-02T17:00:00+00:00", "2026-11-02T18:00:00+00:00"),
@@ -131,7 +184,11 @@ mod tests {
     }
 
     fn berlin(day: i8, hour: i8) -> Ts {
-        Ts(jiff::civil::date(2026, 10, day).at(hour, 0, 0, 0).to_zoned(crate::time::zone("Europe/Berlin").unwrap()).unwrap().timestamp())
+        Ts(jiff::civil::date(2026, 10, day)
+            .at(hour, 0, 0, 0)
+            .to_zoned(crate::time::zone("Europe/Berlin").unwrap())
+            .unwrap()
+            .timestamp())
     }
 
     #[test]

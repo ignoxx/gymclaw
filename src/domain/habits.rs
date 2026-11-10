@@ -33,15 +33,20 @@ pub fn evidence(db: &Connection, now: Ts, zone: &TimeZone) -> Result<Vec<Point>>
         let age_days = (now - at).as_secs_f64() / 86400.0;
         ((local.hour() as i64 * 60 + local.minute() as i64) as f64, sign * 0.5f64.powf(age_days / HALF_LIFE_DAYS))
     };
-    let mut points: Vec<Point> = WorkoutSession::select(db, "WHERE started_by_button AND arrived_at >= ?1 ORDER BY rowid", [since])?
-        .into_iter()
-        .filter_map(|w| w.arrived_at.map(|at| point(at, 1.0)))
-        .collect();
+    let mut points: Vec<Point> =
+        WorkoutSession::select(db, "WHERE started_by_button AND arrived_at >= ?1 ORDER BY rowid", [since])?
+            .into_iter()
+            .filter_map(|w| w.arrived_at.map(|at| point(at, 1.0)))
+            .collect();
     // One owner decision per session: the slot it was planned at first is disliked, the last pick is
     // liked. A chain of moves (10:30 → 14:30 → 11:45) only counts its ends; edits that keep the time don't count.
     let mut order: Vec<String> = Vec::new();
     let mut moves: HashMap<String, (Value, Value)> = HashMap::new();
-    for event in AgentEvent::select(db, "WHERE type = 'planning.session_edited' AND created_at >= ?1 ORDER BY created_at", [since])? {
+    for event in AgentEvent::select(
+        db,
+        "WHERE type = 'planning.session_edited' AND created_at >= ?1 ORDER BY created_at",
+        [since],
+    )? {
         if event.payload_json["request"]["intent"]["patch"]["start"].is_null() {
             continue;
         }
@@ -70,7 +75,8 @@ pub fn affinity(points: &[Point], minute: f64) -> f64 {
         let distance = (minute - other).abs().min(1440.0 - (minute - other).abs());
         (-0.5 * (distance / BANDWIDTH_MINUTES).powi(2)).exp()
     };
-    let net = points.iter().map(|(m, w)| w * bump(*m)).sum::<f64>() / (points.iter().map(|(_, w)| w.abs()).sum::<f64>() + PRIOR_WEIGHT);
+    let net = points.iter().map(|(m, w)| w * bump(*m)).sum::<f64>()
+        / (points.iter().map(|(_, w)| w.abs()).sum::<f64>() + PRIOR_WEIGHT);
     0.5 + 0.5 * net
 }
 
@@ -92,11 +98,19 @@ mod tests {
         let id = planned["sessions"][0]["id"].as_str().unwrap();
         let first = crate::db::models::PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at;
         for (hours, request) in [(2, "move-1"), (5, "move-2")] {
-            edit_session(&db, Some(id), SessionPatch { start: Some(first + SignedDuration::from_hours(hours)), ..Default::default() }, now, request).unwrap();
+            edit_session(
+                &db,
+                Some(id),
+                SessionPatch { start: Some(first + SignedDuration::from_hours(hours)), ..Default::default() },
+                now,
+                request,
+            )
+            .unwrap();
         }
         let tz = crate::time::zone("Europe/Berlin").unwrap();
         let minute = |at: Ts| (at.local(&tz).hour() as i64 * 60 + at.local(&tz).minute() as i64) as f64;
-        let points: Vec<(f64, f64)> = evidence(&db, now, &tz).unwrap().into_iter().map(|(m, w)| (m, w.signum())).collect();
+        let points: Vec<(f64, f64)> =
+            evidence(&db, now, &tz).unwrap().into_iter().map(|(m, w)| (m, w.signum())).collect();
         assert_eq!(points, vec![(minute(first), -1.0), (minute(first + SignedDuration::from_hours(5)), 1.0)]);
     }
 }

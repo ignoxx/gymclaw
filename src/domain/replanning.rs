@@ -23,17 +23,27 @@ const HOURS_48: SignedDuration = SignedDuration::from_hours(48);
 
 /// The session including prep and travel: (leave-prep start, home again).
 pub fn expanded(session: &PlannedSession, profile: &Profile) -> (Ts, Ts) {
-    (session.planned_start_at.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes)), session.planned_end_at.mins(profile.commute_home_minutes))
+    (
+        session.planned_start_at.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes)),
+        session.planned_end_at.mins(profile.commute_home_minutes),
+    )
 }
 
 fn active(db: &Connection, except: Option<&str>) -> Result<Vec<PlannedSession>> {
-    PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') AND id IS NOT ?1 ORDER BY rowid", [except])
+    PlannedSession::select(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') AND id IS NOT ?1 ORDER BY rowid",
+        [except],
+    )
 }
 
 /// Sessions within 48 h are committed (calendar shows them confirmed) and get their reminders.
 pub fn commit_upcoming(db: &Connection, now: Ts) -> Result<()> {
     for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [])? {
-        if session.status == SessionStatus::Tentative && now < session.planned_start_at && session.planned_start_at <= now + HOURS_48 {
+        if session.status == SessionStatus::Tentative
+            && now < session.planned_start_at
+            && session.planned_start_at <= now + HOURS_48
+        {
             session.status = SessionStatus::Committed;
             session.source_revision += 1;
             session.save(db)?;
@@ -59,8 +69,11 @@ fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Resu
     let known = known_warnings(db)?;
     let (mut warnings, mut fresh) = (Vec::new(), Vec::new());
     for &week in weeks {
-        if !monday(week) { crate::bail!("INVALID_WEEK", "week_start must be Monday"); }
-        let sessions: Vec<_> = rows.iter().filter(|s| week_of(s.planned_start_at, &tz) == week && s.status.is_active()).collect();
+        if !monday(week) {
+            crate::bail!("INVALID_WEEK", "week_start must be Monday");
+        }
+        let sessions: Vec<_> =
+            rows.iter().filter(|s| week_of(s.planned_start_at, &tz) == week && s.status.is_active()).collect();
         if !rows.iter().any(|s| week_of(s.planned_start_at, &tz) == week) {
             fresh.extend(new_warnings(db, week, &[], &known, now)?);
             continue;
@@ -83,7 +96,13 @@ fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Resu
         let (start, end) = busy_window(week, &profile)?;
         let busy = busy_intervals(db, start, end)?;
         let unavailable = crate::domain::scheduling::deleted_intervals(db)?;
-        let plan = plan_week(&profile, week, &Inputs { busy: &busy, unavailable: &unavailable, existing: &existing, skipped: &skipped, signals: &[] }, now, &PlannerConfig::default())?;
+        let plan = plan_week(
+            &profile,
+            week,
+            &Inputs { busy: &busy, unavailable: &unavailable, existing: &existing, skipped: &skipped, signals: &[] },
+            now,
+            &PlannerConfig::default(),
+        )?;
         let count = sessions.len() as i64;
         if count < profile.weekly_target_sessions {
             warnings.push(format!("Week {week}: {count}/{} sessions saved; {} additional default slots feasible. Agent decides whether to add or accept shortfall.", profile.weekly_target_sessions, plan.sessions.len()));
@@ -111,14 +130,25 @@ fn known_warnings(db: &Connection) -> Result<HashSet<String>> {
 /// Records the week's current warnings and returns the ones not already standing (`known`, taken
 /// before this inspection). A warning wakes the agent when it appears, stays quiet while it persists
 /// (the agent already decided about it) and wakes it again if it goes away and comes back.
-fn new_warnings(db: &Connection, week: Date, current: &[String], known: &HashSet<String>, now: Ts) -> Result<Vec<String>> {
+fn new_warnings(
+    db: &Connection,
+    week: Date,
+    current: &[String],
+    known: &HashSet<String>,
+    now: Ts,
+) -> Result<Vec<String>> {
     let week = week.to_string();
-    let before = AgentEvent::first(db, "WHERE type = 'planning.warnings' AND payload_json ->> 'week' = ?1 ORDER BY created_at DESC, rowid DESC", [&week])?
-        .map(|e| serde_json::from_value::<Vec<String>>(e.payload_json.0["active"].clone()))
-        .transpose()?
-        .unwrap_or_default();
+    let before = AgentEvent::first(
+        db,
+        "WHERE type = 'planning.warnings' AND payload_json ->> 'week' = ?1 ORDER BY created_at DESC, rowid DESC",
+        [&week],
+    )?
+    .map(|e| serde_json::from_value::<Vec<String>>(e.payload_json.0["active"].clone()))
+    .transpose()?
+    .unwrap_or_default();
     if before != current {
-        let mut event = crate::domain::core::emit(db, "planning.warnings", now, json!({"week": week, "active": current}))?;
+        let mut event =
+            crate::domain::core::emit(db, "planning.warnings", now, json!({"week": week, "active": current}))?;
         event.handled_at = Some(now);
         event.update(db)?;
     }
@@ -130,11 +160,22 @@ fn rule_breaks(db: &Connection, session_id: &str, slot: &Candidate, profile: &Pr
     let tz = profile.tz();
     let (start, end) = (slot.start.local(&tz), slot.end.local(&tz));
     let mut reasons = Vec::new();
-    if !profile.weekdays_allowed.contains(&weekday(start.date())) || start.date() != end.date() || start.time() < profile.earliest_workout_start || end.time() > profile.latest_workout_finish {
-        reasons.push(format!("outside your workout window ({}–{})", profile.earliest_workout_start.strftime("%H:%M"), profile.latest_workout_finish.strftime("%H:%M")));
+    if !profile.weekdays_allowed.contains(&weekday(start.date()))
+        || start.date() != end.date()
+        || start.time() < profile.earliest_workout_start
+        || end.time() > profile.latest_workout_finish
+    {
+        reasons.push(format!(
+            "outside your workout window ({}–{})",
+            profile.earliest_workout_start.strftime("%H:%M"),
+            profile.latest_workout_finish.strftime("%H:%M")
+        ));
     }
     let day = Ts(start.date().to_zoned(tz.clone())?.timestamp());
-    if busy_intervals(db, day - SignedDuration::from_hours(24), day + SignedDuration::from_hours(48))?.iter().any(|b| overlaps(slot.prep_start, slot.home_at, b)) {
+    if busy_intervals(db, day - SignedDuration::from_hours(24), day + SignedDuration::from_hours(48))?
+        .iter()
+        .any(|b| overlaps(slot.prep_start, slot.home_at, b))
+    {
         reasons.push("overlaps a calendar event".into());
     }
     if active(db, Some(session_id))?.iter().any(|other| !recovery_ok(slot.start, slot.end, &interval(other), profile)) {
@@ -157,30 +198,60 @@ pub struct SessionPatch {
 /// edits lock the session and reconcile allocation, calendar intent and notification jobs together.
 /// A missed session, or a skipped one whose slot has begun, keeps that outcome: rescheduling it
 /// creates a new session that follows it, so history shows the miss and the make-up.
-pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now: Ts, request_id: &str) -> Result<Value> {
+pub fn edit_session(
+    db: &Connection,
+    id: Option<&str>,
+    patch: SessionPatch,
+    now: Ts,
+    request_id: &str,
+) -> Result<Value> {
     mutate(db, "planning.session_edited", request_id, json!({"session_id": id, "patch": patch}), now, || {
         let profile = get_profile(db)?;
         let mut session = match id {
-            Some(id) => PlannedSession::get(db, id)?.ok_or_else(|| crate::error::Error::domain("SESSION_NOT_FOUND", "Unknown session"))?,
+            Some(id) => PlannedSession::get(db, id)?
+                .ok_or_else(|| crate::error::Error::domain("SESSION_NOT_FOUND", "Unknown session"))?,
             None => PlannedSession::new(String::new(), None, true),
         };
         // Scheduling status alone is editable; actual training history belongs to workout tools.
-        let trained = crate::db::models::WorkoutSession::first(db, "WHERE planned_session_id = ?1 AND started_at IS NOT NULL", [&session.id])?.is_some();
+        let trained = crate::db::models::WorkoutSession::first(
+            db,
+            "WHERE planned_session_id = ?1 AND started_at IS NOT NULL",
+            [&session.id],
+        )?
+        .is_some();
         // A missed or skipped slot can still be rescheduled (owner is running late, or makes it up later).
-        let outcome = session.status == SessionStatus::Missed || (session.status == SessionStatus::Skipped && session.planned_start_at <= now);
+        let outcome = session.status == SessionStatus::Missed
+            || (session.status == SessionStatus::Skipped && session.planned_start_at <= now);
         if id.is_some() && (trained || (session.planned_end_at <= now && !outcome)) {
-            crate::bail!("SESSION_NOT_EDITABLE", "Use workout tools for a running or historical workout; session edits are for upcoming slots");
+            crate::bail!(
+                "SESSION_NOT_EDITABLE",
+                "Use workout tools for a running or historical workout; session edits are for upcoming slots"
+            );
         }
         let from = id.map(|_| session.planned_start_at);
         let revived = id.is_some() && outcome && patch.status.is_none_or(SessionStatus::is_open);
         if revived {
             // Same workout, times and plan as a starting point; its own identity, calendar event and reminders.
             let original = session.id.clone();
-            session = PlannedSession { id: crate::db::new_id(), calendar_event_id: None, source_revision: 0, created_at: now, follows_session_id: Some(original), ..session };
+            session = PlannedSession {
+                id: crate::db::new_id(),
+                calendar_event_id: None,
+                source_revision: 0,
+                created_at: now,
+                follows_session_id: Some(original),
+                ..session
+            };
         }
         let new = id.is_none() || revived;
-        let start = patch.start.or(id.map(|_| session.planned_start_at)).ok_or_else(|| crate::error::Error::domain("INVALID_ARGUMENTS", "Creating a session requires start"))?;
-        let duration = if id.is_some() { (session.planned_end_at - session.planned_start_at).as_mins() } else { profile.preferred_workout_minutes };
+        let start = patch
+            .start
+            .or(id.map(|_| session.planned_start_at))
+            .ok_or_else(|| crate::error::Error::domain("INVALID_ARGUMENTS", "Creating a session requires start"))?;
+        let duration = if id.is_some() {
+            (session.planned_end_at - session.planned_start_at).as_mins()
+        } else {
+            profile.preferred_workout_minutes
+        };
         let end = patch.end.unwrap_or_else(|| start.mins(duration));
         if end <= start || end <= now {
             crate::bail!("INVALID_SESSION_TIME", "End must follow start and be in the future");
@@ -191,15 +262,32 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
             session.workout_plan_json.0 = session.crowd_keys(true);
         }
         if id.is_none() && session.workout_template_id.is_none() {
-            crate::bail!("TEMPLATE_REQUIRED", "Creating a session requires a real template_id; inspect the split or templates first");
+            crate::bail!(
+                "TEMPLATE_REQUIRED",
+                "Creating a session requires a real template_id; inspect the split or templates first"
+            );
         }
-        let status = patch.status.unwrap_or(if !new { session.status } else if start <= now + HOURS_48 { SessionStatus::Committed } else { SessionStatus::Tentative });
+        let status = patch.status.unwrap_or(if !new {
+            session.status
+        } else if start <= now + HOURS_48 {
+            SessionStatus::Committed
+        } else {
+            SessionStatus::Tentative
+        });
         let slot = Candidate::manual(start, end, &profile);
         let mut warnings = if status.is_active() { rule_breaks(db, &session.id, &slot, &profile)? } else { Vec::new() };
         let week = week_of(start, &profile.tz());
         let mut edited = BTreeSet::from([week]);
-        if id.is_some() { edited.insert(week_of(session.planned_start_at, &profile.tz())); }
-        if status.is_active() && active(db, Some(&session.id))?.iter().filter(|s| week_of(s.planned_start_at, &profile.tz()) == week).count() as i64 >= profile.weekly_max_sessions {
+        if id.is_some() {
+            edited.insert(week_of(session.planned_start_at, &profile.tz()));
+        }
+        if status.is_active()
+            && active(db, Some(&session.id))?
+                .iter()
+                .filter(|s| week_of(s.planned_start_at, &profile.tz()) == week)
+                .count() as i64
+                >= profile.weekly_max_sessions
+        {
             warnings.push("exceeds your weekly maximum".into());
         }
         cancel_session_jobs(db, &session.id, now)?;
@@ -219,16 +307,24 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         if status == SessionStatus::Cancelled {
             session.merge_plan(json!({"deleted_by_user": true}));
         }
-        if new { session.insert(db)?; } else { session.save(db)?; }
+        if new {
+            session.insert(db)?;
+        } else {
+            session.save(db)?;
+        }
         if !status.is_open() {
             // Retire old queued writes too; a cancel then queues an owned calendar deletion.
             retire_session(db, &mut session, status, now)?;
         }
         queue_session_write(db, &session, now, false)?;
-        if status.is_open() { schedule_session_jobs(db, &session, now)?; }
+        if status.is_open() {
+            schedule_session_jobs(db, &session, now)?;
+        }
         // Its warnings (and what it does to its neighbours) are this edit's answer, not news later.
         inspect(db, &edited, now, false)?;
-        Ok(json!({"session": crate::domain::scheduling::session_data(&session), "from": from, "warnings": warnings, "side_effects": []}))
+        Ok(
+            json!({"session": crate::domain::scheduling::session_data(&session), "from": from, "warnings": warnings, "side_effects": []}),
+        )
     })
 }
 
@@ -238,7 +334,9 @@ pub fn retire_session(db: &Connection, session: &mut PlannedSession, status: Ses
     session.source_revision += 1;
     session.save(db)?;
     cancel_session_jobs(db, &session.id, now)?;
-    for mut write in CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [&session.id])? {
+    for mut write in
+        CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [&session.id])?
+    {
         write.status = WriteStatus::Cancelled;
         write.handled_at = Some(now);
         write.update(db)?;
@@ -263,12 +361,20 @@ mod tests {
         let week = jiff::civil::date(2026, 10, 12);
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
         let planned = schedule_week(&db, week, now, None, None, &[]).unwrap();
-        let ids: Vec<String> = planned["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
+        let ids: Vec<String> =
+            planned["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
         let before: Vec<PlannedSession> = ids.iter().map(|id| PlannedSession::get(&db, id).unwrap().unwrap()).collect();
         assert_eq!(before.iter().map(|s| weekday(s.planned_start_at.local(&tz).date())).collect::<Vec<_>>(), [0, 2, 4]);
 
         let tuesday = before[0].planned_start_at + SignedDuration::from_hours(24);
-        let moved = edit_session(&db, Some(&ids[0]), SessionPatch { start: Some(tuesday), ..Default::default() }, now, "move-1").unwrap();
+        let moved = edit_session(
+            &db,
+            Some(&ids[0]),
+            SessionPatch { start: Some(tuesday), ..Default::default() },
+            now,
+            "move-1",
+        )
+        .unwrap();
         assert_eq!(moved["data"]["warnings"], json!(["skips a rest day"]));
         assert_eq!(moved["data"]["side_effects"], json!([]));
 
@@ -280,7 +386,8 @@ mod tests {
         }
 
         // The agent got its edit's warnings in the tool result: they are not raised again as news.
-        let attention = |db: &Connection| AgentEvent::select(db, "WHERE type = 'planning.attention' ORDER BY rowid", []).unwrap();
+        let attention =
+            |db: &Connection| AgentEvent::select(db, "WHERE type = 'planning.attention' ORDER BY rowid", []).unwrap();
         assert!(attention(&db).is_empty());
 
         // A change from outside (a drag in the calendar) raises a warning when it appears, not again
@@ -292,11 +399,16 @@ mod tests {
             session.update(db).unwrap();
             inspect_weeks(db, &BTreeSet::from([week, week.checked_add(7.days()).unwrap()]), now).unwrap()
         };
-        let raised = |db: &Connection| -> Vec<String> { serde_json::from_value(attention(db).last().unwrap().payload_json.0["warnings"].clone()).unwrap() };
+        let raised = |db: &Connection| -> Vec<String> {
+            serde_json::from_value(attention(db).last().unwrap().payload_json.0["warnings"].clone()).unwrap()
+        };
         let thursday = before[2].planned_start_at - SignedDuration::from_hours(24);
         let all = drag(&db, &ids[2], thursday)["warnings"].as_array().unwrap().len();
         let clash = raised(&db);
-        assert!(!clash.is_empty() && clash.len() < all && clash.iter().all(|w| w.ends_with("skips a rest day")), "{clash:?}");
+        assert!(
+            !clash.is_empty() && clash.len() < all && clash.iter().all(|w| w.ends_with("skips a rest day")),
+            "{clash:?}"
+        );
         let count = attention(&db).len();
         inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
         assert_eq!(attention(&db).len(), count);
@@ -307,12 +419,20 @@ mod tests {
         assert_eq!((attention(&db).len(), raised(&db)), (count + 1, clash));
 
         // A session moved to the next week with the same problem doesn't raise it again.
-        let late = Ts(before[1].planned_start_at.local(&tz).date().at(21, 30, 0, 0).to_zoned(tz.clone()).unwrap().timestamp());
+        let late =
+            Ts(before[1].planned_start_at.local(&tz).date().at(21, 30, 0, 0).to_zoned(tz.clone()).unwrap().timestamp());
         drag(&db, &ids[1], late);
-        let window = raised(&db).into_iter().find(|w| w.contains(&ids[1]) && w.contains("outside your workout window")).expect("window warning raised");
+        let window = raised(&db)
+            .into_iter()
+            .find(|w| w.contains(&ids[1]) && w.contains("outside your workout window"))
+            .expect("window warning raised");
         let count = attention(&db).len();
         drag(&db, &ids[1], late + SignedDuration::from_hours(7 * 24));
-        assert!(attention(&db)[count..].iter().all(|e| !e.payload_json.0["warnings"].as_array().unwrap().contains(&json!(window))));
+        assert!(
+            attention(&db)[count..]
+                .iter()
+                .all(|e| !e.payload_json.0["warnings"].as_array().unwrap().contains(&json!(window)))
+        );
     }
 
     /// 2026-11-05: a missed Thursday Push was moved to Sunday as Cardio and skipped there; the row was
@@ -329,10 +449,15 @@ mod tests {
         crate::domain::weekly::mark_missed(&db, later).unwrap();
 
         let makeup = first.planned_start_at + SignedDuration::from_hours(48);
-        let moved = edit_session(&db, Some(&id), SessionPatch { start: Some(makeup), ..Default::default() }, later, "makeup").unwrap();
+        let moved =
+            edit_session(&db, Some(&id), SessionPatch { start: Some(makeup), ..Default::default() }, later, "makeup")
+                .unwrap();
         let new = &moved["data"]["session"];
         assert_ne!(new["id"], json!(id));
-        assert_eq!((new["follows_session_id"].as_str(), new["status"].as_str()), (Some(id.as_str()), Some("COMMITTED")));
+        assert_eq!(
+            (new["follows_session_id"].as_str(), new["status"].as_str()),
+            (Some(id.as_str()), Some("COMMITTED"))
+        );
         assert_eq!(PlannedSession::get(&db, &id).unwrap().unwrap().status, SessionStatus::Missed);
     }
 }

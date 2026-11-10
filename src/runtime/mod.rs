@@ -32,12 +32,21 @@ pub struct Health {
 
 pub fn uptime(d: Duration) -> String {
     let mins = d.as_secs() / 60;
-    if mins < 60 { format!("{mins}m") } else if mins < 48 * 60 { format!("{}h {}m", mins / 60, mins % 60) } else { format!("{}d", mins / 1440) }
+    if mins < 60 {
+        format!("{mins}m")
+    } else if mins < 48 * 60 {
+        format!("{}h {}m", mins / 60, mins % 60)
+    } else {
+        format!("{}d", mins / 1440)
+    }
 }
 
 /// Run `f` on a fresh connection in the blocking pool. Domain code is synchronous; a panic (e.g. a
 /// `todo!()` contract) becomes an `INTERNAL` error instead of taking the runtime down.
-pub async fn blocking<T: Send + 'static>(db_path: &Path, f: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static) -> Result<T> {
+pub async fn blocking<T: Send + 'static>(
+    db_path: &Path,
+    f: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let path: PathBuf = db_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut db = crate::db::open(&path)?;
@@ -48,7 +57,10 @@ pub async fn blocking<T: Send + 'static>(db_path: &Path, f: impl FnOnce(&mut Con
 }
 
 /// `blocking` inside one transaction, committed when `f` succeeds.
-pub async fn in_tx<T: Send + 'static>(db_path: &Path, f: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> Result<T> {
+pub async fn in_tx<T: Send + 'static>(
+    db_path: &Path,
+    f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+) -> Result<T> {
     blocking(db_path, move |db| {
         let tx = db.transaction()?;
         let value = f(&tx)?;
@@ -101,7 +113,15 @@ pub async fn serve(config: Config) -> Result<()> {
             let (db_path, text) = (db_path.clone(), text.to_string());
             tokio::spawn(async move {
                 let saved = blocking(&db_path, move |db| {
-                    ChatMessage { id: None, at: Ts::now(), role: ChatRole::Bot, text, telegram_message_id: Some(message_id), meta_json: Json(json!({"kind": "coach"})) }.insert(db)
+                    ChatMessage {
+                        id: None,
+                        at: Ts::now(),
+                        role: ChatRole::Bot,
+                        text,
+                        telegram_message_id: Some(message_id),
+                        meta_json: Json(json!({"kind": "coach"})),
+                    }
+                    .insert(db)
                 })
                 .await;
                 if let Err(e) = saved {
@@ -146,7 +166,8 @@ pub async fn serve(config: Config) -> Result<()> {
 async fn shutdown() {
     #[cfg(unix)]
     {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
         tokio::select! {
             _ = term.recv() => {}
             _ = tokio::signal::ctrl_c() => {}

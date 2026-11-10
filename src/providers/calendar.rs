@@ -83,7 +83,8 @@ pub fn parse_time(value: &Value, calendar_timezone: &str) -> Result<Ts> {
         return Ts::parse(stamp.as_str().ok_or_else(|| invalid("Calendar event dateTime must be text"))?, Some(&tz));
     }
     if let Some(day) = value.get("date") {
-        let day: jiff::civil::Date = day.as_str().ok_or_else(|| invalid("Calendar event date must be text"))?.trim().parse()?;
+        let day: jiff::civil::Date =
+            day.as_str().ok_or_else(|| invalid("Calendar event date must be text"))?.trim().parse()?;
         return Ok(Ts(day.to_zoned(tz)?.timestamp()));
     }
     Err(invalid("Calendar event time must contain dateTime or date"))
@@ -125,7 +126,8 @@ pub fn parse_event(raw: &Value, calendar_timezone: &str) -> Result<CalendarEvent
     let text = |key: &str| raw.get(key).and_then(Value::as_str).map(str::to_string);
     let private = private_props(raw);
     let private_text = |key: &str| private.and_then(|p| p.get(key)).and_then(Value::as_str);
-    let mut keep: Map<String, Value> = KEEP.iter().filter_map(|k| raw.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
+    let mut keep: Map<String, Value> =
+        KEEP.iter().filter_map(|k| raw.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
     if let Some(private) = private.filter(|p| !p.is_empty()) {
         let kept: Map<String, Value> = private
             .iter()

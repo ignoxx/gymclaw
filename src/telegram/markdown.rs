@@ -9,7 +9,8 @@ static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\n]+)`").unwra
 static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*\n]+?)\*\*").unwrap());
 static STRIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"~~([^~\n]+?)~~").unwrap());
 // Single-star italic only around non-space text, so "* item" bullets and "3 * 4" stay literal.
-static ITALIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(^|[^\w*])\*([^*\s][^*\n]*?[^*\s]|[^*\s])\*([^\w*]|$)").unwrap());
+static ITALIC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(^|[^\w*])\*([^*\s][^*\n]*?[^*\s]|[^*\s])\*([^\w*]|$)").unwrap());
 
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
@@ -55,7 +56,9 @@ pub fn to_html(text: &str) -> String {
             open = None;
         }
         let mut html = line(body);
-        if open.is_none() && let Some(tag) = tag {
+        if open.is_none()
+            && let Some(tag) = tag
+        {
             html = format!("{tag}{html}");
             open = Some(tag);
         }
@@ -91,7 +94,10 @@ mod tests {
     #[test]
     fn quotes_and_strike() {
         let text = "**Done**\n>> Bench 8 × 85 kg\n>> ~~Dips~~ skipped\n> a 3 > 2 note\n*after*";
-        assert_eq!(to_html(text), "<b>Done</b>\n<blockquote expandable>Bench 8 × 85 kg\n<s>Dips</s> skipped</blockquote>\n<blockquote>a 3 &gt; 2 note</blockquote>\n<i>after</i>");
+        assert_eq!(
+            to_html(text),
+            "<b>Done</b>\n<blockquote expandable>Bench 8 × 85 kg\n<s>Dips</s> skipped</blockquote>\n<blockquote>a 3 &gt; 2 note</blockquote>\n<i>after</i>"
+        );
         assert_eq!(plain(text), "Done\nBench 8 × 85 kg\nDips skipped\na 3 > 2 note\nafter");
         assert_eq!(to_html(">no space"), "&gt;no space");
     }

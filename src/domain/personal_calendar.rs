@@ -33,8 +33,10 @@ pub fn blocks(db: &Connection, start: Ts, end: Ts) -> Result<Vec<Interval>> {
 /// Connection status without the URL (a capability secret): only its host.
 pub fn status(db: &Connection) -> Result<Value> {
     let Some(state) = PersonalCalendarState::get(db, 1)? else { return Ok(json!({"connected": false})) };
-    Ok(json!({"connected": true, "host": host(&state.url), "last_success_at": state.last_success_at, "last_error_code": state.last_error_code,
-        "blockers": stored(db)?.len()}))
+    Ok(
+        json!({"connected": true, "host": host(&state.url), "last_success_at": state.last_success_at, "last_error_code": state.last_error_code,
+        "blockers": stored(db)?.len()}),
+    )
 }
 
 /// Hostname of an https URL, without userinfo and port.
@@ -68,7 +70,8 @@ pub fn disconnect(db: &Connection, now: Ts) -> Result<Value> {
 /// Throttled; a no-op when not connected or fetched recently. Errors are recorded, not raised, unless `strict`.
 pub fn refresh(db: &Connection, now: Ts, force: bool, transport: &dyn Transport, strict: bool) -> Result<Value> {
     let quiet = |extra: Value| {
-        let mut base = json!({"refreshed": false, "changes": [], "warnings": [], "events": [], "user_message_hint": null});
+        let mut base =
+            json!({"refreshed": false, "changes": [], "warnings": [], "events": [], "user_message_hint": null});
         base.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
         base
     };
@@ -78,7 +81,8 @@ pub fn refresh(db: &Connection, now: Ts, force: bool, transport: &dyn Transport,
     }
     state.fetched_at = Some(now);
     let tz = get_profile(db)?.tz();
-    let fetched = ics::fetch(&state.url, transport).and_then(|data| ics::busy_intervals(&data, now - LOOKBACK, now + HORIZON, &tz));
+    let fetched = ics::fetch(&state.url, transport)
+        .and_then(|data| ics::busy_intervals(&data, now - LOOKBACK, now + HORIZON, &tz));
     let fresh: BTreeSet<(Ts, Ts)> = match fetched {
         Ok(intervals) => intervals.into_iter().map(|i| (i.start, i.end)).collect(),
         Err(error) => {
@@ -127,15 +131,23 @@ fn inspect_changes(db: &Connection, old: &BTreeSet<(Ts, Ts)>, new: &BTreeSet<(Ts
     }
     let replanned = inspect_weeks(db, &weeks, now)?;
     commit_upcoming(db, now)?;
-    let event = emit(db, "calendar.personal_blockers_changed", now, json!({"added": new.difference(old).count(), "removed": old.difference(new).count(),
-        "changes": replanned["changed"], "warnings": replanned["warnings"]}))?;
-    let warnings: Vec<&str> = replanned["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let event = emit(
+        db,
+        "calendar.personal_blockers_changed",
+        now,
+        json!({"added": new.difference(old).count(), "removed": old.difference(new).count(),
+        "changes": replanned["changed"], "warnings": replanned["warnings"]}),
+    )?;
+    let warnings: Vec<&str> =
+        replanned["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let hint = if !warnings.is_empty() {
         json!(format!("Personal calendar changed. {}", warnings.join(" ")))
     } else {
         Value::Null
     };
-    Ok(json!({"changes": replanned["changed"], "warnings": replanned["warnings"], "events": [{"id": event.id, "type": event.r#type}], "user_message_hint": hint}))
+    Ok(
+        json!({"changes": replanned["changed"], "warnings": replanned["warnings"], "events": [{"id": event.id, "type": event.r#type}], "user_message_hint": hint}),
+    )
 }
 
 #[cfg(test)]
@@ -178,14 +190,22 @@ mod tests {
         let original = PlannedSession::get(&db, &id).unwrap().unwrap().planned_start_at;
         let utc = |t: Ts| t.0.strftime("%Y%m%dT%H%M%SZ").to_string();
         let (busy_start, busy_end) = (original.mins(-60), original.mins(120));
-        let ics = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{0}\r\nDTSTART:{0}\r\nDTEND:{1}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", utc(busy_start), utc(busy_end));
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:{0}\r\nDTSTART:{0}\r\nDTEND:{1}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            utc(busy_start),
+            utc(busy_end)
+        );
         let up = feed(200, ics);
 
         let result = connect(&db, "webcal://p42-caldav.icloud.com/published/2/secret", sunday, &up).unwrap();
         assert!(result["user_message_hint"].as_str().unwrap().starts_with("Personal calendar changed"));
         assert_eq!(result["changes"], json!([]));
         // The conflict wakes the agent once, as a planning warning; the calendar change itself doesn't.
-        let wake: Vec<String> = crate::domain::events::wake_pending(&db).unwrap().iter().map(|e| e["type"].as_str().unwrap().to_string()).collect();
+        let wake: Vec<String> = crate::domain::events::wake_pending(&db)
+            .unwrap()
+            .iter()
+            .map(|e| e["type"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(wake, ["planning.attention"]);
         assert_eq!(PlannedSession::get(&db, &id).unwrap().unwrap().planned_start_at, original);
         assert!(busy_intervals(&db, sunday, sunday.mins(8 * 24 * 60)).unwrap().iter().any(|b| b.start == busy_start));
@@ -197,8 +217,14 @@ mod tests {
 
         // An outage records the error but keeps the last known blockers.
         let down = feed(503, String::new());
-        assert_eq!(refresh(&db, sunday.mins(10), false, &down, false).unwrap()["error_code"], "PERSONAL_CALENDAR_UNAVAILABLE");
-        assert_eq!(PersonalCalendarState::get(&db, 1).unwrap().unwrap().last_error_code.as_deref(), Some("PERSONAL_CALENDAR_UNAVAILABLE"));
+        assert_eq!(
+            refresh(&db, sunday.mins(10), false, &down, false).unwrap()["error_code"],
+            "PERSONAL_CALENDAR_UNAVAILABLE"
+        );
+        assert_eq!(
+            PersonalCalendarState::get(&db, 1).unwrap().unwrap().last_error_code.as_deref(),
+            Some("PERSONAL_CALENDAR_UNAVAILABLE")
+        );
         assert_eq!(status(&db).unwrap()["blockers"], 1);
 
         // An unchanged feed is not news.

@@ -10,18 +10,18 @@ use serde_json::{Value, json};
 use crate::db::models::{CalendarEventSnapshot, CalendarWrite, PlannedSession, SessionStatus, WriteStatus};
 use crate::db::{Connection, Json};
 use crate::domain::calendar_writes::{event_id_for, queue_session_write};
-use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
-use crate::domain::replanning::{commit_upcoming, inspect_weeks};
-use crate::providers::calendar::{CalendarEvent, CalendarProvider, SYNC_TOKEN_EXPIRED};
-use crate::providers::google::bind_calendar;
 use crate::domain::compression::compress_template;
 use crate::domain::core::emit;
 use crate::domain::events::outage_open;
+use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
 use crate::domain::profile::get_profile;
+use crate::domain::replanning::{commit_upcoming, inspect_weeks};
 use crate::domain::scheduling::session_data;
 use crate::domain::templates::{Template, get_template};
 use crate::domain::workout::historical_set_duration;
 use crate::error::{Error, Result};
+use crate::providers::calendar::{CalendarEvent, CalendarProvider, SYNC_TOKEN_EXPIRED};
+use crate::providers::google::bind_calendar;
 use crate::time::Ts;
 
 /// Monday of the local week containing `stamp`.
@@ -35,7 +35,9 @@ pub fn week_of(stamp: Ts, zone: &TimeZone) -> Date {
 pub fn allocation(db: &Connection, session: &mut PlannedSession) -> Result<()> {
     let Some(template_id) = session.workout_template_id.clone() else { return Ok(()) };
     let mut template: Template = match session.plan("template") {
-        Some(snapshot) if !snapshot.is_null() => serde_json::from_value(snapshot.clone()).map_err(|e| Error::domain("INVALID_TEMPLATE", e.to_string()))?,
+        Some(snapshot) if !snapshot.is_null() => {
+            serde_json::from_value(snapshot.clone()).map_err(|e| Error::domain("INVALID_TEMPLATE", e.to_string()))?
+        }
         _ => get_template(db, &template_id)?,
     };
     template.set_duration_seconds = historical_set_duration(db, template.set_duration_seconds as f64)?.ceil() as i64;
@@ -43,7 +45,9 @@ pub fn allocation(db: &Connection, session: &mut PlannedSession) -> Result<()> {
     let crowd = session.crowd_keys(true);
     session.workout_plan_json.0 = match compress_template(&template, &get_profile(db)?, budget) {
         Ok(plan) => plan,
-        Err(error @ Error::Domain { .. }) => json!({"template": template, "budget_seconds": budget, "error": error.code()}),
+        Err(error @ Error::Domain { .. }) => {
+            json!({"template": template, "budget_seconds": budget, "error": error.code()})
+        }
         Err(other) => return Err(other),
     };
     session.merge_plan(crowd);
@@ -76,14 +80,22 @@ fn title(text: &str) -> String {
     let mut out = String::new();
     let mut previous_alpha = false;
     for c in text.chars() {
-        if previous_alpha { out.extend(c.to_lowercase()) } else { out.extend(c.to_uppercase()) }
+        if previous_alpha {
+            out.extend(c.to_lowercase())
+        } else {
+            out.extend(c.to_uppercase())
+        }
         previous_alpha = c.is_alphabetic();
     }
     out
 }
 
 fn active_sessions(db: &Connection) -> Result<Vec<PlannedSession>> {
-    PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') ORDER BY planned_start_at", [])
+    PlannedSession::select(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') ORDER BY planned_start_at",
+        [],
+    )
 }
 
 /// The week's planned workouts for owner messages, e.g. "This week: Mon 12:15 Legs · Wed 10:30 Push."
@@ -95,7 +107,11 @@ pub fn week_lineup(db: &Connection, week_start: Date, now: Ts) -> Result<String>
         .filter(|s| week_of(s.planned_start_at, &tz) == week_start)
         .map(|s| format!("{} {}", s.planned_start_at.local(&tz).strftime("%a %H:%M"), workout_name(s)))
         .collect();
-    let label = if week_start == week_of(now, &tz) { "This week".to_string() } else { format!("Week of {} {}", week_start.strftime("%b"), week_start.day()) };
+    let label = if week_start == week_of(now, &tz) {
+        "This week".to_string()
+    } else {
+        format!("Week of {} {}", week_start.strftime("%b"), week_start.day())
+    };
     let list = if sessions.is_empty() { "no workouts".to_string() } else { sessions.join(" · ") };
     Ok(format!("{label}: {list}."))
 }
@@ -115,17 +131,36 @@ pub fn get_week(db: &Connection, week_start: Date) -> Result<Value> {
 }
 
 pub fn is_closed(status: SessionStatus) -> bool {
-    matches!(status, SessionStatus::Cancelled | SessionStatus::Skipped | SessionStatus::Missed | SessionStatus::Completed)
+    matches!(
+        status,
+        SessionStatus::Cancelled | SessionStatus::Skipped | SessionStatus::Missed | SessionStatus::Completed
+    )
 }
 
 /// Cache a remote event. Tombstones keep their ownership provenance and merge into the last raw payload.
-pub fn persist_snapshot(db: &Connection, event: &CalendarEvent, now: Ts, locked: bool) -> Result<CalendarEventSnapshot> {
+pub fn persist_snapshot(
+    db: &Connection,
+    event: &CalendarEvent,
+    now: Ts,
+    locked: bool,
+) -> Result<CalendarEventSnapshot> {
     let existing = CalendarEventSnapshot::get(db, &event.id)?;
     let fresh = existing.is_none();
     let mut row = existing.unwrap_or_else(|| CalendarEventSnapshot {
-        calendar_event_id: event.id.clone(), ical_uid: None, etag: None, title: String::new(), start_at: event.start.unwrap_or(now),
-        end_at: event.end.unwrap_or(now), status: String::new(), updated_at_remote: None, gymclaw_managed: event.managed, gymclaw_session_id: None,
-        gymclaw_plan_revision: None, user_locked: false, last_seen_at: now, raw_json: Json(json!({})),
+        calendar_event_id: event.id.clone(),
+        ical_uid: None,
+        etag: None,
+        title: String::new(),
+        start_at: event.start.unwrap_or(now),
+        end_at: event.end.unwrap_or(now),
+        status: String::new(),
+        updated_at_remote: None,
+        gymclaw_managed: event.managed,
+        gymclaw_session_id: None,
+        gymclaw_plan_revision: None,
+        user_locked: false,
+        last_seen_at: now,
+        raw_json: Json(json!({})),
     });
     row.ical_uid = event.ical_uid.clone().or(row.ical_uid);
     row.etag = event.etag.clone();
@@ -150,12 +185,18 @@ pub fn persist_snapshot(db: &Connection, event: &CalendarEvent, now: Ts, locked:
     } else {
         row.raw_json = Json(Value::Object(event.raw.clone()));
     }
-    if fresh { row.insert(db)? } else { row.update(db)? }
+    if fresh {
+        row.insert(db)?
+    } else {
+        row.update(db)?
+    }
     Ok(row)
 }
 
 fn cancel_writes(db: &Connection, session_id: &str, now: Ts) -> Result<()> {
-    for mut write in CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [session_id])? {
+    for mut write in
+        CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [session_id])?
+    {
         write.status = WriteStatus::Cancelled;
         write.handled_at = Some(now);
         write.update(db)?;
@@ -170,9 +211,12 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
     let tz = profile.tz();
     let previous = CalendarEventSnapshot::get(db, &event.id)?;
     let mut session = PlannedSession::first(db, "WHERE calendar_event_id = ?1", [&event.id])?;
-    if session.is_none() && event.managed && let Some(id) = &event.session_id
+    if session.is_none()
+        && event.managed
+        && let Some(id) = &event.session_id
         && let Some(mut candidate) = PlannedSession::get(db, id)?
-        && candidate.calendar_event_id.is_none() && event.id == event_id_for(&candidate.id)
+        && candidate.calendar_event_id.is_none()
+        && event.id == event_id_for(&candidate.id)
     {
         candidate.calendar_event_id = Some(event.id.clone());
         candidate.save(db)?;
@@ -198,13 +242,23 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
                 session.save(db)?;
                 cancel_session_jobs(db, &session.id, now)?;
                 cancel_writes(db, &session.id, now)?;
-                let log = emit(db, "calendar.gym_event_deleted", now, json!({"session_id": session.id, "event_id": event.id}))?;
+                let log = emit(
+                    db,
+                    "calendar.gym_event_deleted",
+                    now,
+                    json!({"session_id": session.id, "event_id": event.id}),
+                )?;
                 emitted.push(json!({"id": log.id, "type": log.r#type}));
                 weeks.insert(old_week);
             }
         } else {
-            let (start, end) = (event.start.ok_or_else(|| Error::domain("CALENDAR_INVALID_RESPONSE", "event without start"))?, event.end.unwrap_or(now));
-            let own_echo = event.revision == Some(session.source_revision) && start == session.planned_start_at && end == session.planned_end_at;
+            let (start, end) = (
+                event.start.ok_or_else(|| Error::domain("CALENDAR_INVALID_RESPONSE", "event without start"))?,
+                event.end.unwrap_or(now),
+            );
+            let own_echo = event.revision == Some(session.source_revision)
+                && start == session.planned_start_at
+                && end == session.planned_end_at;
             let times_changed = match &previous {
                 Some(p) => p.start_at != start || p.end_at != end,
                 None => session.planned_start_at != start || session.planned_end_at != end,
@@ -233,7 +287,11 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
                 cancel_session_jobs(db, &session.id, now)?;
                 cancel_writes(db, &session.id, now)?;
                 schedule_session_jobs(db, session, now)?;
-                let kind = if old_duration != end - start { "calendar.gym_event_resized" } else { "calendar.gym_event_changed" };
+                let kind = if old_duration != end - start {
+                    "calendar.gym_event_resized"
+                } else {
+                    "calendar.gym_event_changed"
+                };
                 let log = emit(db, kind, now, json!({"session": session_data(session), "event_id": event.id}))?;
                 emitted.push(json!({"id": log.id, "type": kind, "session_id": session.id}));
                 weeks.extend([old_week, week_of(start, &tz)]);
@@ -241,8 +299,11 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
         }
     } else if !event.cancelled() {
         let meaningful = previous.as_ref().is_none_or(|p| {
-            Some(p.start_at) != event.start || Some(p.end_at) != event.end || p.status == "cancelled"
-                || p.raw_json.get("recurrence") != raw.get("recurrence") || p.raw_json.get("transparency") != raw.get("transparency")
+            Some(p.start_at) != event.start
+                || Some(p.end_at) != event.end
+                || p.status == "cancelled"
+                || p.raw_json.get("recurrence") != raw.get("recurrence")
+                || p.raw_json.get("transparency") != raw.get("transparency")
         });
         if meaningful && (!transparent(&raw) || previous.as_ref().is_some_and(|p| !transparent(&p.raw_json))) {
             let kind = if transparent(&raw) { "calendar.blocker_removed" } else { "calendar.blocker_added" };
@@ -250,7 +311,9 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
             emitted.push(json!({"id": log.id, "type": log.r#type}));
             blocker_weeks(&mut weeks);
         }
-    } else if previous.as_ref().is_some_and(|p| p.status != "cancelled") || previous.is_none() && raw.get("recurringEventId").is_some_and(|v| !v.is_null() && v != "") {
+    } else if previous.as_ref().is_some_and(|p| p.status != "cancelled")
+        || previous.is_none() && raw.get("recurringEventId").is_some_and(|v| !v.is_null() && v != "")
+    {
         let log = emit(db, "calendar.blocker_removed", now, json!({"event_id": event.id}))?;
         emitted.push(json!({"id": log.id, "type": log.r#type}));
         blocker_weeks(&mut weeks);
@@ -296,12 +359,19 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     state.sync_token = Some(batch.next_sync_token.clone());
     state.last_synced_at = Some(now);
     state.update(db)?;
-    let replanned = if affected.is_empty() { json!({"changed": [], "warnings": []}) } else { inspect_weeks(db, &affected, now)? };
+    let replanned =
+        if affected.is_empty() { json!({"changed": [], "warnings": []}) } else { inspect_weeks(db, &affected, now)? };
     commit_upcoming(db, now)?;
     let changes = replanned["changed"].as_array().cloned().unwrap_or_default();
-    let warnings: Vec<String> = replanned["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect();
+    let warnings: Vec<String> =
+        replanned["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect();
     if !emitted.is_empty() || !changes.is_empty() || !warnings.is_empty() {
-        let event = emit(db, "planning.replan_required", now, json!({"reason": "calendar_changed", "handled_locally": false, "changes": changes, "warnings": warnings}))?;
+        let event = emit(
+            db,
+            "planning.replan_required",
+            now,
+            json!({"reason": "calendar_changed", "handled_locally": false, "changes": changes, "warnings": warnings}),
+        )?;
         emitted.push(json!({"id": event.id, "type": event.r#type}));
     }
     let tz = get_profile(db)?.tz();
@@ -310,7 +380,9 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     for e in &emitted {
         let kind = e["type"].as_str().unwrap_or_default();
         if kind == "calendar.gym_event_changed" || kind == "calendar.gym_event_resized" {
-            let Some(session) = PlannedSession::get(db, e["session_id"].as_str().unwrap_or_default())? else { continue };
+            let Some(session) = PlannedSession::get(db, e["session_id"].as_str().unwrap_or_default())? else {
+                continue;
+            };
             let (start, end) = (session.planned_start_at.local(&tz), session.planned_end_at.local(&tz));
             parts.push(if kind == "calendar.gym_event_changed" {
                 format!("{} moved to {}.", workout_name(&session), start.strftime("%a %H:%M"))
@@ -336,8 +408,18 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
 /// A minimal deletion payload, as Google sends for removed events.
 pub fn tombstone(id: &str) -> CalendarEvent {
     CalendarEvent {
-        id: id.into(), etag: None, title: String::new(), status: "cancelled".into(), start: None, end: None, updated: None, ical_uid: None,
-        managed: false, session_id: None, revision: None, raw: json!({"id": id, "status": "cancelled"}).as_object().cloned().unwrap_or_default(),
+        id: id.into(),
+        etag: None,
+        title: String::new(),
+        status: "cancelled".into(),
+        start: None,
+        end: None,
+        updated: None,
+        ical_uid: None,
+        managed: false,
+        session_id: None,
+        revision: None,
+        raw: json!({"id": id, "status": "cancelled"}).as_object().cloned().unwrap_or_default(),
     }
 }
 
@@ -380,7 +462,8 @@ mod tests {
 
     fn publish(db: &Connection, provider: &mut FixtureCalendarProvider, now: Ts) {
         for write in pending_writes(db).unwrap() {
-            let status = apply_write(db, provider, write["id"].as_str().unwrap(), now, false).unwrap()["status"].clone();
+            let status =
+                apply_write(db, provider, write["id"].as_str().unwrap(), now, false).unwrap()["status"].clone();
             assert!(status == "APPLIED" || status == "CANCELLED", "{status}");
         }
     }
@@ -406,10 +489,18 @@ mod tests {
         let template = serde_json::from_value(json!({"id": "long", "name": "Long", "exercises": specs, "set_duration_seconds": 60, "transition_seconds": 90, "source": "demo_fixture"})).unwrap();
         import_template(&db, &template).unwrap();
         sync_calendar(&db, &mut provider, now(0)).unwrap();
-        let signal = SlotSignal { start: at(14, 20, 0), crowd: Some(0.0), confidence: 1.0, calendar_convenience: 0.0, adherence: 0.0, preferred_time: 0.0 };
+        let signal = SlotSignal {
+            start: at(14, 20, 0),
+            crowd: Some(0.0),
+            confidence: 1.0,
+            calendar_convenience: 0.0,
+            adherence: 0.0,
+            preferred_time: 0.0,
+        };
         let result = schedule_week(&db, Date::constant(2026, 10, 12), now(0), None, Some("long"), &[signal]).unwrap();
         commit_upcoming(&db, now(0)).unwrap();
-        let ids: Vec<String> = result["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
+        let ids: Vec<String> =
+            result["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
         for id in &ids {
             queue_session_write(&db, &session(&db, id), now(0), false).unwrap();
         }
@@ -433,10 +524,17 @@ mod tests {
         let result = sync_calendar(&db, &mut provider, now(3)).unwrap();
         let moved = session(&db, &ids[1]);
         assert!(moved.user_locked);
-        assert_eq!((moved.planned_start_at, moved.prep_start_at, moved.leave_home_at, moved.expected_finish_at), (at(15, 19, 0), at(15, 18, 25), at(15, 18, 40), at(15, 20, 10)));
+        assert_eq!(
+            (moved.planned_start_at, moved.prep_start_at, moved.leave_home_at, moved.expected_finish_at),
+            (at(15, 19, 0), at(15, 18, 25), at(15, 18, 40), at(15, 20, 10))
+        );
         assert_eq!(moved.crowd_prediction, None); // Wednesday's prediction isn't Thursday evidence.
-        assert!(old_jobs.iter().all(|j| NotificationJob::get(&db, &j.id).unwrap().unwrap().status == crate::db::models::JobStatus::Cancelled));
-        let new_jobs = NotificationJob::select(&db, "WHERE planned_session_id = ?1 AND status = 'PENDING'", [&moved.id]).unwrap();
+        assert!(
+            old_jobs.iter().all(|j| NotificationJob::get(&db, &j.id).unwrap().unwrap().status
+                == crate::db::models::JobStatus::Cancelled)
+        );
+        let new_jobs =
+            NotificationJob::select(&db, "WHERE planned_session_id = ?1 AND status = 'PENDING'", [&moved.id]).unwrap();
         assert_eq!(new_jobs.len(), 3);
         assert!(new_jobs.iter().all(|j| j.due_at.local(&berlin()).date() == Date::constant(2026, 10, 15)));
         // Thu now skips the rest day before Fri; that's the owner's call, so Fri stays as planned.
@@ -484,14 +582,20 @@ mod tests {
         assert!(resized.user_locked);
         let plan = &resized.workout_plan_json;
         assert!(plan["estimated_duration_seconds"].as_i64().unwrap() <= 45 * 60);
-        assert_eq!([&plan["sets"]["bench"], &plan["sets"]["row"], &plan["sets"]["triceps"], &plan["sets"]["curl"]], [&json!(3), &json!(3), &json!(0), &json!(1)]);
+        assert_eq!(
+            [&plan["sets"]["bench"], &plan["sets"]["row"], &plan["sets"]["triceps"], &plan["sets"]["curl"]],
+            [&json!(3), &json!(3), &json!(0), &json!(1)]
+        );
         assert!(response["user_message_hint"].is_string());
         let started = start(&db, Some("long"), Some(&resized.id), false, at(14, 20, 0), "start-short").unwrap();
         assert!(Ts::parse(started["data"]["eta"].as_str().unwrap(), None).unwrap() <= at(14, 20, 45));
         let rows = WorkoutExercise::select(&db, "ORDER BY position", []).unwrap();
         let raise = rows.iter().find(|e| e.exercise_id == "raise").unwrap();
         assert_eq!((raise.planned_working_sets, raise.config_json["working_sets"].as_i64()), (3, Some(3)));
-        assert_eq!(rows.iter().find(|e| e.exercise_id == "triceps").unwrap().status, crate::db::models::ExerciseStatus::Skipped);
+        assert_eq!(
+            rows.iter().find(|e| e.exercise_id == "triceps").unwrap().status,
+            crate::db::models::ExerciseStatus::Skipped
+        );
     }
 
     #[test]
@@ -533,11 +637,19 @@ mod tests {
         provider.put(json!({"id": "travel", "summary": "Travel", "start": {"date": "2026-10-12"}, "end": {"date": "2026-10-19"}})).unwrap();
         let result = sync_calendar(&db, &mut provider, now(3)).unwrap();
         assert!(ids.iter().all(|id| session(&db, id).status.is_open()));
-        assert!(result["data"]["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("overlaps a calendar event")));
+        assert!(
+            result["data"]["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("overlaps a calendar event"))
+        );
         let events = crate::domain::events::wake_pending(&db).unwrap();
         assert!(!events.is_empty());
         let count = events.len();
-        for event in events { crate::domain::events::ack(&db, event["id"].as_str().unwrap(), now(3)).unwrap(); }
+        for event in events {
+            crate::domain::events::ack(&db, event["id"].as_str().unwrap(), now(3)).unwrap();
+        }
         sync_calendar(&db, &mut provider, now(4)).unwrap();
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
         assert!(count > 0);
@@ -569,8 +681,12 @@ mod tests {
     #[test]
     fn locked_hard_conflicts_are_kept_and_explained() {
         let (db, mut provider, ids) = setup();
-        provider.edit(&event_id_for(&ids[0]), json!({"start": clock(at(12, 20, 0)), "end": clock(at(12, 21, 10))})).unwrap();
-        provider.edit(&event_id_for(&ids[1]), json!({"start": clock(at(13, 19, 0)), "end": clock(at(13, 20, 10))})).unwrap();
+        provider
+            .edit(&event_id_for(&ids[0]), json!({"start": clock(at(12, 20, 0)), "end": clock(at(12, 21, 10))}))
+            .unwrap();
+        provider
+            .edit(&event_id_for(&ids[1]), json!({"start": clock(at(13, 19, 0)), "end": clock(at(13, 20, 10))}))
+            .unwrap();
         let result = sync_calendar(&db, &mut provider, now(3)).unwrap();
         assert!(session(&db, &ids[0]).user_locked && session(&db, &ids[1]).user_locked);
         assert_eq!(session(&db, &ids[1]).planned_start_at, at(13, 19, 0));
@@ -638,7 +754,10 @@ mod tests {
     #[test]
     fn live_write_gate_runs_before_any_provider_call() {
         let db = crate::domain::workout::tests::db();
-        assert_eq!(apply_write(&db, &mut LiveSpy, "anything", now(0), false).unwrap_err().code(), "CALENDAR_WRITES_NOT_APPROVED");
+        assert_eq!(
+            apply_write(&db, &mut LiveSpy, "anything", now(0), false).unwrap_err().code(),
+            "CALENDAR_WRITES_NOT_APPROVED"
+        );
     }
 
     #[test]

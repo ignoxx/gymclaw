@@ -26,7 +26,8 @@ sql_enum!(NoteKind { Owner = "owner", Learned = "learned" });
 
 impl SessionStatus {
     /// Sessions that take a slot in the week.
-    pub const ACTIVE: [SessionStatus; 4] = [SessionStatus::Tentative, SessionStatus::Committed, SessionStatus::Started, SessionStatus::Completed];
+    pub const ACTIVE: [SessionStatus; 4] =
+        [SessionStatus::Tentative, SessionStatus::Committed, SessionStatus::Started, SessionStatus::Completed];
 
     pub fn is_active(self) -> bool {
         Self::ACTIVE.contains(&self)
@@ -377,10 +378,24 @@ impl PlannedSession {
     pub fn new(week_id: String, workout_template_id: Option<String>, user_locked: bool) -> PlannedSession {
         let now = Ts::now();
         PlannedSession {
-            id: crate::db::new_id(), week_id, workout_template_id, workout_plan_json: Json(Value::Object(Default::default())),
-            status: SessionStatus::Tentative, planned_start_at: now, planned_end_at: now, prep_start_at: now, leave_home_at: now,
-            expected_finish_at: now, calendar_event_id: None, crowd_prediction: None, crowd_confidence: None, user_locked,
-            source_revision: 1, created_at: now, updated_at: now, follows_session_id: None,
+            id: crate::db::new_id(),
+            week_id,
+            workout_template_id,
+            workout_plan_json: Json(Value::Object(Default::default())),
+            status: SessionStatus::Tentative,
+            planned_start_at: now,
+            planned_end_at: now,
+            prep_start_at: now,
+            leave_home_at: now,
+            expected_finish_at: now,
+            calendar_event_id: None,
+            crowd_prediction: None,
+            crowd_confidence: None,
+            user_locked,
+            source_revision: 1,
+            created_at: now,
+            updated_at: now,
+            follows_session_id: None,
         }
     }
 

@@ -77,8 +77,22 @@ fn keyboard(card: &Card) -> &Keyboard {
 }
 
 impl Coach {
-    pub fn new(tg: Arc<dyn Telegram>, chat: i64, clock: Clock, rest_over: Option<RestOver>, record: Option<Record>) -> Arc<Coach> {
-        Arc::new_cyclic(|me| Coach { tg, chat, clock, rest_over, record, state: Mutex::new(State::default()), me: me.clone() })
+    pub fn new(
+        tg: Arc<dyn Telegram>,
+        chat: i64,
+        clock: Clock,
+        rest_over: Option<RestOver>,
+        record: Option<Record>,
+    ) -> Arc<Coach> {
+        Arc::new_cyclic(|me| Coach {
+            tg,
+            chat,
+            clock,
+            rest_over,
+            record,
+            state: Mutex::new(State::default()),
+            me: me.clone(),
+        })
     }
 
     fn now(&self) -> Ts {
@@ -94,7 +108,10 @@ impl Coach {
 
     async fn send(&self, text: &str, card: &Card) -> Result<i64> {
         let caption = if card.kind == CardKind::Preview { "" } else { text };
-        let id = self.tg.send(self.chat, caption, card.photo.as_deref().map(Path::new), keyboard(card), card.effect.as_deref()).await?;
+        let id = self
+            .tg
+            .send(self.chat, caption, card.photo.as_deref().map(Path::new), keyboard(card), card.effect.as_deref())
+            .await?;
         if let Some(record) = &self.record {
             record(text, id);
         }
@@ -261,7 +278,14 @@ impl Coach {
     /// A one-off warning that leaves the workout cards alone.
     pub async fn warn(&self, text: &str) {
         let card = Card { text: format!("⚠️ {text}"), ..Card::default() };
-        if let Err(e) = self.apply(&CoachView { handled: true, standalone: true, cards: vec![card], ..CoachView::default() }, None, None).await {
+        if let Err(e) = self
+            .apply(
+                &CoachView { handled: true, standalone: true, cards: vec![card], ..CoachView::default() },
+                None,
+                None,
+            )
+            .await
+        {
             tracing::warn!("coach warning not sent: {e}");
         }
     }
@@ -308,7 +332,12 @@ pub mod tests {
 
     impl FakeTelegram {
         pub fn new() -> Arc<FakeTelegram> {
-            Arc::new(FakeTelegram { calls: StdMutex::new(vec![]), start: tokio::time::Instant::now(), gone: false, fail_send: false })
+            Arc::new(FakeTelegram {
+                calls: StdMutex::new(vec![]),
+                start: tokio::time::Instant::now(),
+                gone: false,
+                fail_send: false,
+            })
         }
         fn push(&self, call: Call) -> usize {
             let mut calls = self.calls.lock().unwrap();
@@ -325,7 +354,14 @@ pub mod tests {
 
     #[async_trait]
     impl Telegram for FakeTelegram {
-        async fn send(&self, _: i64, text: &str, _: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64> {
+        async fn send(
+            &self,
+            _: i64,
+            text: &str,
+            _: Option<&Path>,
+            buttons: &Keyboard,
+            effect: Option<&str>,
+        ) -> Result<i64> {
             if self.fail_send {
                 return Err(Error::domain("TELEGRAM_ERROR", "sendMessage: timeout"));
             }
@@ -387,7 +423,11 @@ pub mod tests {
     }
 
     fn card(text: &str) -> Card {
-        Card { text: text.into(), buttons: vec![vec![Button { text: "✅ 10 × 40 kg".into(), data: "gc:log:abcd1234:40:10".into() }]], ..Card::default() }
+        Card {
+            text: text.into(),
+            buttons: vec![vec![Button { text: "✅ 10 × 40 kg".into(), data: "gc:log:abcd1234:40:10".into() }]],
+            ..Card::default()
+        }
     }
 
     fn rest(text: &str, until: &str) -> Card {
@@ -399,7 +439,9 @@ pub mod tests {
     }
 
     fn next_card(text: &'static str) -> RestOver {
-        Arc::new(move || Box::pin(async move { Some(CoachView { cleanup: Some(Cleanup::Delete), ..view(vec![card(text)]) }) }))
+        Arc::new(move || {
+            Box::pin(async move { Some(CoachView { cleanup: Some(Cleanup::Delete), ..view(vec![card(text)]) }) })
+        })
     }
 
     async fn sleep_ms(ms: u64) {
@@ -409,7 +451,10 @@ pub mod tests {
     #[test]
     fn rest_countdown_text() {
         let rest = rest("until **Bench** set 2/2", T0);
-        assert_eq!(with_rest(&rest, ts(T0).mins(-1) - jiff::SignedDuration::from_secs(25)), "⏱ 1:25 until **Bench** set 2/2");
+        assert_eq!(
+            with_rest(&rest, ts(T0).mins(-1) - jiff::SignedDuration::from_secs(25)),
+            "⏱ 1:25 until **Bench** set 2/2"
+        );
         assert_eq!(with_rest(&rest, ts(T0) + jiff::SignedDuration::from_millis(1)), "⏱ 0:00 until **Bench** set 2/2");
     }
 
@@ -418,7 +463,11 @@ pub mod tests {
         let tg = FakeTelegram::new();
         let coach = Coach::new(tg.clone(), 1, clock(), Some(next_card("Bench · set 2")), None);
         coach.apply(&view(vec![card("Bench · set 1")]), None, None).await.unwrap();
-        let resting = CoachView { react: Some("👍".into()), ack: Some("✅ 10 × 40 kg".into()), ..view(vec![rest("until Bench set 2/2", "2026-10-02T18:01:30Z")]) };
+        let resting = CoachView {
+            react: Some("👍".into()),
+            ack: Some("✅ 10 × 40 kg".into()),
+            ..view(vec![rest("until Bench set 2/2", "2026-10-02T18:01:30Z")])
+        };
         coach.apply(&resting, None, Some(7)).await.unwrap();
         let calls = tg.calls();
         assert_eq!(calls[1], Call::React(7, Some("👍".into())));
@@ -455,10 +504,18 @@ pub mod tests {
         coach.apply(&shorter, None, None).await.unwrap();
         assert!(matches!(tg.calls().last(), Some(Call::Edit(100, text, _, _)) if text == "⏱ 1:00 until Bench set 2/2"));
         sleep_ms(5001).await;
-        let edits: Vec<String> = tg.calls().into_iter().filter_map(|c| if let Call::Edit(_, t, _, _) = c { Some(t) } else { None }).collect();
+        let edits: Vec<String> = tg
+            .calls()
+            .into_iter()
+            .filter_map(|c| if let Call::Edit(_, t, _, _) = c { Some(t) } else { None })
+            .collect();
         assert_eq!(edits.last().unwrap(), "⏱ 0:55 until Bench set 2/2");
         assert_eq!(edits.len(), 2, "the old countdown stopped; only the new one ticks");
-        assert_eq!(tg.calls().iter().filter(|c| matches!(c, Call::Send(..))).count(), 1, "no new message, no extra notification");
+        assert_eq!(
+            tg.calls().iter().filter(|c| matches!(c, Call::Send(..))).count(),
+            1,
+            "no new message, no extra notification"
+        );
         coach.apply(&CoachView { keep: true, ..view(vec![]) }, None, None).await.unwrap();
         assert_eq!(coach.shown().await.0.unwrap(), "until Bench set 2/2");
     }
@@ -470,7 +527,11 @@ pub mod tests {
         coach.apply(&view(vec![card("Cable fly")]), None, None).await.unwrap();
         let menu = vec![vec![Button { text: "⏳ I'll wait".into(), data: "gc:wait:abcd1234".into() }]];
         let option = |t: &str| Card { kind: CardKind::Option, ..card(t) };
-        let swap = CoachView { keep: true, live_buttons: Some(menu.clone()), ..view(vec![option("Option A"), option("Option B")]) };
+        let swap = CoachView {
+            keep: true,
+            live_buttons: Some(menu.clone()),
+            ..view(vec![option("Option A"), option("Option B")])
+        };
         let tap = |id| Tapped { message_id: id, text: None };
         coach.apply(&swap, Some(&tap(100)), None).await.unwrap();
         assert_eq!(tg.calls()[1], Call::Edit(100, "Cable fly".into(), menu.clone(), false));
@@ -478,10 +539,20 @@ pub mod tests {
         coach.apply(&CoachView { restore: true, ..view(vec![]) }, Some(&tap(100)), None).await.unwrap();
         let calls = tg.calls();
         assert_eq!(&calls[calls.len() - 3..calls.len() - 1], &[Call::Remove(101), Call::Remove(102)]);
-        assert!(matches!(calls.last(), Some(Call::Edit(100, _, buttons, _)) if buttons.len() == 1 && buttons[0][0].data.starts_with("gc:log")));
+        assert!(
+            matches!(calls.last(), Some(Call::Edit(100, _, buttons, _)) if buttons.len() == 1 && buttons[0][0].data.starts_with("gc:log"))
+        );
         coach.apply(&swap, Some(&tap(100)), None).await.unwrap();
-        coach.apply(&CoachView { cleanup: Some(Cleanup::Delete), ..view(vec![card("Option A · set 1")]) }, Some(&tap(104)), None).await.unwrap();
-        let removed: Vec<i64> = tg.calls().into_iter().filter_map(|c| if let Call::Remove(id) = c { Some(id) } else { None }).collect();
+        coach
+            .apply(
+                &CoachView { cleanup: Some(Cleanup::Delete), ..view(vec![card("Option A · set 1")]) },
+                Some(&tap(104)),
+                None,
+            )
+            .await
+            .unwrap();
+        let removed: Vec<i64> =
+            tg.calls().into_iter().filter_map(|c| if let Call::Remove(id) = c { Some(id) } else { None }).collect();
         assert_eq!(&removed[removed.len() - 3..], &[100, 103, 104]);
         assert_eq!(coach.shown().await, (Some("Option A · set 1".into()), 0));
     }
@@ -527,12 +598,22 @@ pub mod tests {
         let coach = Coach::new(tg.clone(), 1, clock(), None, None);
         let photo = Card { photo: Some("/x/bench.png".into()), ..card("Bench · set 1") };
         coach.apply(&view(vec![photo]), None, None).await.unwrap();
-        let resting = CoachView { ack: Some("✅ 10 × 40 kg".into()), ..view(vec![rest("until Bench set 2/2", "2099-01-01T00:00:00Z")]) };
+        let resting = CoachView {
+            ack: Some("✅ 10 × 40 kg".into()),
+            ..view(vec![rest("until Bench set 2/2", "2099-01-01T00:00:00Z")])
+        };
         coach.apply(&resting, None, None).await.unwrap();
         assert_eq!(tg.calls()[1], Call::Edit(100, "Bench · set 1\n✅ 10 × 40 kg".into(), vec![], true));
         // A tap on a card from before a restart: only its visible text is known.
         let old = Tapped { message_id: 42, text: Some("Squat · set 3".into()) };
-        coach.apply(&CoachView { ack: Some("✅ 5 × 100 kg".into()), ..view(vec![card("Squat · set 4")]) }, Some(&old), None).await.unwrap();
+        coach
+            .apply(
+                &CoachView { ack: Some("✅ 5 × 100 kg".into()), ..view(vec![card("Squat · set 4")]) },
+                Some(&old),
+                None,
+            )
+            .await
+            .unwrap();
         assert!(tg.calls().contains(&Call::Edit(42, "Squat · set 3\n✅ 5 × 100 kg".into(), vec![], false)));
         assert!(tg.calls().contains(&Call::Remove(101)), "the countdown is deleted, not retired");
     }

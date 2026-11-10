@@ -12,9 +12,14 @@ use crate::time::Ts;
 /// A personal-calendar change is not here: it never moves a session, and a conflict it causes arrives as
 /// `planning.attention`, so waking the agent for the change itself only invites an empty reply.
 pub const ACTIONABLE: [&str; 8] = [
-    "notifications.delivery_unknown", "calendar.write_blocked",
-    "planning.attention", "planning.replan_required", "planning.no_show", "workout.missed",
-    "planning.weekly_briefing", "workout.stale",
+    "notifications.delivery_unknown",
+    "calendar.write_blocked",
+    "planning.attention",
+    "planning.replan_required",
+    "planning.no_show",
+    "workout.missed",
+    "planning.weekly_briefing",
+    "workout.stale",
 ];
 
 /// One event per distinct situation, including across restarts and acknowledgement. A quiet timer
@@ -31,7 +36,11 @@ pub fn request(db: &Connection, kind: &str, payload: Value, now: Ts) -> Result<(
 }
 
 pub fn pending(db: &Connection, include_all: bool) -> Result<Vec<Value>> {
-    let filter = if include_all { String::new() } else { format!("AND type IN ({})", ACTIONABLE.map(|t| format!("'{t}'")).join(", ")) };
+    let filter = if include_all {
+        String::new()
+    } else {
+        format!("AND type IN ({})", ACTIONABLE.map(|t| format!("'{t}'")).join(", "))
+    };
     Ok(AgentEvent::select(db, &format!("WHERE handled_at IS NULL {filter} ORDER BY created_at, id"), [])?
         .into_iter()
         .map(|e| json!({"id": e.id, "type": e.r#type, "created_at": e.created_at, "payload": e.payload_json, "correlation_id": e.correlation_id}))
@@ -62,10 +71,8 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 /// Only decisions wake the model. Delivery/permission issues stay in the inbox until explicitly
 /// resolved; acknowledging a model wake must not imply the owner granted authority. A no-show is
 /// sent by the outbox as the session's own message; the owner's answer reaches the agent.
-pub const WAKE: [&str; 5] = [
-    "planning.attention", "planning.replan_required", "workout.missed",
-    "planning.weekly_briefing", "workout.stale",
-];
+pub const WAKE: [&str; 5] =
+    ["planning.attention", "planning.replan_required", "workout.missed", "planning.weekly_briefing", "workout.stale"];
 
 /// The weekly review waits while the Sunday recap is still queued or sending: the agent's take follows
 /// the recap, whether it went out or not.
@@ -77,7 +84,9 @@ pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
     )?;
     Ok(pending(db, false)?
         .into_iter()
-        .filter(|e| e["type"].as_str().is_some_and(|t| WAKE.contains(&t) && !(recap_queued && t == "planning.weekly_briefing")))
+        .filter(|e| {
+            e["type"].as_str().is_some_and(|t| WAKE.contains(&t) && !(recap_queued && t == "planning.weekly_briefing"))
+        })
         .take(20)
         .collect())
 }
@@ -85,7 +94,11 @@ pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
 /// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context.
 pub fn open_issues(db: &Connection) -> Result<Vec<AgentEvent>> {
     let marks = ACTIONABLE.map(|t| format!("'{t}'")).join(", ");
-    AgentEvent::select(db, &format!("WHERE handled_at IS NULL AND type IN ({marks}) ORDER BY created_at DESC, rowid DESC LIMIT 5"), [])
+    AgentEvent::select(
+        db,
+        &format!("WHERE handled_at IS NULL AND type IN ({marks}) ORDER BY created_at DESC, rowid DESC LIMIT 5"),
+        [],
+    )
 }
 
 /// Position in the event log; pass it to `raised_since` after a tool call.
@@ -97,17 +110,25 @@ pub fn mark(db: &Connection) -> Result<i64> {
 /// that transaction's own: no other connection can commit while it holds its read lock.
 pub fn raised_since(db: &Connection, mark: i64) -> Result<Vec<AgentEvent>> {
     let types = WAKE.map(|t| format!("'{t}'")).join(", ");
-    AgentEvent::select(db, &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN ({types}) ORDER BY rowid"), [mark])
+    AgentEvent::select(
+        db,
+        &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN ({types}) ORDER BY rowid"),
+        [mark],
+    )
 }
 
 /// Freeze a decision batch before calling the model. A retry reuses this batch and its tool request
 /// IDs even when new events arrive meanwhile, so a partial failed turn cannot duplicate mutations.
 pub fn wake_batch(db: &Connection, now: Ts) -> Result<Option<AgentEvent>> {
-    if let Some(batch) = AgentEvent::first(db, "WHERE type = 'runtime.agent_wake' AND handled_at IS NULL ORDER BY created_at, id", [])? {
+    if let Some(batch) =
+        AgentEvent::first(db, "WHERE type = 'runtime.agent_wake' AND handled_at IS NULL ORDER BY created_at, id", [])?
+    {
         return Ok(Some(batch));
     }
     let events = wake_pending(db)?;
-    if events.is_empty() { return Ok(None); }
+    if events.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(crate::domain::core::emit(db, "runtime.agent_wake", now, json!({"events": events}))?))
 }
 
@@ -133,9 +154,12 @@ mod tests {
         }
         let mut code = String::new();
         sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut code);
-        let set = |pattern: &str| -> BTreeSet<String> { regex::Regex::new(pattern).unwrap().captures_iter(&code).map(|c| c[1].to_string()).collect() };
+        let set = |pattern: &str| -> BTreeSet<String> {
+            regex::Regex::new(pattern).unwrap().captures_iter(&code).map(|c| c[1].to_string()).collect()
+        };
         // Reads are SQL literals ('…'); writers name their type as a Rust string ("…").
-        let unwritten: Vec<_> = set(r"type = '([a-z_]+\.[a-z_]+)'").difference(&set(r#""([a-z_]+\.[a-z_]+)""#)).cloned().collect();
+        let unwritten: Vec<_> =
+            set(r"type = '([a-z_]+\.[a-z_]+)'").difference(&set(r#""([a-z_]+\.[a-z_]+)""#)).cloned().collect();
         assert!(unwritten.is_empty(), "read but never written: {unwritten:?}");
     }
 }

@@ -18,8 +18,15 @@ pub struct Bot {
 impl Bot {
     pub fn new(token: &str) -> Result<Bot> {
         // Long polls hold the connection for up to 50 s; every other call is short.
-        let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(70)).build()?;
-        Ok(Bot { http, base: format!("https://api.telegram.org/bot{token}"), files: format!("https://api.telegram.org/file/bot{token}") })
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(70))
+            .build()?;
+        Ok(Bot {
+            http,
+            base: format!("https://api.telegram.org/bot{token}"),
+            files: format!("https://api.telegram.org/file/bot{token}"),
+        })
     }
 
     async fn call<T: DeserializeOwned>(&self, method: &str, body: Value) -> Result<T> {
@@ -30,7 +37,10 @@ impl Bot {
     /// Make the "/" menu exactly `commands` (command, description) in the default scope, and clear
     /// the group scope: the bot is DM only.
     pub async fn set_commands(&self, commands: &[(&str, &str)]) -> Result<()> {
-        let commands: Vec<Value> = commands.iter().map(|(command, description)| json!({"command": command, "description": description})).collect();
+        let commands: Vec<Value> = commands
+            .iter()
+            .map(|(command, description)| json!({"command": command, "description": description}))
+            .collect();
         let _: bool = self.call("setMyCommands", json!({"commands": commands})).await?;
         let _: bool = self.call("deleteMyCommands", json!({"scope": {"type": "all_group_chats"}})).await?;
         Ok(())
@@ -47,7 +57,13 @@ impl Bot {
     }
 
     /// HTML first; if Telegram can't parse the entities, the same text without formatting.
-    async fn call_text<T: DeserializeOwned>(&self, method: &str, mut body: Value, text_key: &str, text: &str) -> Result<T> {
+    async fn call_text<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        mut body: Value,
+        text_key: &str,
+        text: &str,
+    ) -> Result<T> {
         body[text_key] = json!(markdown::to_html(text));
         body["parse_mode"] = json!("HTML");
         match self.call(method, body.clone()).await {
@@ -60,7 +76,14 @@ impl Bot {
         }
     }
 
-    async fn send_once(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64> {
+    async fn send_once(
+        &self,
+        chat: i64,
+        text: &str,
+        photo: Option<&Path>,
+        buttons: &Keyboard,
+        effect: Option<&str>,
+    ) -> Result<i64> {
         let reply_markup = if buttons.is_empty() { None } else { Some(markup(buttons)) };
         let sent: Sent = match photo {
             None => {
@@ -75,7 +98,8 @@ impl Bot {
             }
             Some(path) => {
                 let bytes = tokio::fs::read(path).await?;
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "photo.png".into());
+                let name =
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "photo.png".into());
                 let form = |html: bool| {
                     let mut form = reqwest::multipart::Form::new()
                         .text("chat_id", chat.to_string())
@@ -93,8 +117,12 @@ impl Bot {
                     form
                 };
                 let url = format!("{}/sendPhoto", self.base);
-                match parse("sendPhoto", self.http.post(&url).multipart(form(true)).send().await.map_err(scrub)?).await {
-                    Err(e) if e.to_string().contains("can't parse entities") => parse("sendPhoto", self.http.post(&url).multipart(form(false)).send().await.map_err(scrub)?).await?,
+                match parse("sendPhoto", self.http.post(&url).multipart(form(true)).send().await.map_err(scrub)?).await
+                {
+                    Err(e) if e.to_string().contains("can't parse entities") => {
+                        parse("sendPhoto", self.http.post(&url).multipart(form(false)).send().await.map_err(scrub)?)
+                            .await?
+                    }
                     other => other?,
                 }
             }
@@ -128,11 +156,22 @@ struct Sent {
 
 #[async_trait]
 impl Telegram for Bot {
-    async fn send(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64> {
+    async fn send(
+        &self,
+        chat: i64,
+        text: &str,
+        photo: Option<&Path>,
+        buttons: &Keyboard,
+        effect: Option<&str>,
+    ) -> Result<i64> {
         match self.send_once(chat, text, photo, buttons, effect).await {
             // An effect is decoration: never lose the message over one Telegram doesn't know.
             // Only Telegram's own rejection: a timeout may have sent the message already.
-            Err(e) if effect.is_some() && e.code() == "TELEGRAM_ERROR" && e.to_string().to_lowercase().contains("effect") => {
+            Err(e)
+                if effect.is_some()
+                    && e.code() == "TELEGRAM_ERROR"
+                    && e.to_string().to_lowercase().contains("effect") =>
+            {
                 self.send_once(chat, text, photo, buttons, None).await
             }
             other => other,
@@ -144,13 +183,20 @@ impl Telegram for Bot {
         let (method, key) = if caption { ("editMessageCaption", "caption") } else { ("editMessageText", "text") };
         match self.call_text::<Value>(method, body.clone(), key, text).await {
             // Unknown message kind (from before a restart): a photo needs a caption edit.
-            Err(e) if !caption && e.to_string().contains("no text in the message") => self.call_text::<Value>("editMessageCaption", body, "caption", text).await.map(|_| ()),
+            Err(e) if !caption && e.to_string().contains("no text in the message") => {
+                self.call_text::<Value>("editMessageCaption", body, "caption", text).await.map(|_| ())
+            }
             other => other.map(|_| ()),
         }
     }
 
     async fn edit_buttons(&self, chat: i64, message: i64, buttons: &Keyboard) -> Result<()> {
-        self.call::<Value>("editMessageReplyMarkup", json!({"chat_id": chat, "message_id": message, "reply_markup": markup(buttons)})).await.map(|_| ())
+        self.call::<Value>(
+            "editMessageReplyMarkup",
+            json!({"chat_id": chat, "message_id": message, "reply_markup": markup(buttons)}),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn remove(&self, chat: i64, message: i64) -> Result<()> {
@@ -159,12 +205,16 @@ impl Telegram for Bot {
 
     async fn pin(&self, chat: i64, message: i64, pinned: bool) -> Result<()> {
         let method = if pinned { "pinChatMessage" } else { "unpinChatMessage" };
-        self.call::<Value>(method, json!({"chat_id": chat, "message_id": message, "disable_notification": true})).await.map(|_| ())
+        self.call::<Value>(method, json!({"chat_id": chat, "message_id": message, "disable_notification": true}))
+            .await
+            .map(|_| ())
     }
 
     async fn react(&self, chat: i64, message: i64, emoji: Option<&str>) -> Result<()> {
         let reaction: Vec<Value> = emoji.map(|e| json!({"type": "emoji", "emoji": e})).into_iter().collect();
-        self.call::<Value>("setMessageReaction", json!({"chat_id": chat, "message_id": message, "reaction": reaction})).await.map(|_| ())
+        self.call::<Value>("setMessageReaction", json!({"chat_id": chat, "message_id": message, "reaction": reaction}))
+            .await
+            .map(|_| ())
     }
 
     async fn typing(&self, chat: i64) -> Result<()> {
@@ -180,7 +230,11 @@ impl Telegram for Bot {
     }
 
     async fn updates(&self, offset: i64, timeout_secs: u64) -> Result<Vec<Update>> {
-        self.call("getUpdates", json!({"offset": offset, "timeout": timeout_secs, "allowed_updates": ["message", "callback_query"]})).await
+        self.call(
+            "getUpdates",
+            json!({"offset": offset, "timeout": timeout_secs, "allowed_updates": ["message", "callback_query"]}),
+        )
+        .await
     }
 
     async fn download(&self, file_id: &str) -> Result<Vec<u8>> {
@@ -189,8 +243,17 @@ impl Telegram for Bot {
             file_path: Option<String>,
         }
         let file: File = self.call("getFile", json!({"file_id": file_id})).await?;
-        let Some(path) = file.file_path else { crate::bail!("TELEGRAM_ERROR", "getFile: no file path (file too big?)") };
-        let response = self.http.get(format!("{}/{path}", self.files)).send().await.map_err(scrub)?.error_for_status().map_err(scrub)?;
+        let Some(path) = file.file_path else {
+            crate::bail!("TELEGRAM_ERROR", "getFile: no file path (file too big?)")
+        };
+        let response = self
+            .http
+            .get(format!("{}/{path}", self.files))
+            .send()
+            .await
+            .map_err(scrub)?
+            .error_for_status()
+            .map_err(scrub)?;
         Ok(response.bytes().await.map_err(scrub)?.to_vec())
     }
 }

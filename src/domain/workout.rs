@@ -7,7 +7,10 @@ use jiff::SignedDuration;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::db::models::{ExerciseProgression, ExerciseStatus, JobKind, JobStatus, NotificationJob, PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
+use crate::db::models::{
+    ExerciseProgression, ExerciseStatus, JobKind, JobStatus, NotificationJob, PlannedSession, SessionStatus, SetLog,
+    SetType, WorkoutExercise, WorkoutSession, WorkoutStatus,
+};
 use crate::db::{Connection, Json, new_id};
 use crate::domain::core::{emit, mutate};
 use crate::domain::illustrations::{Entry, bodyweight, for_exercise, primary_muscle};
@@ -80,7 +83,11 @@ pub fn exercises(db: &Connection, workout_id: &str) -> Result<Vec<WorkoutExercis
 /// Sets of one workout exercise in order, optionally only one set type.
 pub fn logs(db: &Connection, exercise_row_id: &str, kind: Option<SetType>) -> Result<Vec<SetLog>> {
     match kind {
-        Some(kind) => SetLog::select(db, "WHERE workout_exercise_id = ?1 AND set_type = ?2 ORDER BY logged_at, set_number", rusqlite::params![exercise_row_id, kind]),
+        Some(kind) => SetLog::select(
+            db,
+            "WHERE workout_exercise_id = ?1 AND set_type = ?2 ORDER BY logged_at, set_number",
+            rusqlite::params![exercise_row_id, kind],
+        ),
         None => SetLog::select(db, "WHERE workout_exercise_id = ?1 ORDER BY logged_at, set_number", [exercise_row_id]),
     }
 }
@@ -104,7 +111,12 @@ pub fn cancel_rest(db: &Connection, workout_id: &str, now: Ts) -> Result<()> {
         job.status = JobStatus::Cancelled;
         job.handled_at = Some(now);
         job.update(db)?;
-        emit(db, "notifications.cancel_required", now, json!({"job_id": job.id, "external_job_id": job.external_job_id}))?;
+        emit(
+            db,
+            "notifications.cancel_required",
+            now,
+            json!({"job_id": job.id, "external_job_id": job.external_job_id}),
+        )?;
     }
     Ok(())
 }
@@ -143,7 +155,9 @@ fn truthy(value: Option<&Value>) -> bool {
 
 /// Unknown working weight (first session): a warm-up has no weight to aim for, so it's skipped.
 pub fn warmup_pending(db: &Connection, exercise: &WorkoutExercise) -> Result<bool> {
-    Ok(truthy(exercise.config_json.get("warmup_required")) && exercise.target_weight > 0.0 && logs(db, &exercise.id, Some(SetType::Warmup))?.is_empty())
+    Ok(truthy(exercise.config_json.get("warmup_required"))
+        && exercise.target_weight > 0.0
+        && logs(db, &exercise.id, Some(SetType::Warmup))?.is_empty())
 }
 
 /// Template warm-up weight, else about half the working weight on the exercise's increment.
@@ -165,7 +179,10 @@ fn set_warmup_required(db: &Connection, exercise: &mut WorkoutExercise, required
 }
 
 fn string_list(value: Option<&Value>) -> Vec<String> {
-    value.and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default()
+    value
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
 }
 
 /// Prerequisites (`requires_completed`) are done, also via a substitute.
@@ -181,8 +198,10 @@ pub fn compatible(exercise: &WorkoutExercise, rows: &[WorkoutExercise]) -> bool 
 /// Activate the next pending exercise in plan order; `prefer_muscle` pulls same-muscle work forward.
 pub fn choose_next(db: &Connection, workout: &mut WorkoutSession, now: Ts, prefer_muscle: Option<&str>) -> Result<()> {
     let rows = exercises(db, &workout.id)?;
-    let ready: Vec<&WorkoutExercise> = rows.iter().filter(|e| e.status == ExerciseStatus::Pending && compatible(e, &rows)).collect();
-    let same = ready.iter().find(|e| prefer_muscle.is_some() && primary_muscle(guide_id(e)).as_deref() == prefer_muscle);
+    let ready: Vec<&WorkoutExercise> =
+        rows.iter().filter(|e| e.status == ExerciseStatus::Pending && compatible(e, &rows)).collect();
+    let same =
+        ready.iter().find(|e| prefer_muscle.is_some() && primary_muscle(guide_id(e)).as_deref() == prefer_muscle);
     if let Some(next) = same.or(ready.first()) {
         let mut next = (*next).clone();
         next.status = ExerciseStatus::Active;
@@ -254,7 +273,8 @@ pub fn g(value: f64) -> String {
     if !(-4..6).contains(&exponent) {
         let text = format!("{value:.5e}");
         let (mantissa, exp) = text.split_once('e').unwrap_or((&text, "0"));
-        let mantissa = if mantissa.contains('.') { mantissa.trim_end_matches('0').trim_end_matches('.') } else { mantissa };
+        let mantissa =
+            if mantissa.contains('.') { mantissa.trim_end_matches('0').trim_end_matches('.') } else { mantissa };
         let exp: i32 = exp.parse().unwrap_or(0);
         return format!("{mantissa}e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs());
     }
@@ -291,7 +311,9 @@ pub fn next_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<O
 /// Weight the owner most likely means when a typed set's order is unclear: the one the card offers.
 pub fn expected_weight(db: &Connection, workout_id: &str) -> Result<Option<f64>> {
     let workout = load_workout(db, workout_id, None)?;
-    let Some(active) = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active) else { return Ok(None) };
+    let Some(active) = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active) else {
+        return Ok(None);
+    };
     Ok(next_working_set(db, &active)?.map(|(weight, _)| weight))
 }
 
@@ -379,8 +401,13 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
             rep_min: if is_warmup { warmup_reps } else { active.rep_min },
             rep_max: if is_warmup { warmup_reps } else { active.rep_max },
         };
-        let step = if is_warmup { "warm-up".to_string() } else { format!("set {}/{}", data.set_number, active.planned_working_sets) };
-        instruction = format!("{} · {step} · {}", data.name, format_target(data.rep_min, data.rep_max, data.target_weight));
+        let step = if is_warmup {
+            "warm-up".to_string()
+        } else {
+            format!("set {}/{}", data.set_number, active.planned_working_sets)
+        };
+        instruction =
+            format!("{} · {step} · {}", data.name, format_target(data.rep_min, data.rep_max, data.target_weight));
         active_data = Some(data);
     } else if rows.iter().any(|e| unresolved(e.status)) {
         instruction = "Deferred equipment unresolved. Retry, substitute, or explicitly skip.".into();
@@ -395,7 +422,13 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
     let mut queue = vec![];
     for e in &rows {
         let remaining_sets = (e.planned_working_sets - working_count(db, &e.id)?).max(0);
-        queue.push(QueueItem { id: e.id.clone(), exercise_id: e.exercise_id.clone(), status: e.status, remaining_sets, reason: e.deferred_reason.clone() });
+        queue.push(QueueItem {
+            id: e.id.clone(),
+            exercise_id: e.exercise_id.clone(),
+            status: e.status,
+            remaining_sets,
+            reason: e.deferred_reason.clone(),
+        });
     }
     Ok(State {
         workout_id: workout.id.clone(),
@@ -425,7 +458,14 @@ pub fn touch(db: &Connection, workout: &mut WorkoutSession, now: Ts) -> Result<V
 }
 
 /// Insert a workout exercise from a template spec. Learned progression wins over the template weight.
-pub fn make_exercise(db: &Connection, workout_id: &str, spec: &ExerciseSpec, position: i64, warmup: bool, working_sets: Option<i64>) -> Result<WorkoutExercise> {
+pub fn make_exercise(
+    db: &Connection,
+    workout_id: &str,
+    spec: &ExerciseSpec,
+    position: i64,
+    warmup: bool,
+    working_sets: Option<i64>,
+) -> Result<WorkoutExercise> {
     let profile = get_profile(db)?;
     let progression = ExerciseProgression::get(db, &spec.id)?;
     let mut config = serde_json::to_value(spec)?;
@@ -454,7 +494,9 @@ pub fn make_exercise(db: &Connection, workout_id: &str, spec: &ExerciseSpec, pos
 /// An older missed session is history; a make-up workout gets its own session.
 pub fn startable(db: &Connection, session: &PlannedSession, now: Ts) -> Result<bool> {
     let zone = get_profile(db)?.tz();
-    Ok(session.status.is_open() || (session.status == SessionStatus::Missed && session.planned_start_at.local(&zone).date() == now.local(&zone).date()))
+    Ok(session.status.is_open()
+        || (session.status == SessionStatus::Missed
+            && session.planned_start_at.local(&zone).date() == now.local(&zone).date()))
 }
 
 /// The startable planned session on the owner's local today closest to now, even if its slot already passed
@@ -462,8 +504,15 @@ pub fn startable(db: &Connection, session: &PlannedSession, now: Ts) -> Result<b
 pub fn todays_session(db: &Connection, now: Ts) -> Result<Option<PlannedSession>> {
     let zone = get_profile(db)?.tz();
     let today = now.local(&zone).date();
-    let rows = PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED', 'MISSED') AND workout_template_id IS NOT NULL", [])?;
-    Ok(rows.into_iter().filter(|s| s.planned_start_at.local(&zone).date() == today).min_by_key(|s| (s.planned_start_at - now).abs()))
+    let rows = PlannedSession::select(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED', 'MISSED') AND workout_template_id IS NOT NULL",
+        [],
+    )?;
+    Ok(rows
+        .into_iter()
+        .filter(|s| s.planned_start_at.local(&zone).date() == today)
+        .min_by_key(|s| (s.planned_start_at - now).abs()))
 }
 
 /// An availability block (travel, sick) is in effect at `now`.
@@ -472,7 +521,14 @@ fn blocked_at(db: &Connection, now: Ts) -> Result<bool> {
 }
 
 /// Start a workout. Without `template_id` it starts the given planned session, else today's one.
-pub fn start(db: &Connection, template_id: Option<&str>, planned_session_id: Option<&str>, by_button: bool, now: Ts, request_id: &str) -> Result<Value> {
+pub fn start(
+    db: &Connection,
+    template_id: Option<&str>,
+    planned_session_id: Option<&str>,
+    by_button: bool,
+    now: Ts,
+    request_id: &str,
+) -> Result<Value> {
     let intent = json!({"template_id": template_id, "planned_session_id": planned_session_id});
     let (template_id, planned_session_id) = match template_id {
         Some(t) => (t.to_string(), planned_session_id.map(String::from)),
@@ -489,7 +545,10 @@ pub fn start(db: &Connection, template_id: Option<&str>, planned_session_id: Opt
     };
     mutate(db, "workout.started", request_id, intent, now, || {
         if blocked_at(db, now)? {
-            crate::bail!("WORKOUT_UNAVAILABLE", "User availability override active; remove/change it explicitly before starting");
+            crate::bail!(
+                "WORKOUT_UNAVAILABLE",
+                "User availability override active; remove/change it explicitly before starting"
+            );
         }
         if active_workout(db)?.is_some() {
             crate::bail!("WORKOUT_ALREADY_ACTIVE", "Finish existing workout before starting another");
@@ -505,11 +564,14 @@ pub fn start(db: &Connection, template_id: Option<&str>, planned_session_id: Opt
         let mut allocation: Option<Value> = None;
         if let Some(planned) = planned.as_mut() {
             // Always the current template: the session's stored copy may predate edits and swaps.
-            template.set_duration_seconds = historical_set_duration(db, template.set_duration_seconds as f64)?.ceil() as i64;
+            template.set_duration_seconds =
+                historical_set_duration(db, template.set_duration_seconds as f64)?.ceil() as i64;
             let budget = (planned.planned_end_at - planned.planned_start_at).as_secs();
             let mut plan = crate::domain::compression::compress_template(&template, &get_profile(db)?, budget)?;
             if let (Some(plan), Some(stored)) = (plan.as_object_mut(), planned.workout_plan_json.as_object()) {
-                plan.extend(stored.iter().filter(|(k, _)| k.starts_with("crowd_")).map(|(k, v)| (k.clone(), v.clone())));
+                plan.extend(
+                    stored.iter().filter(|(k, _)| k.starts_with("crowd_")).map(|(k, v)| (k.clone(), v.clone())),
+                );
             }
             planned.workout_plan_json = Json(plan.clone());
             planned.update(db)?;
@@ -536,7 +598,14 @@ pub fn start(db: &Connection, template_id: Option<&str>, planned_session_id: Opt
         workout.insert(db)?;
         let first_primary = template.exercises.iter().find(|e| e.primary).map(|e| e.id.clone());
         for (index, spec) in template.exercises.iter().enumerate() {
-            let mut row = make_exercise(db, &workout.id, spec, index as i64, first_primary.as_deref() == Some(spec.id.as_str()), None)?;
+            let mut row = make_exercise(
+                db,
+                &workout.id,
+                spec,
+                index as i64,
+                first_primary.as_deref() == Some(spec.id.as_str()),
+                None,
+            )?;
             if let Some(plan) = &allocation {
                 row.planned_working_sets = plan["sets"][&spec.id].as_i64().unwrap_or(0);
                 if row.planned_working_sets == 0 {
@@ -607,7 +676,9 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             }
             // Rest after every working set, also before the next exercise (with the finished one's rest
             // time). None after the last exercise, or when only deferred exercises are left.
-            if (!completed && workout.status != WorkoutStatus::WorkoutComplete) || workout.status == WorkoutStatus::SetActive {
+            if (!completed && workout.status != WorkoutStatus::WorkoutComplete)
+                || workout.status == WorkoutStatus::SetActive
+            {
                 let due = now + SignedDuration::from_secs(active.rest_seconds);
                 row.rest_started_at = Some(now);
                 row.rest_due_at = Some(due);
@@ -625,7 +696,12 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
                     handled_at: None,
                 };
                 job.insert(db)?;
-                emit(db, "notifications.schedule_required", now, json!({"job_id": job.id, "due_at": due, "kind": "REST"}))?;
+                emit(
+                    db,
+                    "notifications.schedule_required",
+                    now,
+                    json!({"job_id": job.id, "due_at": due, "kind": "REST"}),
+                )?;
                 // Deferred-only queue stays EXERCISE_ACTIVE; rest is still durable.
                 if workout.status == WorkoutStatus::SetActive {
                     transition(db, &mut workout, WorkoutStatus::Resting, now)?;
@@ -659,7 +735,8 @@ pub fn rest_complete(db: &Connection, job_id: &str, now: Ts, request_id: &str) -
             transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
         }
         let mut result = touch(db, &mut workout, now)?;
-        result["instruction"] = Value::String(format!("⏱ Rest over · {}", result["instruction"].as_str().unwrap_or_default()));
+        result["instruction"] =
+            Value::String(format!("⏱ Rest over · {}", result["instruction"].as_str().unwrap_or_default()));
         Ok(result)
     })
 }
@@ -734,7 +811,8 @@ pub fn cut_rest(db: &Connection, workout_id: &str, seconds: i64, now: Ts, reques
 
 /// Parse a stored template snapshot (the workout's copy of its template).
 pub fn snapshot(workout: &WorkoutSession) -> Result<Template> {
-    serde_json::from_value(workout.template_snapshot.0.clone()).map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Workout snapshot: {e}")))
+    serde_json::from_value(workout.template_snapshot.0.clone())
+        .map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Workout snapshot: {e}")))
 }
 
 #[cfg(test)]
@@ -763,10 +841,31 @@ pub(crate) mod tests {
     }
 
     fn short(db: &Connection) -> String {
-        crate::domain::profile::update_profile(db, &serde_json::from_value(json!({"default_accessory_rest_seconds": 100})).unwrap()).unwrap();
-        let bench = spec(json!({"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 100}));
-        import_template(db, &Template { id: "short".into(), name: "Short".into(), exercises: vec![bench], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: "user".into() }).unwrap();
-        start(db, Some("short"), None, false, at(0), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string()
+        crate::domain::profile::update_profile(
+            db,
+            &serde_json::from_value(json!({"default_accessory_rest_seconds": 100})).unwrap(),
+        )
+        .unwrap();
+        let bench = spec(
+            json!({"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 100}),
+        );
+        import_template(
+            db,
+            &Template {
+                id: "short".into(),
+                name: "Short".into(),
+                exercises: vec![bench],
+                alternatives: vec![],
+                set_duration_seconds: 40,
+                transition_seconds: 60,
+                source: "user".into(),
+            },
+        )
+        .unwrap();
+        start(db, Some("short"), None, false, at(0), "start").unwrap()["data"]["workout_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -777,7 +876,8 @@ pub(crate) mod tests {
         assert_eq!(initial.active_exercise.unwrap().set_type, SetType::Warmup);
         assert_eq!(initial.eta, at(220));
         log_set(&db, &id, &parse_set("8x50", SetType::Warmup, None, false).unwrap(), at(30), "warmup").unwrap();
-        let first = log_set(&db, &id, &parse_set("9x80", SetType::Working, None, false).unwrap(), at(60), "set-1").unwrap();
+        let first =
+            log_set(&db, &id, &parse_set("9x80", SetType::Working, None, false).unwrap(), at(60), "set-1").unwrap();
         let job_id = first["data"]["rest_job"]["id"].as_str().unwrap().to_string();
         assert_eq!(first["data"]["status"], "RESTING");
         assert_eq!(first["data"]["active_exercise"]["set_number"], 2);
@@ -808,7 +908,10 @@ pub(crate) mod tests {
     fn working_set_skips_pending_warmup_and_time_cannot_reverse() {
         let db = db();
         let id = short(&db);
-        assert_eq!(log_set(&db, &id, &set(50.0, 8, SetType::Warmup), at(-1), "past").unwrap_err().code(), "TIME_REVERSED");
+        assert_eq!(
+            log_set(&db, &id, &set(50.0, 8, SetType::Warmup), at(-1), "past").unwrap_err().code(),
+            "TIME_REVERSED"
+        );
         let result = log_set(&db, &id, &set(80.0, 9, SetType::Working), at(0), "straight-in").unwrap();
         let active = &result["data"]["active_exercise"];
         assert_eq!((active["set_type"].as_str(), active["set_number"].as_i64()), (Some("WORKING"), Some(2)));
@@ -837,12 +940,30 @@ pub(crate) mod tests {
     #[test]
     fn pose_follows_active_exercise_not_previous_set() {
         let db = db();
-        let press = spec(json!({"id": "press", "name": "Owner press", "role": "press", "guide_id": "bench-press", "working_sets": 1, "target_weight": 80}));
-        let row = spec(json!({"id": "row", "name": "Owner row", "role": "pull", "guide_id": "seated-row", "working_sets": 1, "target_weight": 60}));
-        import_template(&db, &Template { id: "poses".into(), name: "Poses".into(), exercises: vec![press, row], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: "user".into() }).unwrap();
+        let press = spec(
+            json!({"id": "press", "name": "Owner press", "role": "press", "guide_id": "bench-press", "working_sets": 1, "target_weight": 80}),
+        );
+        let row = spec(
+            json!({"id": "row", "name": "Owner row", "role": "pull", "guide_id": "seated-row", "working_sets": 1, "target_weight": 60}),
+        );
+        import_template(
+            &db,
+            &Template {
+                id: "poses".into(),
+                name: "Poses".into(),
+                exercises: vec![press, row],
+                alternatives: vec![],
+                set_duration_seconds: 40,
+                transition_seconds: 60,
+                source: "user".into(),
+            },
+        )
+        .unwrap();
         let data = start(&db, Some("poses"), None, false, at(0), "start").unwrap()["data"].clone();
         assert_eq!(data["active_exercise"]["illustration"]["guide_id"], "bench-press");
-        let after = log_set(&db, data["workout_id"].as_str().unwrap(), &set(80.0, 9, SetType::Working), at(40), "set").unwrap()["data"].clone();
+        let after = log_set(&db, data["workout_id"].as_str().unwrap(), &set(80.0, 9, SetType::Working), at(40), "set")
+            .unwrap()["data"]
+            .clone();
         assert_eq!(after["active_exercise"]["illustration"]["guide_id"], "seated-row");
         assert_eq!(after["active_exercise"]["target_weight"], 60.0);
     }
@@ -852,11 +973,16 @@ pub(crate) mod tests {
         let db = db();
         let id = short(&db);
         log_set(&db, &id, &set(50.0, 8, SetType::Warmup), at(0), "warmup").unwrap();
-        let job = log_set(&db, &id, &set(80.0, 9, SetType::Working), at(0), "one").unwrap()["data"]["rest_job"]["id"].as_str().unwrap().to_string();
+        let job = log_set(&db, &id, &set(80.0, 9, SetType::Working), at(0), "one").unwrap()["data"]["rest_job"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let due = rest_complete(&db, &job, at(100), "due").unwrap();
         assert!(due["data"]["rest_job"].is_null() && due["user_message_hint"].as_str().unwrap().contains("Bench"));
         assert_eq!(rest_complete(&db, &job, at(101), "due").unwrap(), due);
-        let events: i64 = db.query_row("SELECT count(*) FROM agent_event WHERE type = 'workout.rest_completed'", [], |r| r.get(0)).unwrap();
+        let events: i64 = db
+            .query_row("SELECT count(*) FROM agent_event WHERE type = 'workout.rest_completed'", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(events, 1);
     }
 
@@ -868,7 +994,10 @@ pub(crate) mod tests {
         let actions: [Action; 4] = [
             &|db| start(db, Some("short"), None, false, at(0), "duplicate-active"),
             &|db| start(db, Some("unknown"), None, false, at(0), "start"),
-            &|db| transition(db, &mut load_workout(db, &id, None)?, WorkoutStatus::PlanUpdated, at(0)).map(|_| Value::Null),
+            &|db| {
+                transition(db, &mut load_workout(db, &id, None)?, WorkoutStatus::PlanUpdated, at(0))
+                    .map(|_| Value::Null)
+            },
             &|db| log_set(db, &id, &set(50.0, 8, SetType::Warmup), at(-1), "past"),
         ];
         for action in actions {
@@ -895,13 +1024,35 @@ pub(crate) mod tests {
     #[test]
     fn only_first_primary_gets_warmup() {
         let db = db();
-        let a = spec(json!({"id": "a", "name": "A", "role": "press", "primary": true, "working_sets": 1, "target_weight": 10, "warmup_weight": 5}));
-        let b = spec(json!({"id": "b", "name": "B", "role": "pull", "primary": true, "working_sets": 1, "target_weight": 10}));
-        import_template(&db, &Template { id: "two".into(), name: "Two".into(), exercises: vec![a, b], alternatives: vec![], set_duration_seconds: 40, transition_seconds: 60, source: "user".into() }).unwrap();
-        let id = start(&db, Some("two"), None, false, at(0), "two").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        let a = spec(
+            json!({"id": "a", "name": "A", "role": "press", "primary": true, "working_sets": 1, "target_weight": 10, "warmup_weight": 5}),
+        );
+        let b = spec(
+            json!({"id": "b", "name": "B", "role": "pull", "primary": true, "working_sets": 1, "target_weight": 10}),
+        );
+        import_template(
+            &db,
+            &Template {
+                id: "two".into(),
+                name: "Two".into(),
+                exercises: vec![a, b],
+                alternatives: vec![],
+                set_duration_seconds: 40,
+                transition_seconds: 60,
+                source: "user".into(),
+            },
+        )
+        .unwrap();
+        let id = start(&db, Some("two"), None, false, at(0), "two").unwrap()["data"]["workout_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         log_set(&db, &id, &set(5.0, 8, SetType::Warmup), at(0), "warmup").unwrap();
         let result = log_set(&db, &id, &set(10.0, 9, SetType::Working), at(0), "working").unwrap()["data"].clone();
-        assert_eq!((result["active_exercise"]["exercise_id"].as_str(), result["active_exercise"]["set_type"].as_str()), (Some("b"), Some("WORKING")));
+        assert_eq!(
+            (result["active_exercise"]["exercise_id"].as_str(), result["active_exercise"]["set_type"].as_str()),
+            (Some("b"), Some("WORKING"))
+        );
         assert_eq!(exercises(&db, &id).unwrap().len(), 2);
     }
 }

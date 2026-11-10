@@ -26,7 +26,8 @@ use crate::time::Ts;
 const DATE_ONLY_HOUR: i8 = 8;
 /// No weigh-in for this long: the Sunday briefing asks for one. Never a separate message.
 const NUDGE_AFTER_DAYS: i64 = 7;
-static EXIF_STAMP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})").unwrap());
+static EXIF_STAMP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})").unwrap());
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -48,7 +49,9 @@ fn invalid(message: impl Into<String>) -> Error {
 
 fn ascii(field: &exif::Field) -> Option<String> {
     match &field.value {
-        exif::Value::Ascii(parts) => parts.first().map(|p| String::from_utf8_lossy(p).trim_matches(['\0', ' ']).to_string()),
+        exif::Value::Ascii(parts) => {
+            parts.first().map(|p| String::from_utf8_lossy(p).trim_matches(['\0', ' ']).to_string())
+        }
         _ => None,
     }
 }
@@ -56,7 +59,9 @@ fn ascii(field: &exif::Field) -> Option<String> {
 /// Capture time from EXIF. HEIC and other containers the EXIF reader can't parse: the first EXIF-style
 /// stamp in the header.
 pub fn photo_taken_at(path: &Path, zone: &TimeZone) -> Result<Ts> {
-    let parsed = std::fs::File::open(path).ok().and_then(|f| exif::Reader::new().read_from_container(&mut std::io::BufReader::new(f)).ok());
+    let parsed = std::fs::File::open(path)
+        .ok()
+        .and_then(|f| exif::Reader::new().read_from_container(&mut std::io::BufReader::new(f)).ok());
     let (stamp, offset) = match parsed {
         Some(data) => {
             let get = |tag| data.get_field(tag, exif::In::PRIMARY).and_then(ascii).filter(|s| !s.is_empty());
@@ -74,7 +79,8 @@ pub fn photo_taken_at(path: &Path, zone: &TimeZone) -> Result<Ts> {
             "Photo has no capture date (Telegram strips it from compressed photos). Ask for the original sent as a file, or pass the date with --at."
         );
     };
-    let taken = civil::DateTime::strptime("%Y:%m:%d %H:%M:%S", &stamp).map_err(|_| invalid(format!("Unreadable photo date: {stamp}")))?;
+    let taken = civil::DateTime::strptime("%Y:%m:%d %H:%M:%S", &stamp)
+        .map_err(|_| invalid(format!("Unreadable photo date: {stamp}")))?;
     let zone = offset.and_then(|o| parse_offset(&o)).map_or_else(|| zone.clone(), TimeZone::fixed);
     Ok(Ts(taken.to_zoned(zone)?.timestamp()))
 }
@@ -109,7 +115,11 @@ fn measured_at(entry: &WeighIn, now: Ts, zone: &TimeZone) -> Result<Ts> {
         (None, None) => now,
     };
     if at > now.mins(5) || at.local(zone).year() < 2000 {
-        crate::bail!("WEIGH_IN_DATE_INVALID", "Weigh-in date {} is in the future or implausible", at.local(zone).strftime("%Y-%m-%d"));
+        crate::bail!(
+            "WEIGH_IN_DATE_INVALID",
+            "Weigh-in date {} is in the future or implausible",
+            at.local(zone).strftime("%Y-%m-%d")
+        );
     }
     Ok(Ts(Timestamp::from_second(at.0.as_second().div_euclid(60) * 60)?))
 }
@@ -181,7 +191,8 @@ pub fn trend(db: &Connection, now: Ts) -> Result<Value> {
     let week_ago = latest.measured_at - SignedDuration::from_hours(24 * 7);
     let two_weeks_ago = latest.measured_at - SignedDuration::from_hours(24 * 14);
     let week: Vec<f64> = rows.iter().filter(|r| week_ago < r.measured_at).map(|r| r.kg).collect();
-    let before: Vec<f64> = rows.iter().filter(|r| two_weeks_ago < r.measured_at && r.measured_at <= week_ago).map(|r| r.kg).collect();
+    let before: Vec<f64> =
+        rows.iter().filter(|r| two_weeks_ago < r.measured_at && r.measured_at <= week_ago).map(|r| r.kg).collect();
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
     let change = (!before.is_empty()).then(|| round1(mean(&week) - mean(&before)));
     let days_since = (now - latest.measured_at).as_secs().div_euclid(86400);
@@ -198,7 +209,8 @@ pub fn briefing_line(db: &Connection, now: Ts) -> Result<Option<String>> {
     if days >= NUDGE_AFTER_DAYS {
         return Ok(Some(format!("⚖️ Last weigh-in {days} days ago. Send a scale photo when you get a chance.")));
     }
-    let change = summary["change_kg"].as_f64().map(|c| format!(" · {} kg vs the week before", signed(c))).unwrap_or_default();
+    let change =
+        summary["change_kg"].as_f64().map(|c| format!(" · {} kg vs the week before", signed(c))).unwrap_or_default();
     Ok(Some(format!("⚖️ {} kg{change}", g(kg))))
 }
 
@@ -215,7 +227,12 @@ mod tests {
     #[test]
     fn capture_time_from_exif() {
         let berlin = TimeZone::get("Europe/Berlin").unwrap();
-        let at = |name: &str| photo_taken_at(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers/testdata/photo").join(name), &berlin);
+        let at = |name: &str| {
+            photo_taken_at(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers/testdata/photo").join(name),
+                &berlin,
+            )
+        };
         assert_eq!(at("offset.jpg").unwrap().iso(), "2026-10-12T05:41:05+00:00");
         assert_eq!(at("local.jpg").unwrap().iso(), "2026-03-29T04:15:00+00:00");
         assert_eq!(at("plain.png").unwrap_err().code(), "PHOTO_DATE_UNKNOWN");
@@ -233,14 +250,22 @@ mod tests {
         // HEIC from an iPhone: no parsable container here, the EXIF stamp is still in the header.
         let heic = std::env::temp_dir().join(format!("{}.heic", new_id()));
         std::fs::write(&heic, b"\x00\x00\x00\x18ftypheic....Exif\x00\x002026:10:05 07:40:12\x00").unwrap();
-        let entries = [weigh(83.0, Some("2026-09-28T07:05:00+02:00"), None), weigh(82.4, None, Some(heic)), weigh(83.4, Some("2026-09-27"), None)];
+        let entries = [
+            weigh(83.0, Some("2026-09-28T07:05:00+02:00"), None),
+            weigh(82.4, None, Some(heic)),
+            weigh(83.4, Some("2026-09-27"), None),
+        ];
         let out = log(&db, &entries, now(), "tg-1").unwrap();
-        let times: Vec<&str> = out["data"]["logged"].as_array().unwrap().iter().map(|e| e["measured_at"].as_str().unwrap()).collect();
+        let times: Vec<&str> =
+            out["data"]["logged"].as_array().unwrap().iter().map(|e| e["measured_at"].as_str().unwrap()).collect();
         assert_eq!(times, ["2026-09-28T05:05:00+00:00", "2026-10-05T05:40:00+00:00", "2026-09-27T06:00:00+00:00"]);
         // 7 days up to the Oct 5 weigh-in: 82.4. The 7 days before: (83.0 + 83.4) / 2.
         assert_eq!(out["user_message_hint"], "3 weigh-ins logged · -0.8 kg vs the week before");
         let again = log(&db, &entries, now(), "tg-2").unwrap();
-        assert_eq!((again["data"]["logged"].as_array().unwrap().len(), again["data"]["duplicates"].as_array().unwrap().len()), (0, 3));
+        assert_eq!(
+            (again["data"]["logged"].as_array().unwrap().len(), again["data"]["duplicates"].as_array().unwrap().len()),
+            (0, 3)
+        );
     }
 
     #[test]
@@ -249,7 +274,10 @@ mod tests {
         log(&db, &[weigh(83.1, Some("2026-10-03T17:00:00+00:00"), None), weigh(82.5, None, None)], now(), "r").unwrap();
         assert_eq!(briefing_line(&db, now()).unwrap().unwrap(), "⚖️ 82.5 kg · -0.6 kg vs the week before");
         let later = now() + SignedDuration::from_hours(24 * 9);
-        assert_eq!(briefing_line(&db, later).unwrap().unwrap(), "⚖️ Last weigh-in 9 days ago. Send a scale photo when you get a chance.");
+        assert_eq!(
+            briefing_line(&db, later).unwrap().unwrap(),
+            "⚖️ Last weigh-in 9 days ago. Send a scale photo when you get a chance."
+        );
     }
 
     #[test]
