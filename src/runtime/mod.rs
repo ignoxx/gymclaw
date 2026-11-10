@@ -79,7 +79,7 @@ pub fn import_legacy_notes(db: &Connection, path: &Path, now: Ts) -> Result<usiz
 /// Run the bot: Telegram long-poll, agent turns, coach, scheduler and outbox, until shutdown.
 pub async fn serve(config: Config) -> Result<()> {
     let db_path = config.db_path.clone();
-    let legacy: PathBuf = std::env::var("GYMCLAW_LEGACY_USER_MD").unwrap_or_else(|_| "/opt/gymclaw/openclaw/USER.md".into()).into();
+    let legacy = config.legacy_user_md.clone();
     let imported = in_tx(&db_path, move |db| import_legacy_notes(db, &legacy, Ts::now())).await?;
     if imported > 0 {
         tracing::info!("imported {imported} owner notes from USER.md");
@@ -95,7 +95,7 @@ pub async fn serve(config: Config) -> Result<()> {
     }
     let tg: Arc<dyn Telegram> = Arc::new(telegram);
     let model: Arc<dyn ChatModel> = Arc::new(OpenRouter::new(&config.openrouter_key, config.provider.clone())?);
-    let log = TurnLog::new(std::env::var("GYMCLAW_TURN_LOG_DIR").ok().filter(|d| !d.is_empty()).map(PathBuf::from));
+    let log = TurnLog::new(config.turn_log_dir.clone());
     let wake = Arc::new(Notify::new());
     let health = Arc::new(Mutex::new(Health { started: Instant::now(), last_tick: None }));
 

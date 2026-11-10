@@ -110,3 +110,32 @@ pub fn wake_batch(db: &Connection, now: Ts) -> Result<Option<AgentEvent>> {
     if events.is_empty() { return Ok(None); }
     Ok(Some(crate::domain::core::emit(db, "runtime.agent_wake", now, json!({"events": events}))?))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// Every event type a query reads is written somewhere. Habit learning once read
+    /// `planning.session_moved` for weeks after its writer was renamed to `planning.session_edited`.
+    #[test]
+    fn every_event_type_read_is_written() {
+        fn sources(dir: &Path, out: &mut String) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    out.push_str(text.split("#[cfg(test)]").next().unwrap());
+                }
+            }
+        }
+        let mut code = String::new();
+        sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut code);
+        let set = |pattern: &str| -> BTreeSet<String> { regex::Regex::new(pattern).unwrap().captures_iter(&code).map(|c| c[1].to_string()).collect() };
+        // Reads are SQL literals ('…'); writers name their type as a Rust string ("…").
+        let unwritten: Vec<_> = set(r"type = '([a-z_]+\.[a-z_]+)'").difference(&set(r#""([a-z_]+\.[a-z_]+)""#)).cloned().collect();
+        assert!(unwritten.is_empty(), "read but never written: {unwritten:?}");
+    }
+}

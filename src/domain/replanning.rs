@@ -171,6 +171,7 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         if id.is_some() && (trained || (session.planned_end_at <= now && !outcome)) {
             crate::bail!("SESSION_NOT_EDITABLE", "Use workout tools for a running or historical workout; session edits are for upcoming slots");
         }
+        let from = id.map(|_| session.planned_start_at);
         let revived = id.is_some() && outcome && patch.status.is_none_or(SessionStatus::is_open);
         if revived {
             // Same workout, times and plan as a starting point; its own identity, calendar event and reminders.
@@ -227,7 +228,7 @@ pub fn edit_session(db: &Connection, id: Option<&str>, patch: SessionPatch, now:
         if status.is_open() { schedule_session_jobs(db, &session, now)?; }
         // Its warnings (and what it does to its neighbours) are this edit's answer, not news later.
         inspect(db, &edited, now, false)?;
-        Ok(json!({"session": crate::domain::scheduling::session_data(&session), "warnings": warnings, "side_effects": []}))
+        Ok(json!({"session": crate::domain::scheduling::session_data(&session), "from": from, "warnings": warnings, "side_effects": []}))
     })
 }
 

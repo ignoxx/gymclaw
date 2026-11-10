@@ -123,9 +123,9 @@ impl Tool for RuntimeResume {
         let mut settings = match RuntimeSettings::get(cx.db, 1)? {
             Some(s) => s,
             None => {
-                let Ok(owner) = std::env::var("GYMCLAW_TELEGRAM_USER_ID") else { crate::bail!("RUNTIME_NOT_CONFIGURED", "GYMCLAW_TELEGRAM_USER_ID is not set") };
+                let Ok(owner) = crate::config::owner_id() else { crate::bail!("RUNTIME_NOT_CONFIGURED", "GYMCLAW_TELEGRAM_USER_ID is not set") };
                 let row = RuntimeSettings {
-                    id: 1, profile: PROFILE.into(), recipient: owner, project_root: String::new(), python_path: String::new(), template_id: None,
+                    id: 1, profile: PROFILE.into(), recipient: owner.to_string(), project_root: String::new(), python_path: String::new(), template_id: None,
                     enabled: true, calendar_writes_enabled: false, crowd_polling_enabled: false,
                 };
                 row.insert(cx.db)?;

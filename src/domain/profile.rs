@@ -177,7 +177,7 @@ pub fn get_profile(db: &Connection) -> Result<Profile> {
     if let Some(row) = UserProfile::get(db, 1)? {
         return Profile::from_row(&row);
     }
-    let profile = Profile { timezone: std::env::var("GYMCLAW_TIMEZONE").unwrap_or_else(|_| "Europe/Berlin".into()), ..Profile::default() };
+    let profile = Profile { timezone: crate::config::timezone_seed(), ..Profile::default() };
     let now = Ts::now();
     let mut row = UserProfile {
         id: 1, timezone: String::new(), weekly_min_sessions: 0, weekly_target_sessions: 0, weekly_max_sessions: 0, weekdays_allowed: Json(vec![]),

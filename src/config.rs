@@ -1,4 +1,6 @@
-//! Runtime settings from the environment (same variables the Python/OpenClaw deploy used).
+//! Runtime settings from the environment (same variables the Python/OpenClaw deploy used). The only
+//! module that reads env vars (clippy `disallowed_methods`). In production a variable reaches the bot
+//! only if the `gymclaw` service's `environment` in docker-compose.yaml passes it.
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -19,10 +21,38 @@ pub struct Config {
     pub provider: Option<String>,
     /// Dashboard hostname behind Traefik; the Telegram menu button opens it.
     pub dashboard_host: Option<String>,
+    /// Old OpenClaw `USER.md`; its owner notes are imported once.
+    pub legacy_user_md: PathBuf,
+    /// Where full agent turns are logged, if anywhere.
+    pub turn_log_dir: Option<PathBuf>,
 }
 
+#[expect(clippy::disallowed_methods, reason = "the one env read")]
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// The owner's Telegram user id, for code that runs without a full `Config` (tools, CLI).
+pub fn owner_id() -> Result<i64, String> {
+    var("GYMCLAW_TELEGRAM_USER_ID")
+        .ok_or("GYMCLAW_TELEGRAM_USER_ID is required")?
+        .parse()
+        .map_err(|_| "GYMCLAW_TELEGRAM_USER_ID must be a numeric Telegram user id".into())
+}
+
+/// Timezone a new profile starts with.
+pub fn timezone_seed() -> String {
+    var("GYMCLAW_TIMEZONE").unwrap_or_else(|| "Europe/Berlin".into())
+}
+
+/// Workout Guide assets, relative to the working dir unless set.
+pub fn assets_dir() -> PathBuf {
+    var("GYMCLAW_ASSETS_DIR").unwrap_or_else(|| "assets/workout-guide".into()).into()
+}
+
+/// Crowd source config file.
+pub fn crowd_config() -> PathBuf {
+    var("GYMCLAW_CROWD_CONFIG").unwrap_or_else(|| "data/crowd-config.json".into()).into()
 }
 
 impl Config {
@@ -36,7 +66,7 @@ impl Config {
     pub fn from_env() -> Result<Config, String> {
         let (data_dir, db_path) = Self::paths();
         let need = |name: &str| var(name).ok_or_else(|| format!("{name} is required"));
-        let owner_id = need("GYMCLAW_TELEGRAM_USER_ID")?.parse().map_err(|_| "GYMCLAW_TELEGRAM_USER_ID must be a numeric Telegram user id")?;
+        let owner_id = owner_id()?;
         let model = var("GYMCLAW_MODEL").unwrap_or_else(|| "z-ai/glm-5.3-flash".into());
         Ok(Config {
             data_dir,
@@ -49,6 +79,8 @@ impl Config {
             model,
             provider: var("GYMCLAW_PROVIDER"),
             dashboard_host: var("GYMCLAW_DASHBOARD_HOST"),
+            legacy_user_md: var("GYMCLAW_LEGACY_USER_MD").unwrap_or_else(|| "/opt/gymclaw/openclaw/USER.md".into()).into(),
+            turn_log_dir: var("GYMCLAW_TURN_LOG_DIR").map(PathBuf::from),
         })
     }
 }

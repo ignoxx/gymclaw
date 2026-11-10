@@ -13,7 +13,6 @@
 //! `regex` is Rust `regex` syntax (no lookaround/backreferences); anything else is the same as Python's `re`.
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -379,7 +378,7 @@ impl CrowdProvider for CommandCountProvider<'_> {
 /// The configured crowd provider, or GYM_API_NOT_CONFIGURED. Config values never appear in errors.
 /// Production: `from_environment(&Net::new()?, &run_command)`.
 pub fn from_environment<'a>(transport: &'a dyn Transport, run: &'a Runner) -> Result<Box<dyn CrowdProvider + 'a>> {
-    let path = std::env::var_os("GYMCLAW_CROWD_CONFIG").map_or_else(|| PathBuf::from("data/crowd-config.json"), PathBuf::from);
+    let path = crate::config::crowd_config();
     let not_configured = || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
     let values: Value = std::fs::read(&path)
         .ok()
