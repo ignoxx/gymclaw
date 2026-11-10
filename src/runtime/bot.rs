@@ -249,7 +249,7 @@ impl Bot {
 
     /// A message from the bot itself (status), stored as `bot` in the history.
     async fn send_bot(&self, text: &str, kind: &'static str) {
-        match self.tg.send(self.owner, text, None, &vec![]).await {
+        match self.tg.send(self.owner, text, None, &vec![], None).await {
             Ok(id) => self.remember(ChatRole::Bot, text.to_string(), Some(id), json!({"kind": kind})).await,
             Err(e) => tracing::warn!("send failed: {e}"),
         }
@@ -477,7 +477,7 @@ impl Bot {
             }
         }
         let keyboard: Vec<Vec<Button>> = rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
-        let sent = self.tg.send(self.owner, text, photo, &keyboard).await;
+        let sent = self.tg.send(self.owner, text, photo, &keyboard, None).await;
         self.log.log(json!({"ev": "outbound", "session": SESSION, "run": outcome.run_id, "channel": "telegram", "msg": sent.as_ref().ok(), "photo": photo.is_some(),
             "ok": sent.is_ok(), "error": sent.as_ref().err().map(|e| scrub(&e.to_string(), 500)), "text": scrub(text, 4000)}));
         match sent {

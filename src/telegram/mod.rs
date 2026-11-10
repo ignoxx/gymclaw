@@ -15,6 +15,10 @@ use serde::Deserialize;
 use crate::domain::view::Button;
 use crate::error::Result;
 
+/// Message effects Telegram plays when a message arrives: for moments worth celebrating, so keep them rare.
+pub const EFFECT_CONFETTI: &str = "5046509860389126442";
+pub const EFFECT_FIRE: &str = "5104841245755180586";
+
 /// Inline keyboard rows. Empty = no keyboard (an edit with none removes the buttons).
 pub type Keyboard = Vec<Vec<Button>>;
 
@@ -26,13 +30,16 @@ pub fn is_gone(error: &crate::error::Error) -> bool {
 
 #[async_trait]
 pub trait Telegram: Send + Sync {
-    /// Send text (or a local photo with `text` as caption). Returns the message id.
-    async fn send(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard) -> Result<i64>;
+    /// Send text (or a local photo with `text` as caption), with an optional animated effect
+    /// (`EFFECT_*`, private chats only). Returns the message id.
+    async fn send(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64>;
     /// Replace text (or caption, for photo messages) and keyboard.
     async fn edit(&self, chat: i64, message: i64, text: &str, buttons: &Keyboard, caption: bool) -> Result<()>;
     /// Replace only the keyboard (empty removes it).
     async fn edit_buttons(&self, chat: i64, message: i64, buttons: &Keyboard) -> Result<()>;
     async fn remove(&self, chat: i64, message: i64) -> Result<()>;
+    /// Pin (silently) or unpin a message.
+    async fn pin(&self, chat: i64, message: i64, pinned: bool) -> Result<()>;
     /// Set one emoji reaction; `None` clears ours.
     async fn react(&self, chat: i64, message: i64, emoji: Option<&str>) -> Result<()>;
     async fn typing(&self, chat: i64) -> Result<()>;

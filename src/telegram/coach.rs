@@ -94,7 +94,7 @@ impl Coach {
 
     async fn send(&self, text: &str, card: &Card) -> Result<i64> {
         let caption = if card.kind == CardKind::Preview { "" } else { text };
-        let id = self.tg.send(self.chat, caption, card.photo.as_deref().map(Path::new), keyboard(card)).await?;
+        let id = self.tg.send(self.chat, caption, card.photo.as_deref().map(Path::new), keyboard(card), card.effect.as_deref()).await?;
         if let Some(record) = &self.record {
             record(text, id);
         }
@@ -290,6 +290,9 @@ pub mod tests {
         Edit(i64, String, Keyboard, bool),
         Buttons(i64, Keyboard),
         Remove(i64),
+        Pin(i64, bool),
+        /// The effect of the `Send` that follows it.
+        Effect(String),
         React(i64, Option<String>),
         Typing,
         Answer(String, Option<String>),
@@ -322,9 +325,12 @@ pub mod tests {
 
     #[async_trait]
     impl Telegram for FakeTelegram {
-        async fn send(&self, _: i64, text: &str, _: Option<&Path>, buttons: &Keyboard) -> Result<i64> {
+        async fn send(&self, _: i64, text: &str, _: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64> {
             if self.fail_send {
                 return Err(Error::domain("TELEGRAM_ERROR", "sendMessage: timeout"));
+            }
+            if let Some(effect) = effect {
+                self.push(Call::Effect(effect.into()));
             }
             Ok(99 + self.push(Call::Send(text.into(), buttons.clone())) as i64)
         }
@@ -341,6 +347,10 @@ pub mod tests {
         }
         async fn remove(&self, _: i64, message: i64) -> Result<()> {
             self.push(Call::Remove(message));
+            Ok(())
+        }
+        async fn pin(&self, _: i64, message: i64, pinned: bool) -> Result<()> {
+            self.push(Call::Pin(message, pinned));
             Ok(())
         }
         async fn react(&self, _: i64, message: i64, emoji: Option<&str>) -> Result<()> {

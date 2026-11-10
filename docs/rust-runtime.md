@@ -88,6 +88,8 @@ model never has to. Timestamps without an offset are the owner's local time.
 - 👀 ack reaction on receipt, removed when the reply is sent; typing indicator while working.
 - Two button kinds: `gc:<action>:<ref>` → coach, no model. Agent buttons → `btn:<id>` with the
   value in `agent_button`; a tap is fed to the agent as the owner's text.
+- Formatting is the Markdown subset in `telegram::markdown` (bold, italic, strike, code, `> ` and
+  collapsed `>> ` quotes). Records get a confetti effect, a week on target a 🔥 one.
 - Typed sets (`10x40`, `13 reps`) → coach first; unparsed text and failed validations → agent
   with error context. Failed button operations also fall back to the agent with the card context.
 - Coach card: one live card per exercise with image, target and quick buttons, edited in place;
@@ -107,10 +109,12 @@ model never has to. Timestamps without an offset are the owner's local time.
 ## Scheduler and outbox
 
 - In-process: `ticks::watch` every 60 s (calendar sync, personal feed, reminders), `ticks::weekly`
-  Sunday from 19:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
+  Sunday from 23:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
   after ticks when calendar writes are enabled. A no-show is sent as the session's last reminder
   (Start, plus Skip/Move handed to the agent). Conflicts, missed slots, stale workouts
-  and week rollover create durable decision events rather than automatic replans or fixed briefings.
+  and week rollover create durable decision events rather than automatic replans. The two fixed
+  messages are numbers only: the workout summary card and the Sunday recap (`weekly::recap`), both
+  built on `domain::highlights`; the agent adds its take after each.
   The bot checks this inbox every minute in its serialized agent worker, gated by runtime authority;
   successful turns acknowledge events and failed turns remain pending. Unchanged conflicts dedupe
   across restarts and acknowledgement. Default drafts for empty weeks, rotation of unlocked

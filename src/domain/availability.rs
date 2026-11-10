@@ -115,7 +115,7 @@ mod tests {
     use crate::db::models::NotificationJob;
     use crate::domain::notifications::schedule_session_jobs;
     use crate::domain::templates::{Template, import_template};
-    use crate::domain::weekly::{rolling_plan, weekly_plan};
+    use crate::domain::weekly::weekly_plan;
     use crate::domain::workout::start;
 
     /// Sunday 2026-10-11 19:00 Berlin, plus `minutes`.
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(pending_jobs(&db, None), 0);
         let blocked = start(&db, Some("short"), None, false, sunday(60), "blocked-start").unwrap_err();
         assert!(blocked.to_string().contains("availability override"), "{blocked}");
-        assert!(!rolling_plan(&db, "short", end).unwrap()["created"].as_array().unwrap().is_empty());
+        assert!(!weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap()["plan"]["sessions"].as_array().unwrap().is_empty());
         assert!(PlannedSession::select(&db, "WHERE status IN ('TENTATIVE', 'COMMITTED')", []).unwrap().iter().all(|s| s.planned_start_at >= end));
         start(&db, Some("short"), None, false, end, "allowed-at-end").unwrap();
     }

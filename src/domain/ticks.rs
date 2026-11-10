@@ -71,7 +71,7 @@ fn watch_with(db: &Connection, recipient: &str, now: Ts, sync: impl FnOnce() -> 
     Ok(json!({"calendar_error": calendar_error, "rolling": rolling, "briefed": false}))
 }
 
-/// Sunday 19:00 local: sync, draft an empty next week, audit this week and queue the agent event.
+/// Sunday 23:00 local: sync, draft an empty next week, audit this week and queue the agent event.
 pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
     let authority = runtime_authority(db)?;
     let Some(template) = authority.template_id.clone() else { crate::bail!("TEMPLATE_REQUIRED", "No activated template or confirmed split to plan with") };

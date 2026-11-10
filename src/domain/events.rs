@@ -67,8 +67,19 @@ pub const WAKE: [&str; 5] = [
     "planning.weekly_briefing", "workout.stale",
 ];
 
+/// The weekly review waits while the Sunday recap is still queued or sending: the agent's take follows
+/// the recap, whether it went out or not.
 pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
-    Ok(pending(db, false)?.into_iter().filter(|e| e["type"].as_str().is_some_and(|t| WAKE.contains(&t))).take(20).collect())
+    let recap_queued: bool = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM notification_delivery WHERE status IN ('PENDING', 'SENDING') AND agent_event_id IN (SELECT id FROM agent_event WHERE type = 'planning.weekly_recap'))",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(pending(db, false)?
+        .into_iter()
+        .filter(|e| e["type"].as_str().is_some_and(|t| WAKE.contains(&t) && !(recap_queued && t == "planning.weekly_briefing")))
+        .take(20)
+        .collect())
 }
 
 /// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context.

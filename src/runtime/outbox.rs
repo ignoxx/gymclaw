@@ -237,7 +237,13 @@ pub fn pending(db: &Connection, recipient: &str) -> Result<Vec<String>> {
 
 enum Claim {
     Done(Value),
-    Send { chat: i64, message: String, buttons: Vec<Vec<Button>>, session: Option<String> },
+    Send { chat: i64, message: String, buttons: Vec<Vec<Button>>, session: Option<String>, recap: Option<Recap> },
+}
+
+/// The Sunday recap: sent with its effect, pinned in place of last week's.
+struct Recap {
+    effect: Option<String>,
+    unpin: Option<i64>,
 }
 
 /// Check route, authority and staleness, then commit SENDING. Nothing goes out unless this says so.
@@ -280,10 +286,23 @@ fn claim(db: &mut Connection, delivery_id: &str, now: Ts) -> Result<Claim> {
     row.status = DeliveryStatus::Sending;
     row.handled_at = Some(now);
     row.update(&tx)?;
-    let no_show = match &row.agent_event_id {
-        Some(id) => AgentEvent::get(&tx, id)?.filter(|e| e.r#type == "planning.no_show"),
+    let event = match &row.agent_event_id {
+        Some(id) => AgentEvent::get(&tx, id)?,
         None => None,
     };
+    let recap = match event.as_ref().filter(|e| e.r#type == "planning.weekly_recap") {
+        Some(event) => Some(Recap {
+            effect: event.payload_json["effect"].as_str().map(String::from),
+            unpin: NotificationDelivery::first(
+                &tx,
+                "WHERE status = 'SENT' AND id != ?1 AND agent_event_id IN (SELECT id FROM agent_event WHERE type = 'planning.weekly_recap') ORDER BY created_at DESC",
+                [&row.id],
+            )?
+            .and_then(|d| d.external_message_id?.parse().ok()),
+        }),
+        None => None,
+    };
+    let no_show = event.filter(|e| e.r#type == "planning.no_show");
     let session = match (&job, &no_show) {
         (Some(job), _) => job.planned_session_id.clone(),
         (None, Some(event)) => event.payload_json["session_id"].as_str().map(String::from),
@@ -297,7 +316,7 @@ fn claim(db: &mut Connection, delivery_id: &str, now: Ts) -> Result<Claim> {
     let chat = row.recipient.parse().map_err(|_| Error::domain("DELIVERY_ROUTE_MISMATCH", "Recipient is not a Telegram user id"))?;
     let message = row.message.clone();
     tx.commit()?;
-    Ok(Claim::Send { chat, message, buttons, session })
+    Ok(Claim::Send { chat, message, buttons, session, recap })
 }
 
 /// Starts the workout in one tap (handled by the coach, no model).
@@ -323,13 +342,14 @@ fn no_show_buttons(db: &Connection, session_id: &str, now: Ts) -> Result<Vec<Vec
 /// TELEGRAM_DELIVERY_UNKNOWN.
 pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: Ts) -> Result<Value> {
     let id = delivery_id.to_string();
-    let (chat, message, buttons, session) = match blocking(db_path, move |db| claim(db, &id, now)).await? {
+    let (chat, message, buttons, session, recap) = match blocking(db_path, move |db| claim(db, &id, now)).await? {
         Claim::Done(data) => return Ok(data),
-        Claim::Send { chat, message, buttons, session } => (chat, message, buttons, session),
+        Claim::Send { chat, message, buttons, session, recap } => (chat, message, buttons, session, recap),
     };
     let has_buttons = !buttons.is_empty();
     let id = delivery_id.to_string();
-    match tg.send(chat, &message, None, &buttons).await {
+    let effect = recap.as_ref().and_then(|r| r.effect.as_deref());
+    match tg.send(chat, &message, None, &buttons, effect).await {
         Err(error) => {
             tracing::warn!("delivery {delivery_id} outcome unknown: {error}");
             blocking(db_path, move |db| {
@@ -364,6 +384,18 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
                     && !crate::telegram::is_gone(&e)
                 {
                     tracing::warn!("old session message {old} not removed: {e}");
+                }
+            }
+            if let Some(recap) = recap {
+                // The week's plan stays one tap away at the top of the chat. Pin first, so a failed pin
+                // leaves last week's in place.
+                match tg.pin(chat, message_id, true).await {
+                    Err(e) => tracing::warn!("weekly recap not pinned: {e}"),
+                    Ok(()) => {
+                        if let Some(old) = recap.unpin {
+                            let _ = tg.pin(chat, old, false).await;
+                        }
+                    }
                 }
             }
             Ok(data)
@@ -431,7 +463,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::telegram::coach::tests::FakeTelegram;
+    use crate::telegram::coach::tests::{Call, FakeTelegram};
 
     fn fresh() -> (tempdir::Dir, Connection) {
         let dir = tempdir::Dir::new();
@@ -481,6 +513,24 @@ mod tests {
         assert_eq!(event_stale_reason(&db, &row, now().mins(60)).unwrap(), None);
     }
 
+    /// Each Sunday recap arrives with its effect and takes over the pin from last week's.
+    #[tokio::test]
+    async fn weekly_recap_is_pinned_in_place_of_the_last_one() {
+        let (dir, db) = fresh();
+        let recap = |at: Ts, effect: Option<&str>| {
+            let event = emit(&db, "planning.weekly_recap", at, json!({"effect": effect})).unwrap();
+            prepare_event_message(&db, &event.id, "📅 Your week", at, "42", &[]).unwrap()["id"].as_str().unwrap().to_string()
+        };
+        let tg = FakeTelegram::new();
+        let first = recap(now(), None);
+        deliver(&dir.db(), tg.as_ref(), &first, now()).await.unwrap();
+        let second = recap(now().mins(1), Some(crate::telegram::EFFECT_FIRE));
+        deliver(&dir.db(), tg.as_ref(), &second, now().mins(1)).await.unwrap();
+        let calls: Vec<Call> = tg.calls();
+        let send = Call::Send("📅 Your week".into(), vec![]);
+        assert_eq!(calls, [send.clone(), Call::Pin(100, true), Call::Effect(crate::telegram::EFFECT_FIRE.into()), send, Call::Pin(101, true), Call::Pin(100, false)]);
+    }
+
     #[tokio::test]
     async fn failed_send_is_unknown_and_never_resent() {
         let (dir, db) = fresh();
@@ -518,7 +568,6 @@ mod tests {
     use crate::domain::set_parser::SetInput;
     use crate::domain::templates::{Template, import_template};
     use crate::db::models::SetType;
-    use crate::telegram::coach::tests::Call;
 
     fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {
         SetInput { weight, reps, set_type, rir: None }

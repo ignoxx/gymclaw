@@ -14,6 +14,7 @@ pub mod audit;
 pub mod backfill;
 pub mod body;
 pub mod coach;
+pub mod highlights;
 pub mod onboarding;
 pub mod preview;
 pub mod workout;
