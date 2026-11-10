@@ -6,14 +6,6 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-/// `GYMCLAW_ASSETS_DIR`, else `assets/workout-guide` (or the old Python location) under the working dir.
-pub fn asset_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("GYMCLAW_ASSETS_DIR") {
-        return dir.into();
-    }
-    "assets/workout-guide".into()
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
@@ -43,7 +35,7 @@ pub struct Entry {
 
 /// Slug → item, sorted like the Python dict (manifest order is not needed for any result).
 pub static CATALOG: LazyLock<BTreeMap<String, Item>> = LazyLock::new(|| {
-    let path = asset_root().join("manifest.json");
+    let path = crate::config::assets_dir().join("manifest.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("workout guide manifest {}: {e}", path.display()));
     let items: Vec<Item> = serde_json::from_str(&text).expect("valid workout guide manifest");
     items.into_iter().map(|i| (i.slug.clone(), i)).collect()
@@ -60,7 +52,7 @@ pub fn entry(item: &Item) -> Entry {
         equipment: item.equipment.clone(),
         primary_muscle: item.primary_muscle.clone(),
         svg_url: format!("/illustrations/{}.svg", item.slug),
-        telegram_png: asset_root().join(&item.slug).join("frame-1.png").to_string_lossy().into(),
+        telegram_png: crate::config::assets_dir().join(&item.slug).join("frame-1.png").to_string_lossy().into(),
     }
 }
 
@@ -187,7 +179,7 @@ pub fn similar(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<Strin
 
 /// Dashboard SVG route → file.
 pub fn svg_path(slug: &str) -> Option<PathBuf> {
-    catalog().contains_key(slug).then(|| asset_root().join(slug).join("frame-1.svg"))
+    catalog().contains_key(slug).then(|| crate::config::assets_dir().join(slug).join("frame-1.svg"))
 }
 
 #[cfg(test)]

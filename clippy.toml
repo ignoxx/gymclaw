@@ -1,0 +1,5 @@
+# Env vars are read only in src/config.rs.
+disallowed-methods = [
+  { path = "std::env::var", reason = "read env vars through crate::config" },
+  { path = "std::env::var_os", reason = "read env vars through crate::config" },
+]

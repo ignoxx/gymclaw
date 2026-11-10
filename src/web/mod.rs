@@ -59,6 +59,8 @@ fn reply(status: StatusCode, body: Vec<u8>, mime: &str) -> Response {
     set(headers, header::CACHE_CONTROL, "no-store");
     set(headers, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(headers, header::HeaderName::from_static("cross-origin-resource-policy"), "same-origin");
+    // Telegram Web shows the menu-button Mini App in an iframe; no other site may frame the dashboard.
+    // It has no login and is reachable only from the tailnet, so a Telegram frame exposes nothing new.
     set(
         headers,
         header::CONTENT_SECURITY_POLICY,
