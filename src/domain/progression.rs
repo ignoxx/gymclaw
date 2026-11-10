@@ -17,7 +17,7 @@ pub struct ProgressionDecision {
     pub reason: &'static str,
 }
 
-/// Weights compared and added in tenths of grams, so 82.5 + 2.5 is exactly 85 (Python used Decimal).
+/// Weights compared and added in tenths of grams, so 82.5 + 2.5 is exactly 85.
 fn milli(weight: f64) -> i64 {
     (weight * 10_000.0).round() as i64
 }

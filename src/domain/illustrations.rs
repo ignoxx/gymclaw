@@ -33,7 +33,7 @@ pub struct Entry {
     pub telegram_png: String,
 }
 
-/// Slug → item, sorted like the Python dict (manifest order is not needed for any result).
+/// Slug → item, sorted by slug (manifest order is not needed for any result).
 pub static CATALOG: LazyLock<BTreeMap<String, Item>> = LazyLock::new(|| {
     let path = crate::config::assets_dir().join("manifest.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("workout guide manifest {}: {e}", path.display()));

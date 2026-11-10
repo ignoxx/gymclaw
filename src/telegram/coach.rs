@@ -1,4 +1,4 @@
-//! Renders `CoachView`s in the owner chat (port of the `gymclaw-coach` plugin's `createCoach`).
+//! Renders `CoachView`s in the owner chat.
 //!
 //! Keeps one "live" card (current set or rest countdown) and "extras" (swap options). Old buttons
 //! disappear as soon as the workout moves on. Rest cards are edited every 5 s and, exactly at

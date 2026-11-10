@@ -1,5 +1,4 @@
-//! Outbox: every proactive owner message is a `notification_delivery` row committed before the send
-//! (port of gymclaw/services/runtime.py minus the OpenClaw automation sync).
+//! Outbox: every proactive owner message is a `notification_delivery` row committed before the send.
 //!
 //! PENDING → claim SENDING (committed, no network under the write lock) → send → SENT with the
 //! Telegram message id. Any send error → UNKNOWN plus a `notifications.delivery_unknown` event,
@@ -23,7 +22,7 @@ use crate::error::{Error, Result};
 use crate::telegram::Telegram;
 use crate::time::Ts;
 
-/// `runtime_profile` of every delivery (was the OpenClaw profile name).
+/// `runtime_profile` of every delivery; a fixed value the column requires.
 pub const PROFILE: &str = "gymclaw";
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,7 +158,7 @@ fn new_delivery(job_id: Option<&str>, event_id: Option<&str>, recipient: &str, m
     }
 }
 
-/// Advance a due job and queue its exact message in the same transaction (was `runtime fire`).
+/// Advance a due job and queue its exact message in the same transaction.
 pub fn prepare_notification(db: &Connection, job_id: &str, now: Ts, recipient: &str) -> Result<Value> {
     let Some(mut job) = NotificationJob::get(db, job_id)? else { crate::bail!("JOB_NOT_FOUND", "Unknown notification job") };
     if let Some(existing) = NotificationDelivery::first(db, "WHERE notification_job_id = ?1", [job_id])? {

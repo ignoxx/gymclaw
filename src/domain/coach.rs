@@ -1,4 +1,4 @@
-//! Telegram coach flows: cards, taps and typed sets (port of gymclaw/services/coach.py). Owner: WP-train.
+//! Telegram coach flows: cards, taps and typed sets.
 //!
 //! Deterministic and model-free: a typed set, a button tap or an agent action in; a `CoachView` out
 //! (see `view.rs` for what each flag means to the renderer). Button data is
@@ -439,7 +439,7 @@ pub fn handle_rest_over(db: &Connection, now: Ts) -> Result<CoachView> {
     Ok(CoachView { rest_over: true, ..deleted(after_change(db, &workout.id, now, &request_id)?) })
 }
 
-/// Agent-initiated coach actions (the old `gymclaw_workout` tool's coach verbs).
+/// Agent-initiated coach actions (the `workout` tool's verbs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn one_rest_duration_overrides_legacy_exercise_settings() {
+    fn one_rest_duration_overrides_per_exercise_settings() {
         use crate::domain::{compression::compress_template, profile::{get_profile, update_profile}};
         let db = db();
         push(&db);

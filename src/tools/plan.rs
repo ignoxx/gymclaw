@@ -1,4 +1,4 @@
-//! Planning tools: the week, sessions, profile, availability, crowd and events. Owner: lead.
+//! Planning tools: the week, sessions, profile, availability, crowd and events.
 use jiff::civil::Date;
 use schemars::JsonSchema;
 use serde::Deserialize;

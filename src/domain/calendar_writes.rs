@@ -1,5 +1,5 @@
-//! Durable calendar write outbox (port of calendar_writes.py). Only GymClaw-owned events; live writes
-//! need the explicit calendar-write authority. Owner: lead (planning).
+//! Durable calendar write outbox. Only GymClaw-owned events; live writes
+//! need the explicit calendar-write authority.
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 

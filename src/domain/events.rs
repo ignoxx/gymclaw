@@ -1,4 +1,4 @@
-//! Durable agent event inbox; acknowledgement never deletes history (port of events.py). Owner: lead.
+//! Durable agent event inbox; acknowledgement never deletes history.
 use serde_json::{Value, json};
 
 use crate::db::Connection;

@@ -4,4 +4,4 @@
 useDefault = true
 
 [allowlist]
-paths = ['''openclaw/plugins/turn-log/runtime\.test\.mjs''', '''src/agent/turnlog\.rs''']
+paths = ['''src/agent/turnlog\.rs''']

@@ -1,4 +1,4 @@
-//! Calendar provider contract and minimal normalized Google event payloads (port of `providers/calendar.py`).
+//! Calendar provider contract and minimal normalized Google event payloads.
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -110,7 +110,7 @@ pub fn private_props(raw: &Value) -> Option<&Map<String, Value>> {
     raw.get("extendedProperties")?.get("private")?.as_object()
 }
 
-/// Python `int(value)` for the plan revision; anything unparsable is None.
+/// The plan revision as an integer (string or number); anything unparsable is None.
 fn revision(value: &Value) -> Option<i64> {
     match value {
         Value::String(s) => s.trim().replace('_', "").parse().ok(),

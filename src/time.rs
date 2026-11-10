@@ -39,7 +39,7 @@ impl Ts {
         self.0.strftime("%Y-%m-%d %H:%M:%S%.6f").to_string()
     }
 
-    /// Python `isoformat()` of an aware UTC datetime: `2026-10-14T10:30:00+00:00` (micros only when set).
+    /// ISO 8601 in UTC: `2026-10-14T10:30:00+00:00` (micros only when set).
     pub fn iso(self) -> String {
         iso(&self.0.to_zoned(TimeZone::UTC))
     }
@@ -76,7 +76,7 @@ impl std::ops::Sub<Ts> for Ts {
     }
 }
 
-/// Python `isoformat()` of an aware datetime in any zone: `2026-10-16T12:00:00+02:00`.
+/// ISO 8601 with the zone's offset: `2026-10-16T12:00:00+02:00` (micros only when set).
 pub fn iso(z: &Zoned) -> String {
     let micros = z.subsec_nanosecond() / 1000;
     let base = z.strftime("%Y-%m-%dT%H:%M:%S").to_string();
@@ -165,7 +165,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_python_formats() {
+    fn db_and_iso_formats() {
         let ts = Ts::from_db("2026-10-12 12:07:18.231715").unwrap();
         assert_eq!(ts.db(), "2026-10-12 12:07:18.231715");
         assert_eq!(ts.iso(), "2026-10-12T12:07:18.231715+00:00");

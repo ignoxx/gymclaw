@@ -1,4 +1,4 @@
-//! External services: Google Calendar + OAuth, ICS feed, gym crowd sources, photos. Owner: WP-providers.
+//! External services: Google Calendar + OAuth, ICS feed, gym crowd sources, photos.
 //!
 //! Everything here is synchronous (blocking HTTP via `http::Net`); domain code calls providers inside
 //! a DB transaction, and the async runtime reaches them through `spawn_blocking`.
@@ -13,15 +13,15 @@ pub mod recurrence;
 
 use serde_json::Value;
 
-/// Python `json.dumps(value, sort_keys=True)`: `", "` / `": "` separators, non-ASCII escaped.
-/// Used where Python hashed JSON into an identity that is stored in the DB.
-pub(crate) fn python_json(value: &Value) -> String {
+/// JSON with sorted keys, `", "` / `": "` separators and non-ASCII escaped as `\uXXXX`. Its hash
+/// is stored in the DB as an identity, so the output must never change by one byte.
+pub(crate) fn identity_json(value: &Value) -> String {
     let mut out = String::new();
-    write_python_json(value, &mut out);
+    write_identity_json(value, &mut out);
     out
 }
 
-fn write_python_json(value: &Value, out: &mut String) {
+fn write_identity_json(value: &Value, out: &mut String) {
     match value {
         Value::String(s) => {
             out.push('"');
@@ -51,7 +51,7 @@ fn write_python_json(value: &Value, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                write_python_json(item, out);
+                write_identity_json(item, out);
             }
             out.push(']');
         }
@@ -63,9 +63,9 @@ fn write_python_json(value: &Value, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                write_python_json(&Value::String(key.clone()), out);
+                write_identity_json(&Value::String(key.clone()), out);
                 out.push_str(": ");
-                write_python_json(&map[key], out);
+                write_identity_json(&map[key], out);
             }
             out.push('}');
         }

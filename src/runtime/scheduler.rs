@@ -1,4 +1,4 @@
-//! In-process clocks (replace the OpenClaw cron jobs and the heartbeat session).
+//! In-process clocks.
 //!
 //! - Ticks: `watch` every 60 s, `weekly` Sunday ≥ 23:00 profile-local (once per week), `poll_crowd`
 //!   every 15 min when enabled, `publish` after ticks when calendar writes are enabled. Then the

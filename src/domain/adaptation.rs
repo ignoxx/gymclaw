@@ -1,4 +1,4 @@
-//! Mid-workout changes: swap, switch, relabel, skip (port of gymclaw/services/adaptation.py). Owner: WP-train.
+//! Mid-workout changes: swap, switch, relabel, skip.
 //!
 //! Busy equipment keeps unresolved work durable; substitution needs explicit choice. Swap options come
 //! from the template first, then the illustrated catalog (same primary muscle), so every swap still has

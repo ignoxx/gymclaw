@@ -1,7 +1,7 @@
-//! Personal calendar as read-only blockers (port of personal_calendar.py). Fetched by the watcher, never
+//! Personal calendar as read-only blockers. Fetched by the watcher, never
 //! written. Connect stores the feed URL locally; each refresh replaces the expanded busy intervals and
 //! reports conflicts in weeks whose blockers changed. A failed fetch keeps the last known blockers so an
-//! outage never frees up time that is actually busy. Owner: lead (planning).
+//! outage never frees up time that is actually busy.
 use std::collections::BTreeSet;
 
 use jiff::SignedDuration;
@@ -37,7 +37,7 @@ pub fn status(db: &Connection) -> Result<Value> {
         "blockers": stored(db)?.len()}))
 }
 
-/// Hostname of an https URL, like Python's `urlsplit(url).hostname`.
+/// Hostname of an https URL, without userinfo and port.
 fn host(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();

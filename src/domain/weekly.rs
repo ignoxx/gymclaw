@@ -1,4 +1,4 @@
-//! Rolling maintenance, weekly audit and the Sunday briefing (port of weekly.py). Owner: lead (planning).
+//! Rolling maintenance, weekly audit and the Sunday briefing.
 use std::collections::{BTreeSet, HashMap};
 
 use jiff::SignedDuration;
@@ -134,7 +134,7 @@ pub fn no_show_nudges(db: &Connection, now: Ts) -> Result<Vec<(String, String, S
 }
 
 /// Idempotency key for a week's first plan: stable through quiet watcher ticks; calendar/profile changes
-/// retry an impossible week. (Not byte-compatible with Python's key; only stability matters.)
+/// retry an impossible week.
 fn first_plan_key(db: &Connection, week: Date, now: Ts, template_id: &str) -> Result<String> {
     let profile = get_profile(db)?;
     let snapshots: Vec<Value> = CalendarEventSnapshot::select(db, "ORDER BY calendar_event_id", [])?

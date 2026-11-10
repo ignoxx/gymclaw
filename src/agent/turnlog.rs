@@ -1,5 +1,4 @@
-//! Append-only JSONL turn log with the same events and privacy rules as the old OpenClaw `turn-log`
-//! plugin, so logs from before and after the rewrite compare directly.
+//! Append-only JSONL turn log.
 //!
 //! One line per event in `<dir>/YYYY-MM-DD.jsonl` (UTC date). `log` never blocks or fails a turn:
 //! lines go through a bounded queue to a writer task; when it backs up, new lines are dropped.

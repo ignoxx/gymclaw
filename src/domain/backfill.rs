@@ -1,5 +1,4 @@
-//! Workouts the owner did without the bot (forgot to start it, another gym), logged afterwards
-//! (port of gymclaw/services/backfill.py). Owner: WP-train.
+//! Workouts the owner did without the bot (forgot to start it, another gym), logged afterwards.
 use jiff::SignedDuration;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,5 @@
-//! Calendar sync and owner-edit reconciliation (port of calendar.py). Sync never performs remote
-//! writes. Owner: lead (planning).
+//! Calendar sync and owner-edit reconciliation. Sync never performs remote
+//! writes.
 use std::collections::{BTreeSet, HashSet};
 
 use jiff::SignedDuration;
@@ -71,7 +71,7 @@ pub fn workout_name(session: &PlannedSession) -> String {
     title(session.workout_template_id.as_deref().unwrap_or("Workout"))
 }
 
-/// Python's str.title(): capitalize each alphabetic run.
+/// Capitalize each alphabetic run: "leg day" → "Leg Day".
 fn title(text: &str) -> String {
     let mut out = String::new();
     let mut previous_alpha = false;

@@ -1,4 +1,4 @@
-//! Mandatory owner interview, then an owner-confirmed plan (port of gymclaw/services/onboarding.py). Owner: WP-train.
+//! Mandatory owner interview, then an owner-confirmed plan.
 //!
 //! Steps: INTERVIEW (one question at a time) → PLAN (owner's plan from a photo, or one GymClaw builds from
 //! the catalog) → REVIEW (one summary, owner confirms) → READY. Defaults never count as answers. Ready
@@ -40,7 +40,7 @@ pub enum Update<'a> {
     Finish(Option<&'a str>),
 }
 
-/// Python `json.dumps(value, sort_keys=True, separators=(",", ":"))`.
+/// Compact JSON with sorted keys, so equal values give equal text.
 fn canonical(value: &Value) -> String {
     match value {
         Value::Object(map) => {

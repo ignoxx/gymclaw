@@ -1,4 +1,4 @@
-//! Travel/sickness blocks: persistent owner overrides (port of availability.py). Owner: lead (planning).
+//! Travel/sickness blocks: persistent owner overrides.
 use std::collections::BTreeSet;
 
 use jiff::civil::Date;

@@ -24,11 +24,7 @@ as a non-root user with a read-only root filesystem, no capabilities and
 | Volume | Mounted at | Contents |
 | --- | --- | --- |
 | `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, chat history, agent notes, Google OAuth token), crowd config, inbound `media/`, `turns/` turn logs (JSONL, format in [`src/agent/turnlog.rs`](../src/agent/turnlog.rs)), `heartbeat` |
-| `gymclaw-workspace` | `/opt/gymclaw/openclaw` (read-only) | Old OpenClaw workspace. Its `USER.md` "Owner notes" are imported into the DB once on first start |
 | `gymclaw-backups` | `/backups` | `backup.sh` archives |
-
-The old `openclaw-state` volume is no longer mounted; delete it once the Rust runtime has run fine
-for a while.
 
 ## Coolify
 
@@ -119,7 +115,7 @@ Google auth travels with the DB. If it's gone (`CALENDAR_AUTH_REQUIRED`), re-run
 ## Backups
 
 `backup.sh` writes a consistent `/backups/gymclaw-<UTC>.tar.gz` (`gymclaw backup` of the DB,
-`data/`, the old workspace) and keeps the newest 14. Archives contain the
+`data/`) and keeps the newest 14. Archives contain the
 Google OAuth token and chat history, so copy them off-host only to private storage:
 
 ```bash

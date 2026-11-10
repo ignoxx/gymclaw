@@ -1,4 +1,4 @@
-//! Explicit in-memory demo calendar, never used as evidence of live Google behavior (port of `fixture_calendar.py`).
+//! Explicit in-memory demo calendar, never used as evidence of live Google behavior.
 use serde_json::{Value, json};
 
 use super::calendar::{CalendarEvent, CalendarProvider, SyncBatch, already_applied, body_session_id, conflict, parse_event, sync_token_expired};
@@ -17,7 +17,7 @@ pub enum Call {
 pub struct FixtureCalendarProvider {
     pub calendar_id: String,
     pub timezone: String,
-    /// Insertion-ordered, like Python's dict.
+    /// In insertion order.
     events: Vec<(String, Value)>,
     pub changes: Vec<Value>,
     pub calls: Vec<Call>,
@@ -87,7 +87,7 @@ impl FixtureCalendarProvider {
     }
 }
 
-/// Python `a | b` on dicts.
+/// `base` with `changes`' keys overwritten.
 fn merge(mut base: Value, changes: &Value) -> Value {
     if let (Some(base), Some(changes)) = (base.as_object_mut(), changes.as_object()) {
         for (k, v) in changes {

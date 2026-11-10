@@ -1,6 +1,5 @@
-//! Gym crowd: deterministic collection, conservative label calibration and slot signals (port of
-//! crowd.py). No gym capacity assumption or count→occupancy conversion: the owner's ratings define the
-//! personal score; confidence is heuristic evidence strength, not forecast accuracy. Owner: lead.
+//! Gym crowd: deterministic collection, conservative label calibration and slot signals. No gym capacity assumption or count→occupancy conversion: the owner's ratings define the
+//! personal score; confidence is heuristic evidence strength, not forecast accuracy.
 use std::collections::HashMap;
 
 use jiff::SignedDuration;

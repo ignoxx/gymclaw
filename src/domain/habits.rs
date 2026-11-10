@@ -1,4 +1,4 @@
-//! Time-of-day habits learned from what the owner actually does (port of habits.py). Owner: lead.
+//! Time-of-day habits learned from what the owner actually does.
 //!
 //! Evidence: when the owner arrives at the gym (workouts started with the reminder's ▶️ button; chat
 //! starts may be logged late, so they don't count), where the owner moves sessions to, and the planned

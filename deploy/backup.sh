@@ -14,9 +14,7 @@ umask 077
 gymclaw backup "$TMP/gymclaw.db" >/dev/null
 
 # data/turns (turn logs) and data/media (photos the owner sent) are included on purpose; same
-# privacy class as the chat history in the DB. The old OpenClaw workspace goes along while it exists.
-ARGS=(-C "$TMP" gymclaw.db -C "$ROOT" --exclude='data/gymclaw.db*' --exclude='data/backups' data)
-[[ -d "$ROOT/openclaw" && -n "$(ls -A "$ROOT/openclaw" 2>/dev/null)" ]] && ARGS+=(openclaw)
-tar -czf "$DEST/gymclaw-$STAMP.tar.gz" "${ARGS[@]}"
+# privacy class as the chat history in the DB.
+tar -czf "$DEST/gymclaw-$STAMP.tar.gz" -C "$TMP" gymclaw.db -C "$ROOT" --exclude='data/gymclaw.db*' --exclude='data/backups' data
 ls -1t "$DEST"/gymclaw-*.tar.gz | tail -n +"$(( ${GYMCLAW_BACKUP_KEEP:-14} + 1 ))" | xargs -r rm -f
 echo "$DEST/gymclaw-$STAMP.tar.gz"

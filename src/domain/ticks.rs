@@ -1,4 +1,4 @@
-//! Periodic domain work the scheduler runs (was `runtime watch|weekly|poll-crowd`). Owner: lead.
+//! Periodic domain work the scheduler runs.
 //! `watch`, `weekly` and `poll_crowd` run in one transaction and queue owner messages as PENDING
 //! `notification_delivery` rows; the runtime's outbox sends them afterwards. `publish` commits per write.
 use serde_json::{Value, json};
@@ -88,7 +88,7 @@ pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
 pub fn poll_crowd(db: &Connection, _now: Ts) -> Result<Value> {
     let net = Net::new()?;
     let provider = from_environment(&net, &run_command)?;
-    // Retrieval time is taken after the response, like Python.
+    // Retrieval time is taken after the response.
     crowd::poll(db, provider.as_ref(), None)
 }
 

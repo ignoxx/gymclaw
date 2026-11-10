@@ -1,4 +1,4 @@
-//! Dashboard (`gymclaw dashboard`). Owner: WP-runtime.
+//! Dashboard (`gymclaw dashboard`).
 //!
 //! Serves the frontend in `web/` (embedded), exercise SVGs and `/api/state`, a fresh snapshot from a
 //! read-only connection per request. The only writes are the agent's notes (`POST /api/note_*`), so

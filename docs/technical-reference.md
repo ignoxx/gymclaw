@@ -192,7 +192,6 @@ Apple Calendar to revoke the link.
 ### Sync and publication
 
 Set your real profile constraints and import an appropriate workout template first.
-Demo seed weights (`config/exercises.seed.json`) are illustrative, not personalized advice.
 
 Plans are local until calendar writes are granted. `calendar_pending_writes` lists what would be
 written (calendar ID, times, bodies); inspect it before granting. Writes are a separate authority

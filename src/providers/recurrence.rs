@@ -1,13 +1,12 @@
-//! RFC 5545 recurrence sets (RRULE, RDATE, EXDATE), expanded on the wall clock the way Python's
-//! `dateutil` + `recurring-ical-events` do. Shared by the ICS feed (`providers::ics`) and the
+//! RFC 5545 recurrence sets (RRULE, RDATE, EXDATE), expanded on the wall clock. Shared by the ICS feed (`providers::ics`) and the
 //! Google recurring-master expansion in `domain::calendar_busy` (`occurrences`).
 //!
 //! Semantics worth knowing:
 //! - Rules step in local wall-clock time, so a 19:00 Europe/Berlin series stays at 19:00 across DST.
-//! - A wall time that doesn't exist or happens twice resolves like Python's `fold=0`
-//!   (jiff's "compatible" disambiguation).
+//! - A wall time that doesn't exist or happens twice resolves to the earlier offset (jiff's
+//!   "compatible" disambiguation).
 //! - UNTIL without `Z` on a zoned series is read as UTC, and a date UNTIL as UTC midnight
-//!   (recurring-ical-events' repair of rules `dateutil` rejects). EXDATE matches by UTC or local time;
+//!   (the usual repair of rules that are invalid as written). EXDATE matches by UTC or local time;
 //!   a date-valued EXDATE removes every instance on that date.
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -24,14 +23,14 @@ use crate::time::Ts;
 pub enum When {
     Date(Date),
     Floating(DateTime),
-    /// Wall time in a zone. Kept as wall time (like a Python aware datetime), so a time that
-    /// doesn't exist on a DST day still adds up on the wall clock the way Python does.
+    /// Wall time in a zone. Kept as wall time, so a time that doesn't exist on a DST day still adds
+    /// up on the wall clock.
     Zoned(DateTime, TimeZone),
 }
 
 impl When {
     /// Parse `20261019`, `20261019T190000`, `20261019T170000Z`; `tzid` applies to local date-times.
-    /// Unknown TZIDs fall back to floating, like Python's `icalendar`.
+    /// Unknown TZIDs fall back to floating.
     pub fn parse(value: &str, tzid: Option<&str>, date: bool) -> Result<When> {
         let value = value.trim();
         let bad = || invalid(format!("bad date/time {value:?}"));
@@ -76,7 +75,7 @@ impl When {
         }
     }
 
-    /// The instant: dates and floating times are read in `zone` (Python `ics_feed._aware`).
+    /// The instant: dates and floating times are read in `zone`.
     pub fn to_ts(&self, zone: &TimeZone) -> Result<Ts> {
         Ok(Ts(match self {
             When::Zoned(dt, tz) => instant(*dt, tz)?,
@@ -84,7 +83,7 @@ impl When {
         }))
     }
 
-    /// Python `convert_to_datetime(value, tz)`: dates become midnight, naive times get `tz`,
+    /// As a datetime: dates become midnight, naive times get `tz`,
     /// zoned times lose their zone when `tz` is None.
     fn with_tz(&self, tz: Option<&TimeZone>) -> Result<When> {
         Ok(match (self, tz) {
@@ -95,7 +94,7 @@ impl When {
         })
     }
 
-    /// Python `to_recurrence_ids`: UTC and local wall time for zoned values, the wall time otherwise.
+    /// Recurrence ids: UTC and local wall time for zoned values, the wall time otherwise.
     fn ids(&self) -> Vec<DateTime> {
         match self {
             When::Zoned(dt, tz) => match instant(*dt, tz) {
@@ -110,13 +109,13 @@ impl When {
         Ok(match self {
             When::Date(day) => When::Date(day.checked_add((d.as_secs().div_euclid(86_400)).days())?),
             When::Floating(dt) => When::Floating(dt.checked_add(d)?),
-            // Python aware arithmetic: add on the wall clock, keep the zone.
+            // Add on the wall clock, keep the zone.
             When::Zoned(dt, tz) => When::Zoned(dt.checked_add(d)?, tz.clone()),
         })
     }
 }
 
-/// Python `make_comparable` + `<`: dates compare as dates; otherwise both become datetimes in the
+/// Ordering: dates compare as dates; otherwise both become datetimes in the
 /// first zone either one has, and compare as instants (or wall times when neither has a zone).
 pub fn compare(a: &When, b: &When) -> Result<Ordering> {
     if let (When::Date(x), When::Date(y)) = (a, b) {
@@ -129,7 +128,7 @@ pub fn compare(a: &When, b: &When) -> Result<Ordering> {
     })
 }
 
-/// Python `end - start` after `make_comparable`: wall-clock difference within one zone, absolute across zones.
+/// `end - start`: wall-clock difference within one zone, absolute across zones.
 pub fn difference(end: &When, start: &When) -> Result<SignedDuration> {
     let tz = start.tz().or(end.tz()).cloned();
     Ok(match (end.with_tz(tz.as_ref())?, start.with_tz(tz.as_ref())?) {
@@ -147,7 +146,7 @@ fn zone_for_tzid(tzid: &str) -> Option<TimeZone> {
     (0..parts.len()).find_map(|i| TimeZone::get(&parts[i..].join("/")).ok())
 }
 
-/// Wall time → instant; gaps and folds resolve like Python's `fold=0`.
+/// Wall time → instant; gaps and folds resolve to the earlier offset.
 pub fn instant(dt: DateTime, tz: &TimeZone) -> Result<Timestamp> {
     Ok(dt.to_zoned(tz.clone())?.timestamp())
 }
@@ -269,14 +268,14 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Python `to_recurrence_ids` of this instance's start.
+    /// Recurrence ids of this instance's start (see `When::ids`).
     pub fn ids(&self) -> Vec<DateTime> {
         self.start.ids()
     }
 }
 
 impl Series {
-    /// `end` only helps pick the series zone (Python `make_all_dates_comparable`).
+    /// `end` only helps pick the series zone.
     pub fn new(start: &When, end: Option<&When>, rrules: &[&str], rdates: Vec<RDate>, exdates: &[When], include_start: bool) -> Result<Series> {
         let rdate_starts = rdates.iter().map(|r| match r {
             RDate::At(w) | RDate::Period(w, _) => w,
@@ -319,7 +318,7 @@ impl Series {
         })
     }
 
-    /// Whether `ids` (Python recurrence ids) hit an EXDATE.
+    /// Whether `ids` (recurrence ids) hit an EXDATE.
     pub fn excludes(&self, ids: &[DateTime]) -> bool {
         ids.iter().any(|id| self.exdate_ids.contains(id))
     }
@@ -397,7 +396,7 @@ impl Series {
         Ok(result)
     }
 
-    /// Instance end: start + series length on the wall clock (Python aware `+ timedelta`).
+    /// Instance end: start + series length on the wall clock.
     pub fn end_of(instance: &Instance, length: SignedDuration) -> Result<When> {
         instance.start.add(instance.length.unwrap_or(length))
     }
@@ -841,10 +840,10 @@ mod tests {
 
     use super::*;
 
-    /// Google `recurrence` arrays against Python's `dateutil.rrulestr(forceset=True).xafter(...)`
-    /// (`testdata/ics/recurrence.json`, generated from Python before its removal).
+    /// Google `recurrence` arrays against expected occurrences (`testdata/ics/recurrence.json`,
+    /// generated from an independent implementation).
     #[test]
-    fn matches_dateutil() {
+    fn google_recurrence_expands_to_expected_occurrences() {
         let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/recurrence.json")).unwrap();
         let berlin = TimeZone::get("Europe/Berlin").unwrap();
         for case in cases {

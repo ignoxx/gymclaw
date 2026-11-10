@@ -249,8 +249,8 @@ table!(PersonalBusyInterval = "personal_busy_interval" {
 });
 
 table!(
-    /// Kept for schema compatibility. `profile`, `project_root` and `python_path` described OpenClaw
-    /// callbacks and are unused now; `enabled` and the two authorities still gate the runtime.
+    /// `profile`, `project_root` and `python_path` are unused columns kept so the schema stays as is;
+    /// `enabled` and the two authorities gate the runtime.
     RuntimeSettings = "runtime_settings" {
     id: i64,
     profile: String,

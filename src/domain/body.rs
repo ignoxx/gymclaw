@@ -1,4 +1,4 @@
-//! Body weight log (port of gymclaw/services/body.py). Owner: WP-train.
+//! Body weight log.
 //!
 //! Weigh-ins read from scale photos (or typed), a weekly trend and a quiet nudge. The agent reads the
 //! number with its own vision; for old photos it passes the file, and the capture date comes from the
@@ -211,15 +211,15 @@ mod tests {
         Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap()
     }
 
-    /// Fixtures from Pillow (`heif-enc` for the HEIC); expectations from Python's `photo_taken_at`.
+    /// Fixtures made with Pillow (`heif-enc` for the HEIC); the expected times are their EXIF capture times.
     #[test]
-    fn capture_time_matches_python() {
+    fn capture_time_from_exif() {
         let berlin = TimeZone::get("Europe/Berlin").unwrap();
         let at = |name: &str| photo_taken_at(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers/testdata/photo").join(name), &berlin);
         assert_eq!(at("offset.jpg").unwrap().iso(), "2026-10-12T05:41:05+00:00");
         assert_eq!(at("local.jpg").unwrap().iso(), "2026-03-29T04:15:00+00:00");
         assert_eq!(at("plain.png").unwrap_err().code(), "PHOTO_DATE_UNKNOWN");
-        // Python read the first stamp (DateTime, 2026:10:01 09:00:00) from HEIC; EXIF parsing gets the real capture time.
+        // The HEIC also carries an older DateTime stamp (2026:10:01 09:00:00); the capture time wins.
         assert_eq!(at("offset.heic").unwrap().iso(), "2026-10-12T05:41:05+00:00");
     }
 

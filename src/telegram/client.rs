@@ -27,8 +27,8 @@ impl Bot {
         parse(method, response).await
     }
 
-    /// Make the "/" menu exactly `commands` (command, description). OpenClaw left its own menu in the
-    /// default and group scopes; group commands go too, the bot is DM only.
+    /// Make the "/" menu exactly `commands` (command, description) in the default scope, and clear
+    /// the group scope: the bot is DM only.
     pub async fn set_commands(&self, commands: &[(&str, &str)]) -> Result<()> {
         let commands: Vec<Value> = commands.iter().map(|(command, description)| json!({"command": command, "description": description})).collect();
         let _: bool = self.call("setMyCommands", json!({"commands": commands})).await?;

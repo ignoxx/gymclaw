@@ -1,4 +1,4 @@
-//! Runtime operations: deliveries, pause/resume, runtime status. Owner: WP-runtime.
+//! Runtime operations: deliveries, pause/resume, runtime status.
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};

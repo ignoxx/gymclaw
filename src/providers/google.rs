@@ -1,11 +1,11 @@
-//! Google Calendar v3 REST + OAuth refresh (port of `google_auth.py` and `google_calendar.py`).
+//! Google Calendar v3 REST + OAuth refresh.
 //! No implicit primary calendar.
 //!
 //! Sync uses stable list params and pages without time filters. Recurring masters and exceptions
 //! are expanded locally (`recurrence::occurrences`); syncToken can't be combined with timeMin/timeMax.
 //!
-//! Credentials are the google-auth `Credentials.to_json()` dict in `calendar_credential.credentials_json`.
-//! A refreshed token is written back in that format, so the Python app can still read it.
+//! Credentials are google-auth authorized-user JSON (`token`, `refresh_token`, `expiry`, …) in
+//! `calendar_credential.credentials_json`; a refreshed token is written back in the same shape.
 //! Consent (`gymclaw calendar-auth`) is a paste flow: the owner opens the URL anywhere, approves, and
 //! pastes back the loopback URL the browser lands on, so it also works inside the container.
 use std::collections::HashSet;
@@ -139,7 +139,7 @@ impl Credentials {
             .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
         {
             Some(secs) => {
-                // Python `naive_utc.isoformat() + "Z"`.
+                // Naive UTC ISO plus "Z": `2026-10-14T10:30:00Z`.
                 let iso = (now + jiff::SignedDuration::from_secs(secs)).iso();
                 self.0.insert("expiry".into(), json!(format!("{}Z", iso.trim_end_matches("+00:00"))));
             }
@@ -293,7 +293,7 @@ pub struct GoogleCalendarProvider<'a> {
     session: Option<Session<'a>>,
 }
 
-/// Percent-encode everything but RFC 3986 unreserved characters (Python `quote(s, safe="")`).
+/// Percent-encode everything but RFC 3986 unreserved characters (`/` included).
 fn quote(text: &str) -> String {
     text.bytes()
         .map(|b| match b {

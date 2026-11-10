@@ -1,4 +1,4 @@
-//! Session previews: plan lines and the exercise grid image (port of gymclaw/services/preview.py). Owner: WP-train.
+//! Session previews: plan lines and the exercise grid image.
 //!
 //! Used when the owner asks "what's on today?". One photo with every exercise's illustration, sent
 //! without a caption (the plan lines go to chat history), instead of a stack of messages; rendered
@@ -70,7 +70,7 @@ pub fn session_preview(db: &Connection, now: Ts, planned_session_id: Option<&str
     Ok(Card { text: lines.join("\n"), photo, buttons: vec![], rest_until: None, kind, effect: None })
 }
 
-/// Python `json.dumps` escaping (ASCII only), so keys and fingerprints match the old app.
+/// Escapes non-ASCII as `\uXXXX`, so stored keys and fingerprints keep their exact text.
 pub(crate) fn ensure_ascii(json: &str) -> String {
     let mut out = String::with_capacity(json.len());
     for c in json.chars() {

@@ -1,4 +1,4 @@
-//! Workout, coach, template, onboarding and body tools. Owner: WP-train.
+//! Workout, coach, template, onboarding and body tools.
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -93,7 +93,7 @@ pub struct Workout {
     pub remember: bool,
 }
 
-/// What the owner now sees, like the old plugin returned it.
+/// What the owner now sees.
 fn shown(view: &CoachView) -> Value {
     let texts: Vec<&str> = view.cards.iter().map(|c| c.text.as_str()).collect();
     if view.live_buttons.is_some() { json!({"ack": view.ack, "swap_options": texts}) } else { json!({"ack": view.ack, "card": texts.first()}) }

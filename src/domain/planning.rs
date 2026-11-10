@@ -1,7 +1,7 @@
-//! Pure week planner (port of planning.py): deterministic slots; maximize session count first, then
+//! Pure week planner: deterministic slots; maximize session count first, then
 //! aggregate score. Recovery uses local calendar dates, not elapsed 24-hour periods. The search keeps
 //! the best slot per day, then considers all weekday combinations (at most 128 per week). No provider
-//! data means unknown crowd, never fabricated occupancy. Owner: lead.
+//! data means unknown crowd, never fabricated occupancy.
 use jiff::SignedDuration;
 use jiff::civil::Date;
 use serde::Serialize;

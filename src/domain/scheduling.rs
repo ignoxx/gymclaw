@@ -1,4 +1,4 @@
-//! Plan a whole week against persisted profile/calendar state (port of scheduling.py). Owner: lead.
+//! Plan a whole week against persisted profile/calendar state.
 use jiff::civil::Date;
 use serde_json::{Value, json};
 

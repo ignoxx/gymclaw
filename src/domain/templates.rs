@@ -334,7 +334,7 @@ mod tests {
     use crate::domain::workout::tests::db;
 
     fn seed() -> Template {
-        serde_json::from_str(&std::fs::read_to_string("config/exercises.seed.json").unwrap()).unwrap()
+        serde_json::from_str(include_str!("testdata/template.json")).unwrap()
     }
 
     fn object(value: Value) -> Map<String, Value> {

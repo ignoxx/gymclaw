@@ -1,6 +1,6 @@
-//! Runtime settings from the environment (same variables the Python/OpenClaw deploy used). The only
-//! module that reads env vars (clippy `disallowed_methods`). In production a variable reaches the bot
-//! only if the `gymclaw` service's `environment` in docker-compose.yaml passes it.
+//! Runtime settings from the environment. The only module that reads env vars (clippy
+//! `disallowed_methods`). In production a variable reaches the bot only if the `gymclaw` service's
+//! `environment` in docker-compose.yaml passes it.
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -21,8 +21,6 @@ pub struct Config {
     pub provider: Option<String>,
     /// Dashboard hostname behind Traefik; the Telegram menu button opens it.
     pub dashboard_host: Option<String>,
-    /// Old OpenClaw `USER.md`; its owner notes are imported once.
-    pub legacy_user_md: PathBuf,
     /// Where full agent turns are logged, if anywhere.
     pub turn_log_dir: Option<PathBuf>,
 }
@@ -79,7 +77,6 @@ impl Config {
             model,
             provider: var("GYMCLAW_PROVIDER"),
             dashboard_host: var("GYMCLAW_DASHBOARD_HOST"),
-            legacy_user_md: var("GYMCLAW_LEGACY_USER_MD").unwrap_or_else(|| "/opt/gymclaw/openclaw/USER.md".into()).into(),
             turn_log_dir: var("GYMCLAW_TURN_LOG_DIR").map(PathBuf::from),
         })
     }

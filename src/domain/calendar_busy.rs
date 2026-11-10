@@ -1,6 +1,6 @@
-//! Busy time the planner avoids (port of calendar_busy.py): availability blocks, the personal ICS feed,
+//! Busy time the planner avoids: availability blocks, the personal ICS feed,
 //! and gym-calendar events that aren't GymClaw's own, with recurring masters expanded locally within a
-//! bounded horizon. Owner: lead (planning).
+//! bounded horizon.
 use std::collections::HashSet;
 
 use jiff::{SignedDuration, ToSpan};
@@ -110,10 +110,10 @@ mod tests {
         .unwrap();
     }
 
-    // Expected values are the Python oracle's output: wall-clock times across the DST change, the
-    // cancelled Wed 28 instance dropped, and all-day spans following local midnight.
+    // Wall-clock times across the DST change, the cancelled Wed 28 instance dropped, and all-day spans
+    // following local midnight.
     #[test]
-    fn recurring_masters_match_python() {
+    fn recurring_masters_expand_across_dst() {
         let db = crate::domain::workout::tests::db();
         event(&db, "m", "confirmed", "2026-10-05T16:00:00Z", "2026-10-05T17:00:00Z",
             json!({"start": {"dateTime": "2026-10-05T18:00:00+02:00", "timeZone": "Europe/Berlin"}, "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE"]}));

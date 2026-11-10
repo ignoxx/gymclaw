@@ -1,4 +1,4 @@
-//! SQLite: the same file and schema the Python app used. Synchronous on purpose: one owner, short
+//! SQLite. Synchronous on purpose: one owner, short
 //! transactions, and domain code stays free of async. The async runtime calls in via `spawn_blocking`.
 pub mod models;
 mod table;
@@ -11,10 +11,12 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::Result;
 
-/// Schema of the last Python (alembic) revision; fresh databases start here.
+/// Starting schema; fresh databases start here.
 const BASELINE: &str = include_str!("baseline.sql");
-const ALEMBIC_HEAD: &str = "3d5e7f9a1b20";
-/// Rust-owned migrations after the baseline, applied in order and tracked by `PRAGMA user_version`.
+/// Baseline marker: the one row of the `alembic_version` table (the name is historical). Every DB,
+/// fresh or the long-lived production one, carries exactly this value; anything else is refused.
+const BASELINE_MARKER: &str = "3d5e7f9a1b20";
+/// Migrations after the baseline, applied in order and tracked by `PRAGMA user_version`.
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_agent.sql"),
     include_str!("migrations/002_learned_notes.sql"),
@@ -40,14 +42,14 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    let has_alembic: bool = tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
-    if !has_alembic {
+    let has_baseline: bool = tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
+    if !has_baseline {
         tx.execute_batch(BASELINE)?;
-        tx.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [ALEMBIC_HEAD])?;
+        tx.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [BASELINE_MARKER])?;
     } else {
-        let head: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
-        if head != ALEMBIC_HEAD {
-            crate::bail!("SCHEMA_MISMATCH", "Database is at alembic {head}; run the last Python migration ({ALEMBIC_HEAD}) first");
+        let marker: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
+        if marker != BASELINE_MARKER {
+            crate::bail!("SCHEMA_MISMATCH", "Database has baseline marker {marker}, expected {BASELINE_MARKER}; it predates the baseline and can't be upgraded");
         }
     }
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -175,7 +177,7 @@ mod tests {
         assert_eq!(get_profile(&db).unwrap().prep_minutes, 23);
         assert_eq!(AgentEvent::select(&db, "", []).unwrap()[0].created_at, at);
         let version: String = db.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, ALEMBIC_HEAD);
+        assert_eq!(version, BASELINE_MARKER);
         let _ = std::fs::remove_file(&path);
     }
 

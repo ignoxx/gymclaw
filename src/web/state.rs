@@ -1,5 +1,4 @@
-//! Read-only projection for the dashboard (port of gymclaw/dashboard_state.py). Same JSON, so the
-//! existing frontend (`web/`) works unchanged.
+//! Read-only projection for the dashboard: the JSON `web/app.js` renders.
 use std::collections::{BTreeMap, HashMap};
 
 use jiff::civil::{Date, DateTime};
@@ -42,13 +41,13 @@ fn date_fmt(d: Date, pattern: &str) -> String {
     d.strftime(pattern).to_string()
 }
 
-/// Python `f"{x:g}"` for weights: 40.0 → "40", 22.5 → "22.5".
+/// Weight without a trailing ".0": 40.0 → "40", 22.5 → "22.5".
 pub fn g(x: f64) -> String {
     let text = format!("{x}");
     text.strip_suffix(".0").map(String::from).unwrap_or(text)
 }
 
-/// Python's `round(x, digits)` (half to even).
+/// Round to `digits` decimals, half to even.
 fn round(x: f64, digits: i32) -> f64 {
     let scale = 10f64.powi(digits);
     (x * scale).round_ties_even() / scale
@@ -280,7 +279,7 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
     for w in done.iter().rev() {
         for exercise in w["exercises"].as_array().into_iter().flatten() {
             let sets = exercise["sets"].as_array().cloned().unwrap_or_default();
-            // Best set by estimated 1-rep max, so 12 × 40 and 8 × 50 compare on one line (first max wins, like Python).
+            // Best set by estimated 1-rep max, so 12 × 40 and 8 × 50 compare on one line (on a tie the first set wins).
             let key = |s: &Value| (one_rep_max(s["weight"].as_f64().unwrap_or(0.0), s["reps"].as_i64().unwrap_or(0)), s["reps"].as_i64().unwrap_or(0));
             let Some(top) = sets.iter().fold(None::<&Value>, |best, s| match best {
                 Some(b) if key(b).partial_cmp(&key(s)) != Some(std::cmp::Ordering::Less) => Some(b),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restore an archive from backup.sh (new or OpenClaw-era) into this deployment's
+# Restore an archive from backup.sh into this deployment's
 # volumes. Run in a one-off container while the gymclaw service is stopped:
 #
 #   docker run --rm -i --network none --volumes-from <stopped gymclaw container> \
@@ -22,9 +22,6 @@ umask 077
 rm -f "$ROOT"/data/gymclaw.db-wal "$ROOT"/data/gymclaw.db-shm
 cp "$TMP/gymclaw.db" "$ROOT/data/gymclaw.db"
 [[ -d "$TMP/data" ]] && cp -R "$TMP/data/." "$ROOT/data/"
-# The OpenClaw workspace only matters for the one-time USER.md notes import; skip it if read-only.
-if [[ -d "$TMP/openclaw" && -w "$ROOT/openclaw" ]]; then
-  cp -R "$TMP/openclaw/." "$ROOT/openclaw/"
-fi
+# Older archives may also hold an `openclaw/` folder; it is no longer used and stays unrestored.
 cd "$ROOT" && gymclaw migrate >/dev/null
 echo "Restored $ARCHIVE"

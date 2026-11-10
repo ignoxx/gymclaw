@@ -1,5 +1,5 @@
-//! Fit a template into a shorter slot (port of compression.py): drop lowest-priority volume first and
-//! keep the first primary exercise plus its prerequisites. Owner: lead.
+//! Fit a template into a shorter slot: drop lowest-priority volume first and
+//! keep the first primary exercise plus its prerequisites.
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};

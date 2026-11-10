@@ -70,8 +70,8 @@ impl Default for Profile {
 }
 
 impl Profile {
-    /// One rest duration for every exercise. The stored compound/template settings are
-    /// retained for legacy data; `rest --remember` still updates both profile defaults.
+    /// One rest duration for every exercise. The compound and per-exercise settings are still stored
+    /// but no longer select a timer; `rest --remember` updates both profile defaults.
     pub fn rest_seconds(&self) -> i64 {
         self.default_accessory_rest_seconds
     }
@@ -207,7 +207,7 @@ pub fn update_profile(db: &Connection, changes: &Map<String, Value>) -> Result<P
     Ok(profile)
 }
 
-/// Local wall-clock times as Python's `time.isoformat()`: "07:00:00" (input also takes "07:00").
+/// Local wall-clock times as "07:00:00" (input also takes "07:00").
 pub mod local_time {
     use jiff::civil::Time;
     use serde::{Deserialize, Deserializer, Serializer};

@@ -1,4 +1,4 @@
--- Schema at alembic head 3d5e7f9a1b20 (last Python revision), dumped from the live DB.
+-- Baseline schema (marker 3d5e7f9a1b20 in alembic_version; see src/db/mod.rs). Later changes: migrations/.
 CREATE TABLE alembic_version (
 	version_num VARCHAR(32) NOT NULL, 
 	CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)

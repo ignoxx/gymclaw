@@ -1,5 +1,4 @@
-//! Read-only ICS feed (iCloud "Public Calendar" link, Google secret iCal address). Port of
-//! `providers/ics_feed.py`, which used `icalendar` + `recurring-ical-events`.
+//! Read-only ICS feed (iCloud "Public Calendar" link, Google secret iCal address).
 //!
 //! GET only, nothing is ever written back. Yields busy intervals; titles/notes are discarded.
 use std::collections::{BTreeSet, HashMap};
@@ -24,7 +23,7 @@ pub fn normalize_url(url: &str) -> Result<String> {
         None => url.to_string(),
     };
     let host = url.strip_prefix("https://").map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
-    // Python `urlsplit(...).hostname`: strip userinfo and port.
+    // Strip userinfo and port.
     let host = host.map(|h| h.rsplit('@').next().unwrap_or("")).map(|h| h.split(':').next().unwrap_or(""));
     if !url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) || host.is_none_or(str::is_empty) {
         bail!(
@@ -160,7 +159,7 @@ fn event(props: &[ContentLine<'_>]) -> Result<Event> {
         (None, Some(duration)) => {
             let duration = parse_duration(duration.value)?;
             match &start {
-                // Python: a date plus a duration with a time part becomes a floating date-time.
+                // A date plus a duration with a time part becomes a floating date-time.
                 When::Date(d) if duration.as_secs().rem_euclid(86_400) != 0 => {
                     When::Floating(d.to_datetime(jiff::civil::Time::midnight()).checked_add(duration)?)
                 }
@@ -204,7 +203,7 @@ fn event(props: &[ContentLine<'_>]) -> Result<Event> {
     })
 }
 
-/// `max(existing, new)` by SEQUENCE; ties keep the first, like Python's `max`.
+/// The higher SEQUENCE wins; ties keep the first.
 fn highest<'a>(existing: Option<&'a Event>, new: &'a Event) -> &'a Event {
     match existing {
         Some(e) if e.sequence >= new.sequence => e,
@@ -380,10 +379,10 @@ mod tests {
     use crate::time::zone;
 
     /// Feeds covering RRULE (UNTIL/COUNT/BYDAY/BYSETPOS/…), EXDATE, RDATE, RECURRENCE-ID overrides,
-    /// all-day, floating, TZID with DST, cancelled and free events. `expected.json` is the Python
-    /// implementation's output (generated from the Python `ics_feed` before its removal).
+    /// all-day, floating, TZID with DST, cancelled and free events. `expected.json` holds the expected
+    /// busy intervals, generated from an independent implementation.
     #[test]
-    fn matches_python_expansion() {
+    fn feeds_expand_to_expected_busy_times() {
         let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/expected.json")).unwrap();
         let mut failures = Vec::new();
         for case in &cases {
@@ -396,7 +395,7 @@ mod tests {
             };
             if actual != case["expected"] {
                 failures.push(format!(
-                    "{} {} {}..{}\n  python: {}\n  rust:   {}",
+                    "{} {} {}..{}\n  expected: {}\n  actual:   {}",
                     case["feed"], case["zone"], case["start"], case["end"], case["expected"], actual
                 ));
             }

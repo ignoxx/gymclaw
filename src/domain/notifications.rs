@@ -1,4 +1,4 @@
-//! Durable session reminders (port of notifications.py). The runtime scheduler fires them. Owner: lead.
+//! Durable session reminders. The runtime scheduler fires them.
 use serde_json::{Value, json};
 
 use crate::db::models::{JobKind, JobStatus, NotificationJob, PlannedSession, SessionStatus};

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::{ChatModel, ModelReply, Usage};
 use crate::error::{Error, Result};
 
-/// Same budget as the OpenClaw config: GLM reasons even at "minimal", and a cut-off answer is worse than a slow one.
+/// GLM reasons even at "minimal", and a cut-off answer is worse than a slow one.
 pub const MAX_TOKENS: u32 = 16384;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 

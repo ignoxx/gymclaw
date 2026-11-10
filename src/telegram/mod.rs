@@ -1,7 +1,7 @@
-//! Telegram Bot API client, owner chat and the coach card renderer. Owner: WP-runtime.
+//! Telegram Bot API client, owner chat and the coach card renderer.
 //!
 //! `Telegram` is the small surface the runtime needs; `client::Bot` implements it over HTTPS and
-//! tests use fakes. Message text is the Markdown subset the old OpenClaw channel accepted
+//! tests use fakes. Message text is a small Markdown subset
 //! (`**bold**`, `` `code` ``), converted to Telegram HTML by `markdown::to_html`.
 pub mod client;
 pub mod coach;

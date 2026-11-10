@@ -1,4 +1,4 @@
-//! Persisted workout state machine (port of gymclaw/services/workout.py). Owner: WP-train.
+//! Persisted workout state machine.
 //!
 //! Every mutation runs through `mutate` with a request ID: a retry returns the original result, reuse
 //! with a different intent fails. Rest jobs are durable `notification_job` rows; the scheduler and the
@@ -129,7 +129,7 @@ pub fn guide_id(exercise: &WorkoutExercise) -> Option<&str> {
     config_str(exercise, "guide_id")
 }
 
-/// Python truthiness of a JSON value.
+/// Whether a JSON value is set: null, false, 0, "", [] and {} are not.
 fn truthy(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
@@ -219,7 +219,7 @@ fn snapshot_number(workout: &WorkoutSession, key: &str) -> f64 {
     workout.template_snapshot.get(key).and_then(Value::as_f64).unwrap_or_default()
 }
 
-/// Seconds as a duration, rounded to microseconds like Python's timedelta.
+/// Seconds as a duration, rounded to microseconds.
 pub fn seconds(value: f64) -> SignedDuration {
     SignedDuration::from_micros((value * 1e6).round() as i64)
 }
@@ -245,7 +245,7 @@ pub fn estimate_finish(db: &Connection, workout: &WorkoutSession, now: Ts) -> Re
     Ok(now + seconds(total))
 }
 
-/// Python's `{:g}`: 80 → "80", 22.5 → "22.5".
+/// A number in at most 6 significant digits without trailing zeros (printf `%g`): 80 → "80", 22.5 → "22.5".
 pub fn g(value: f64) -> String {
     if value == 0.0 {
         return "0".into();
@@ -436,7 +436,7 @@ pub fn make_exercise(db: &Connection, workout_id: &str, spec: &ExerciseSpec, pos
         exercise_id: spec.id.clone(),
         position,
         status: ExerciseStatus::Pending,
-        // Python's `working_sets or spec.working_sets`: 0 falls back too.
+        // 0 falls back to the template's count too.
         planned_working_sets: working_sets.filter(|n| *n != 0).unwrap_or(spec.working_sets),
         rep_min: spec.rep_min,
         rep_max: spec.rep_max,
@@ -830,7 +830,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn python_g_format() {
+    fn g_drops_trailing_zeros() {
         assert_eq!([g(80.0), g(22.5), g(0.5), g(102.25), g(-1.2)], ["80", "22.5", "0.5", "102.25", "-1.2"]);
     }
 

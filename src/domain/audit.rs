@@ -1,4 +1,4 @@
-//! Post-workout analysis and progression (port of gymclaw/services/audit.py). Owner: WP-train.
+//! Post-workout analysis and progression.
 //! Finishing writes the audit and progression atomically, then requests replanning.
 use serde_json::{Value, json};
 

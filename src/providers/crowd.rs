@@ -1,5 +1,4 @@
-//! Gym crowd sources: the gym's reported active check-in count (port of `crowd.py`, `mysports.py`,
-//! `crowd_sources.py`).
+//! Gym crowd sources: the gym's reported active check-in count.
 //!
 //! Config is private JSON at data/crowd-config.json (or GYMCLAW_CROWD_CONFIG), one of:
 //!
@@ -10,7 +9,7 @@
 //!
 //! The file holds everything needed to read the count; nothing else configures the source.
 //! A file without "kind" is the original MySports shape. See docs/crowd.md.
-//! `regex` is Rust `regex` syntax (no lookaround/backreferences); anything else is the same as Python's `re`.
+//! `regex` is Rust `regex` syntax (no lookaround or backreferences).
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -250,7 +249,7 @@ impl<'a> HttpCountProvider<'a> {
         };
         // Headers and the extraction rule can select another gym at the same URL, so they're part of the identity.
         let dump = json!({"kind": "http", "url": config.url, "headers": config.headers, "json_path": config.json_path, "regex": config.regex});
-        let digest = hex::encode(Sha256::digest(super::python_json(&dump).as_bytes()));
+        let digest = hex::encode(Sha256::digest(super::identity_json(&dump).as_bytes()));
         Ok(HttpCountProvider {
             provider_id: format!("http:{}#{}", config.url, &digest[..12]),
             config,
@@ -467,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn http_source_extracts_and_identity_matches_python() {
+    fn http_source_extracts_and_keeps_its_identity() {
         let config = |extra: Value| -> HttpSource {
             let mut base = json!({"url": "https://gym.example/live", "headers": {"x-tenant": "gym-b", "b": "2 ü"}});
             for (k, v) in extra.as_object().unwrap() {
@@ -478,7 +477,7 @@ mod tests {
         let transport = body(json!({"data": [{"count": 12}]}));
         let source = HttpCountProvider::new(config(json!({"json_path": "data.0.count"})), &transport).unwrap();
         assert_eq!(source.get_reading().unwrap().raw_value, 12);
-        // Python: HttpCountProvider(HttpSource(...)).provider_id for the same config.
+        // Pinned: the DB stores this identity, so the same config must keep producing it.
         assert_eq!(source.provider_id(), "http:https://gym.example/live#dcdf56b39c45");
 
         let transport = |_: &Request| {
@@ -508,7 +507,7 @@ mod tests {
                 .map(|p| p.provider_id().to_string())
                 .map_err(|e| e.code().to_string())
         };
-        // Legacy file (no kind, extra field) keeps the identity the live DB is bound to.
+        // A file in the original shape (no kind, extra field) keeps the identity the live DB is bound to.
         assert_eq!(
             id(json!({"studio_id": "1234567890", "tenant": "fixture-tenant", "note": "my gym"})).unwrap(),
             "mysports:fixture-tenant:1234567890"

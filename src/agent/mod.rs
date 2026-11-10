@@ -1,5 +1,5 @@
 //! The conversational agent: one turn = context from the DB, a tool loop over OpenRouter, and exactly
-//! one outcome (reply text with optional buttons or exercise picture, a reaction, or silence). Owner: WP-runtime.
+//! one outcome (reply text with optional buttons or exercise picture, a reaction, or silence).
 //!
 //! Tools are `tools::all()` plus `reply`, the turn's final answer. Each tool call runs in its own DB
 //! transaction on the blocking pool; errors go back to
