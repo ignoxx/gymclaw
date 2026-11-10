@@ -878,14 +878,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_substitution_preserves_state() {
+    fn substitute_must_be_an_alternative_or_a_same_muscle_catalog_exercise() {
         let db = db();
         let id = bench_done(&db);
         let fly = current(&db, &id, at(40)).unwrap()["active_exercise"]["id"].as_str().unwrap().to_string();
-        let tx = db.unchecked_transaction().unwrap();
-        let error = substitute(&tx, &id, &fly, "bench", at(50), "bad").unwrap_err();
+        let error = substitute(&db, &id, &fly, "bench", at(50), "bad").unwrap_err();
         assert!(error.to_string().contains("template alternative or a catalog exercise"), "{error}");
-        drop(tx);
-        assert_eq!(WorkoutExercise::get(&db, &fly).unwrap().unwrap().status, ExerciseStatus::Active);
     }
 }

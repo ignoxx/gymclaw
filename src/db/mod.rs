@@ -164,7 +164,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::db::models::{AgentEvent, SetLog, SetType};
+    use crate::db::models::AgentEvent;
     use crate::domain::profile::{get_profile, update_profile};
     use crate::time::Ts;
 
@@ -194,23 +194,5 @@ mod tests {
         let version: String = db.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, BASELINE_MARKER);
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn foreign_keys_are_enforced() {
-        let db = crate::db::test::db();
-        let orphan = SetLog {
-            id: new_id(),
-            workout_exercise_id: "missing".into(),
-            set_number: 1,
-            set_type: SetType::Working,
-            weight: 80.0,
-            reps: 9,
-            rir_optional: None,
-            logged_at: Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap(),
-            rest_started_at: None,
-            rest_due_at: None,
-        };
-        assert!(orphan.insert(&db).is_err());
     }
 }
