@@ -33,15 +33,13 @@ RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin gymclaw
 WORKDIR /opt/gymclaw
 COPY --from=build /usr/local/bin/gymclaw /usr/local/bin/gymclaw
 COPY assets/workout-guide ./assets/workout-guide
-COPY config ./config
 COPY deploy/entrypoint.sh deploy/backup.sh deploy/restore.sh /usr/local/bin/
-RUN mkdir -p data openclaw /backups && chown gymclaw:gymclaw data openclaw /backups
+RUN mkdir -p data /backups && chown gymclaw:gymclaw data /backups
 
 USER gymclaw
 ENV GYMCLAW_DATA_DIR=/opt/gymclaw/data \
     GYMCLAW_ASSETS_DIR=/opt/gymclaw/assets/workout-guide \
     GYMCLAW_TURN_LOG_DIR=/opt/gymclaw/data/turns \
-    GYMCLAW_LEGACY_USER_MD=/opt/gymclaw/openclaw/USER.md \
     NO_PROXY=localhost,127.0.0.1,::1 \
     no_proxy=localhost,127.0.0.1,::1
 ENTRYPOINT ["tini", "-s", "--", "entrypoint.sh"]

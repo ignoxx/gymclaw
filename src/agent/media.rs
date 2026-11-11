@@ -17,7 +17,14 @@ pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
         [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
-        [_, _, _, _, b'f', b't', b'y', b'p', rest @ ..] if rest.starts_with(b"heic") || rest.starts_with(b"heix") || rest.starts_with(b"mif1") || rest.starts_with(b"msf1") => Some("image/heic"),
+        [_, _, _, _, b'f', b't', b'y', b'p', rest @ ..]
+            if rest.starts_with(b"heic")
+                || rest.starts_with(b"heix")
+                || rest.starts_with(b"mif1")
+                || rest.starts_with(b"msf1") =>
+        {
+            Some("image/heic")
+        }
         _ => None,
     }
 }
@@ -34,10 +41,8 @@ pub async fn save(data_dir: &Path, unique_id: &str, bytes: &[u8]) -> Result<Opti
     Ok(Some(Media { path, mime: mime.into() }))
 }
 
-/// Bytes the vision model can read: JPEG/PNG/WebP/GIF as is; HEIC is decoded to JPEG.
-///
-/// HEIC decoding belongs to `crate::providers::photo::to_jpeg` (WP-providers); until it lands, HEIC
-/// files are described to the model instead of shown.
+/// Bytes the vision model can read: JPEG/PNG/WebP/GIF as is. HEIC is not shown; the model gets a
+/// note instead (`providers::photo::to_jpeg` can decode it but isn't wired in here).
 fn viewable(media: &Media, bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
     if media.mime == "image/heic" {
         return None;

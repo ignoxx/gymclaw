@@ -92,7 +92,9 @@ fn identifier(value: &str) -> bool {
 
 impl ExerciseSpec {
     fn validate(&self) -> Result<()> {
-        if ![&self.id, &self.name, &self.role].iter().all(|v| identifier(v)) || self.requires_completed.iter().chain(&self.substitutes).any(|v| !identifier(v)) {
+        if ![&self.id, &self.name, &self.role].iter().all(|v| identifier(v))
+            || self.requires_completed.iter().chain(&self.substitutes).any(|v| !identifier(v))
+        {
             return invalid("IDs, names and roles are 1–100 characters");
         }
         if let Some(guide) = &self.guide_id
@@ -100,11 +102,20 @@ impl ExerciseSpec {
         {
             return invalid(&format!("guide_id must match Workout Guide catalog: {guide}"));
         }
-        if self.working_sets <= 0 || self.rep_min <= 0 || self.rep_max <= 0 || self.warmup_reps <= 0 || self.rest_seconds.is_some_and(|r| r <= 0) || self.priority < 0 {
+        if self.working_sets <= 0
+            || self.rep_min <= 0
+            || self.rep_max <= 0
+            || self.warmup_reps <= 0
+            || self.rest_seconds.is_some_and(|r| r <= 0)
+            || self.priority < 0
+        {
             return invalid("Sets, reps and rest must be positive");
         }
         let weights = [Some(self.target_weight), self.warmup_weight];
-        if weights.iter().flatten().any(|w| !w.is_finite() || *w < 0.0) || !self.increment.is_finite() || self.increment <= 0.0 {
+        if weights.iter().flatten().any(|w| !w.is_finite() || *w < 0.0)
+            || !self.increment.is_finite()
+            || self.increment <= 0.0
+        {
             return invalid("Weights must be ≥ 0 and the increment > 0");
         }
         if self.rep_min > self.rep_max {
@@ -152,7 +163,11 @@ impl Template {
         }
         for spec in &all {
             for substitute in &spec.substitutes {
-                let ok = self.alternatives.iter().find(|a| &a.id == substitute).is_some_and(|a| a.role == spec.role && substitute != &spec.id);
+                let ok = self
+                    .alternatives
+                    .iter()
+                    .find(|a| &a.id == substitute)
+                    .is_some_and(|a| a.role == spec.role && substitute != &spec.id);
                 if !ok {
                     return invalid("Substitutes must reference same-role alternatives");
                 }
@@ -173,9 +188,19 @@ impl Template {
 
 /// Owner templates need a catalog guide_id on every exercise, so every card has an image.
 pub fn require_illustrations(template: &Template) -> Result<()> {
-    let missing: Vec<&str> = template.exercises.iter().chain(&template.alternatives).filter(|s| s.guide_id.is_none()).map(|s| s.name.as_str()).collect();
+    let missing: Vec<&str> = template
+        .exercises
+        .iter()
+        .chain(&template.alternatives)
+        .filter(|s| s.guide_id.is_none())
+        .map(|s| s.name.as_str())
+        .collect();
     if !missing.is_empty() {
-        crate::bail!("ILLUSTRATION_REQUIRED", "Set guide_id (closest match from catalog search) for: {}", missing.join(", "));
+        crate::bail!(
+            "ILLUSTRATION_REQUIRED",
+            "Set guide_id (closest match from catalog search) for: {}",
+            missing.join(", ")
+        );
     }
     Ok(())
 }
@@ -183,16 +208,26 @@ pub fn require_illustrations(template: &Template) -> Result<()> {
 pub fn import_template(db: &Connection, template: &Template) -> Result<Value> {
     template.validate()?;
     let definition = serde_json::to_value(template)?;
-    let row = WorkoutTemplate { id: template.id.clone(), definition_json: Json(definition.clone()), updated_at: Ts::now() };
-    if WorkoutTemplate::get(db, &template.id)?.is_some() { row.update(db)? } else { row.insert(db)? }
+    let row =
+        WorkoutTemplate { id: template.id.clone(), definition_json: Json(definition.clone()), updated_at: Ts::now() };
+    if WorkoutTemplate::get(db, &template.id)?.is_some() {
+        row.update(db)?
+    } else {
+        row.insert(db)?
+    }
     Ok(definition)
 }
 
 pub fn get_template(db: &Connection, template_id: &str) -> Result<Template> {
     let Some(row) = WorkoutTemplate::get(db, template_id)? else {
-        crate::bail!("TEMPLATE_UNKNOWN", "Unknown workout template: {template_id}. Templates: {}", template_ids(db)?.join(", "));
+        crate::bail!(
+            "TEMPLATE_UNKNOWN",
+            "Unknown workout template: {template_id}. Templates: {}",
+            template_ids(db)?.join(", ")
+        );
     };
-    serde_json::from_value(row.definition_json.0).map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Stored template {template_id}: {e}")))
+    serde_json::from_value(row.definition_json.0)
+        .map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Stored template {template_id}: {e}")))
 }
 
 pub fn template_ids(db: &Connection) -> Result<Vec<String>> {
@@ -201,7 +236,12 @@ pub fn template_ids(db: &Connection) -> Result<Vec<String>> {
 
 /// Owner swapped an exercise mid-workout: the replacement takes its place in the saved template, and
 /// the original stays as an alternative so it's one swap away. False if the template can't take it.
-pub fn remember_swap(db: &Connection, template_id: &str, original_id: &str, replacement: &ExerciseSpec) -> Result<bool> {
+pub fn remember_swap(
+    db: &Connection,
+    template_id: &str,
+    original_id: &str,
+    replacement: &ExerciseSpec,
+) -> Result<bool> {
     let Ok(template) = get_template(db, template_id) else { return Ok(false) };
     let Some(index) = template.exercises.iter().position(|e| e.id == original_id) else { return Ok(false) };
     let original = template.exercises[index].clone();
@@ -217,13 +257,18 @@ pub fn remember_swap(db: &Connection, template_id: &str, original_id: &str, repl
         substitutes: vec![original_id.into()],
         ..replacement.clone()
     };
-    let mut alternatives: Vec<ExerciseSpec> = template.alternatives.iter().filter(|a| a.id != replacement.id && a.id != original_id).cloned().collect();
+    let mut alternatives: Vec<ExerciseSpec> =
+        template.alternatives.iter().filter(|a| a.id != replacement.id && a.id != original_id).cloned().collect();
     alternatives.push(ExerciseSpec { substitutes: vec![], requires_completed: vec![], ..original });
     let mut exercises: Vec<ExerciseSpec> = template
         .exercises
         .iter()
         .map(|e| ExerciseSpec {
-            requires_completed: e.requires_completed.iter().map(|r| if r == original_id { replacement.id.clone() } else { r.clone() }).collect(),
+            requires_completed: e
+                .requires_completed
+                .iter()
+                .map(|r| if r == original_id { replacement.id.clone() } else { r.clone() })
+                .collect(),
             substitutes: e.substitutes.iter().filter(|s| **s != replacement.id).cloned().collect(),
             ..e.clone()
         })
@@ -251,7 +296,8 @@ pub enum ExerciseEdit<'a> {
 /// Names are unique per template, so the names in the error always resolve.
 pub fn pick(key: &str, candidates: &[[Option<&str>; 3]]) -> Result<Option<usize>> {
     let key = key.trim().to_lowercase();
-    let hits: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].iter().flatten().any(|v| v.to_lowercase() == key)).collect();
+    let hits: Vec<usize> =
+        (0..candidates.len()).filter(|&i| candidates[i].iter().flatten().any(|v| v.to_lowercase() == key)).collect();
     let mut ids: Vec<Option<&str>> = hits.iter().map(|&i| candidates[i][0]).collect();
     ids.sort();
     ids.dedup();
@@ -259,24 +305,40 @@ pub fn pick(key: &str, candidates: &[[Option<&str>; 3]]) -> Result<Option<usize>
         let mut names: Vec<&str> = hits.iter().filter_map(|&i| candidates[i][1]).collect();
         names.sort();
         names.dedup();
-        crate::bail!("EXERCISE_AMBIGUOUS", "'{key}' matches several exercises; pass one of these names: {}", names.join(", "));
+        crate::bail!(
+            "EXERCISE_AMBIGUOUS",
+            "'{key}' matches several exercises; pass one of these names: {}",
+            names.join(", ")
+        );
     }
     Ok(hits.first().copied())
 }
 
 /// Change one exercise of a saved plan without re-importing it. `exercise` is an ID, guide_id or name;
 /// `position` is the 0-based place. Upcoming planned sessions pick the change up via `refresh_plans`.
-pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: ExerciseEdit, position: Option<usize>) -> Result<Value> {
+pub fn edit_exercise(
+    db: &Connection,
+    template_id: &str,
+    exercise: &str,
+    edit: ExerciseEdit,
+    position: Option<usize>,
+) -> Result<Value> {
     let mut definition = serde_json::to_value(get_template(db, template_id)?)?;
     let name = definition["name"].as_str().unwrap_or_default().to_string();
     let rows = definition["exercises"].as_array_mut().expect("exercises array");
     let key = exercise.trim().to_lowercase();
-    let find = |rows: &[Value]| pick(&key, &rows.iter().map(|e| [e["id"].as_str(), e["name"].as_str(), e["guide_id"].as_str()]).collect::<Vec<_>>());
+    let find = |rows: &[Value]| {
+        pick(
+            &key,
+            &rows.iter().map(|e| [e["id"].as_str(), e["name"].as_str(), e["guide_id"].as_str()]).collect::<Vec<_>>(),
+        )
+    };
     match edit {
         ExerciseEdit::Add(changes) => {
             let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
             let Some(item) = item else {
-                let options: Vec<String> = search(exercise, None, None, 5).iter().map(|o| format!("{} ({})", o.guide_id, o.name)).collect();
+                let options: Vec<String> =
+                    search(exercise, None, None, 5).iter().map(|o| format!("{} ({})", o.guide_id, o.name)).collect();
                 let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
                 crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{exercise}'. Pass one guide_id: {options}");
             };
@@ -284,10 +346,16 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
             spec.as_object_mut().unwrap().extend(changes.clone());
             // Exercises are told apart by id; the guide_id only picks the picture, so two machine
             // variants can share one.
-            let same = |a: &Value, b: &Value| a.as_str().zip(b.as_str()).is_some_and(|(a, b)| a.trim().eq_ignore_ascii_case(b.trim()));
-            if let Some(existing) = rows.iter().find(|e| same(&e["id"], &spec["id"]) || same(&e["name"], &spec["name"])) {
+            let same = |a: &Value, b: &Value| {
+                a.as_str().zip(b.as_str()).is_some_and(|(a, b)| a.trim().eq_ignore_ascii_case(b.trim()))
+            };
+            if let Some(existing) = rows.iter().find(|e| same(&e["id"], &spec["id"]) || same(&e["name"], &spec["name"]))
+            {
                 let existing = existing["name"].as_str().unwrap_or_default();
-                crate::bail!("EXERCISE_EXISTS", "{existing} is already in {name}; edit it, or add a variant with its own id and name in fields");
+                crate::bail!(
+                    "EXERCISE_EXISTS",
+                    "{existing} is already in {name}; edit it, or add a variant with its own id and name in fields"
+                );
             }
             let at = position.unwrap_or(rows.len()).min(rows.len());
             rows.insert(at, spec);
@@ -317,7 +385,8 @@ pub fn edit_exercise(db: &Connection, template_id: &str, exercise: &str, edit: E
             }
         }
     }
-    let template: Template = serde_json::from_value(definition).map_err(|e| Error::domain("INVALID_TEMPLATE", e.to_string()))?;
+    let template: Template =
+        serde_json::from_value(definition).map_err(|e| Error::domain("INVALID_TEMPLATE", e.to_string()))?;
     import_template(db, &template)
 }
 
@@ -331,10 +400,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::domain::workout::tests::db;
+    use crate::db::test::db;
 
     fn seed() -> Template {
-        serde_json::from_str(&std::fs::read_to_string("config/exercises.seed.json").unwrap()).unwrap()
+        serde_json::from_str(include_str!("testdata/template.json")).unwrap()
     }
 
     fn object(value: Value) -> Map<String, Value> {
@@ -366,9 +435,26 @@ mod tests {
     fn edit_one_exercise_without_reimport() {
         let db = db();
         import_template(&db, &seed()).unwrap();
-        let ids = |definition: &Value| definition["exercises"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-        let edited = edit_exercise(&db, "upper-a", "bench press", ExerciseEdit::Change(&object(json!({"target_weight": 85, "working_sets": 4}))), None).unwrap();
-        assert_eq!((edited["exercises"][0]["target_weight"].as_f64(), edited["exercises"][0]["working_sets"].as_i64()), (Some(85.0), Some(4)));
+        let ids = |definition: &Value| {
+            definition["exercises"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        let edited = edit_exercise(
+            &db,
+            "upper-a",
+            "bench press",
+            ExerciseEdit::Change(&object(json!({"target_weight": 85, "working_sets": 4}))),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (edited["exercises"][0]["target_weight"].as_f64(), edited["exercises"][0]["working_sets"].as_i64()),
+            (Some(85.0), Some(4))
+        );
         let added = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Add(&Map::new()), Some(2)).unwrap();
         assert_eq!(ids(&added), ["bench", "row", "face-pull", "pec-deck", "lateral-raise"]);
         let again = edit_exercise(&db, "upper-a", "face-pull", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
@@ -377,12 +463,24 @@ mod tests {
         let variant = object(json!({"id": "bench-machine", "name": "Machine bench"}));
         let added = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&variant), None).unwrap();
         assert_eq!(added["exercises"][5]["guide_id"], added["exercises"][0]["guide_id"]);
-        let unnamed = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&object(json!({"id": "bench-2"}))), None).unwrap_err();
+        let unnamed =
+            edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Add(&object(json!({"id": "bench-2"}))), None)
+                .unwrap_err();
         assert_eq!(unnamed.code(), "EXERCISE_EXISTS", "a second 'Bench Press' could never be told apart");
         let shared = edit_exercise(&db, "upper-a", "bench-press", ExerciseEdit::Remove, None).unwrap_err();
         assert_eq!(shared.code(), "EXERCISE_AMBIGUOUS");
-        let named = edit_exercise(&db, "upper-a", "Machine bench", ExerciseEdit::Change(&object(json!({"target_weight": 60}))), None).unwrap();
-        assert_eq!((named["exercises"][0]["target_weight"].as_f64(), named["exercises"][5]["target_weight"].as_f64()), (Some(85.0), Some(60.0)));
+        let named = edit_exercise(
+            &db,
+            "upper-a",
+            "Machine bench",
+            ExerciseEdit::Change(&object(json!({"target_weight": 60}))),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (named["exercises"][0]["target_weight"].as_f64(), named["exercises"][5]["target_weight"].as_f64()),
+            (Some(85.0), Some(60.0))
+        );
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();

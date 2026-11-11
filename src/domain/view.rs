@@ -45,7 +45,7 @@ pub enum Cleanup {
     Delete,
 }
 
-/// One coach step. Flags mirror the old plugin protocol (see `telegram::coach` for how each renders).
+/// One coach step (see `telegram::coach` for how each flag renders).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoachView {
     /// False: not a coach message (e.g. typed text that isn't a set); the agent gets it.

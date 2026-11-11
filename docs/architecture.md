@@ -7,7 +7,7 @@ over one SQLite DB (`data/gymclaw.db`).
 gymclaw serve        # bot: Telegram long-poll, agent, coach, scheduler, outbox
 gymclaw call <tool> '<json>'|- [--now …] [--request-id …]   # any agent tool, for ops and testing
 gymclaw tools        # tool names, descriptions, JSON schemas
-gymclaw migrate      # schema (baseline = last alembic head of the old Python schema, then src/db/migrations)
+gymclaw migrate      # schema: src/db/baseline.sql, then src/db/migrations (result: src/db/schema.sql)
 gymclaw backup [dest]
 gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
 gymclaw dashboard    # dashboard; writes only the agent's notes and plan targets
@@ -15,19 +15,15 @@ gymclaw dashboard    # dashboard; writes only the agent's notes and plan targets
 
 ## Why one binary
 
-GymClaw used to be a Python package behind OpenClaw, with tools exposed through a shell. On
-2026-10-12 the agent was asked to move one session and leave the rest alone. The shell boundary
-let it read `--help`, grep source and run ad-hoc Python on the prod DB, and it told the owner
-something the state contradicted. Now the model gets typed tools only, a small context, and a way
-past missing verbs that doesn't involve the source code (see "Agent"). Behavior, messages, error
-codes and DB schema were kept, so existing data and habits carried over.
+The model gets typed tools only and a small context. An earlier build exposed tools through a shell;
+the agent read source and ran ad-hoc queries on prod, then told the owner things the state contradicted.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
 | `src/main.rs`, `src/config.rs` | CLI and environment |
-| `src/db/` | schema baseline, migrations, typed rows (`models.rs`) |
+| `src/db/` | schema (`schema.sql`, generated), baseline and migrations, typed rows (`models.rs`), test fixtures (`test.rs`) |
 | `src/time.rs`, `src/error.rs` | timestamps (naive UTC in the DB), `CODE: message` errors |
 | `src/domain/` | planning, scheduling, calendar sync/writes, crowd model, workout, coach, progression, onboarding, body, ticks |
 | `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries) |
@@ -134,4 +130,5 @@ model never has to. Timestamps without an offset are the owner's local time.
 
 `cargo test` and `cargo clippy --all-targets -- -D warnings`. Tests pin down behavior that's easy
 to get subtly wrong (planner choices, set parsing, progression math, rest timing, stale-delivery
-rules); the compiler covers shape. Never test against the production DB; use copies in `/tmp`.
+rules); the compiler covers shape. Shared fixtures live in `src/db/test.rs`. Never test against the
+production DB; use copies in `/tmp`.

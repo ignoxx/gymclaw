@@ -1,5 +1,4 @@
-//! Outbox: every proactive owner message is a `notification_delivery` row committed before the send
-//! (port of gymclaw/services/runtime.py minus the OpenClaw automation sync).
+//! Outbox: every proactive owner message is a `notification_delivery` row committed before the send.
 //!
 //! PENDING → claim SENDING (committed, no network under the write lock) → send → SENT with the
 //! Telegram message id. Any send error → UNKNOWN plus a `notifications.delivery_unknown` event,
@@ -13,8 +12,8 @@ use serde_json::{Value, json};
 
 use super::blocking;
 use crate::db::models::{
-    AgentButton, AgentEvent, ChatMessage, ChatRole, DeliveryStatus, JobKind, JobStatus, NotificationDelivery, NotificationJob, OnboardingState, PlannedSession,
-    RuntimeSettings, SessionStatus, WorkoutSession, WorkoutStatus,
+    AgentButton, AgentEvent, ChatMessage, ChatRole, DeliveryStatus, JobKind, JobStatus, NotificationDelivery,
+    NotificationJob, OnboardingState, PlannedSession, RuntimeSettings, SessionStatus, WorkoutSession, WorkoutStatus,
 };
 use crate::db::{Connection, Json, new_id};
 use crate::domain::view::Button;
@@ -23,7 +22,7 @@ use crate::error::{Error, Result};
 use crate::telegram::Telegram;
 use crate::time::Ts;
 
-/// `runtime_profile` of every delivery (was the OpenClaw profile name).
+/// `runtime_profile` of every delivery; a fixed value the column requires.
 pub const PROFILE: &str = "gymclaw";
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,7 +45,13 @@ fn planning_template(db: &Connection, settings: &RuntimeSettings) -> Result<Opti
 /// What the runtime may do: send (enabled), plan with which template, write the calendar, poll the gym.
 pub fn runtime_authority(db: &Connection) -> Result<Authority> {
     let Some(settings) = RuntimeSettings::get(db, 1)? else {
-        return Ok(Authority { configured: false, enabled: false, template_id: None, calendar_writes_enabled: false, crowd_polling_enabled: false });
+        return Ok(Authority {
+            configured: false,
+            enabled: false,
+            template_id: None,
+            calendar_writes_enabled: false,
+            crowd_polling_enabled: false,
+        });
     };
     Ok(Authority {
         configured: true,
@@ -58,7 +63,12 @@ pub fn runtime_authority(db: &Connection) -> Result<Authority> {
 }
 
 /// Why a reminder/rest job (or its queued delivery) should no longer reach the owner.
-pub fn stale_reason(db: &Connection, job: &NotificationJob, now: Ts, delivery: Option<&NotificationDelivery>) -> Result<Option<&'static str>> {
+pub fn stale_reason(
+    db: &Connection,
+    job: &NotificationJob,
+    now: Ts,
+    delivery: Option<&NotificationDelivery>,
+) -> Result<Option<&'static str>> {
     if job.status == JobStatus::Cancelled {
         return Ok(Some("cancelled"));
     }
@@ -70,13 +80,19 @@ pub fn stale_reason(db: &Connection, job: &NotificationJob, now: Ts, delivery: O
             Some(id) => WorkoutSession::get(db, id)?,
             None => None,
         };
-        let Some(workout) = workout.filter(|w| !matches!(w.status, WorkoutStatus::WorkoutComplete | WorkoutStatus::PostAnalysis | WorkoutStatus::PlanUpdated)) else {
+        let Some(workout) = workout.filter(|w| {
+            !matches!(
+                w.status,
+                WorkoutStatus::WorkoutComplete | WorkoutStatus::PostAnalysis | WorkoutStatus::PlanUpdated
+            )
+        }) else {
             return Ok(Some("workout_finished"));
         };
         if let Some(delivery) = delivery {
             let actual = workout::current(db, &workout.id, now)?;
             let expected = &delivery.result_json["data"];
-            let moved = ["status", "active_exercise", "queue", "rest_job"].iter().any(|k| actual.get(*k) != expected.get(*k));
+            let moved =
+                ["status", "active_exercise", "queue", "rest_job"].iter().any(|k| actual.get(*k) != expected.get(*k));
             if workout.last_action_at != job.handled_at || moved {
                 return Ok(Some("workout_advanced"));
             }
@@ -86,7 +102,10 @@ pub fn stale_reason(db: &Connection, job: &NotificationJob, now: Ts, delivery: O
             Some(id) => PlannedSession::get(db, id)?,
             None => None,
         };
-        let Some(planned) = planned.filter(|p| p.status == SessionStatus::Committed && Some(p.source_revision) == job.payload_json.get("revision").and_then(Value::as_i64)) else {
+        let Some(planned) = planned.filter(|p| {
+            p.status == SessionStatus::Committed
+                && Some(p.source_revision) == job.payload_json.get("revision").and_then(Value::as_i64)
+        }) else {
             return Ok(Some("plan_changed"));
         };
         if availability::session_blocked(db, &planned)? {
@@ -116,7 +135,11 @@ pub fn event_stale_reason(db: &Connection, row: &NotificationDelivery, now: Ts) 
             Some(id) => PlannedSession::get(db, id)?,
             None => None,
         };
-        let open = planned.is_some_and(|p| p.status == SessionStatus::Committed && p.planned_end_at > now && Some(p.planned_start_at.iso().as_str()) == event.payload_json["start"].as_str());
+        let open = planned.is_some_and(|p| {
+            p.status == SessionStatus::Committed
+                && p.planned_end_at > now
+                && Some(p.planned_start_at.iso().as_str()) == event.payload_json["start"].as_str()
+        });
         if !open {
             return Ok(Some("session_resolved"));
         }
@@ -143,7 +166,14 @@ fn acknowledge_delivery_events(db: &Connection, row: &NotificationDelivery, now:
     Ok(())
 }
 
-fn new_delivery(job_id: Option<&str>, event_id: Option<&str>, recipient: &str, message: &str, result: Value, now: Ts) -> NotificationDelivery {
+fn new_delivery(
+    job_id: Option<&str>,
+    event_id: Option<&str>,
+    recipient: &str,
+    message: &str,
+    result: Value,
+    now: Ts,
+) -> NotificationDelivery {
     NotificationDelivery {
         id: new_id(),
         notification_job_id: job_id.map(String::from),
@@ -159,9 +189,11 @@ fn new_delivery(job_id: Option<&str>, event_id: Option<&str>, recipient: &str, m
     }
 }
 
-/// Advance a due job and queue its exact message in the same transaction (was `runtime fire`).
+/// Advance a due job and queue its exact message in the same transaction.
 pub fn prepare_notification(db: &Connection, job_id: &str, now: Ts, recipient: &str) -> Result<Value> {
-    let Some(mut job) = NotificationJob::get(db, job_id)? else { crate::bail!("JOB_NOT_FOUND", "Unknown notification job") };
+    let Some(mut job) = NotificationJob::get(db, job_id)? else {
+        crate::bail!("JOB_NOT_FOUND", "Unknown notification job")
+    };
     if let Some(existing) = NotificationDelivery::first(db, "WHERE notification_job_id = ?1", [job_id])? {
         if existing.recipient != recipient || existing.runtime_profile != PROFILE {
             crate::bail!("DELIVERY_ROUTE_MISMATCH", "Stored delivery belongs to a different owner/runtime");
@@ -187,7 +219,8 @@ pub fn prepare_notification(db: &Connection, job_id: &str, now: Ts, recipient: &
         job.status = JobStatus::Fired;
         job.handled_at = Some(now);
         job.update(db)?;
-        let event = emit(db, "notifications.due", now, json!({"job_id": job.id, "session_id": job.planned_session_id}))?;
+        let event =
+            emit(db, "notifications.due", now, json!({"job_id": job.id, "session_id": job.planned_session_id}))?;
         json!({"data": {"job_id": job.id}, "events": [{"id": event.id, "type": event.r#type}], "user_message_hint": job.payload_json["instruction"]})
     };
     let Some(message) = result["user_message_hint"].as_str().filter(|m| !m.is_empty()).map(String::from) else {
@@ -200,8 +233,17 @@ pub fn prepare_notification(db: &Connection, job_id: &str, now: Ts, recipient: &
 
 /// Freeze a proactive message (briefing, nudge, alert): one delivery per durable event. A newer
 /// calendar briefing supersedes any still-pending one.
-pub fn prepare_event_message(db: &Connection, event_id: &str, message: &str, now: Ts, recipient: &str, related_events: &[String]) -> Result<Value> {
-    let Some(source) = AgentEvent::get(db, event_id)? else { crate::bail!("EVENT_NOT_FOUND", "Unknown proactive message event") };
+pub fn prepare_event_message(
+    db: &Connection,
+    event_id: &str,
+    message: &str,
+    now: Ts,
+    recipient: &str,
+    related_events: &[String],
+) -> Result<Value> {
+    let Some(source) = AgentEvent::get(db, event_id)? else {
+        crate::bail!("EVENT_NOT_FOUND", "Unknown proactive message event")
+    };
     if let Some(existing) = NotificationDelivery::first(db, "WHERE agent_event_id = ?1", [event_id])? {
         if existing.recipient != recipient || existing.runtime_profile != PROFILE {
             crate::bail!("DELIVERY_ROUTE_MISMATCH", "Event delivery belongs to another owner/runtime");
@@ -229,10 +271,14 @@ pub fn prepare_event_message(db: &Connection, event_id: &str, message: &str, now
 
 /// Ids of PENDING deliveries for the owner, oldest first.
 pub fn pending(db: &Connection, recipient: &str) -> Result<Vec<String>> {
-    Ok(NotificationDelivery::select(db, "WHERE status = 'PENDING' AND runtime_profile = ?1 AND recipient = ?2 ORDER BY created_at, id", [PROFILE, recipient])?
-        .into_iter()
-        .map(|d| d.id)
-        .collect())
+    Ok(NotificationDelivery::select(
+        db,
+        "WHERE status = 'PENDING' AND runtime_profile = ?1 AND recipient = ?2 ORDER BY created_at, id",
+        [PROFILE, recipient],
+    )?
+    .into_iter()
+    .map(|d| d.id)
+    .collect())
 }
 
 enum Claim {
@@ -249,7 +295,9 @@ struct Recap {
 /// Check route, authority and staleness, then commit SENDING. Nothing goes out unless this says so.
 fn claim(db: &mut Connection, delivery_id: &str, now: Ts) -> Result<Claim> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let Some(mut row) = NotificationDelivery::get(&tx, delivery_id)? else { crate::bail!("DELIVERY_NOT_FOUND", "Unknown notification delivery") };
+    let Some(mut row) = NotificationDelivery::get(&tx, delivery_id)? else {
+        crate::bail!("DELIVERY_NOT_FOUND", "Unknown notification delivery")
+    };
     if row.runtime_profile != PROFILE {
         crate::bail!("DELIVERY_ROUTE_MISMATCH", "Delivery belongs to another runtime profile");
     }
@@ -313,7 +361,10 @@ fn claim(db: &mut Connection, delivery_id: &str, now: Ts) -> Result<Claim> {
         (None, Some(id)) => no_show_buttons(&tx, id, now)?,
         _ => vec![],
     };
-    let chat = row.recipient.parse().map_err(|_| Error::domain("DELIVERY_ROUTE_MISMATCH", "Recipient is not a Telegram user id"))?;
+    let chat = row
+        .recipient
+        .parse()
+        .map_err(|_| Error::domain("DELIVERY_ROUTE_MISMATCH", "Recipient is not a Telegram user id"))?;
     let message = row.message.clone();
     tx.commit()?;
     Ok(Claim::Send { chat, message, buttons, session, recap })
@@ -327,7 +378,8 @@ fn start_button(session_id: &str) -> Vec<Button> {
 
 /// Start, or hand skip/move to the agent as if the owner had typed it: those are decisions.
 fn no_show_buttons(db: &Connection, session_id: &str, now: Ts) -> Result<Vec<Vec<Button>>> {
-    let name = PlannedSession::get(db, session_id)?.and_then(|s| s.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).map(String::from));
+    let name = PlannedSession::get(db, session_id)?
+        .and_then(|s| s.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).map(String::from));
     let name = name.unwrap_or_else(|| "workout".into());
     let mut choices = Vec::new();
     for (label, value) in [("Skip", format!("Skip today's {name}")), ("Move", format!("Move today's {name}"))] {
@@ -359,7 +411,10 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
                 Ok(tx.commit()?)
             })
             .await?;
-            crate::bail!("TELEGRAM_DELIVERY_UNKNOWN", "Delivery outcome unknown; inspect Telegram, then resolve it. No automatic resend.")
+            crate::bail!(
+                "TELEGRAM_DELIVERY_UNKNOWN",
+                "Delivery outcome unknown; inspect Telegram, then resolve it. No automatic resend."
+            )
         }
         Ok(message_id) => {
             let (data, replaced) = blocking(db_path, move |db| {
@@ -407,7 +462,10 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
 fn retire(db: &Connection, filter: &str, arg: impl rusqlite::ToSql, flag: &str) -> Result<Vec<i64>> {
     let rows = ChatMessage::select(db, &format!("WHERE telegram_message_id IS NOT NULL AND {filter}"), [arg])?;
     for row in &rows {
-        db.execute(&format!("UPDATE chat_message SET meta_json = json_set(meta_json, '$.{flag}', json('true')) WHERE id = ?1"), [row.id])?;
+        db.execute(
+            &format!("UPDATE chat_message SET meta_json = json_set(meta_json, '$.{flag}', json('true')) WHERE id = ?1"),
+            [row.id],
+        )?;
     }
     Ok(rows.iter().filter_map(|r| r.telegram_message_id).collect())
 }
@@ -417,10 +475,12 @@ fn retire(db: &Connection, filter: &str, arg: impl rusqlite::ToSql, flag: &str) 
 pub async fn settle_session_messages(db_path: &Path, tg: &dyn Telegram, chat: i64, now: Ts) -> Result<()> {
     let done = blocking(db_path, move |db| {
         let tx = db.transaction()?;
-        let live = "meta_json ->> 'buttons' = 1 AND meta_json ->> 'removed' IS NULL AND meta_json ->> 'settled' IS NULL";
+        let live =
+            "meta_json ->> 'buttons' = 1 AND meta_json ->> 'removed' IS NULL AND meta_json ->> 'settled' IS NULL";
         let mut done = Vec::new();
         for row in ChatMessage::select(&tx, &format!("WHERE telegram_message_id IS NOT NULL AND {live}"), [])? {
-            let session = row.meta_json["session_id"].as_str().map(|id| PlannedSession::get(&tx, id)).transpose()?.flatten();
+            let session =
+                row.meta_json["session_id"].as_str().map(|id| PlannedSession::get(&tx, id)).transpose()?.flatten();
             if session.map(|s| workout::startable(&tx, &s, now)).transpose()? != Some(true) {
                 done.extend(retire(&tx, "id = ?1", row.id, "settled")?);
             }
@@ -443,7 +503,9 @@ pub async fn settle_session_messages(db_path: &Path, tg: &dyn Telegram, chat: i6
 
 /// The owner's answer about an ambiguous delivery: `sent` closes it, `not-sent` queues it again.
 pub fn resolve_delivery(db: &Connection, delivery_id: &str, sent: bool, now: Ts) -> Result<Value> {
-    let Some(mut row) = NotificationDelivery::get(db, delivery_id)? else { crate::bail!("DELIVERY_NOT_FOUND", "Unknown notification delivery") };
+    let Some(mut row) = NotificationDelivery::get(db, delivery_id)? else {
+        crate::bail!("DELIVERY_NOT_FOUND", "Unknown notification delivery")
+    };
     if !matches!(row.status, DeliveryStatus::Unknown | DeliveryStatus::Sending) {
         crate::bail!("INVALID_DELIVERY_RESOLUTION", "Resolve only ambiguous delivery with sent or not-sent");
     }
@@ -454,7 +516,12 @@ pub fn resolve_delivery(db: &Connection, delivery_id: &str, sent: bool, now: Ts)
         acknowledge_delivery_events(db, &row, now)?;
     }
     let outcome = if sent { "sent" } else { "not-sent" };
-    emit(db, "notifications.delivery_resolved", now, json!({"delivery_id": row.id, "outcome": outcome, "source": "operator_confirmation"}))?;
+    emit(
+        db,
+        "notifications.delivery_resolved",
+        now,
+        json!({"delivery_id": row.id, "outcome": outcome, "source": "operator_confirmation"}),
+    )?;
     Ok(delivery_data(&row))
 }
 
@@ -465,45 +532,21 @@ mod tests {
     use super::*;
     use crate::telegram::coach::tests::{Call, FakeTelegram};
 
-    fn fresh() -> (tempdir::Dir, Connection) {
-        let dir = tempdir::Dir::new();
-        let mut db = crate::db::open(&dir.db()).unwrap();
-        crate::db::migrate(&mut db).unwrap();
-        (dir, db)
-    }
-
-    /// A throwaway directory under the system temp dir.
-    mod tempdir {
-        pub struct Dir(pub std::path::PathBuf);
-        impl Dir {
-            pub fn new() -> Dir {
-                let path = std::env::temp_dir().join(format!("gymclaw-test-{}", crate::db::new_id()));
-                std::fs::create_dir_all(&path).unwrap();
-                Dir(path)
-            }
-            pub fn db(&self) -> std::path::PathBuf {
-                self.0.join("gymclaw.db")
-            }
-        }
-        impl Drop for Dir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-    }
-
     fn now() -> Ts {
         Ts::parse("2026-10-12T10:00:00Z", None).unwrap()
     }
 
     fn briefing(db: &Connection, at: Ts) -> String {
         let event = emit(db, "calendar.update_briefing", at, json!({})).unwrap();
-        prepare_event_message(db, &event.id, "Moved Push to 14:30.", at, "42", &[]).unwrap()["id"].as_str().unwrap().into()
+        prepare_event_message(db, &event.id, "Moved Push to 14:30.", at, "42", &[]).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .into()
     }
 
     #[test]
     fn newer_briefing_supersedes_pending_one_and_old_messages_expire() {
-        let (_dir, db) = fresh();
+        let db = crate::db::test::db();
         let first = briefing(&db, now());
         let second = briefing(&db, now());
         assert_eq!(NotificationDelivery::get(&db, &first).unwrap().unwrap().status, DeliveryStatus::Cancelled);
@@ -516,58 +559,71 @@ mod tests {
     /// Each Sunday recap arrives with its effect and takes over the pin from last week's.
     #[tokio::test]
     async fn weekly_recap_is_pinned_in_place_of_the_last_one() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let recap = |at: Ts, effect: Option<&str>| {
             let event = emit(&db, "planning.weekly_recap", at, json!({"effect": effect})).unwrap();
-            prepare_event_message(&db, &event.id, "📅 Your week", at, "42", &[]).unwrap()["id"].as_str().unwrap().to_string()
+            prepare_event_message(&db, &event.id, "📅 Your week", at, "42", &[]).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
         };
         let tg = FakeTelegram::new();
         let first = recap(now(), None);
-        deliver(&dir.db(), tg.as_ref(), &first, now()).await.unwrap();
+        deliver(&path, tg.as_ref(), &first, now()).await.unwrap();
         let second = recap(now().mins(1), Some(crate::telegram::EFFECT_FIRE));
-        deliver(&dir.db(), tg.as_ref(), &second, now().mins(1)).await.unwrap();
+        deliver(&path, tg.as_ref(), &second, now().mins(1)).await.unwrap();
         let calls: Vec<Call> = tg.calls();
         let send = Call::Send("📅 Your week".into(), vec![]);
-        assert_eq!(calls, [send.clone(), Call::Pin(100, true), Call::Effect(crate::telegram::EFFECT_FIRE.into()), send, Call::Pin(101, true), Call::Pin(100, false)]);
+        assert_eq!(
+            calls,
+            [
+                send.clone(),
+                Call::Pin(100, true),
+                Call::Effect(crate::telegram::EFFECT_FIRE.into()),
+                send,
+                Call::Pin(101, true),
+                Call::Pin(100, false)
+            ]
+        );
     }
 
     #[tokio::test]
     async fn failed_send_is_unknown_and_never_resent() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let id = briefing(&db, now());
         drop(db);
         let tg = Arc::new(FakeTelegram { fail_send: true, ..Arc::into_inner(FakeTelegram::new()).unwrap() });
-        let error = deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap_err();
+        let error = deliver(&path, tg.as_ref(), &id, now()).await.unwrap_err();
         assert_eq!(error.code(), "TELEGRAM_DELIVERY_UNKNOWN");
-        let db = crate::db::open(&dir.db()).unwrap();
+        let db = crate::db::open(&path).unwrap();
         assert_eq!(NotificationDelivery::get(&db, &id).unwrap().unwrap().status, DeliveryStatus::Unknown);
         assert!(AgentEvent::first(&db, "WHERE type = 'notifications.delivery_unknown'", []).unwrap().is_some());
         // A second attempt only reports the state; it does not send again.
         let ok = FakeTelegram::new();
-        let data = deliver(&dir.db(), ok.as_ref(), &id, now()).await.unwrap();
+        let data = deliver(&path, ok.as_ref(), &id, now()).await.unwrap();
         assert_eq!(data["status"], "UNKNOWN");
         assert!(ok.calls().is_empty());
         // The owner says it never arrived: queued again, then sent once.
         resolve_delivery(&db, &id, false, now()).unwrap();
-        let data = deliver(&dir.db(), ok.as_ref(), &id, now()).await.unwrap();
+        let data = deliver(&path, ok.as_ref(), &id, now()).await.unwrap();
         assert_eq!((data["status"].as_str(), data["external_message_id"].as_str()), (Some("SENT"), Some("100")));
         assert_eq!(ok.calls().len(), 1);
     }
 
     #[tokio::test]
     async fn paused_runtime_sends_nothing() {
-        let (dir, db) = fresh();
-        db.execute("INSERT INTO runtime_settings VALUES (1, 'gymclaw', '42', '', '', NULL, 0, 0, 0)", []).unwrap();
+        let (path, db) = crate::db::test::file();
+        RuntimeSettings { enabled: false, ..crate::db::test::authority() }.insert(&db).unwrap();
         let id = briefing(&db, now());
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap_err().code(), "RUNTIME_PAUSED");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now()).await.unwrap_err().code(), "RUNTIME_PAUSED");
         assert!(tg.calls().is_empty());
         assert_eq!(NotificationDelivery::get(&db, &id).unwrap().unwrap().status, DeliveryStatus::Pending);
     }
 
+    use crate::db::models::SetType;
     use crate::domain::set_parser::SetInput;
     use crate::domain::templates::{Template, import_template};
-    use crate::db::models::SetType;
 
     fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {
         SetInput { weight, reps, set_type, rir: None }
@@ -576,82 +632,136 @@ mod tests {
     /// A workout resting after its first working set: (workout id, rest job id).
     fn rest_job(db: &Connection) -> (String, String) {
         let bench = json!({"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 3, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 100});
-        import_template(db, &serde_json::from_value::<Template>(json!({"id": "short", "name": "Short", "exercises": [bench]})).unwrap()).unwrap();
-        let id = workout::start(db, Some("short"), None, false, now(), "start").unwrap()["data"]["workout_id"].as_str().unwrap().to_string();
+        import_template(
+            db,
+            &serde_json::from_value::<Template>(json!({"id": "short", "name": "Short", "exercises": [bench]})).unwrap(),
+        )
+        .unwrap();
+        let id = workout::start(db, Some("short"), None, false, now(), "start").unwrap()["data"]["workout_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         workout::log_set(db, &id, &set(50.0, 8, SetType::Warmup), now(), "warmup").unwrap();
-        let job = workout::log_set(db, &id, &set(80.0, 9, SetType::Working), now(), "one").unwrap()["data"]["rest_job"]["id"].as_str().unwrap().to_string();
+        let job = workout::log_set(db, &id, &set(80.0, 9, SetType::Working), now(), "one").unwrap()["data"]["rest_job"]
+            ["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         (id, job)
     }
 
     fn planned_job(db: &Connection, kind: JobKind, instruction: &str) -> (PlannedSession, String) {
         let mut plan = PlannedSession::new("2026-10-12".into(), None, false);
         plan.status = SessionStatus::Committed;
-        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) = (now(), now().mins(60), now(), now(), now().mins(60));
+        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) =
+            (now(), now().mins(60), now(), now(), now().mins(60));
         plan.insert(db).unwrap();
         let job = NotificationJob {
-            id: new_id(), kind, workout_session_id: None, planned_session_id: Some(plan.id.clone()), set_log_id: None, due_at: now(),
-            status: JobStatus::Pending, payload_json: Json(json!({"revision": 1, "instruction": instruction})), external_job_id: None, handled_at: None,
+            id: new_id(),
+            kind,
+            workout_session_id: None,
+            planned_session_id: Some(plan.id.clone()),
+            set_log_id: None,
+            due_at: now(),
+            status: JobStatus::Pending,
+            payload_json: Json(json!({"revision": 1, "instruction": instruction})),
+            external_job_id: None,
+            handled_at: None,
         };
         job.insert(db).unwrap();
-        let delivery = prepare_notification(db, &job.id, now(), "42").unwrap()["delivery_id"].as_str().unwrap().to_string();
+        let delivery =
+            prepare_notification(db, &job.id, now(), "42").unwrap()["delivery_id"].as_str().unwrap().to_string();
         (plan, delivery)
     }
 
     #[tokio::test]
     async fn rest_output_survives_restart_and_delivery_retries_do_not_duplicate() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (workout_id, job) = rest_job(&db);
         let prepared = prepare_notification(&db, &job, now().mins(0) + SignedDuration::from_secs(100), "42").unwrap();
         assert_eq!(prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap(), prepared);
         let id = prepared["delivery_id"].as_str().unwrap();
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), id, now() + SignedDuration::from_secs(100)).await.unwrap()["status"], "SENT");
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), id, now() + SignedDuration::from_secs(110)).await.unwrap()["status"], "SENT");
+        assert_eq!(
+            deliver(&path, tg.as_ref(), id, now() + SignedDuration::from_secs(100)).await.unwrap()["status"],
+            "SENT"
+        );
+        assert_eq!(
+            deliver(&path, tg.as_ref(), id, now() + SignedDuration::from_secs(110)).await.unwrap()["status"],
+            "SENT"
+        );
         let sent = tg.calls();
         assert_eq!(sent.len(), 1);
         assert!(matches!(&sent[0], Call::Send(text, _) if text.contains("Rest over · Bench")));
-        assert_eq!(workout::current(&db, &workout_id, now() + SignedDuration::from_secs(110)).unwrap()["status"], "SET_ACTIVE");
+        assert_eq!(
+            workout::current(&db, &workout_id, now() + SignedDuration::from_secs(110)).unwrap()["status"],
+            "SET_ACTIVE"
+        );
         assert_eq!(NotificationDelivery::select(&db, "", []).unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn crash_after_claim_never_auto_resends() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (_, job) = rest_job(&db);
-        let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"].as_str().unwrap().to_string();
+        let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         db.execute("UPDATE notification_delivery SET status = 'SENDING' WHERE id = ?1", [&id]).unwrap();
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now().mins(5)).await.unwrap()["status"], "SENDING");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now().mins(5)).await.unwrap()["status"], "SENDING");
         assert!(tg.calls().is_empty());
     }
 
     #[tokio::test]
     async fn new_set_suppresses_stale_pending_delivery() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (workout_id, job) = rest_job(&db);
-        let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"].as_str().unwrap().to_string();
-        workout::log_set(&db, &workout_id, &set(80.0, 9, SetType::Working), now() + SignedDuration::from_secs(110), "next").unwrap();
+        let id = prepare_notification(&db, &job, now() + SignedDuration::from_secs(100), "42").unwrap()["delivery_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        workout::log_set(
+            &db,
+            &workout_id,
+            &set(80.0, 9, SetType::Working),
+            now() + SignedDuration::from_secs(110),
+            "next",
+        )
+        .unwrap();
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now() + SignedDuration::from_secs(120)).await.unwrap()["status"], "CANCELLED");
+        assert_eq!(
+            deliver(&path, tg.as_ref(), &id, now() + SignedDuration::from_secs(120)).await.unwrap()["status"],
+            "CANCELLED"
+        );
         assert!(tg.calls().is_empty());
     }
 
     #[tokio::test]
     async fn moved_plan_suppresses_old_preparation_delivery() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (mut plan, id) = planned_job(&db, JobKind::GetReady, "Get ready.");
         plan.source_revision += 1;
         plan.update(&db).unwrap();
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "CANCELLED");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now()).await.unwrap()["status"], "CANCELLED");
         assert!(tg.calls().is_empty());
     }
 
     /// Next reminder of the same session, due now.
     fn next_job(db: &Connection, plan: &PlannedSession, kind: JobKind) -> String {
         let job = NotificationJob {
-            id: new_id(), kind, workout_session_id: None, planned_session_id: Some(plan.id.clone()), set_log_id: None, due_at: now(),
-            status: JobStatus::Pending, payload_json: Json(json!({"revision": 1, "instruction": "Gym session begins."})), external_job_id: None, handled_at: None,
+            id: new_id(),
+            kind,
+            workout_session_id: None,
+            planned_session_id: Some(plan.id.clone()),
+            set_log_id: None,
+            due_at: now(),
+            status: JobStatus::Pending,
+            payload_json: Json(json!({"revision": 1, "instruction": "Gym session begins."})),
+            external_job_id: None,
+            handled_at: None,
         };
         job.insert(db).unwrap();
         prepare_notification(db, &job.id, now(), "42").unwrap()["delivery_id"].as_str().unwrap().to_string()
@@ -661,18 +771,29 @@ mod tests {
     /// ended up buried under the chat that followed. Each step now replaces the last one.
     #[tokio::test]
     async fn a_session_keeps_one_message_and_its_start_button() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let (plan, ready) = planned_job(&db, JobKind::GetReady, "Gym soon.");
         let tg = FakeTelegram::new();
-        deliver(&dir.db(), tg.as_ref(), &ready, now()).await.unwrap();
+        deliver(&path, tg.as_ref(), &ready, now()).await.unwrap();
         let start = next_job(&db, &plan, JobKind::SessionStart);
-        deliver(&dir.db(), tg.as_ref(), &start, now()).await.unwrap();
+        deliver(&path, tg.as_ref(), &start, now()).await.unwrap();
         let begin = vec![Button { text: "▶️ Start workout".into(), data: format!("gc:begin:{}", &plan.id[..8]) }];
-        assert!(matches!(&tg.calls()[1..], [Call::Send(_, buttons), Call::Remove(100)] if buttons == &vec![begin.clone()]), "{:?}", tg.calls());
+        assert!(
+            matches!(&tg.calls()[1..], [Call::Send(_, buttons), Call::Remove(100)] if buttons == &vec![begin.clone()]),
+            "{:?}",
+            tg.calls()
+        );
 
-        let event = emit(&db, "planning.no_show", now(), json!({"session_id": plan.id, "start": plan.planned_start_at})).unwrap();
-        let nudge = prepare_event_message(&db, &event.id, "Push was planned for 12:00 and hasn't started.", now(), "42", &[]).unwrap()["id"].as_str().unwrap().to_string();
-        deliver(&dir.db(), tg.as_ref(), &nudge, now()).await.unwrap();
+        let event =
+            emit(&db, "planning.no_show", now(), json!({"session_id": plan.id, "start": plan.planned_start_at}))
+                .unwrap();
+        let nudge =
+            prepare_event_message(&db, &event.id, "Push was planned for 12:00 and hasn't started.", now(), "42", &[])
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+        deliver(&path, tg.as_ref(), &nudge, now()).await.unwrap();
         let Call::Send(_, buttons) = &tg.calls()[3] else { panic!("{:?}", tg.calls()) };
         assert_eq!((&buttons[0], buttons[1].len()), (&begin, 2));
         assert_eq!(tg.calls()[4], Call::Remove(101));
@@ -681,23 +802,26 @@ mod tests {
         assert!(matches!(sent.as_slice(), [only] if only.ends_with("hasn't started. [with buttons]")), "{now_state}");
 
         // Still startable: the buttons stay. Skipped in chat: they go, once.
-        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
+        settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
         assert_eq!(tg.calls().len(), 5);
         db.execute("UPDATE planned_session SET status = 'SKIPPED' WHERE id = ?1", [&plan.id]).unwrap();
-        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
-        settle_session_messages(&dir.db(), tg.as_ref(), 42, now()).await.unwrap();
+        settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
+        settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
         assert_eq!(&tg.calls()[5..], &[Call::Buttons(102, vec![])]);
     }
 
     #[tokio::test]
     async fn sent_event_message_marks_its_event_handled() {
-        let (dir, db) = fresh();
+        let (path, db) = crate::db::test::file();
         let id = briefing(&db, now());
         let event = NotificationDelivery::get(&db, &id).unwrap().unwrap().agent_event_id.unwrap();
         // Retrying the prepare returns the same delivery.
-        assert_eq!(prepare_event_message(&db, &event, "Moved Push to 14:30.", now(), "42", &[]).unwrap()["id"], id.as_str());
+        assert_eq!(
+            prepare_event_message(&db, &event, "Moved Push to 14:30.", now(), "42", &[]).unwrap()["id"],
+            id.as_str()
+        );
         let tg = FakeTelegram::new();
-        assert_eq!(deliver(&dir.db(), tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
+        assert_eq!(deliver(&path, tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
         assert!(AgentEvent::get(&db, &event).unwrap().unwrap().handled_at.is_some());
     }
 }

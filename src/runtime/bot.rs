@@ -42,7 +42,8 @@ pub enum Route {
 }
 
 /// The "/" menu Telegram shows; `route` handles each (and `/reset` as `/new`). Set on startup.
-pub const COMMANDS: &[(&str, &str)] = &[("new", "Start a fresh conversation"), ("status", "Bot health and what's running")];
+pub const COMMANDS: &[(&str, &str)] =
+    &[("new", "Start a fresh conversation"), ("status", "Bot health and what's running")];
 
 pub fn route(text: &str) -> Route {
     let command = text.split_whitespace().next().unwrap_or("").split('@').next().unwrap_or("");
@@ -84,9 +85,28 @@ pub struct Bot {
 
 impl Bot {
     /// Start the fast lane and the agent worker.
-    pub fn start(owner: i64, tg: Arc<dyn Telegram>, coach: Arc<Coach>, agent: Agent, log: TurnLog, wake: Arc<Notify>, status: Arc<Mutex<super::Health>>) -> Arc<Bot> {
+    pub fn start(
+        owner: i64,
+        tg: Arc<dyn Telegram>,
+        coach: Arc<Coach>,
+        agent: Agent,
+        log: TurnLog,
+        wake: Arc<Notify>,
+        status: Arc<Mutex<super::Health>>,
+    ) -> Arc<Bot> {
         let (fast, mut lane) = mpsc::unbounded_channel();
-        let bot = Arc::new(Bot { owner, tg, coach, agent, log, wake, status, inbox: Mutex::new(vec![]), inbox_ready: Notify::new(), fast });
+        let bot = Arc::new(Bot {
+            owner,
+            tg,
+            coach,
+            agent,
+            log,
+            wake,
+            status,
+            inbox: Mutex::new(vec![]),
+            inbox_ready: Notify::new(),
+            fast,
+        });
         let worker = bot.clone();
         tokio::spawn(async move {
             while let Some(job) = lane.recv().await {
@@ -134,7 +154,10 @@ impl Bot {
             return;
         }
         let Some(message) = update.message else { return };
-        if message.chat.kind != "private" || message.chat.id != self.owner || message.from.as_ref().is_none_or(|f| f.id != self.owner) {
+        if message.chat.kind != "private"
+            || message.chat.id != self.owner
+            || message.from.as_ref().is_none_or(|f| f.id != self.owner)
+        {
             return;
         }
         self.message(message).await;
@@ -161,7 +184,14 @@ impl Bot {
         if message_id != 0 {
             let _ = self.tg.edit_buttons(self.owner, message_id, &vec![]).await;
         }
-        self.to_agent(message_id, format!("tg-cb:{}", q.id), button.value, vec![], json!({"kind": "button", "label": button.label})).await;
+        self.to_agent(
+            message_id,
+            format!("tg-cb:{}", q.id),
+            button.value,
+            vec![],
+            json!({"kind": "button", "label": button.label}),
+        )
+        .await;
     }
 
     async fn message(&self, message: Message) {
@@ -185,13 +215,22 @@ impl Bot {
         if message.photo.is_none() && message.document.is_some() && images.is_empty() {
             text.push_str("\n[a file that isn't an image; it wasn't saved]");
         }
-        self.to_agent(message.message_id, format!("tg-{}", message.message_id), text.trim().to_string(), images, json!({})).await;
+        self.to_agent(
+            message.message_id,
+            format!("tg-{}", message.message_id),
+            text.trim().to_string(),
+            images,
+            json!({}),
+        )
+        .await;
     }
 
     /// Download the largest photo size or an image document.
     async fn media(&self, message: &Message) -> Vec<Media> {
         let file = match (&message.photo, &message.document) {
-            (Some(sizes), _) => sizes.iter().max_by_key(|s| s.width).map(|s| (s.file_id.clone(), s.file_unique_id.clone())),
+            (Some(sizes), _) => {
+                sizes.iter().max_by_key(|s| s.width).map(|s| (s.file_id.clone(), s.file_unique_id.clone()))
+            }
             (None, Some(doc)) => Some((doc.file_id.clone(), doc.file_unique_id.clone())),
             _ => None,
         };
@@ -221,7 +260,15 @@ impl Bot {
             "sentAt": Ts::now().0.as_millisecond(), "chars": text.chars().count(), "text": scrub(&text, 4000)}));
         let stored = text.clone();
         let saved = blocking(self.db(), move |db| {
-            ChatMessage { id: None, at: Ts::now(), role: ChatRole::Owner, text: stored, telegram_message_id: (message_id != 0).then_some(message_id), meta_json: Json(meta) }.insert(db)
+            ChatMessage {
+                id: None,
+                at: Ts::now(),
+                role: ChatRole::Owner,
+                text: stored,
+                telegram_message_id: (message_id != 0).then_some(message_id),
+                meta_json: Json(meta),
+            }
+            .insert(db)
         })
         .await;
         if let Err(e) = saved {
@@ -233,7 +280,15 @@ impl Bot {
 
     async fn new_window(&self, message_id: i64) {
         let saved = blocking(self.db(), |db| {
-            ChatMessage { id: None, at: Ts::now(), role: ChatRole::Bot, text: "/new".into(), telegram_message_id: None, meta_json: Json(json!({"kind": "boundary"})) }.insert(db)
+            ChatMessage {
+                id: None,
+                at: Ts::now(),
+                role: ChatRole::Bot,
+                text: "/new".into(),
+                telegram_message_id: None,
+                meta_json: Json(json!({"kind": "boundary"})),
+            }
+            .insert(db)
         })
         .await;
         let emoji = if saved.is_ok() { "👍" } else { "🤷" };
@@ -243,7 +298,9 @@ impl Bot {
     async fn send_status(&self) {
         let health = self.status.lock().await.clone();
         let model = self.agent.chat_model.clone();
-        let text = blocking(self.db(), move |db| status_text(db, &health, &model)).await.unwrap_or_else(|e| format!("⚠️ Status unavailable: {}", e.code()));
+        let text = blocking(self.db(), move |db| status_text(db, &health, &model))
+            .await
+            .unwrap_or_else(|e| format!("⚠️ Status unavailable: {}", e.code()));
         self.send_bot(&text, "status").await;
     }
 
@@ -256,7 +313,11 @@ impl Bot {
     }
 
     async fn remember(&self, role: ChatRole, text: String, message_id: Option<i64>, meta: Value) {
-        let saved = blocking(self.db(), move |db| ChatMessage { id: None, at: Ts::now(), role, text, telegram_message_id: message_id, meta_json: Json(meta) }.insert(db)).await;
+        let saved = blocking(self.db(), move |db| {
+            ChatMessage { id: None, at: Ts::now(), role, text, telegram_message_id: message_id, meta_json: Json(meta) }
+                .insert(db)
+        })
+        .await;
         if let Err(e) = saved {
             tracing::warn!("chat history write failed: {e}");
         }
@@ -272,7 +333,10 @@ impl Bot {
         let result = in_tx(self.db(), move |db| coach::handle_tap(db, &data, Ts::now(), &request_id)).await;
         let cli_ms = started.elapsed().as_millis() as u64;
         let error = match result {
-            Ok(view) if !view.handled || matches!(view.ack.as_deref(), Some("⌛ No workout running." | "⌛ Old button.")) => {
+            Ok(view)
+                if !view.handled
+                    || matches!(view.ack.as_deref(), Some("⌛ No workout running." | "⌛ Old button.")) =>
+            {
                 self.to_agent(message_id, format!("fallback:{}", q.id),
                     format!("Coach button {} could not apply: {}. Card: {}. Inspect current state and resolve the owner's intent; never replay an old set button as a new log.", q.data.as_deref().unwrap_or(""), view.ack.as_deref().unwrap_or("unhandled"), q.message.as_ref().and_then(|m| m.body()).unwrap_or("")),
                     vec![], json!({"kind": "coach_fallback"})).await;
@@ -307,7 +371,8 @@ impl Bot {
         let input = text.clone();
         let result = in_tx(self.db(), move |db| coach::handle_text(db, &input, Ts::now(), &request_id)).await;
         let cli_ms = started.elapsed().as_millis() as u64;
-        let mut entry = json!({"ev": "fast", "flow": "text", "text": text, "msg": message_id.to_string(), "cliMs": cli_ms});
+        let mut entry =
+            json!({"ev": "fast", "flow": "text", "text": text, "msg": message_id.to_string(), "cliMs": cli_ms});
         match result {
             Ok(view) if view.handled => {
                 if let Err(e) = self.coach.apply(&view, None, Some(message_id)).await {
@@ -332,7 +397,8 @@ impl Bot {
                     Err(e) => format!("{text}\n[Coach fallback: {}: {e}]", e.code()),
                     _ => text,
                 };
-                self.to_agent(message_id, format!("tg-{message_id}"), text, vec![], json!({"kind": "coach_fallback"})).await;
+                self.to_agent(message_id, format!("tg-{message_id}"), text, vec![], json!({"kind": "coach_fallback"}))
+                    .await;
             }
         }
         entry["ms"] = json!(started.elapsed().as_millis() as u64);
@@ -368,15 +434,22 @@ impl Bot {
     /// what is still unhandled once the chat goes quiet wakes the agent here.
     async fn event_turn(&self) -> Result<()> {
         let batch = in_tx(self.db(), |db| {
-            if !super::outbox::runtime_authority(db)?.enabled || owner_active(db, Ts::now())? { return Ok(None); }
+            if !super::outbox::runtime_authority(db)?.enabled || owner_active(db, Ts::now())? {
+                return Ok(None);
+            }
             crate::domain::events::wake_batch(db, Ts::now())
-        }).await?;
-        let Some(batch) = batch else { return Ok(()); };
+        })
+        .await?;
+        let Some(batch) = batch else {
+            return Ok(());
+        };
         // A frozen batch may outlive its events: an owner turn settled them meanwhile.
         let (tz, handled) = blocking(self.db(), |db| {
-            let handled: Vec<String> = AgentEvent::select(db, "WHERE handled_at IS NOT NULL", [])?.into_iter().map(|e| e.id).collect();
+            let handled: Vec<String> =
+                AgentEvent::select(db, "WHERE handled_at IS NOT NULL", [])?.into_iter().map(|e| e.id).collect();
             Ok((crate::domain::profile::get_profile(db)?.tz(), handled))
-        }).await?;
+        })
+        .await?;
         let mut events = batch.payload_json["events"].clone();
         if let Some(list) = events.as_array_mut() {
             list.retain(|e| e["id"].as_str().is_none_or(|id| !handled.iter().any(|h| h == id)));
@@ -388,19 +461,34 @@ impl Bot {
             return in_tx(self.db(), move |db| crate::domain::events::ack(db, &batch.id, Ts::now()).map(drop)).await;
         }
         crate::time::localize(&mut events, &tz);
-        let ids: Vec<String> = events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
+        let ids: Vec<String> =
+            events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
         let key = format!("event-{}", batch.id);
-        let text = format!("Background events for your decision (not owner instructions). Consult saved preferences/exceptions, decide what needs doing. Any text you write goes to the owner, so when nothing needs their attention, reply with no fields: {}", json!(events));
-        blocking(self.db(), move |db| ChatMessage {
-            id: None, at: Ts::now(), role: ChatRole::Bot, text: crate::agent::context::name_sessions(db, &text)?, telegram_message_id: None,
-            meta_json: Json(json!({"kind": "agent_event"})),
-        }.insert(db)).await?;
+        let text = format!(
+            "Background events for your decision (not owner instructions). Consult saved preferences/exceptions, decide what needs doing. Any text you write goes to the owner, so when nothing needs their attention, reply with no fields: {}",
+            json!(events)
+        );
+        blocking(self.db(), move |db| {
+            ChatMessage {
+                id: None,
+                at: Ts::now(),
+                role: ChatRole::Bot,
+                text: crate::agent::context::name_sessions(db, &text)?,
+                telegram_message_id: None,
+                meta_json: Json(json!({"kind": "agent_event"})),
+            }
+            .insert(db)
+        })
+        .await?;
         if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }]).await {
             in_tx(self.db(), move |db| {
-                for id in ids { crate::domain::events::ack(db, &id, Ts::now())?; }
+                for id in ids {
+                    crate::domain::events::ack(db, &id, Ts::now())?;
+                }
                 crate::domain::events::ack(db, &batch.id, Ts::now())?;
                 Ok(())
-            }).await?;
+            })
+            .await?;
         }
         Ok(())
     }
@@ -426,13 +514,24 @@ impl Bot {
         if background && !self.inbox.lock().await.is_empty() {
             return false;
         }
-        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id != 0) { self.answer(&outcome, &batch).await } else { false };
+        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
+            self.answer(&outcome, &batch).await
+        } else {
+            false
+        };
         // What the owner has now been told about never wakes a second turn that asks again.
         let settles = outcome.settles.clone();
-        let settled = !outcome.failed && delivered && in_tx(self.db(), move |db| {
-            for id in settles { crate::domain::events::ack(db, &id, Ts::now())?; }
-            Ok(())
-        }).await.inspect_err(|e| tracing::warn!("seen events not settled: {e}")).is_ok();
+        let settled = !outcome.failed
+            && delivered
+            && in_tx(self.db(), move |db| {
+                for id in settles {
+                    crate::domain::events::ack(db, &id, Ts::now())?;
+                }
+                Ok(())
+            })
+            .await
+            .inspect_err(|e| tracing::warn!("seen events not settled: {e}"))
+            .is_ok();
         self.wake.notify_one();
         settled
     }
@@ -452,7 +551,8 @@ impl Bot {
             }
         }
         if let Some(message) = &reply.message {
-            let buttons: Vec<(String, String)> = message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
+            let buttons: Vec<(String, String)> =
+                message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
             delivered &= self.send_reply(outcome, &message.text, message.photo.as_deref(), &buttons).await;
         }
         for b in batch.iter().filter(|b| b.message_id != 0 && Some(b.message_id) != reacted) {
@@ -461,8 +561,17 @@ impl Bot {
         delivered
     }
 
-    async fn send_reply(&self, outcome: &Outcome, text: &str, photo: Option<&std::path::Path>, buttons: &[(String, String)]) -> bool {
-        let rows: Vec<(String, String, String)> = buttons.iter().map(|(label, value)| (crate::db::new_id()[..8].to_string(), label.clone(), value.clone())).collect();
+    async fn send_reply(
+        &self,
+        outcome: &Outcome,
+        text: &str,
+        photo: Option<&std::path::Path>,
+        buttons: &[(String, String)],
+    ) -> bool {
+        let rows: Vec<(String, String, String)> = buttons
+            .iter()
+            .map(|(label, value)| (crate::db::new_id()[..8].to_string(), label.clone(), value.clone()))
+            .collect();
         if !rows.is_empty() {
             let stored = rows.clone();
             let saved = blocking(self.db(), move |db| {
@@ -476,7 +585,8 @@ impl Bot {
                 tracing::warn!("agent buttons not stored: {e}");
             }
         }
-        let keyboard: Vec<Vec<Button>> = rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
+        let keyboard: Vec<Vec<Button>> =
+            rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
         let sent = self.tg.send(self.owner, text, photo, &keyboard, None).await;
         self.log.log(json!({"ev": "outbound", "session": SESSION, "run": outcome.run_id, "channel": "telegram", "msg": sent.as_ref().ok(), "photo": photo.is_some(),
             "ok": sent.is_ok(), "error": sent.as_ref().err().map(|e| scrub(&e.to_string(), 500)), "text": scrub(text, 4000)}));
@@ -507,17 +617,30 @@ fn owner_active(db: &crate::db::Connection, now: Ts) -> Result<bool> {
 fn status_text(db: &crate::db::Connection, health: &super::Health, model: &str) -> Result<String> {
     let authority = super::outbox::runtime_authority(db)?;
     let tz = crate::domain::profile::get_profile(db)?.tz();
-    let count = |s: &str| -> Result<i64> { Ok(db.query_row("SELECT count(*) FROM notification_delivery WHERE status = ?1", [s], |r| r.get(0))?) };
+    let count = |s: &str| -> Result<i64> {
+        Ok(db.query_row("SELECT count(*) FROM notification_delivery WHERE status = ?1", [s], |r| r.get(0))?)
+    };
     let on = |b: bool| if b { "on" } else { "off" };
     let mut lines = vec![
         format!("**GymClaw** · up {}", super::uptime(health.started.elapsed())),
         format!(
             "Runtime {} · calendar writes {} · crowd polling {}",
-            if authority.enabled { "on" } else if authority.configured { "paused" } else { "not set up" },
+            if authority.enabled {
+                "on"
+            } else if authority.configured {
+                "paused"
+            } else {
+                "not set up"
+            },
             on(authority.calendar_writes_enabled),
             on(authority.crowd_polling_enabled)
         ),
-        format!("Deliveries: {} pending · {} sending · {} unknown", count("PENDING")?, count("SENDING")?, count("UNKNOWN")?),
+        format!(
+            "Deliveries: {} pending · {} sending · {} unknown",
+            count("PENDING")?,
+            count("SENDING")?,
+            count("UNKNOWN")?
+        ),
     ];
     if let Some(job) = NotificationJob::first(db, "WHERE status = 'PENDING' ORDER BY due_at", [])? {
         lines.push(format!("Next: {} {}", job.kind, job.due_at.local(&tz).strftime("%a %H:%M")));
@@ -537,12 +660,23 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::agent::ChatModel for EventModel {
-        async fn complete(&self, _: &str, messages: &[Value], _: &[Value], _: bool) -> Result<crate::agent::ModelReply> {
+        async fn complete(
+            &self,
+            _: &str,
+            messages: &[Value],
+            _: &[Value],
+            _: bool,
+        ) -> Result<crate::agent::ModelReply> {
             // Input to answer, not something the bot said.
-            assert!(messages.iter().any(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|t| t.contains("Background events for your decision") && t.contains("planning.attention"))));
+            assert!(messages.iter().any(|m| m["role"] == "user"
+                && m["content"].as_str().is_some_and(
+                    |t| t.contains("Background events for your decision") && t.contains("planning.attention")
+                )));
             let message = match self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                 0 => crate::bail!("MODEL_DOWN", "fixture model outage"),
-                1 => json!({"tool_calls": [{"id": "create", "function": {"name": "session_create", "arguments": json!({"start": "2099-10-14T12:00", "template_id": "fixture"}).to_string()}}]}),
+                1 => {
+                    json!({"tool_calls": [{"id": "create", "function": {"name": "session_create", "arguments": json!({"start": "2099-10-14T12:00", "template_id": "fixture"}).to_string()}}]})
+                }
                 _ => json!({"content": ""}),
             };
             Ok(crate::agent::ModelReply { message, ..Default::default() })
@@ -550,27 +684,42 @@ mod tests {
     }
 
     /// A bot over a fresh DB with one template (`fixture`); runtime authority still off.
-    fn fixture(model: Arc<dyn crate::agent::ChatModel>) -> (Bot, crate::db::Connection, std::path::PathBuf, Arc<crate::telegram::coach::tests::FakeTelegram>) {
-        let dir = std::env::temp_dir().join(format!("gymclaw-events-{}", crate::db::new_id()));
-        let db_path = dir.join("test.db");
-        let mut db = crate::db::open(&db_path).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+    fn fixture(
+        model: Arc<dyn crate::agent::ChatModel>,
+    ) -> (Bot, crate::db::Connection, std::path::PathBuf, Arc<crate::telegram::coach::tests::FakeTelegram>) {
+        let (db_path, db) = crate::db::test::file();
+        let dir = db_path.parent().unwrap().to_path_buf();
         let template = serde_json::from_value(json!({"id": "fixture", "name": "Fixture", "exercises": [{"id": "bench", "name": "Bench", "role": "press", "target_weight": 0}]})).unwrap();
         crate::domain::templates::import_template(&db, &template).unwrap();
         let tg = crate::telegram::coach::tests::FakeTelegram::new();
         let coach = Coach::new(tg.clone(), 42, Arc::new(Ts::now), None, None);
         let (fast, _) = mpsc::unbounded_channel();
         let bot = Bot {
-            owner: 42, tg: tg.clone(), coach, log: TurnLog::default(), wake: Arc::new(Notify::new()),
+            owner: 42,
+            tg: tg.clone(),
+            coach,
+            log: TurnLog::default(),
+            wake: Arc::new(Notify::new()),
             status: Arc::new(Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
-            inbox: Mutex::new(vec![]), inbox_ready: Notify::new(), fast,
-            agent: Agent { db_path, data_dir: dir.clone(), model, chat_model: "fixture".into(), vision_model: "fixture".into(), coach: None, log: TurnLog::default(), clock: Arc::new(Ts::now) },
+            inbox: Mutex::new(vec![]),
+            inbox_ready: Notify::new(),
+            fast,
+            agent: Agent {
+                db_path,
+                data_dir: dir.clone(),
+                model,
+                chat_model: "fixture".into(),
+                vision_model: "fixture".into(),
+                coach: None,
+                log: TurnLog::default(),
+                clock: Arc::new(Ts::now),
+            },
         };
         (bot, db, dir, tg)
     }
 
     fn enable_runtime(db: &crate::db::Connection) {
-        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, enabled, calendar_writes_enabled, crowd_polling_enabled) VALUES (1, 'gymclaw', '42', '', '', 1, 0, 0)", []).unwrap();
+        crate::db::test::authority().insert(db).unwrap();
     }
 
     #[tokio::test]
@@ -579,7 +728,13 @@ mod tests {
         let (bot, db, dir, tg) = fixture(model.clone());
         // Batch identity stays short enough for mutation request IDs regardless of batch size.
         for n in 0..6 {
-            crate::domain::events::request(&db, "planning.attention", json!({"warnings": [format!("calendar clash {n}")]}), Ts::now()).unwrap();
+            crate::domain::events::request(
+                &db,
+                "planning.attention",
+                json!({"warnings": [format!("calendar clash {n}")]}),
+                Ts::now(),
+            )
+            .unwrap();
         }
         bot.event_turn().await.unwrap();
         assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -588,7 +743,13 @@ mod tests {
         assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 6);
         assert!(!tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))));
         let batch = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
-        crate::domain::events::request(&db, "planning.attention", json!({"warnings": ["new event during failure"]}), Ts::now()).unwrap();
+        crate::domain::events::request(
+            &db,
+            "planning.attention",
+            json!({"warnings": ["new event during failure"]}),
+            Ts::now(),
+        )
+        .unwrap();
         assert_eq!(crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap().id, batch.id);
         // The retry answers the frozen batch; the newer event was in its context as an open issue, so
         // it is settled too instead of waking another turn.
@@ -603,7 +764,8 @@ mod tests {
         bot.tap(serde_json::from_value(json!({"id": "stale", "from": {"id": 42}, "data": "gc:next:missing", "message": {"message_id": 5, "chat": {"id": 42, "type": "private"}, "text": "Bench card"}})).unwrap()).await;
         bot.set_text(6, "10x40".into()).await;
         assert_eq!(bot.inbox.lock().await.len(), 2);
-        let fallback = ChatMessage::select(&db, "WHERE meta_json ->> 'kind' = 'coach_fallback' ORDER BY id", []).unwrap();
+        let fallback =
+            ChatMessage::select(&db, "WHERE meta_json ->> 'kind' = 'coach_fallback' ORDER BY id", []).unwrap();
         assert_eq!(fallback.len(), 2);
         assert!(fallback[0].text.contains("Bench card"));
         drop(db);
@@ -629,7 +791,9 @@ mod tests {
         let (bot, db, dir, tg) = fixture(model.clone());
         enable_runtime(&db);
         let calls = || model.0.load(std::sync::atomic::Ordering::SeqCst);
-        let attention = |text: &str| crate::domain::events::request(&db, "planning.attention", json!({"warnings": [text]}), Ts::now()).unwrap();
+        let attention = |text: &str| {
+            crate::domain::events::request(&db, "planning.attention", json!({"warnings": [text]}), Ts::now()).unwrap()
+        };
 
         // The owner just wrote: the event waits.
         bot.to_agent(7, "tg-7".into(), "back to 3 a week".into(), vec![], json!({})).await;
@@ -652,7 +816,9 @@ mod tests {
         // The owner writes while a background turn thinks: it stays silent and settles nothing.
         attention("Session y: skips a rest day");
         bot.inbox.lock().await.push(Inbound { message_id: 8, key: "tg-8".into(), images: vec![] });
-        let sent = |tg: &crate::telegram::coach::tests::FakeTelegram| tg.calls().iter().filter(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))).count();
+        let sent = |tg: &crate::telegram::coach::tests::FakeTelegram| {
+            tg.calls().iter().filter(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))).count()
+        };
         let before = sent(&tg);
         bot.event_turn().await.unwrap();
         assert_eq!((calls(), sent(&tg)), (3, before));

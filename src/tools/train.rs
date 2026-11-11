@@ -1,4 +1,4 @@
-//! Workout, coach, template, onboarding and body tools. Owner: WP-train.
+//! Workout, coach, template, onboarding and body tools.
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -10,7 +10,9 @@ use crate::domain::coach::{self, Action};
 use crate::domain::illustrations::search;
 use crate::domain::onboarding::{self, Update};
 use crate::domain::profile::get_profile;
-use crate::domain::templates::{ExerciseEdit, Template, edit_exercise, get_template, import_template, require_illustrations};
+use crate::domain::templates::{
+    ExerciseEdit, Template, edit_exercise, get_template, import_template, require_illustrations,
+};
 use crate::domain::view::CoachView;
 use crate::domain::{audit, workout};
 use crate::error::Result;
@@ -93,10 +95,14 @@ pub struct Workout {
     pub remember: bool,
 }
 
-/// What the owner now sees, like the old plugin returned it.
+/// What the owner now sees.
 fn shown(view: &CoachView) -> Value {
     let texts: Vec<&str> = view.cards.iter().map(|c| c.text.as_str()).collect();
-    if view.live_buttons.is_some() { json!({"ack": view.ack, "swap_options": texts}) } else { json!({"ack": view.ack, "card": texts.first()}) }
+    if view.live_buttons.is_some() {
+        json!({"ack": view.ack, "swap_options": texts})
+    } else {
+        json!({"ack": view.ack, "card": texts.first()})
+    }
 }
 
 impl Tool for Workout {
@@ -107,10 +113,18 @@ impl Tool for Workout {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let missing = match self.action {
-            WorkoutAction::Log if self.text.as_deref().is_none_or(str::is_empty) => Some(("log", "text", r#"{"action":"log","text":"10x40"}"#)),
-            WorkoutAction::Switch if self.exercise.as_deref().is_none_or(str::is_empty) => Some(("switch", "exercise", r#"{"action":"switch","exercise":"pec-deck"}"#)),
-            WorkoutAction::Relabel if self.exercise.as_deref().is_none_or(str::is_empty) => Some(("relabel", "exercise", r#"{"action":"relabel","exercise":"pec-deck"}"#)),
-            WorkoutAction::Rest if self.seconds.is_none() => Some(("rest", "seconds", r#"{"action":"rest","seconds":90}"#)),
+            WorkoutAction::Log if self.text.as_deref().is_none_or(str::is_empty) => {
+                Some(("log", "text", r#"{"action":"log","text":"10x40"}"#))
+            }
+            WorkoutAction::Switch if self.exercise.as_deref().is_none_or(str::is_empty) => {
+                Some(("switch", "exercise", r#"{"action":"switch","exercise":"pec-deck"}"#))
+            }
+            WorkoutAction::Relabel if self.exercise.as_deref().is_none_or(str::is_empty) => {
+                Some(("relabel", "exercise", r#"{"action":"relabel","exercise":"pec-deck"}"#))
+            }
+            WorkoutAction::Rest if self.seconds.is_none() => {
+                Some(("rest", "seconds", r#"{"action":"rest","seconds":90}"#))
+            }
             _ => None,
         };
         if let Some((action, field, example)) = missing {
@@ -120,7 +134,18 @@ impl Tool for Workout {
             );
         }
         let (db, now, rid) = (cx.db, cx.now, cx.request_id.clone());
-        let coach_action = |action| coach::handle_action(db, action, self.exercise.as_deref(), self.which.as_deref(), self.seconds, self.remember, now, &rid);
+        let coach_action = |action| {
+            coach::handle_action(
+                db,
+                action,
+                self.exercise.as_deref(),
+                self.which.as_deref(),
+                self.seconds,
+                self.remember,
+                now,
+                &rid,
+            )
+        };
         let view = match self.action {
             WorkoutAction::Status => {
                 let running = workout::active_workout(db)?;
@@ -131,7 +156,10 @@ impl Tool for Workout {
                 let view = coach::handle_text(db, self.text.as_deref().unwrap_or_default(), now, &rid)?;
                 if !view.handled {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
-                    crate::bail!("NOT_LOGGED", "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps). Check status, then ask the owner.");
+                    crate::bail!(
+                        "NOT_LOGGED",
+                        "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps). Check status, then ask the owner."
+                    );
                 }
                 view
             }
@@ -184,7 +212,8 @@ pub struct WorkoutAudit {
 
 impl Tool for WorkoutAudit {
     const NAME: &'static str = "workout_audit";
-    const DESCRIPTION: &'static str = "Saved audit of a finished workout: sets, duration, ETA error, progressions, crowd feedback.";
+    const DESCRIPTION: &'static str =
+        "Saved audit of a finished workout: sets, duration, ETA error, progressions, crowd feedback.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         audit::get_audit(cx.db, &self.workout_id)
@@ -242,8 +271,6 @@ impl Tool for TemplateImport {
     }
 }
 
-/// Upcoming sessions should follow the edited plan via the planning side's `weekly::refresh_plans`
-/// (not declared yet; `workout start` always uses the current template regardless).
 /// Upcoming sessions (and their calendar events) follow the edited plan.
 fn edited(cx: &Ctx, definition: Value) -> Result<Value> {
     Ok(json!({"template": definition, "refreshed_sessions": crate::domain::weekly::refresh_plans(cx.db, cx.now)?}))
@@ -264,10 +291,20 @@ pub struct TemplateEditExercise {
 
 impl Tool for TemplateEditExercise {
     const NAME: &'static str = "template_edit_exercise";
-    const DESCRIPTION: &'static str = "Change one exercise of a saved plan: weight, sets, reps, rest, or its place in the order.";
+    const DESCRIPTION: &'static str =
+        "Change one exercise of a saved plan: weight, sets, reps, rest, or its place in the order.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Change(&self.changes), self.position)?)
+        edited(
+            cx,
+            edit_exercise(
+                cx.db,
+                &self.template_id,
+                &self.exercise,
+                ExerciseEdit::Change(&self.changes),
+                self.position,
+            )?,
+        )
     }
 }
 
@@ -291,7 +328,10 @@ impl Tool for TemplateAddExercise {
     const DESCRIPTION: &'static str = "Add an exercise to a saved plan. The catalog entry only gives the picture: a machine variant the catalog lacks (a second leg press) reuses the closest guide_id under its own id and name, and keeps its own weights.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Add(&self.fields), self.position)?)
+        edited(
+            cx,
+            edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Add(&self.fields), self.position)?,
+        )
     }
 }
 
@@ -362,10 +402,16 @@ pub struct OnboardingAnswer {
 
 impl Tool for OnboardingAnswer {
     const NAME: &'static str = "onboarding_answer";
-    const DESCRIPTION: &'static str = "Save the owner's interview answers (only what they actually said; defaults never count).";
+    const DESCRIPTION: &'static str =
+        "Save the owner's interview answers (only what they actually said; defaults never count).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        onboarding::update(cx.db, Update::Answer { answers: &self.answers, profile: self.profile.as_ref() }, cx.now, &cx.request_id)
+        onboarding::update(
+            cx.db,
+            Update::Answer { answers: &self.answers, profile: self.profile.as_ref() },
+            cx.now,
+            &cx.request_id,
+        )
     }
 }
 
@@ -386,7 +432,12 @@ impl Tool for PlanSet {
         You plan workouts by it; code only rotates the templates as a default for sessions you haven't given one (side_effects).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        onboarding::update(cx.db, Update::ConfirmPlan { templates: &self.templates, plan: self.plan.as_deref() }, cx.now, &cx.request_id)
+        onboarding::update(
+            cx.db,
+            Update::ConfirmPlan { templates: &self.templates, plan: self.plan.as_deref() },
+            cx.now,
+            &cx.request_id,
+        )
     }
 }
 
@@ -399,7 +450,8 @@ pub struct OnboardingFinish {
 
 impl Tool for OnboardingFinish {
     const NAME: &'static str = "onboarding_finish";
-    const DESCRIPTION: &'static str = "Finish setup after the owner confirmed the summary. Grants no calendar or runtime authority.";
+    const DESCRIPTION: &'static str =
+        "Finish setup after the owner confirmed the summary. Grants no calendar or runtime authority.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         onboarding::update(cx.db, Update::Finish(Some(&self.fingerprint)), cx.now, &cx.request_id)

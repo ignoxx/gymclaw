@@ -1,5 +1,4 @@
-//! Read-only ICS feed (iCloud "Public Calendar" link, Google secret iCal address). Port of
-//! `providers/ics_feed.py`, which used `icalendar` + `recurring-ical-events`.
+//! Read-only ICS feed (iCloud "Public Calendar" link, Google secret iCal address).
 //!
 //! GET only, nothing is ever written back. Yields busy intervals; titles/notes are discarded.
 use std::collections::{BTreeSet, HashMap};
@@ -8,7 +7,9 @@ use jiff::SignedDuration;
 use jiff::tz::TimeZone;
 
 use super::http::{Method, Request, Transport};
-use super::recurrence::{ContentLine, Instance, RDate, Series, When, compare, difference, parse_duration, rdate_values};
+use super::recurrence::{
+    ContentLine, Instance, RDate, Series, When, compare, difference, parse_duration, rdate_values,
+};
 use crate::bail;
 use crate::domain::planning::Interval;
 use crate::error::{Error, Result};
@@ -24,13 +25,10 @@ pub fn normalize_url(url: &str) -> Result<String> {
         None => url.to_string(),
     };
     let host = url.strip_prefix("https://").map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
-    // Python `urlsplit(...).hostname`: strip userinfo and port.
+    // Strip userinfo and port.
     let host = host.map(|h| h.rsplit('@').next().unwrap_or("")).map(|h| h.split(':').next().unwrap_or(""));
     if !url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) || host.is_none_or(str::is_empty) {
-        bail!(
-            "PERSONAL_CALENDAR_URL_INVALID",
-            "Personal calendar feed must be an https:// or webcal:// ICS link"
-        );
+        bail!("PERSONAL_CALENDAR_URL_INVALID", "Personal calendar feed must be an https:// or webcal:// ICS link");
     }
     Ok(url)
 }
@@ -54,7 +52,8 @@ pub fn fetch(url: &str, transport: &dyn Transport) -> Result<Vec<u8>> {
 /// RECURRENCE-ID overrides are expanded; free (TRANSP:TRANSPARENT) and cancelled events don't block.
 /// Floating times and all-day dates are read in `zone` (the owner's).
 pub fn busy_intervals(data: &[u8], start: Ts, end: Ts, zone: &TimeZone) -> Result<Vec<Interval>> {
-    expand(data, start, end, zone).map_err(|_| Error::domain("PERSONAL_CALENDAR_INVALID", "Personal calendar feed could not be parsed"))
+    expand(data, start, end, zone)
+        .map_err(|_| Error::domain("PERSONAL_CALENDAR_INVALID", "Personal calendar feed could not be parsed"))
 }
 
 /// One VEVENT, reduced to what busy time needs.
@@ -81,16 +80,7 @@ impl Event {
     }
 
     fn ids(&self) -> Vec<jiff::civil::DateTime> {
-        self.recurrence_id
-            .as_ref()
-            .map(|r| {
-                Instance {
-                    start: r.clone(),
-                    length: None,
-                }
-                .ids()
-            })
-            .unwrap_or_default()
+        self.recurrence_id.as_ref().map(|r| Instance { start: r.clone(), length: None }.ids()).unwrap_or_default()
     }
 
     /// How far THISANDFUTURE overrides shift later instances.
@@ -153,18 +143,22 @@ fn events(data: &[u8]) -> Result<Vec<Event>> {
 fn event(props: &[ContentLine<'_>]) -> Result<Event> {
     let get = |name: &str| props.iter().find(|p| p.name == name);
     let text = |name: &str| get(name).map(|p| p.value.trim().to_ascii_uppercase()).unwrap_or_default();
-    let one = |p: &ContentLine<'_>| -> Result<When> { p.times()?.into_iter().next().ok_or_else(|| Error::domain("ICS", "empty time")) };
+    let one = |p: &ContentLine<'_>| -> Result<When> {
+        p.times()?.into_iter().next().ok_or_else(|| Error::domain("ICS", "empty time"))
+    };
     let start = one(get("DTSTART").ok_or_else(|| Error::domain("ICS", "DTSTART missing"))?)?;
     let raw_end = match (get("DTEND"), get("DURATION")) {
         (Some(end), _) => one(end)?,
         (None, Some(duration)) => {
             let duration = parse_duration(duration.value)?;
             match &start {
-                // Python: a date plus a duration with a time part becomes a floating date-time.
+                // A date plus a duration with a time part becomes a floating date-time.
                 When::Date(d) if duration.as_secs().rem_euclid(86_400) != 0 => {
                     When::Floating(d.to_datetime(jiff::civil::Time::midnight()).checked_add(duration)?)
                 }
-                When::Date(d) => When::Date(d.checked_add(jiff::Span::new().days(duration.as_secs().div_euclid(86_400)))?),
+                When::Date(d) => {
+                    When::Date(d.checked_add(jiff::Span::new().days(duration.as_secs().div_euclid(86_400)))?)
+                }
                 When::Floating(dt) => When::Floating(dt.checked_add(duration)?),
                 When::Zoned(dt, tz) => When::Zoned(dt.checked_add(duration)?, tz.clone()),
             }
@@ -174,12 +168,8 @@ fn event(props: &[ContentLine<'_>]) -> Result<Event> {
             other => other.clone(),
         },
     };
-    // recurring-ical-events orders a reversed span.
-    let (start, end) = if compare(&start, &raw_end)?.is_gt() {
-        (raw_end, start)
-    } else {
-        (start, raw_end)
-    };
+    // An end before the start is read as the reversed span.
+    let (start, end) = if compare(&start, &raw_end)?.is_gt() { (raw_end, start) } else { (start, raw_end) };
     let mut rdates = Vec::new();
     let mut exdates = Vec::new();
     for p in props {
@@ -204,7 +194,7 @@ fn event(props: &[ContentLine<'_>]) -> Result<Event> {
     })
 }
 
-/// `max(existing, new)` by SEQUENCE; ties keep the first, like Python's `max`.
+/// The higher SEQUENCE wins; ties keep the first.
 fn highest<'a>(existing: Option<&'a Event>, new: &'a Event) -> &'a Event {
     match existing {
         Some(e) if e.sequence >= new.sequence => e,
@@ -271,14 +261,12 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
             unique.push(m);
         }
     }
-    let mut this_and_future: Vec<(jiff::civil::DateTime, &Event)> = unique.iter().filter(|m| m.this_and_future).map(|m| (m.ids()[0], *m)).collect();
+    let mut this_and_future: Vec<(jiff::civil::DateTime, &Event)> =
+        unique.iter().filter(|m| m.this_and_future).map(|m| (m.ids()[0], *m)).collect();
     this_and_future.sort_by_key(|(id, _)| *id);
-    let modification_for = |ids: &[jiff::civil::DateTime]| ids.iter().rev().find_map(|id| modifications.get(id).copied());
-    let occurrence = |e: &Event| Occurrence {
-        start: e.start.clone(),
-        end: e.end.clone(),
-        blocks: e.blocks,
-    };
+    let modification_for =
+        |ids: &[jiff::civil::DateTime]| ids.iter().rev().find_map(|id| modifications.get(id).copied());
+    let occurrence = |e: &Event| Occurrence { start: e.start.clone(), end: e.end.clone(), blocks: e.blocks };
 
     let mut out = Vec::new();
     let mut returned: Vec<&Event> = Vec::new();
@@ -302,10 +290,7 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
         }
     }
     let shift = |w: &When, d: SignedDuration| -> Result<When> {
-        Ok(When::Zoned(
-            TimeZone::UTC.to_datetime(w.to_ts(&TimeZone::UTC)?.0.checked_add(d)?),
-            TimeZone::UTC,
-        ))
+        Ok(When::Zoned(TimeZone::UTC.to_datetime(w.to_ts(&TimeZone::UTC)?.0.checked_add(d)?), TimeZone::UTC))
     };
     for instance in series.between(&shift(lower, -reach)?, &shift(upper, reach)?, usize::MAX)? {
         let ids = instance.ids();
@@ -318,28 +303,15 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
         }
         let component = this_and_future.iter().take_while(|(id, _)| *id < ids[0]).last().map_or(core, |(_, m)| *m);
         let moved = component.moved_by()?;
-        let start = Series::end_of(
-            &Instance {
-                start: instance.start.clone(),
-                length: None,
-            },
-            moved,
-        )?;
-        let end = Series::end_of(
-            &Instance {
-                start: start.clone(),
-                length: instance.length,
-            },
-            component.duration()?,
-        )?;
-        out.push(Occurrence {
-            start,
-            end,
-            blocks: component.blocks,
-        });
+        let start = Series::end_of(&Instance { start: instance.start.clone(), length: None }, moved)?;
+        let end = Series::end_of(&Instance { start: start.clone(), length: instance.length }, component.duration()?)?;
+        out.push(Occurrence { start, end, blocks: component.blocks });
     }
     for m in unique {
-        if returned.iter().any(|r| std::ptr::eq(*r, m)) || series.excludes(&m.ids()) || skip_stale_modification(m, core, &series)? {
+        if returned.iter().any(|r| std::ptr::eq(*r, m))
+            || series.excludes(&m.ids())
+            || skip_stale_modification(m, core, &series)?
+        {
             continue;
         }
         out.push(occurrence(m));
@@ -347,8 +319,8 @@ fn series_occurrences(group: &[&Event], lower: &When, upper: &When) -> Result<Ve
     Ok(out)
 }
 
-/// recurring-ical-events issue 148/164/253: an older override that carries its own rules only
-/// counts when the master still produces its RECURRENCE-ID.
+/// An older override that carries its own rules only counts when the master still produces its
+/// RECURRENCE-ID.
 fn skip_stale_modification(m: &Event, core: &Event, series: &Series) -> Result<bool> {
     if !m.has_rules() || m.sequence >= core.sequence {
         return Ok(false);
@@ -358,11 +330,8 @@ fn skip_stale_modification(m: &Event, core: &Event, series: &Series) -> Result<b
     };
     let ids = m.ids();
     let day = |w: &When, days: i64| -> Result<When> {
-        let midnight = w
-            .civil()
-            .date()
-            .checked_add(jiff::Span::new().days(days))?
-            .to_datetime(jiff::civil::Time::midnight());
+        let midnight =
+            w.civil().date().checked_add(jiff::Span::new().days(days))?.to_datetime(jiff::civil::Time::midnight());
         Ok(match w {
             When::Zoned(_, tz) => When::Zoned(midnight, tz.clone()),
             _ => When::Floating(midnight),
@@ -380,14 +349,18 @@ mod tests {
     use crate::time::zone;
 
     /// Feeds covering RRULE (UNTIL/COUNT/BYDAY/BYSETPOS/…), EXDATE, RDATE, RECURRENCE-ID overrides,
-    /// all-day, floating, TZID with DST, cancelled and free events. `expected.json` is the Python
-    /// implementation's output (generated from the Python `ics_feed` before its removal).
+    /// all-day, floating, TZID with DST, cancelled and free events. `expected.json` holds the expected
+    /// busy intervals, generated from an independent implementation.
     #[test]
-    fn matches_python_expansion() {
+    fn feeds_expand_to_expected_busy_times() {
         let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/expected.json")).unwrap();
         let mut failures = Vec::new();
         for case in &cases {
-            let feed = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/src/providers/testdata/ics/").to_string() + case["feed"].as_str().unwrap()).unwrap();
+            let feed = std::fs::read(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/src/providers/testdata/ics/").to_string()
+                    + case["feed"].as_str().unwrap(),
+            )
+            .unwrap();
             let start = Ts::parse(case["start"].as_str().unwrap(), None).unwrap();
             let end = Ts::parse(case["end"].as_str().unwrap(), None).unwrap();
             let actual = match busy_intervals(&feed, start, end, &zone(case["zone"].as_str().unwrap()).unwrap()) {
@@ -396,7 +369,7 @@ mod tests {
             };
             if actual != case["expected"] {
                 failures.push(format!(
-                    "{} {} {}..{}\n  python: {}\n  rust:   {}",
+                    "{} {} {}..{}\n  expected: {}\n  actual:   {}",
                     case["feed"], case["zone"], case["start"], case["end"], case["expected"], actual
                 ));
             }

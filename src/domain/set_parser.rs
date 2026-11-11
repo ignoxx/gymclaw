@@ -25,7 +25,11 @@ fn working() -> SetType {
 
 impl SetInput {
     pub fn validate(&self) -> Result<()> {
-        if !self.weight.is_finite() || self.weight < 0.0 || self.reps <= 0 || self.rir.is_some_and(|r| !r.is_finite() || r < 0.0) {
+        if !self.weight.is_finite()
+            || self.weight < 0.0
+            || self.reps <= 0
+            || self.rir.is_some_and(|r| !r.is_finite() || r < 0.0)
+        {
             crate::bail!("INVALID_SET", "Weight must be ≥ 0, reps > 0");
         }
         Ok(())
@@ -33,8 +37,10 @@ impl SetInput {
 }
 
 const NUMBER: &str = r"\d+(?:[.,]\d+)?";
-static PAIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^({NUMBER})\s*(kg|reps?)?\s*[x×*]\s*({NUMBER})\s*(kg|reps?)?$")).unwrap());
-static AT: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^(\d+)\s*reps?\s*(?:at|@)\s*({NUMBER})\s*(?:kg)?$")).unwrap());
+static PAIR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"^({NUMBER})\s*(kg|reps?)?\s*[x×*]\s*({NUMBER})\s*(kg|reps?)?$")).unwrap());
+static AT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"^(\d+)\s*reps?\s*(?:at|@)\s*({NUMBER})\s*(?:kg)?$")).unwrap());
 static REPS_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)\s*(?:reps?|[x×*])?$").unwrap());
 const MAX_PLAUSIBLE_REPS: f64 = 30.0;
 
@@ -101,7 +107,17 @@ mod tests {
 
     #[test]
     fn either_order_with_units_and_separators() {
-        for text in ["80x9", "80 x 9", "80kg x9", "9 reps at 80", "80 KG × 9", "9 reps at 80kg", "9x80kg", "80kgx9 reps", "9x80"] {
+        for text in [
+            "80x9",
+            "80 x 9",
+            "80kg x9",
+            "9 reps at 80",
+            "80 KG × 9",
+            "9 reps at 80kg",
+            "9x80kg",
+            "80kgx9 reps",
+            "9x80",
+        ] {
             assert_eq!(parse(text).unwrap(), set(80.0, 9), "{text}");
         }
     }

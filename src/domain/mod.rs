@@ -8,7 +8,7 @@ pub mod progression;
 pub mod set_parser;
 pub mod templates;
 
-// WP-train
+// Training
 pub mod adaptation;
 pub mod audit;
 pub mod backfill;
@@ -19,7 +19,7 @@ pub mod onboarding;
 pub mod preview;
 pub mod workout;
 
-// Lead (planning)
+// Planning
 pub mod availability;
 pub mod calendar;
 pub mod calendar_busy;

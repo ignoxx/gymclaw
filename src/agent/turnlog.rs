@@ -1,5 +1,4 @@
-//! Append-only JSONL turn log with the same events and privacy rules as the old OpenClaw `turn-log`
-//! plugin, so logs from before and after the rewrite compare directly.
+//! Append-only JSONL turn log.
 //!
 //! One line per event in `<dir>/YYYY-MM-DD.jsonl` (UTC date). `log` never blocks or fails a turn:
 //! lines go through a bounded queue to a writer task; when it backs up, new lines are dropped.
@@ -13,7 +12,8 @@ use tokio::sync::mpsc;
 
 const MAX_PENDING: usize = 1000;
 
-static SECRET_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)token|secret|password|passwd|api.?key|authorization|cookie|credential").unwrap());
+static SECRET_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)token|secret|password|passwd|api.?key|authorization|cookie|credential").unwrap());
 static SECRET_VALUE: LazyLock<[Regex; 3]> = LazyLock::new(|| {
     [
         Regex::new(r"(?i)\bBearer\s+[\w.~+/=-]+").unwrap(),
@@ -47,7 +47,11 @@ pub fn clean(value: &Value, max: usize, depth: usize) -> Value {
         Value::Array(_) | Value::Object(_) if depth > 4 => json!("[deep]"),
         Value::Array(items) => Value::Array(items.iter().take(50).map(|v| clean(v, max, depth + 1)).collect()),
         Value::Object(map) => Value::Object(
-            map.iter().map(|(k, v)| (k.clone(), if SECRET_KEY.is_match(k) { json!("[redacted]") } else { clean(v, max, depth + 1) })).collect::<Map<_, _>>(),
+            map.iter()
+                .map(|(k, v)| {
+                    (k.clone(), if SECRET_KEY.is_match(k) { json!("[redacted]") } else { clean(v, max, depth + 1) })
+                })
+                .collect::<Map<_, _>>(),
         ),
         other => other.clone(),
     }

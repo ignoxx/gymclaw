@@ -29,8 +29,6 @@ services:
       https_proxy: http://egress:3128
     volumes:
       - gymclaw-data:/opt/gymclaw/data
-      # Old OpenClaw workspace: USER.md owner notes are imported into the DB once on first start.
-      - gymclaw-workspace:/opt/gymclaw/openclaw:ro
       - gymclaw-backups:/backups
     # serve touches data/heartbeat every minute from the scheduler loop.
     healthcheck:
@@ -94,7 +92,6 @@ services:
 
 volumes:
   gymclaw-data:
-  gymclaw-workspace:
   gymclaw-backups:
 
 networks:

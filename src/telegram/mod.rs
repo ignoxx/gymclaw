@@ -1,7 +1,7 @@
-//! Telegram Bot API client, owner chat and the coach card renderer. Owner: WP-runtime.
+//! Telegram Bot API client, owner chat and the coach card renderer.
 //!
 //! `Telegram` is the small surface the runtime needs; `client::Bot` implements it over HTTPS and
-//! tests use fakes. Message text is the Markdown subset the old OpenClaw channel accepted
+//! tests use fakes. Message text is a small Markdown subset
 //! (`**bold**`, `` `code` ``), converted to Telegram HTML by `markdown::to_html`.
 pub mod client;
 pub mod coach;
@@ -25,14 +25,23 @@ pub type Keyboard = Vec<Vec<Button>>;
 /// Telegram's answer when the message we edit is gone (deleted by the owner or another step).
 pub fn is_gone(error: &crate::error::Error) -> bool {
     let text = error.to_string().to_lowercase();
-    ["message to edit not found", "message can't be edited", "message_id_invalid", "message to delete not found"].iter().any(|p| text.contains(p))
+    ["message to edit not found", "message can't be edited", "message_id_invalid", "message to delete not found"]
+        .iter()
+        .any(|p| text.contains(p))
 }
 
 #[async_trait]
 pub trait Telegram: Send + Sync {
     /// Send text (or a local photo with `text` as caption), with an optional animated effect
     /// (`EFFECT_*`, private chats only). Returns the message id.
-    async fn send(&self, chat: i64, text: &str, photo: Option<&Path>, buttons: &Keyboard, effect: Option<&str>) -> Result<i64>;
+    async fn send(
+        &self,
+        chat: i64,
+        text: &str,
+        photo: Option<&Path>,
+        buttons: &Keyboard,
+        effect: Option<&str>,
+    ) -> Result<i64>;
     /// Replace text (or caption, for photo messages) and keyboard.
     async fn edit(&self, chat: i64, message: i64, text: &str, buttons: &Keyboard, caption: bool) -> Result<()>;
     /// Replace only the keyboard (empty removes it).

@@ -1,5 +1,5 @@
 //! The conversational agent: one turn = context from the DB, a tool loop over OpenRouter, and exactly
-//! one outcome (reply text with optional buttons or exercise picture, a reaction, or silence). Owner: WP-runtime.
+//! one outcome (reply text with optional buttons or exercise picture, a reaction, or silence).
 //!
 //! Tools are `tools::all()` plus `reply`, the turn's final answer. Each tool call runs in its own DB
 //! transaction on the blocking pool; errors go back to
@@ -159,7 +159,8 @@ pub fn tool_specs() -> Vec<Value> {
 
 /// Start of tool-call markup models write as text: `<tool_call>`, `<|tool_call|>`, `<function_call>`,
 /// `<tool_calls>`, `<function=workout>`.
-static CALL_MARKUP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<\|?(tool_calls?|function_calls?)\b|<function=").unwrap());
+static CALL_MARKUP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)<\|?(tool_calls?|function_calls?)\b|<function=").unwrap());
 
 /// A tool call written as text instead of made (markup, or the whole message as a `{"name", "arguments"}`
 /// object). Returns the text before it, or None when there is none.
@@ -183,10 +184,13 @@ fn cut(text: String) -> String {
 }
 
 /// History prefix the model sometimes copies onto its own reply ("[Tue 14:22, sent automatically] …", "[Sun 13:46] …").
-static ECHOED_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[(?:[^\]\n]*sent automatically|[A-Z][a-z]{2} \d{1,2}:\d{2})\]\s*").unwrap());
+static ECHOED_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\[(?:[^\]\n]*sent automatically|[A-Z][a-z]{2} \d{1,2}:\d{2})\]\s*").unwrap());
 
 /// A parenthesised note to itself with an explanation: "(nothing — already asked about Pull)".
-static NOTE_TO_SELF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)^\((nothing|no (reply|response|message|action)|already (asked|handled|sent))\b.*\)$").unwrap());
+static NOTE_TO_SELF: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)^\((nothing|no (reply|response|message|action)|already (asked|handled|sent))\b.*\)$").unwrap()
+});
 
 /// The whole reply is a note that there's nothing to say: "No reply needed.", "Nothing to report",
 /// "(background events handled — nothing to report)".
@@ -200,7 +204,10 @@ static NOTHING_TO_SAY: LazyLock<Regex> = LazyLock::new(|| {
 fn clean_text(text: &str, background: bool) -> Option<String> {
     let text = ECHOED_PREFIX.replace(text.trim(), "").trim().to_string();
     let wordless = text.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || c == '…');
-    (!wordless && text != "NO_REPLY" && !(background && (NOTHING_TO_SAY.is_match(&text) || NOTE_TO_SELF.is_match(&text)))).then_some(text)
+    (!wordless
+        && text != "NO_REPLY"
+        && !(background && (NOTHING_TO_SAY.is_match(&text) || NOTE_TO_SELF.is_match(&text))))
+    .then_some(text)
 }
 
 /// Turn-log label: owner turns and background-event turns read differently in `prod turns`.
@@ -228,7 +235,8 @@ impl Agent {
             let wrote = tx.total_changes() > before;
             let raised = crate::domain::events::raised_since(&tx, mark)?;
             if !raised.is_empty() {
-                let shown: Vec<Value> = raised.iter().map(|e| json!({"type": e.r#type, "payload": e.payload_json})).collect();
+                let shown: Vec<Value> =
+                    raised.iter().map(|e| json!({"type": e.r#type, "payload": e.payload_json})).collect();
                 value = match value {
                     Value::Object(mut map) => {
                         map.insert("raised".into(), json!(shown));
@@ -263,7 +271,8 @@ impl Agent {
         let mut state = FailureState::default();
         let mut calls_log = vec![];
         let mut settles = vec![];
-        let result = tokio::time::timeout(DEADLINE, self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles)).await;
+        let result =
+            tokio::time::timeout(DEADLINE, self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles)).await;
         let (reply, failed, error) = match result {
             Ok(Ok(reply)) => (reply, false, None),
             Ok(Err(e)) => {
@@ -287,10 +296,19 @@ impl Agent {
         Outcome { reply, failed, run_id, settles }
     }
 
-    async fn run(&self, input: &TurnInput, run_id: &str, state: &mut FailureState, calls_log: &mut Vec<Value>, settles: &mut Vec<String>) -> Result<Reply> {
+    async fn run(
+        &self,
+        input: &TurnInput,
+        run_id: &str,
+        state: &mut FailureState,
+        calls_log: &mut Vec<Value>,
+        settles: &mut Vec<String>,
+    ) -> Result<Reply> {
         let now = (self.clock)();
-        let ((system, shown), history, tz) =
-            in_tx(&self.db_path, move |db| Ok((context::system(db, now)?, context::history(db)?, crate::domain::profile::get_profile(db)?.tz()))).await?;
+        let ((system, shown), history, tz) = in_tx(&self.db_path, move |db| {
+            Ok((context::system(db, now)?, context::history(db)?, crate::domain::profile::get_profile(db)?.tz()))
+        })
+        .await?;
         settles.extend(shown);
         let mut messages = vec![json!({"role": "system", "content": system})];
         let history_chars = Value::Array(history.clone()).to_string().len();
@@ -299,7 +317,12 @@ impl Agent {
         let images = media::attach(&mut messages, &input.images).await;
         let model = if images > 0 { &self.vision_model } else { &self.chat_model };
         let specs = tool_specs();
-        let prompt = messages.iter().rev().find(|m| m["role"] == "user").map(|m| media::text_of(&m["content"])).unwrap_or_default();
+        let prompt = messages
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user")
+            .map(|m| media::text_of(&m["content"]))
+            .unwrap_or_default();
         self.log.log(json!({
             "ev": "llm_input", "run": run_id, "session": "telegram:owner", "trigger": trigger(input), "provider": "openrouter", "model": model,
             "history": history_len, "historyChars": history_chars, "systemChars": system.chars().count(), "systemSha": sha(&system),
@@ -332,7 +355,9 @@ impl Agent {
             self.log.log(json!({"ev": "model_call", "run": run_id, "call": calls_log.len(), "provider": reply.provider, "model": model,
                 "ms": reply.ms as u64, "ttfbMs": reply.ttfb_ms as u64, "outcome": "completed", "reqBytes": reply.req_bytes, "resBytes": reply.res_bytes}));
             let usage = json!({"input": reply.usage.input, "output": reply.usage.output, "reasoning": reply.usage.reasoning, "cacheRead": reply.usage.cache_read});
-            self.log.log(json!({"ev": "llm_output", "run": run_id, "model": model, "usage": usage, "stop": reply.finish_reason}));
+            self.log.log(
+                json!({"ev": "llm_output", "run": run_id, "model": model, "usage": usage, "stop": reply.finish_reason}),
+            );
             let mut call = usage.clone();
             call["stop"] = json!(reply.finish_reason);
             call["toolCalls"] = json!(tool_calls.len());
@@ -355,7 +380,9 @@ impl Agent {
                 if force_text && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("STUCK", "step limit reached without an answer");
                 }
-                return Ok(content.and_then(|c| clean_text(c, input.background)).map_or_else(Reply::default, Reply::text));
+                return Ok(content
+                    .and_then(|c| clean_text(c, input.background))
+                    .map_or_else(Reply::default, Reply::text));
             }
             // Text next to tool calls is narration ("Moving it now…"): it never reaches the owner.
             messages.push(json!({"role": "assistant", "content": content, "tool_calls": tool_calls}));
@@ -364,10 +391,15 @@ impl Agent {
                 let id = tc["id"].as_str().unwrap_or_default().to_string();
                 let name = tc.pointer("/function/name").and_then(Value::as_str).unwrap_or_default().to_string();
                 let raw = tc.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
-                let args: std::result::Result<Value, _> = if raw.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str(raw) };
+                let args: std::result::Result<Value, _> =
+                    if raw.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str(raw) };
                 let started = Instant::now();
                 let (mut result, ok) = match (name.as_str(), args) {
-                    (_, Err(e)) => (tools::guide(&name, Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}"))).to_json(), false),
+                    (_, Err(e)) => (
+                        tools::guide(&name, Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}")))
+                            .to_json(),
+                        false,
+                    ),
                     (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
                         // The call it meant didn't run; the owner must not get its markup or a silent reply.
                         Ok(reply) if reply.message.as_ref().and_then(|m| written_tool_call(&m.text)).is_some() => {
@@ -388,7 +420,9 @@ impl Agent {
                         let key = format!("{name} {args}");
                         let (repeats, failed, done) = seen.entry(key.clone()).or_default();
                         *repeats += 1;
-                        if *repeats == 2 && let Some(earlier) = done.clone() {
+                        if *repeats == 2
+                            && let Some(earlier) = done.clone()
+                        {
                             // A model that repeats a call that worked wants confirmation, not an error to loop on.
                             let mut replay = earlier;
                             replay["already_done"] = json!(true);
@@ -404,13 +438,15 @@ impl Agent {
                             steps += 1;
                             index += 1;
                             state.tool_calls += 1;
-                            let (result, ok, wrote, raised) = self.tool(&name, args, format!("{}-{index}", input.key)).await;
+                            let (result, ok, wrote, raised) =
+                                self.tool(&name, args, format!("{}-{index}", input.key)).await;
                             settles.extend(raised);
                             if let Some(entry) = seen.get_mut(&key) {
                                 if ok {
                                     entry.2 = Some(result.clone());
                                 } else {
-                                    entry.1 = result.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
+                                    entry.1 =
+                                        result.pointer("/error/message").and_then(Value::as_str).map(str::to_string);
                                 }
                             }
                             // State changed, so other earlier calls may now give a different answer.
@@ -422,7 +458,15 @@ impl Agent {
                     }
                 };
                 crate::time::localize(&mut result, &tz);
-                self.log_tool(run_id, &id, &name, &serde_json::from_str(raw).unwrap_or(Value::Null), &result, ok, started);
+                self.log_tool(
+                    run_id,
+                    &id,
+                    &name,
+                    &serde_json::from_str(raw).unwrap_or(Value::Null),
+                    &result,
+                    ok,
+                    started,
+                );
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": cut(result.to_string())}));
             }
             if let Some(mut reply) = finished {
@@ -445,7 +489,10 @@ impl Agent {
             crate::bail!("TOO_MANY_EXERCISES", "Show at most 12 exercises in one picture.");
         }
         if message.text.chars().count() > 1000 {
-            crate::bail!("CAPTION_TOO_LONG", "With exercises the text is the picture's caption: keep it under 1000 characters.");
+            crate::bail!(
+                "CAPTION_TOO_LONG",
+                "With exercises the text is the picture's caption: keep it under 1000 characters."
+            );
         }
         let (mut items, mut unknown) = (vec![], vec![]);
         for id in &message.exercises {
@@ -455,10 +502,16 @@ impl Agent {
             }
         }
         if !unknown.is_empty() {
-            crate::bail!("EXERCISE_UNKNOWN", "Not catalog guide_ids: {}. Find them with catalog_search.", unknown.join(", "));
+            crate::bail!(
+                "EXERCISE_UNKNOWN",
+                "Not catalog guide_ids: {}. Find them with catalog_search.",
+                unknown.join(", ")
+            );
         }
         let root = self.data_dir.join("previews");
-        let path = tokio::task::spawn_blocking(move || crate::domain::preview::render_grid(&items, &root)).await.map_err(|e| Error::domain("RENDER_FAILED", e.to_string()))??;
+        let path = tokio::task::spawn_blocking(move || crate::domain::preview::render_grid(&items, &root))
+            .await
+            .map_err(|e| Error::domain("RENDER_FAILED", e.to_string()))??;
         message.photo = Some(path.into());
         Ok(())
     }
@@ -466,7 +519,10 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     fn log_tool(&self, run: &str, call: &str, name: &str, args: &Value, result: &Value, ok: bool, started: Instant) {
         let text = result.to_string();
-        let error = result.pointer("/error/code").and_then(Value::as_str).map(|code| format!("{code}: {}", result.pointer("/error/message").and_then(Value::as_str).unwrap_or("")));
+        let error = result
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .map(|code| format!("{code}: {}", result.pointer("/error/message").and_then(Value::as_str).unwrap_or("")));
         self.log.log(json!({
             "ev": "tool", "run": run, "call": call, "name": name, "ms": started.elapsed().as_millis() as u64, "ok": ok,
             "error": error.map(|e| scrub(&e, 500)), "args": clean(args, 1000, 0),
@@ -480,8 +536,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::db::models::{AgentNote, ChatMessage, ChatRole};
     use crate::db::Json;
+    use crate::db::models::{AgentNote, ChatMessage, ChatRole};
 
     /// Plays back scripted assistant messages and records what it was sent.
     struct Script {
@@ -507,16 +563,30 @@ mod tests {
     }
 
     fn scripted(replies: Vec<Value>) -> (Agent, Arc<Script>, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("gymclaw-agent-{}", crate::db::new_id()));
-        let db_path = dir.join("gymclaw.db");
-        let mut db = crate::db::open(&db_path).unwrap();
-        crate::db::migrate(&mut db).unwrap();
+        let (db_path, db) = crate::db::test::file();
+        let dir = db_path.parent().unwrap().to_path_buf();
         let now = Ts::parse("2026-10-12T10:00:00Z", None).unwrap();
-        ChatMessage { id: None, at: now, role: ChatRole::Owner, text: "remember I hate lunges".into(), telegram_message_id: Some(5), meta_json: Json(json!({})) }.insert(&db).unwrap();
-        let script = Arc::new(Script { replies: Mutex::new(replies), seen: Mutex::new(vec![]), last: Mutex::new(vec![]) });
+        ChatMessage {
+            id: None,
+            at: now,
+            role: ChatRole::Owner,
+            text: "remember I hate lunges".into(),
+            telegram_message_id: Some(5),
+            meta_json: Json(json!({})),
+        }
+        .insert(&db)
+        .unwrap();
+        let script =
+            Arc::new(Script { replies: Mutex::new(replies), seen: Mutex::new(vec![]), last: Mutex::new(vec![]) });
         let agent = Agent {
-            db_path, data_dir: dir.clone(), model: script.clone(), chat_model: "m".into(), vision_model: "v".into(), coach: None,
-            log: TurnLog::default(), clock: Arc::new(move || now),
+            db_path,
+            data_dir: dir.clone(),
+            model: script.clone(),
+            chat_model: "m".into(),
+            vision_model: "v".into(),
+            coach: None,
+            log: TurnLog::default(),
+            clock: Arc::new(move || now),
         };
         (agent, script, dir)
     }
@@ -531,8 +601,12 @@ mod tests {
 
     #[tokio::test]
     async fn tool_then_one_reply_with_buttons_and_narration_dropped() {
-        let reply = call("reply", json!({"message": {"text": "Noted.", "buttons": [{"label": "Undo", "value": "Forget the lunges note"}]}}));
-        let (agent, script, dir) = scripted(vec![call("note_add", json!({"kind": "owner", "text": "Hates lunges"})), reply]);
+        let reply = call(
+            "reply",
+            json!({"message": {"text": "Noted.", "buttons": [{"label": "Undo", "value": "Forget the lunges note"}]}}),
+        );
+        let (agent, script, dir) =
+            scripted(vec![call("note_add", json!({"kind": "owner", "text": "Hates lunges"})), reply]);
         let outcome = agent.turn(input()).await;
         assert!(!outcome.failed);
         let message = outcome.reply.message.unwrap();
@@ -549,10 +623,18 @@ mod tests {
     /// back to the model instead of reaching the owner.
     #[tokio::test]
     async fn reply_shows_exercises_as_one_picture() {
-        let show = |ids: &[&str]| call("reply", json!({"message": {"text": "Your triceps options:", "exercises": ids}}));
-        let (agent, script, dir) = scripted(vec![show(&["tricep-pushdown-rope", "skull-crusher"]), show(&["dumbbell-overhead-tricep-extension", "skull-crusher", "tricep-kickback"])]);
+        let show =
+            |ids: &[&str]| call("reply", json!({"message": {"text": "Your triceps options:", "exercises": ids}}));
+        let (agent, script, dir) = scripted(vec![
+            show(&["tricep-pushdown-rope", "skull-crusher"]),
+            show(&["dumbbell-overhead-tricep-extension", "skull-crusher", "tricep-kickback"]),
+        ]);
         let message = agent.turn(input()).await.reply.message.unwrap();
-        assert!(Value::Array(script.last.lock().unwrap().clone()).to_string().contains("Not catalog guide_ids: tricep-pushdown-rope."));
+        assert!(
+            Value::Array(script.last.lock().unwrap().clone())
+                .to_string()
+                .contains("Not catalog guide_ids: tricep-pushdown-rope.")
+        );
         let photo = message.photo.unwrap();
         assert!(photo.starts_with(dir.join("previews")) && photo.exists());
         std::fs::remove_dir_all(dir).unwrap();
@@ -567,10 +649,19 @@ mod tests {
             assert_eq!(agent.turn(input()).await.reply, Reply::default(), "{silence}");
         }
         // An echoed history prefix is never part of the message.
-        let (agent, _, _) = scripted(vec![json!({"content": "[Tue 14:22, sent automatically] Pull moved to **13:30**."})]);
-        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Pull moved to **13:30**."));
+        let (agent, _, _) =
+            scripted(vec![json!({"content": "[Tue 14:22, sent automatically] Pull moved to **13:30**."})]);
+        assert_eq!(
+            agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(),
+            Some("Pull moved to **13:30**.")
+        );
         // After background events, notes to itself are silence; to the owner the same words can be answers.
-        let notes = ["[Tue 14:22, sent automatically] (background events handled — nothing to report)", "No reply needed.", "Nothing to report", "nothing needs attention."];
+        let notes = [
+            "[Tue 14:22, sent automatically] (background events handled — nothing to report)",
+            "No reply needed.",
+            "Nothing to report",
+            "nothing needs attention.",
+        ];
         for note in notes {
             let (agent, _, _) = scripted(vec![json!({"content": note})]);
             assert_eq!(agent.turn(background()).await.reply, Reply::default(), "{note}");
@@ -584,8 +675,15 @@ mod tests {
         let (agent, _, _) = scripted(vec![json!({"content": leak})]);
         assert!(agent.turn(background()).await.reply.message.is_none());
         let (agent, _, _) = scripted(vec![json!({"content": "[Sun 13:46] Pull missed. Move it?"})]);
-        assert_eq!(agent.turn(background()).await.reply.message.map(|m| m.text).as_deref(), Some("Pull missed. Move it?"));
-        for message in ["Nothing to report on the crowd yet: no data for Fridays.", "(Pull moved to 13:30)", "Wed clash — move Pull?"] {
+        assert_eq!(
+            agent.turn(background()).await.reply.message.map(|m| m.text).as_deref(),
+            Some("Pull missed. Move it?")
+        );
+        for message in [
+            "Nothing to report on the crowd yet: no data for Fridays.",
+            "(Pull moved to 13:30)",
+            "Wed clash — move Pull?",
+        ] {
             let (agent, _, _) = scripted(vec![json!({"content": message})]);
             assert_eq!(agent.turn(background()).await.reply.message.map(|m| m.text).as_deref(), Some(message));
         }
@@ -595,7 +693,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_errors_go_back_to_the_model() {
-        let (agent, script, _) = scripted(vec![call("sql_query", json!({"sql": "DELETE FROM agent_note"})), json!({"content": "Done."})]);
+        let (agent, script, _) =
+            scripted(vec![call("sql_query", json!({"sql": "DELETE FROM agent_note"})), json!({"content": "Done."})]);
         let outcome = agent.turn(input()).await;
         assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Done."));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
@@ -619,9 +718,16 @@ mod tests {
         let (agent, script, _) = scripted(vec![wrong(), wrong(), json!({"content": "Which workout?"})]);
         assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Which workout?"));
         let last = script.last.lock().unwrap();
-        let errors: Vec<&str> = last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+        let errors: Vec<&str> =
+            last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
         assert!(errors[0].contains("start (string, required)"), "{}", errors[0]);
-        assert!(errors[1].contains("REPEATED_CALL") && errors[1].contains("already failed") && errors[1].contains("template_id (string, required)"), "{}", errors[1]);
+        assert!(
+            errors[1].contains("REPEATED_CALL")
+                && errors[1].contains("already failed")
+                && errors[1].contains("template_id (string, required)"),
+            "{}",
+            errors[1]
+        );
     }
 
     /// Prod 2026-11-04: the model repeated a session_update that had worked, got REPEATED_CALL twice and
@@ -632,7 +738,8 @@ mod tests {
         let (agent, script, _) = scripted(vec![add(), add(), json!({"content": "Saved."})]);
         assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Saved."));
         let last = script.last.lock().unwrap();
-        let results: Vec<&str> = last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+        let results: Vec<&str> =
+            last.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
         assert!(results[1].contains("already_done") && !results[1].contains("REPEATED_CALL"), "{}", results[1]);
         assert_eq!(results.len(), 2);
     }
@@ -640,7 +747,12 @@ mod tests {
     #[tokio::test]
     async fn a_write_lets_earlier_calls_run_again() {
         let check = || call("sql_query", json!({"sql": "SELECT count(*) AS n FROM agent_note"}));
-        let (agent, script, _) = scripted(vec![check(), call("note_add", json!({"kind": "owner", "text": "Hates lunges"})), check(), json!({"content": "Saved."})]);
+        let (agent, script, _) = scripted(vec![
+            check(),
+            call("note_add", json!({"kind": "owner", "text": "Hates lunges"})),
+            check(),
+            json!({"content": "Saved."}),
+        ]);
         assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Saved."));
         let last = script.last.lock().unwrap();
         let rerun = last.last().unwrap()["content"].as_str().unwrap();
@@ -666,7 +778,10 @@ mod tests {
         assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Started."));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
         // Forced to answer, it can't retry: an honest failure beats leaking the markup.
-        let calls: Vec<Value> = (0..STEP_CAP).map(|i| call("sql_query", json!({"sql": format!("SELECT {i}")}))).chain([written()]).collect();
+        let calls: Vec<Value> = (0..STEP_CAP)
+            .map(|i| call("sql_query", json!({"sql": format!("SELECT {i}")})))
+            .chain([written()])
+            .collect();
         let (agent, _, _) = scripted(calls);
         let outcome = agent.turn(input()).await;
         assert!(outcome.failed && !outcome.reply.message.unwrap().text.contains("<tool_call>"));
@@ -674,7 +789,12 @@ mod tests {
 
     #[test]
     fn written_tool_calls_in_other_formats() {
-        for text in ["<|tool_call|>workout", "Starting.\n<function_call>workout</function_call>", "<function=workout>{}</function>", r#"{"name": "workout", "arguments": {"action": "start"}}"#] {
+        for text in [
+            "<|tool_call|>workout",
+            "Starting.\n<function_call>workout</function_call>",
+            "<function=workout>{}</function>",
+            r#"{"name": "workout", "arguments": {"action": "start"}}"#,
+        ] {
             assert!(written_tool_call(text).is_some(), "{text}");
         }
         for text in ["Use the function of the hips.", r#"{"name": "Bench"}"#, "**Pull** at 13:30"] {
@@ -685,7 +805,10 @@ mod tests {
     #[tokio::test]
     async fn buttons_outside_a_message_go_back_to_the_model() {
         let buttons = json!([{"label": "10:30", "value": "Move Sunday Pull to 10:30"}]);
-        let (agent, script, _) = scripted(vec![call("reply", json!({"buttons": buttons})), call("reply", json!({"message": {"text": "Pick one:", "buttons": buttons}}))]);
+        let (agent, script, _) = scripted(vec![
+            call("reply", json!({"buttons": buttons})),
+            call("reply", json!({"message": {"text": "Pick one:", "buttons": buttons}})),
+        ]);
         let message = agent.turn(input()).await.reply.message.unwrap();
         assert_eq!((message.text.as_str(), message.buttons.len()), ("Pick one:", 1));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
@@ -717,10 +840,15 @@ mod tests {
         let outcome = agent.turn(input()).await;
         assert!(!outcome.failed);
         let messages = script.last.lock().unwrap().clone();
-        let results: Vec<&str> = messages.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
+        let results: Vec<&str> =
+            messages.iter().filter(|m| m["role"] == "tool").filter_map(|m| m["content"].as_str()).collect();
         assert!(results.iter().any(|r| r.contains("\"raised\"") && r.contains("/4 sessions saved")), "{results:?}");
         // The turn settles exactly what it raised once its reply is out; until then nothing is lost.
-        let pending: Vec<String> = crate::domain::events::wake_pending(&db).unwrap().iter().map(|e| e["id"].as_str().unwrap().to_string()).collect();
+        let pending: Vec<String> = crate::domain::events::wake_pending(&db)
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_string())
+            .collect();
         assert!(!pending.is_empty());
         assert_eq!(outcome.settles, pending);
         drop(db);

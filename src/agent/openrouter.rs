@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::{ChatModel, ModelReply, Usage};
 use crate::error::{Error, Result};
 
-/// Same budget as the OpenClaw config: GLM reasons even at "minimal", and a cut-off answer is worse than a slow one.
+/// GLM reasons even at "minimal", and a cut-off answer is worse than a slow one.
 pub const MAX_TOKENS: u32 = 16384;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -20,7 +20,8 @@ pub struct OpenRouter {
 
 impl OpenRouter {
     pub fn new(key: &str, provider: Option<String>) -> Result<OpenRouter> {
-        let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(REQUEST_TIMEOUT).build()?;
+        let http =
+            reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(REQUEST_TIMEOUT).build()?;
         Ok(OpenRouter { http, key: key.into(), provider: provider.filter(|p| p != "auto") })
     }
 }
@@ -28,7 +29,8 @@ impl OpenRouter {
 /// Request body. `force_text` asks for a plain answer with no further tool calls.
 pub fn body(model: &str, messages: &[Value], tools: &[Value], force_text: bool, provider: Option<&str>) -> Value {
     // GLM can't turn reasoning off (`enabled: false` is a 400); minimal keeps it to a few hundred tokens.
-    let mut body = json!({"model": model, "messages": messages, "max_tokens": MAX_TOKENS, "reasoning": {"effort": "minimal"}});
+    let mut body =
+        json!({"model": model, "messages": messages, "max_tokens": MAX_TOKENS, "reasoning": {"effort": "minimal"}});
     if !tools.is_empty() {
         body["tools"] = json!(tools);
         body["tool_choice"] = json!(if force_text { "none" } else { "auto" });
@@ -56,15 +58,22 @@ impl ChatModel for OpenRouter {
             .map_err(|e| Error::domain("MODEL_ERROR", format!("connection: {}", e.without_url())))?;
         let ttfb_ms = started.elapsed().as_millis();
         let status = response.status();
-        let text = response.text().await.map_err(|e| Error::domain("MODEL_ERROR", format!("connection: {}", e.without_url())))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|e| Error::domain("MODEL_ERROR", format!("connection: {}", e.without_url())))?;
         let res_bytes = text.len();
         let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !status.is_success() || parsed.get("error").is_some_and(|e| !e.is_null()) {
             let message = parsed.pointer("/error/message").and_then(Value::as_str).unwrap_or("no details");
-            let code = parsed.pointer("/error/code").map(|c| c.to_string()).unwrap_or_else(|| status.as_u16().to_string());
+            let code =
+                parsed.pointer("/error/code").map(|c| c.to_string()).unwrap_or_else(|| status.as_u16().to_string());
             return Err(Error::domain("MODEL_ERROR", format!("{code} {message}")));
         }
-        let choice = parsed.pointer("/choices/0").cloned().ok_or_else(|| Error::domain("MODEL_ERROR", "upstream returned no choices"))?;
+        let choice = parsed
+            .pointer("/choices/0")
+            .cloned()
+            .ok_or_else(|| Error::domain("MODEL_ERROR", "upstream returned no choices"))?;
         let usage = &parsed["usage"];
         let cached = usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0);
         Ok(ModelReply {

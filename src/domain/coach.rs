@@ -1,4 +1,4 @@
-//! Telegram coach flows: cards, taps and typed sets (port of gymclaw/services/coach.py). Owner: WP-train.
+//! Telegram coach flows: cards, taps and typed sets.
 //!
 //! Deterministic and model-free: a typed set, a button tap or an agent action in; a `CoachView` out
 //! (see `view.rs` for what each flag means to the renderer). Button data is
@@ -14,16 +14,16 @@ use crate::db::Connection;
 use crate::db::models::{ExerciseStatus, PlannedSession, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::adaptation::{self, spec_of};
 use crate::domain::audit;
-use crate::domain::highlights::{self, Change};
 use crate::domain::crowd::{LABELS, record_feedback};
+use crate::domain::highlights::{self, Change};
 use crate::domain::illustrations::{bodyweight, catalog};
 use crate::domain::profile::update_profile;
 use crate::domain::set_parser::{SetInput, parse_set};
 use crate::domain::templates::remember_swap;
 use crate::domain::view::{Button, Card, CardKind, Cleanup, CoachView};
 use crate::domain::workout::{
-    self, active_workout, cut_rest, exercises, expected_weight, format_target, g, guide_id, log_set, logs, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start,
-    unresolved,
+    self, active_workout, cut_rest, exercises, expected_weight, format_target, g, guide_id, log_set, logs, name,
+    pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -77,51 +77,83 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     let rows = exercises(db, workout_id)?;
     let deferred: Vec<&WorkoutExercise> = rows.iter().filter(|e| e.status == ExerciseStatus::Deferred).collect();
     let Some(active) = data.active_exercise else {
-        let Some(waiting) = deferred.first() else { crate::bail!("NO_ACTIVE_EXERCISE", "Nothing left to act on; end the workout") };
+        let Some(waiting) = deferred.first() else {
+            crate::bail!("NO_ACTIVE_EXERCISE", "Nothing left to act on; end the workout")
+        };
         let r = reference(&waiting.id);
         return Ok(card(
             format!("Only **{}** left. It was taken earlier.", name(waiting)),
-            vec![vec![button("✅ It's free now", &["free", r])?, button("🔄 Swap", &["swap", r])?], vec![button("⏭ Skip it", &["drop", r])?]],
+            vec![
+                vec![button("✅ It's free now", &["free", r])?, button("🔄 Swap", &["swap", r])?],
+                vec![button("⏭ Skip it", &["drop", r])?],
+            ],
         ));
     };
     let r = reference(&active.id);
     let row = rows.iter().find(|e| e.id == active.id).expect("active row");
     if let Some(rest) = data.rest_job {
         // Resting there is nothing to log yet: just the countdown and ways to shorten it.
-        let upcoming = if active.new_exercise { format!("next: **{}**", active.name) } else { format!("**{}** set {}/{}", active.name, active.set_number, active.working_sets) };
-        let weight = if active.set_type == SetType::Warmup { active.target_weight } else { next_set(db, row, active.bodyweight)?.map_or(0.0, |(w, _)| w) };
-        let target = if weight > 0.0 { kg(weight) } else if active.bodyweight { "Bodyweight".into() } else { "? kg".into() };
+        let upcoming = if active.new_exercise {
+            format!("next: **{}**", active.name)
+        } else {
+            format!("**{}** set {}/{}", active.name, active.set_number, active.working_sets)
+        };
+        let weight = if active.set_type == SetType::Warmup {
+            active.target_weight
+        } else {
+            next_set(db, row, active.bodyweight)?.map_or(0.0, |(w, _)| w)
+        };
+        let target = if weight > 0.0 {
+            kg(weight)
+        } else if active.bodyweight {
+            "Bodyweight".into()
+        } else {
+            "? kg".into()
+        };
         return Ok(Card {
             text: format!("until {upcoming} · {target}"),
             photo: None,
-            buttons: vec![vec![button("−15s", &["cut", r, "15"])?, button("−30s", &["cut", r, "30"])?, button("⏭ Skip", &["skip", r])?]],
+            buttons: vec![vec![
+                button("−15s", &["cut", r, "15"])?,
+                button("−30s", &["cut", r, "30"])?,
+                button("⏭ Skip", &["skip", r])?,
+            ]],
             rest_until: Some(rest.due_at),
             kind: CardKind::Rest,
             effect: None,
         });
     }
-    let head = format!("**{}**{}", active.name, active.primary_muscle.as_ref().map(|m| format!(" · {m}")).unwrap_or_default());
+    let head =
+        format!("**{}**{}", active.name, active.primary_muscle.as_ref().map(|m| format!(" · {m}")).unwrap_or_default());
     let (lines, mut buttons) = if active.set_type == SetType::Warmup {
         (
             vec![head, format!("Warm-up · {}", format_target(active.rep_min, active.rep_max, active.target_weight))],
-            vec![vec![button("✅ Warm-up done", &["warm", r])?, button("Skip warm-up", &["nowarm", r])?], vec![button("🔄 Swap", &["swap", r])?]],
+            vec![
+                vec![button("✅ Warm-up done", &["warm", r])?, button("Skip warm-up", &["nowarm", r])?],
+                vec![button("🔄 Swap", &["swap", r])?],
+            ],
         )
     } else {
         let set_line = format!("Set {}/{}", active.set_number, active.working_sets);
         let (mut lines, mut buttons) = (vec![head], vec![]);
         if let Some((weight, reps)) = next_set(db, row, active.bodyweight)? {
             lines.push(format!("{set_line} · {}", format_target(active.rep_min, active.rep_max, weight)));
-            buttons.push(vec![button(format!("✅ {}", done(reps, weight)), &["log", r, &g(weight), &reps.to_string()])?]);
+            buttons
+                .push(vec![button(format!("✅ {}", done(reps, weight)), &["log", r, &g(weight), &reps.to_string()])?]);
         } else {
             // Unknown weight: the gap is the headline and the reply format is impossible to miss.
             let guess = guess_set(db, row, active.rep_min)?;
-            let example = guess.as_ref().map_or(format!("{}x40", active.rep_min), |(w, reps, _)| format!("{reps}x{}", g(*w)));
+            let example =
+                guess.as_ref().map_or(format!("{}x40", active.rep_min), |(w, reps, _)| format!("{reps}x{}", g(*w)));
             let reps = format_target(active.rep_min, active.rep_max, 0.0);
             lines.push(format!("{set_line} · {} × **? kg**", reps.trim_end_matches(" reps")));
             lines.push(format!("✍️ **Reply reps × weight:** `{example}`"));
             if let Some((weight, reps, source)) = guess {
                 lines.push(format!("💡 Guess from {source}"));
-                buttons.push(vec![button(format!("✅ {}?", done(reps, weight)), &["log", r, &g(weight), &reps.to_string()])?]);
+                buttons.push(vec![button(
+                    format!("✅ {}?", done(reps, weight)),
+                    &["log", r, &g(weight), &reps.to_string()],
+                )?]);
             }
         }
         // Swap only before the first set: once the owner is on the machine it isn't taken.
@@ -134,7 +166,14 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     if let Some(first) = deferred.first() {
         buttons.push(vec![button(format!("↩ {} free?", name(first)), &["free", reference(&first.id)])?]);
     }
-    Ok(Card { text: lines.join("\n"), photo: active.illustration.map(|i| i.telegram_png), buttons, rest_until: None, kind: CardKind::Set, effect: None })
+    Ok(Card {
+        text: lines.join("\n"),
+        photo: active.illustration.map(|i| i.telegram_png),
+        buttons,
+        rest_until: None,
+        kind: CardKind::Set,
+        effect: None,
+    })
 }
 
 /// Starting weight for an exercise with no history: the same movement under another name first
@@ -146,13 +185,24 @@ fn guess_set(db: &Connection, row: &WorkoutExercise, reps: i64) -> Result<Option
         "SELECT s.weight, e.config_json FROM set_log s JOIN workout_exercise e ON e.id = s.workout_exercise_id \
          WHERE s.set_type = 'WORKING' AND e.exercise_id != ?1 ORDER BY s.logged_at DESC LIMIT 300",
     )?;
-    let recent: Vec<(f64, crate::db::Json<Value>)> = stmt.query_map([&row.exercise_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let recent: Vec<(f64, crate::db::Json<Value>)> =
+        stmt.query_map([&row.exercise_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     for same in [true, false] {
         for (weight, config) in &recent {
-            let Some(other) = config.get("guide_id").and_then(Value::as_str).and_then(|g| catalog().get(g)) else { continue };
-            let hit = if same { other.slug == item.slug } else { other.primary_muscle == item.primary_muscle && other.equipment == item.equipment };
+            let Some(other) = config.get("guide_id").and_then(Value::as_str).and_then(|g| catalog().get(g)) else {
+                continue;
+            };
+            let hit = if same {
+                other.slug == item.slug
+            } else {
+                other.primary_muscle == item.primary_muscle && other.equipment == item.equipment
+            };
             if hit {
-                return Ok(Some((*weight, reps, config.get("name").and_then(Value::as_str).unwrap_or_default().to_string())));
+                return Ok(Some((
+                    *weight,
+                    reps,
+                    config.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                )));
             }
         }
     }
@@ -167,21 +217,33 @@ fn tonnes(kg: f64) -> String {
 /// One exercise's working sets for the details quote: "Bench 85 kg: 8 · 8 · 7" when the weight held,
 /// else "Bench 8 × 85 · 7 × 82.5 kg"; "Dips 15 · 12 reps" for bodyweight.
 fn sets_line(name: &str, sets: &[Value]) -> String {
-    let pairs: Vec<(f64, i64)> = sets.iter().map(|s| (s["weight"].as_f64().unwrap_or(0.0), s["reps"].as_i64().unwrap_or(0))).collect();
+    let pairs: Vec<(f64, i64)> =
+        sets.iter().map(|s| (s["weight"].as_f64().unwrap_or(0.0), s["reps"].as_i64().unwrap_or(0))).collect();
     let reps = |pairs: &[(f64, i64)]| pairs.iter().map(|(_, r)| r.to_string()).collect::<Vec<_>>().join(" · ");
     match pairs.first() {
         Some((w, _)) if pairs.iter().all(|(x, _)| x == w) && *w == 0.0 => format!("{name} {} reps", reps(&pairs)),
         Some((w, _)) if pairs.iter().all(|(x, _)| x == w) => format!("{name} {}: {}", kg(*w), reps(&pairs)),
-        _ => format!("{name} {} kg", pairs.iter().map(|(w, r)| format!("{r} × {}", g(*w))).collect::<Vec<_>>().join(" · ")),
+        _ => format!(
+            "{name} {} kg",
+            pairs.iter().map(|(w, r)| format!("{r} × {}", g(*w))).collect::<Vec<_>>().join(" · ")
+        ),
     }
 }
 
 /// "Legs Thu 18:00": the next planned session.
 fn next_session(db: &Connection, now: Ts, tz: &jiff::tz::TimeZone) -> Result<Option<String>> {
-    let next = PlannedSession::first(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 ORDER BY planned_start_at", [now])?;
+    let next = PlannedSession::first(
+        db,
+        "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 ORDER BY planned_start_at",
+        [now],
+    )?;
     Ok(next.map(|s| {
         let name = s.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).map(String::from);
-        format!("{} {}", name.or(s.workout_template_id.clone()).unwrap_or_else(|| "Workout".into()), s.planned_start_at.local(tz).strftime("%a %H:%M"))
+        format!(
+            "{} {}",
+            name.or(s.workout_template_id.clone()).unwrap_or_else(|| "Workout".into()),
+            s.planned_start_at.local(tz).strftime("%a %H:%M")
+        )
     }))
 }
 
@@ -200,7 +262,11 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
     if let Some((minutes, volume)) = h.last {
         let mut versus = Vec::new();
         if minutes.abs_diff(h.minutes) >= 3 {
-            versus.push(if h.minutes < minutes { format!("⚡ {} min faster", minutes - h.minutes) } else { format!("{} min slower", h.minutes - minutes) });
+            versus.push(if h.minutes < minutes {
+                format!("⚡ {} min faster", minutes - h.minutes)
+            } else {
+                format!("{} min slower", h.minutes - minutes)
+            });
         }
         let change = if volume > 0.0 { ((h.volume / volume - 1.0) * 100.0).round() as i64 } else { 0 };
         if change != 0 {
@@ -214,8 +280,12 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
         let set = done(lift.reps, lift.weight);
         lines.push(match lift.change {
             Change::WeightRecord(was) => format!("🏆 **{} {set}** · heaviest ever (was {})", lift.name, g(was)),
-            Change::RepRecord(was) if lift.weight == 0.0 => format!("🏆 **{} {set}** · most ever (was {was})", lift.name),
-            Change::RepRecord(was) => format!("🏆 **{} {set}** · most reps at {} kg (was {was})", lift.name, g(lift.weight)),
+            Change::RepRecord(was) if lift.weight == 0.0 => {
+                format!("🏆 **{} {set}** · most ever (was {was})", lift.name)
+            }
+            Change::RepRecord(was) => {
+                format!("🏆 **{} {set}** · most reps at {} kg (was {was})", lift.name, g(lift.weight))
+            }
             Change::Heavier(was) => format!("↑ {} {set} (was {})", lift.name, g(was)),
             Change::MoreReps(was) => format!("↑ {} {set} (+{} reps)", lift.name, lift.reps - was),
         });
@@ -226,7 +296,9 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
         .iter()
         .zip(&progressions)
         .filter(|(_, p)| p["progressed"].as_bool() == Some(true))
-        .map(|(e, p)| format!("{} {}", e["name"].as_str().unwrap_or_default(), kg(p["next_weight"].as_f64().unwrap_or(0.0))))
+        .map(|(e, p)| {
+            format!("{} {}", e["name"].as_str().unwrap_or_default(), kg(p["next_weight"].as_f64().unwrap_or(0.0)))
+        })
         .collect();
     if !targets.is_empty() {
         lines.push(format!("🎯 Next time: {}", targets.join(", ")));
@@ -234,7 +306,11 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
     // The week the workout started in: one that runs past Sunday midnight still counts for that week.
     let week = highlights::finished_in(db, crate::domain::calendar::week_of(h.started_at, &tz), &tz)?.len() as i64;
     let target = profile.weekly_target_sessions;
-    let mut standing = if target > 0 && week >= target { format!("🗓 Week done: **{week}/{target}** ✅") } else { format!("🗓 This week **{week}/{target}**") };
+    let mut standing = if target > 0 && week >= target {
+        format!("🗓 Week done: **{week}/{target}** ✅")
+    } else {
+        format!("🗓 This week **{week}/{target}**")
+    };
     if let Some(next) = next_session(db, now, &tz)? {
         standing += &format!(" · next: {next}");
     }
@@ -250,7 +326,8 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
     }
     lines.push("How busy was the gym?".into());
     let r = reference(workout_id).to_string();
-    let buttons = LABELS.iter().map(|(value, label)| button(*label, &["crowd", value, &r])).collect::<Result<Vec<_>>>()?;
+    let buttons =
+        LABELS.iter().map(|(value, label)| button(*label, &["crowd", value, &r])).collect::<Result<Vec<_>>>()?;
     let effect = h.lifts.iter().any(|l| l.record()).then(|| crate::telegram::EFFECT_CONFETTI.to_string());
     Ok(Card { effect, ..card(lines.join("\n"), vec![buttons]) })
 }
@@ -266,19 +343,25 @@ fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
 
 /// Typed text during a workout ("10x40"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
-    let Some(workout) = active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting)) else {
+    let Some(workout) =
+        active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting))
+    else {
         return Ok(CoachView::default());
     };
     let active = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
     let is_bodyweight = active.as_ref().is_some_and(|a| bodyweight(guide_id(a)));
-    let parsed = expected_weight(db, &workout.id).and_then(|expected| parse_set(text, SetType::Working, expected, is_bodyweight));
+    let parsed = expected_weight(db, &workout.id)
+        .and_then(|expected| parse_set(text, SetType::Working, expected, is_bodyweight));
     let value = match parsed {
         Ok(value) => value,
         Err(Error::Domain { .. }) => return Ok(CoachView::default()),
         Err(other) => return Err(other),
     };
     log_set(db, &workout.id, &value, now, request_id)?;
-    Ok(CoachView { react: Some("👍".into()), ..acked(format!("✅ {}", done(value.reps, value.weight)), after_change(db, &workout.id, now, request_id)?) })
+    Ok(CoachView {
+        react: Some("👍".into()),
+        ..acked(format!("✅ {}", done(value.reps, value.weight)), after_change(db, &workout.id, now, request_id)?)
+    })
 }
 
 fn invalid(message: &str) -> Error {
@@ -319,7 +402,9 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
     };
     let id = workout.id.as_str();
     let arg = |i: usize| args.get(i).copied().ok_or_else(|| invalid("Button is missing an argument"));
-    let next = |ack: Option<String>| -> Result<CoachView> { Ok(CoachView { ack, cards: after_change(db, id, now, request_id)?, ..handled() }) };
+    let next = |ack: Option<String>| -> Result<CoachView> {
+        Ok(CoachView { ack, cards: after_change(db, id, now, request_id)?, ..handled() })
+    };
     match action {
         "log" => {
             let weight: f64 = arg(1)?.parse().map_err(|_| invalid("Bad weight"))?;
@@ -328,8 +413,16 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
             next(Some(format!("✅ {}", done(reps, weight))))
         }
         "warm" => {
-            let target = workout::state(db, id, now)?.active_exercise.ok_or_else(|| Error::domain("NO_ACTIVE_EXERCISE", "No active exercise"))?;
-            log_set(db, id, &SetInput { weight: target.target_weight, reps: target.rep_max, set_type: SetType::Warmup, rir: None }, now, request_id)?;
+            let target = workout::state(db, id, now)?
+                .active_exercise
+                .ok_or_else(|| Error::domain("NO_ACTIVE_EXERCISE", "No active exercise"))?;
+            log_set(
+                db,
+                id,
+                &SetInput { weight: target.target_weight, reps: target.rep_max, set_type: SetType::Warmup, rir: None },
+                now,
+                request_id,
+            )?;
             next(Some("✅ Warm-up".into()))
         }
         "nowarm" => {
@@ -349,15 +442,22 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
             // Same countdown message, new time: no new notification on the phone.
             Ok(CoachView { refresh: true, cards: vec![exercise_card(db, id, now)?], ..handled() })
         }
-        "swap" | "sub" if row.status == ExerciseStatus::Active && !logs(db, &row.id, Some(SetType::Working))?.is_empty() => {
+        "swap" | "sub"
+            if row.status == ExerciseStatus::Active && !logs(db, &row.id, Some(SetType::Working))?.is_empty() =>
+        {
             // A set done means the owner is on that machine: finish it there. (A machine taken mid-way is
             // deferred first, and its remaining sets can then be swapped.) Naming an exercise in chat still works.
-            Ok(acked(format!("Already started {}: finish it or tap Next.", name(&row)), vec![exercise_card(db, id, now)?]))
+            Ok(acked(
+                format!("Already started {}: finish it or tap Next.", name(&row)),
+                vec![exercise_card(db, id, now)?],
+            ))
         }
         "swap" => {
             // The card's own buttons become wait/later; options are sent below it. No extra menu message.
             let mut menu = vec![button(format!("↩ Keep {}", name(&row)), &["wait", r])?];
-            if row.status == ExerciseStatus::Active && exercises(db, id)?.iter().any(|e| e.status == ExerciseStatus::Pending) {
+            if row.status == ExerciseStatus::Active
+                && exercises(db, id)?.iter().any(|e| e.status == ExerciseStatus::Pending)
+            {
                 menu.push(button("↪ Do it later", &["later", r])?);
             }
             Ok(CoachView { keep: true, live_buttons: Some(vec![menu]), cards: swap_cards(db, id, &row)?, ..handled() })
@@ -365,7 +465,9 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
         "sub" => {
             let result = adaptation::substitute(db, id, &row.id, arg(1)?, now, request_id)?;
             let replacement_id = result["data"]["replacement_exercise_id"].as_str().unwrap_or_default();
-            if let (Some(replacement), Some(template_id)) = (WorkoutExercise::get(db, replacement_id)?, &workout.template_id) {
+            if let (Some(replacement), Some(template_id)) =
+                (WorkoutExercise::get(db, replacement_id)?, &workout.template_id)
+            {
                 remember_swap(db, template_id, &row.exercise_id, &spec_of(&replacement)?)?;
             }
             Ok(deleted(after_change(db, id, now, request_id)?))
@@ -396,14 +498,22 @@ fn swap_cards(db: &Connection, workout_id: &str, row: &WorkoutExercise) -> Resul
     let r = reference(&row.id);
     let options = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?.options;
     if options.is_empty() {
-        return Ok(vec![Card { kind: CardKind::Option, ..card("No alternatives for this muscle in the catalog.".into(), vec![]) }]);
+        return Ok(vec![Card {
+            kind: CardKind::Option,
+            ..card("No alternatives for this muscle in the catalog.".into(), vec![])
+        }]);
     }
     options
         .into_iter()
         .map(|o| {
-            let label = if o.source == "workout" { format!("↩ Back to {}", o.name) } else { format!("Use {}", o.name) };
+            let label =
+                if o.source == "workout" { format!("↩ Back to {}", o.name) } else { format!("Use {}", o.name) };
             Ok(Card {
-                text: format!("**{}**{}", o.name, o.illustration.as_ref().map(|i| format!(" · {}", i.equipment)).unwrap_or_default()),
+                text: format!(
+                    "**{}**{}",
+                    o.name,
+                    o.illustration.as_ref().map(|i| format!(" · {}", i.equipment)).unwrap_or_default()
+                ),
                 photo: o.illustration.map(|i| i.telegram_png),
                 buttons: vec![vec![button(label, &["sub", r, &o.substitute_id])?]],
                 rest_until: None,
@@ -418,7 +528,14 @@ fn swap_cards(db: &Connection, workout_id: &str, row: &WorkoutExercise) -> Resul
 pub fn end_workout(db: &Connection, workout: &WorkoutSession, now: Ts, request_id: &str) -> Result<CoachView> {
     for row in exercises(db, &workout.id)? {
         if unresolved(row.status) {
-            adaptation::skip_exercise(db, &workout.id, &row.id, "ended_early", now, &format!("{request_id}:skip:{}", row.id))?;
+            adaptation::skip_exercise(
+                db,
+                &workout.id,
+                &row.id,
+                "ended_early",
+                now,
+                &format!("{request_id}:skip:{}", row.id),
+            )?;
         }
     }
     Ok(CoachView { cards: after_change(db, &workout.id, now, request_id)?, ..handled() })
@@ -439,7 +556,7 @@ pub fn handle_rest_over(db: &Connection, now: Ts) -> Result<CoachView> {
     Ok(CoachView { rest_over: true, ..deleted(after_change(db, &workout.id, now, &request_id)?) })
 }
 
-/// Agent-initiated coach actions (the old `gymclaw_workout` tool's coach verbs).
+/// Agent-initiated coach actions (the `workout` tool's verbs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
@@ -469,10 +586,23 @@ fn needed<T>(value: Option<T>, name: &str) -> Result<T> {
 /// 'switch' (exercise: do this one now), 'relabel' (exercise: what was really done, which: the logged one;
 /// also after the workout), 'rest' (seconds for this workout; remember: also the default from now on).
 #[allow(clippy::too_many_arguments)]
-pub fn handle_action(db: &Connection, action: Action, exercise: Option<&str>, which: Option<&str>, seconds: Option<i64>, remember: bool, now: Ts, request_id: &str) -> Result<CoachView> {
+pub fn handle_action(
+    db: &Connection,
+    action: Action,
+    exercise: Option<&str>,
+    which: Option<&str>,
+    seconds: Option<i64>,
+    remember: bool,
+    now: Ts,
+    request_id: &str,
+) -> Result<CoachView> {
     let seconds = if action == Action::Rest { Some(needed(seconds, "seconds")?) } else { seconds };
     if action == Action::Rest && remember {
-        let changes: Map<String, Value> = [("default_compound_rest_seconds", seconds), ("default_accessory_rest_seconds", seconds)].into_iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+        let changes: Map<String, Value> =
+            [("default_compound_rest_seconds", seconds), ("default_accessory_rest_seconds", seconds)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect();
         update_profile(db, &changes)?;
     }
     let running = active_workout(db)?;
@@ -487,7 +617,11 @@ pub fn handle_action(db: &Connection, action: Action, exercise: Option<&str>, wh
         let exercise = needed(exercise, "exercise")?;
         let result = adaptation::relabel(db, &workout.id, exercise, which, now, request_id)?;
         let ack = format!("✏️ Saved as {}.", result["data"]["name"].as_str().unwrap_or(exercise));
-        let cards = if workout.status != WorkoutStatus::PlanUpdated { after_change(db, &workout.id, now, request_id)? } else { vec![] };
+        let cards = if workout.status != WorkoutStatus::PlanUpdated {
+            after_change(db, &workout.id, now, request_id)?
+        } else {
+            vec![]
+        };
         return Ok(acked(ack, cards));
     }
     let Some(workout) = running else {
@@ -514,7 +648,11 @@ pub fn handle_action(db: &Connection, action: Action, exercise: Option<&str>, wh
         Action::Relabel => unreachable!("handled above"),
     };
     let rows = exercises(db, &workout.id)?;
-    let Some(row) = rows.iter().find(|e| e.status == ExerciseStatus::Active).or_else(|| rows.iter().find(|e| e.status == ExerciseStatus::Deferred)) else {
+    let Some(row) = rows
+        .iter()
+        .find(|e| e.status == ExerciseStatus::Active)
+        .or_else(|| rows.iter().find(|e| e.status == ExerciseStatus::Deferred))
+    else {
         crate::bail!("NO_ACTIVE_EXERCISE", "Nothing left to act on; end the workout");
     };
     handle_tap(db, &format!("{tap}:{}", reference(&row.id)), now, request_id)
@@ -547,8 +685,9 @@ pub fn preview(db: &Connection, now: Ts, planned_session_id: Option<&str>, data_
 mod tests {
     use super::*;
     use crate::db::models::{ExerciseProgression, JobStatus, NotificationJob};
+    use crate::db::test::db;
     use crate::domain::templates::{Template, get_template, import_template};
-    use crate::domain::workout::tests::{at, db, spec};
+    use crate::domain::workout::tests::{at, spec};
 
     /// Plan order puts shoulders between the two chest exercises, like the first real session.
     fn push(db: &Connection) {
@@ -556,9 +695,15 @@ mod tests {
             id: "push".into(),
             name: "Push".into(),
             exercises: vec![
-                spec(json!({"id": "incline", "name": "Machine incline press", "role": "press", "guide_id": "incline-bench-press", "working_sets": 2, "target_weight": 0, "rest_seconds": 90})),
-                spec(json!({"id": "shoulder", "name": "Shoulder press", "role": "press", "guide_id": "machine-shoulder-press", "working_sets": 2, "target_weight": 25})),
-                spec(json!({"id": "fly", "name": "Cable fly", "role": "fly", "guide_id": "cable-fly", "working_sets": 2, "target_weight": 40})),
+                spec(
+                    json!({"id": "incline", "name": "Machine incline press", "role": "press", "guide_id": "incline-bench-press", "working_sets": 2, "target_weight": 0, "rest_seconds": 90}),
+                ),
+                spec(
+                    json!({"id": "shoulder", "name": "Shoulder press", "role": "press", "guide_id": "machine-shoulder-press", "working_sets": 2, "target_weight": 25}),
+                ),
+                spec(
+                    json!({"id": "fly", "name": "Cable fly", "role": "fly", "guide_id": "cable-fly", "working_sets": 2, "target_weight": 40}),
+                ),
             ],
             alternatives: vec![],
             set_duration_seconds: 40,
@@ -574,7 +719,11 @@ mod tests {
     }
 
     fn data(card: &Card, text: &str) -> String {
-        buttons(card).into_iter().find(|(t, _)| t == text).unwrap_or_else(|| panic!("no button {text}: {:?}", buttons(card))).1
+        buttons(card)
+            .into_iter()
+            .find(|(t, _)| t == text)
+            .unwrap_or_else(|| panic!("no button {text}: {:?}", buttons(card)))
+            .1
     }
 
     fn live(db: &Connection, now: Ts) -> Card {
@@ -588,7 +737,12 @@ mod tests {
         let first = live(&db, at(0));
         // No weight known: no 0 kg warm-up; the card asks for the weight.
         assert!(first.photo.is_some());
-        assert!(first.text.contains("Set 1/2 · 8–10 × **? kg**") && first.text.contains("✍️ **Reply reps × weight:** `8x40`"), "{}", first.text);
+        assert!(
+            first.text.contains("Set 1/2 · 8–10 × **? kg**")
+                && first.text.contains("✍️ **Reply reps × weight:** `8x40`"),
+            "{}",
+            first.text
+        );
         assert!(!handle_text(&db, "how long do I rest?", at(5), "chat").unwrap().handled);
         let result = handle_text(&db, "12x90kg", at(10), "msg-1").unwrap();
         assert_eq!((result.react.as_deref(), result.ack.as_deref()), (Some("👍"), Some("✅ 12 × 90 kg")));
@@ -630,7 +784,11 @@ mod tests {
         push(&db);
         let card = live(&db, at(0));
         let swap = handle_tap(&db, &data(&card, "🔄 Swap"), at(5), "cb-1").unwrap();
-        assert!(swap.keep && swap.cards.len() == 3 && swap.cards.iter().all(|o| o.photo.is_some() && o.kind == CardKind::Option));
+        assert!(
+            swap.keep
+                && swap.cards.len() == 3
+                && swap.cards.iter().all(|o| o.photo.is_some() && o.kind == CardKind::Option)
+        );
         let menu = Card { buttons: swap.live_buttons.clone().unwrap(), ..Card::default() };
         assert!(handle_tap(&db, &data(&menu, "↩ Keep Machine incline press"), at(6), "cb-2").unwrap().restore);
         let later = handle_tap(&db, &data(&menu, "↪ Do it later"), at(7), "cb-3").unwrap();
@@ -645,7 +803,10 @@ mod tests {
         assert_eq!(handle_tap(&db, &sub, at(10), "cb-6").unwrap().cleanup, Some(Cleanup::Delete));
         let template = get_template(&db, "push").unwrap();
         assert_eq!((template.exercises[0].id.as_str(), template.exercises[0].working_sets), (slug.as_str(), 2));
-        assert_eq!((template.exercises[0].substitutes.clone(), template.alternatives[0].id.as_str()), (vec!["incline".to_string()], "incline"));
+        assert_eq!(
+            (template.exercises[0].substitutes.clone(), template.alternatives[0].id.as_str()),
+            (vec!["incline".to_string()], "incline")
+        );
         // Changed their mind: the swapped-away exercise is offered first.
         let again = handle_tap(&db, &data(&live(&db, at(11)), "🔄 Swap"), at(11), "cb-7").unwrap();
         let back = handle_tap(&db, &data(&again.cards[0], "↩ Back to Machine incline press"), at(12), "cb-8").unwrap();
@@ -659,12 +820,21 @@ mod tests {
         handle_text(&db, "10x90", at(10), "m1").unwrap();
         let first = handle_action(&db, Action::End, None, None, None, false, at(600), "end-1").unwrap().cards.remove(0);
         // First time doing anything: nothing to compare against.
-        assert!(!first.text.contains("vs last") && !first.text.contains('🏆') && first.effect.is_none(), "{}", first.text);
+        assert!(
+            !first.text.contains("vs last") && !first.text.contains('🏆') && first.effect.is_none(),
+            "{}",
+            first.text
+        );
         start(&db, Some("push"), None, false, at(1000), "start-2").unwrap();
         handle_text(&db, "10x95", at(1010), "m2").unwrap();
-        let second = handle_action(&db, Action::End, None, None, None, false, at(1240), "end-2").unwrap().cards.remove(0);
+        let second =
+            handle_action(&db, Action::End, None, None, None, false, at(1240), "end-2").unwrap().cards.remove(0);
         assert!(second.text.contains("\n⚡ 6 min faster · 📈 +6% volume vs last Push\n"), "{}", second.text);
-        assert!(second.text.contains("\n🏆 **Machine incline press 10 × 95 kg** · heaviest ever (was 90)\n"), "{}", second.text);
+        assert!(
+            second.text.contains("\n🏆 **Machine incline press 10 × 95 kg** · heaviest ever (was 90)\n"),
+            "{}",
+            second.text
+        );
         assert_eq!(second.effect.as_deref(), Some(crate::telegram::EFFECT_CONFETTI));
     }
 
@@ -678,21 +848,48 @@ mod tests {
         assert!(moved.cards[0].text.starts_with("**Shoulder press**"));
         let summary = handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap().cards.remove(0);
         assert!(summary.text.starts_with("🏁 **Push done** · 10 min · 1 set · 0.9 t\n"), "{}", summary.text);
-        assert!(summary.text.contains("\n>> Machine incline press 90 kg: 10\n>> ~~Shoulder press~~ skipped\n"), "{}", summary.text);
-        assert_eq!(buttons(&summary).iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["Empty", "A few", "Busy", "Packed"]);
+        assert!(
+            summary.text.contains("\n>> Machine incline press 90 kg: 10\n>> ~~Shoulder press~~ skipped\n"),
+            "{}",
+            summary.text
+        );
+        assert_eq!(
+            buttons(&summary).iter().map(|b| b.0.as_str()).collect::<Vec<_>>(),
+            ["Empty", "A few", "Busy", "Packed"]
+        );
         // Unknown starting weight becomes the logged baseline for next time.
         assert_eq!(ExerciseProgression::get(&db, "incline").unwrap().unwrap().next_weight, 90.0);
-        let fixed = handle_action(&db, Action::Relabel, Some("incline-dumbbell-press"), Some("Machine incline press"), None, false, at(700), "fix").unwrap();
+        let fixed = handle_action(
+            &db,
+            Action::Relabel,
+            Some("incline-dumbbell-press"),
+            Some("Machine incline press"),
+            None,
+            false,
+            at(700),
+            "fix",
+        )
+        .unwrap();
         assert_eq!((fixed.ack.as_deref(), fixed.cards.len()), (Some("✏️ Saved as Incline Dumbbell Press."), 0));
         assert!(ExerciseProgression::get(&db, "incline").unwrap().is_none());
         assert_eq!(ExerciseProgression::get(&db, "incline-dumbbell-press").unwrap().unwrap().next_weight, 90.0);
         assert_eq!(get_template(&db, "push").unwrap().exercises[0].id, "incline-dumbbell-press");
         // Renamed movement with no history of its own: the card guesses from the same artwork.
-        let template = Template { id: "push2".into(), exercises: vec![spec(json!({"id": "incline-v2", "name": "Incline press", "role": "press", "guide_id": "incline-dumbbell-press", "working_sets": 2, "target_weight": 0}))], ..get_template(&db, "push").unwrap() };
+        let template = Template {
+            id: "push2".into(),
+            exercises: vec![spec(
+                json!({"id": "incline-v2", "name": "Incline press", "role": "press", "guide_id": "incline-dumbbell-press", "working_sets": 2, "target_weight": 0}),
+            )],
+            ..get_template(&db, "push").unwrap()
+        };
         import_template(&db, &Template { alternatives: vec![], ..template }).unwrap();
         start(&db, Some("push2"), None, false, at(800), "start-2").unwrap();
         let card = live(&db, at(801));
-        assert!(card.text.contains("💡 Guess from Incline Dumbbell Press") && card.text.contains("`8x90`"), "{}", card.text);
+        assert!(
+            card.text.contains("💡 Guess from Incline Dumbbell Press") && card.text.contains("`8x90`"),
+            "{}",
+            card.text
+        );
         data(&card, "✅ 8 × 90 kg?");
     }
 
@@ -729,7 +926,10 @@ mod tests {
         handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
         let fixed = crate::domain::audit::correct_set(&db, &set.id, Some(95.0), None, at(700), "fix").unwrap();
-        assert_eq!((fixed["data"]["before"]["weight"].as_f64(), fixed["data"]["next_weight"].as_f64()), (Some(90.0), Some(95.0)));
+        assert_eq!(
+            (fixed["data"]["before"]["weight"].as_f64(), fixed["data"]["next_weight"].as_f64()),
+            (Some(90.0), Some(95.0))
+        );
         assert_eq!(ExerciseProgression::get(&db, "incline").unwrap().unwrap().next_weight, 95.0);
     }
 
@@ -751,7 +951,11 @@ mod tests {
 
     #[test]
     fn rest_previews_warmup_unknown_and_bodyweight_targets() {
-        for (guide, weight, warmup, expected) in [("bench-press", 80.0, true, "40 kg"), ("bench-press", 0.0, false, "? kg"), ("crunch", 0.0, false, "Bodyweight")] {
+        for (guide, weight, warmup, expected) in [
+            ("bench-press", 80.0, true, "40 kg"),
+            ("bench-press", 0.0, false, "? kg"),
+            ("crunch", 0.0, false, "Bodyweight"),
+        ] {
             let db = db();
             push(&db);
             let workout = active_workout(&db).unwrap().unwrap();
@@ -767,8 +971,11 @@ mod tests {
     }
 
     #[test]
-    fn one_rest_duration_overrides_legacy_exercise_settings() {
-        use crate::domain::{compression::compress_template, profile::{get_profile, update_profile}};
+    fn one_rest_duration_overrides_per_exercise_settings() {
+        use crate::domain::{
+            compression::compress_template,
+            profile::{get_profile, update_profile},
+        };
         let db = db();
         push(&db);
         handle_action(&db, Action::End, None, None, None, false, at(0), "end").unwrap();
@@ -797,14 +1004,20 @@ mod tests {
         push(&db);
         let option = handle_tap(&db, &data(&live(&db, at(0)), "🔄 Swap"), at(1), "cb-1").unwrap().cards.remove(0);
         handle_tap(&db, &buttons(&option)[0].1, at(2), "cb-2").unwrap();
-        let back = handle_action(&db, Action::Switch, Some("Machine incline press"), None, None, false, at(3), "sw-1").unwrap();
+        let back = handle_action(&db, Action::Switch, Some("Machine incline press"), None, None, false, at(3), "sw-1")
+            .unwrap();
         assert!(back.cards[0].text.starts_with("**Machine incline press**"));
         assert_eq!(get_template(&db, "push").unwrap().exercises[0].id, "incline");
-        let unknown = handle_action(&db, Action::Switch, Some("dumbbell rdl"), None, None, false, at(4), "sw-x").unwrap_err();
+        let unknown =
+            handle_action(&db, Action::Switch, Some("dumbbell rdl"), None, None, false, at(4), "sw-x").unwrap_err();
         assert!(unknown.to_string().contains("dumbbell-romanian-deadlift"), "{unknown}");
         // After a set any exercise still goes; the started one keeps its set and counts as done.
         handle_text(&db, "10x90", at(10), "m1").unwrap();
-        let now_on = handle_action(&db, Action::Switch, Some("dumbbell-romanian-deadlift"), None, None, false, at(20), "sw-2").unwrap().cards.remove(0);
+        let now_on =
+            handle_action(&db, Action::Switch, Some("dumbbell-romanian-deadlift"), None, None, false, at(20), "sw-2")
+                .unwrap()
+                .cards
+                .remove(0);
         assert!(now_on.text.starts_with("**Dumbbell Romanian Deadlift**") && now_on.rest_until.is_none());
         let queue = workout::state(&db, &active_workout(&db).unwrap().unwrap().id, at(20)).unwrap().queue;
         let has = |id: &str, status| queue.iter().any(|q| q.exercise_id == id && q.status == status);
@@ -817,7 +1030,9 @@ mod tests {
         let template = Template {
             id: "core".into(),
             name: "Core".into(),
-            exercises: vec![spec(json!({"id": "crunch", "name": "Crunch", "role": "core", "guide_id": "crunch", "working_sets": 1, "rep_min": 12, "rep_max": 15, "target_weight": 0}))],
+            exercises: vec![spec(
+                json!({"id": "crunch", "name": "Crunch", "role": "core", "guide_id": "crunch", "working_sets": 1, "rep_min": 12, "rep_max": 15, "target_weight": 0}),
+            )],
             alternatives: vec![],
             set_duration_seconds: 40,
             transition_seconds: 60,
@@ -833,10 +1048,16 @@ mod tests {
         assert!(done.cards.iter().all(|c| c.rest_until.is_none()) && done.cards[0].text.starts_with("🏁"));
     }
 
-    fn planned(db: &Connection, template: &str, start: Ts, status: crate::db::models::SessionStatus) -> crate::db::models::PlannedSession {
+    fn planned(
+        db: &Connection,
+        template: &str,
+        start: Ts,
+        status: crate::db::models::SessionStatus,
+    ) -> crate::db::models::PlannedSession {
         let mut plan = crate::db::models::PlannedSession::new("2026-10-12".into(), Some(template.into()), false);
         plan.status = status;
-        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) = (start, start.mins(60), start.mins(-30), start.mins(-15), start.mins(60));
+        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) =
+            (start, start.mins(60), start.mins(-30), start.mins(-15), start.mins(60));
         plan.insert(db).unwrap();
         plan
     }
@@ -860,7 +1081,10 @@ mod tests {
         let card = live(&db, at(0));
         let option = handle_tap(&db, &data(&card, "🔄 Swap"), at(1), "cb-1").unwrap().cards.remove(0);
         handle_tap(&db, &buttons(&option)[0].1, at(2), "cb-2").unwrap();
-        assert_eq!(handle_tap(&db, &data(&card, "⏭ Skip"), at(3), "cb-3").unwrap().ack.as_deref(), Some("⌛ Old button."));
+        assert_eq!(
+            handle_tap(&db, &data(&card, "⏭ Skip"), at(3), "cb-3").unwrap().ack.as_deref(),
+            Some("⌛ Old button.")
+        );
     }
 
     #[test]
@@ -872,7 +1096,10 @@ mod tests {
         assert!(detect_stale_workouts(&db, at(10 + 2 * 3600)).unwrap().is_empty());
         let id = active_workout(&db).unwrap().unwrap().id;
         assert_eq!(detect_stale_workouts(&db, at(10 + 3 * 3600 + 1)).unwrap(), vec![id.clone()]);
-        assert_ne!(crate::db::models::WorkoutSession::get(&db, &id).unwrap().unwrap().status, WorkoutStatus::PlanUpdated);
+        assert_ne!(
+            crate::db::models::WorkoutSession::get(&db, &id).unwrap().unwrap().status,
+            WorkoutStatus::PlanUpdated
+        );
         assert_eq!(workout::logs(&db, &workout::exercises(&db, &id).unwrap()[0].id, None).unwrap().len(), 1);
         assert!(active_workout(&db).unwrap().is_some());
         assert_eq!(crate::domain::events::wake_pending(&db).unwrap().len(), 1);
@@ -885,10 +1112,20 @@ mod tests {
         let db = db();
         push(&db);
         let dir = std::env::temp_dir().join(format!("gymclaw-preview-{}", crate::db::new_id()));
-        planned(&db, "push", Ts::parse("2026-10-19T08:30:00+00:00", None).unwrap(), crate::db::models::SessionStatus::Tentative);
+        planned(
+            &db,
+            "push",
+            Ts::parse("2026-10-19T08:30:00+00:00", None).unwrap(),
+            crate::db::models::SessionStatus::Tentative,
+        );
         let card = crate::domain::preview::session_preview(&db, at(0), None, &dir).unwrap();
         assert_eq!(card.text.lines().next(), Some("**Push** · Mon 10:30")); // Europe/Berlin, not UTC
-        assert!(card.text.contains("1. Machine incline press · 2 sets of 8–10") && card.text.contains("3. Cable fly · 2 sets of 8–10"), "{}", card.text);
+        assert!(
+            card.text.contains("1. Machine incline press · 2 sets of 8–10")
+                && card.text.contains("3. Cable fly · 2 sets of 8–10"),
+            "{}",
+            card.text
+        );
         let photo = card.photo.clone().unwrap();
         assert_eq!(card.kind, CardKind::Preview);
         assert!(std::path::Path::new(&photo).is_file() && photo.starts_with(dir.to_str().unwrap()));
@@ -904,7 +1141,9 @@ mod tests {
         let legs = Template {
             id: "legs".into(),
             name: "Legs".into(),
-            exercises: vec![spec(json!({"id": "press", "name": "Leg press", "role": "legs", "guide_id": "leg-press", "primary": true, "working_sets": 1, "target_weight": 0, "warmup_weight": 0}))],
+            exercises: vec![spec(
+                json!({"id": "press", "name": "Leg press", "role": "legs", "guide_id": "leg-press", "primary": true, "working_sets": 1, "target_weight": 0, "warmup_weight": 0}),
+            )],
             alternatives: vec![],
             set_duration_seconds: 40,
             transition_seconds: 60,
@@ -915,7 +1154,10 @@ mod tests {
         let tap = format!("begin:{}", &plan.id[..8]);
         let started = handle_tap(&db, &tap, at(70), "cb-begin").unwrap();
         assert_eq!(started.ack.as_deref(), Some("▶️ Started."));
-        assert_eq!(crate::db::models::PlannedSession::get(&db, &plan.id).unwrap().unwrap().status, crate::db::models::SessionStatus::Started);
+        assert_eq!(
+            crate::db::models::PlannedSession::get(&db, &plan.id).unwrap().unwrap().status,
+            crate::db::models::SessionStatus::Started
+        );
         // Unknown weight: straight to the working set, no "8 × 0 kg" warm-up.
         assert!(started.cards[0].text.contains("**? kg**"), "{}", started.cards[0].text);
         assert_eq!(handle_tap(&db, &tap, at(71), "cb-again").unwrap().ack.as_deref(), Some("Already running."));

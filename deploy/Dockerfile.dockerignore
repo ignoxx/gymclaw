@@ -4,7 +4,6 @@
 !Cargo.lock
 !src
 !web
-!config
 !assets/workout-guide
 !deploy/entrypoint.sh
 !deploy/backup.sh

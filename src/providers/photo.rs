@@ -47,11 +47,7 @@ pub fn to_jpeg(bytes: &[u8], max_edge: u32) -> Result<Photo> {
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
         .encode_image(&rgb)
         .map_err(|_| invalid())?;
-    Ok(Photo {
-        jpeg,
-        width: rgb.width(),
-        height: rgb.height(),
-    })
+    Ok(Photo { jpeg, width: rgb.width(), height: rgb.height() })
 }
 
 fn decode_raster(bytes: &[u8]) -> Result<DynamicImage> {
@@ -94,7 +90,6 @@ mod tests {
 
     const OFFSET_JPG: &[u8] = include_bytes!("testdata/photo/offset.jpg");
     const PLAIN_PNG: &[u8] = include_bytes!("testdata/photo/plain.png");
-    const OFFSET_HEIC: &[u8] = include_bytes!("testdata/photo/offset.heic");
 
     #[test]
     fn decodes_upright_jpeg() {
@@ -109,8 +104,9 @@ mod tests {
     #[cfg(feature = "heic")]
     #[test]
     fn decodes_heic() {
-        assert!(is_heif(OFFSET_HEIC));
-        let photo = to_jpeg(OFFSET_HEIC, MAX_EDGE).unwrap();
+        let heic = include_bytes!("testdata/photo/offset.heic");
+        assert!(is_heif(heic));
+        let photo = to_jpeg(heic, MAX_EDGE).unwrap();
         assert!(photo.jpeg.starts_with(&[0xFF, 0xD8]) && photo.width.max(photo.height) == 64);
     }
 }

@@ -1,4 +1,4 @@
-//! Periodic domain work the scheduler runs (was `runtime watch|weekly|poll-crowd`). Owner: lead.
+//! Periodic domain work the scheduler runs.
 //! `watch`, `weekly` and `poll_crowd` run in one transaction and queue owner messages as PENDING
 //! `notification_delivery` rows; the runtime's outbox sends them afterwards. `publish` commits per write.
 use serde_json::{Value, json};
@@ -34,7 +34,13 @@ pub fn watch(db: &Connection, recipient: &str, now: Ts) -> Result<Value> {
 }
 
 /// `watch` with the calendar sync passed in (tests use the fixture calendar).
-fn watch_with(db: &Connection, recipient: &str, now: Ts, sync: impl FnOnce() -> Result<Value>, net: &dyn Transport) -> Result<Value> {
+fn watch_with(
+    db: &Connection,
+    recipient: &str,
+    now: Ts,
+    sync: impl FnOnce() -> Result<Value>,
+    net: &dyn Transport,
+) -> Result<Value> {
     let authority = runtime_authority(db)?;
     // A calendar outage must not stall the rest of the tick: reminders, nudges, deliveries.
     db.execute_batch("SAVEPOINT calendar_sync")?;
@@ -74,7 +80,9 @@ fn watch_with(db: &Connection, recipient: &str, now: Ts, sync: impl FnOnce() -> 
 /// Sunday 23:00 local: sync, draft an empty next week, audit this week and queue the agent event.
 pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
     let authority = runtime_authority(db)?;
-    let Some(template) = authority.template_id.clone() else { crate::bail!("TEMPLATE_REQUIRED", "No activated template or confirmed split to plan with") };
+    let Some(template) = authority.template_id.clone() else {
+        crate::bail!("TEMPLATE_REQUIRED", "No activated template or confirmed split to plan with")
+    };
     let net = Net::new()?;
     if let Some(state) = CalendarSyncState::get(db, 1)?.filter(|s| s.source == "google") {
         sync_calendar(db, &mut google_provider(db, Some(&state.calendar_id), &net)?, now)?;
@@ -88,7 +96,7 @@ pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
 pub fn poll_crowd(db: &Connection, _now: Ts) -> Result<Value> {
     let net = Net::new()?;
     let provider = from_environment(&net, &run_command)?;
-    // Retrieval time is taken after the response, like Python.
+    // Retrieval time is taken after the response.
     crowd::poll(db, provider.as_ref(), None)
 }
 
@@ -104,7 +112,13 @@ pub fn publish(db: &Connection, now: Ts) -> Result<Value> {
     for _ in 0..50 {
         let tx = db.unchecked_transaction()?;
         let Some(write) = pending_writes(&tx)?.into_iter().next() else { break };
-        let result = apply_write(&tx, &mut google_provider(&tx, Some(&state.calendar_id), &net)?, write["id"].as_str().unwrap_or_default(), now, true)?;
+        let result = apply_write(
+            &tx,
+            &mut google_provider(&tx, Some(&state.calendar_id), &net)?,
+            write["id"].as_str().unwrap_or_default(),
+            now,
+            true,
+        )?;
         tx.commit()?;
         let conflict = result["status"] == "CONFLICT";
         results.push(result);
@@ -119,17 +133,16 @@ pub fn publish(db: &Connection, now: Ts) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use jiff::civil::Date;
     use super::*;
     use crate::db::models::PlannedSession;
     use crate::domain::calendar_writes::queue_session_write;
     use crate::domain::profile::update_profile;
     use crate::domain::replanning::commit_upcoming;
     use crate::domain::scheduling::schedule_week;
-    use crate::domain::templates::{Template, import_template};
     use crate::error::Error;
     use crate::providers::fixture_calendar::FixtureCalendarProvider;
     use crate::time::iso;
+    use jiff::civil::Date;
 
     fn sunday(minutes: i64) -> Ts {
         Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap().mins(minutes)
@@ -137,41 +150,54 @@ mod tests {
 
     /// The "short" template planned for next week, the runtime enabled without calendar-write authority.
     fn setup(changes: Value) -> (Connection, FixtureCalendarProvider) {
-        let db = crate::domain::workout::tests::db();
-        let template: Template = serde_json::from_value(json!({"id": "short", "name": "Short",
-            "exercises": [{"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50}]})).unwrap();
-        import_template(&db, &template).unwrap();
+        let db = crate::db::test::with_short_template();
         update_profile(&db, changes.as_object().unwrap()).unwrap();
         schedule_week(&db, Date::constant(2026, 10, 12), sunday(0), None, Some("short"), &[]).unwrap();
         commit_upcoming(&db, sunday(0)).unwrap();
-        db.execute("INSERT INTO runtime_settings (id, profile, recipient, project_root, python_path, template_id, enabled, calendar_writes_enabled, crowd_polling_enabled)
-            VALUES (1, 'gymclaw', '123', '', '', 'short', 1, 0, 0)", []).unwrap();
+        crate::db::models::RuntimeSettings {
+            recipient: "123".into(),
+            template_id: Some("short".into()),
+            ..crate::db::test::authority()
+        }
+        .insert(&db)
+        .unwrap();
         (db, FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin"))
     }
 
     fn sent(db: &Connection) -> Vec<String> {
-        let mut statement = db.prepare("SELECT message FROM notification_delivery WHERE recipient = '123' ORDER BY created_at, rowid").unwrap();
+        let mut statement = db
+            .prepare("SELECT message FROM notification_delivery WHERE recipient = '123' ORDER BY created_at, rowid")
+            .unwrap();
         statement.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
     }
 
     fn tick(db: &Connection, now: Ts, calendar: Option<&mut FixtureCalendarProvider>) -> Value {
         let sync = || match calendar {
             Some(calendar) => sync_calendar(db, calendar, now),
-            None => Err(Error::domain("CALENDAR_AUTH_REQUIRED", "Google credentials expired or invalid; run `gymclaw calendar-auth` again")),
+            None => Err(Error::domain(
+                "CALENDAR_AUTH_REQUIRED",
+                "Google credentials expired or invalid; run `gymclaw calendar-auth` again",
+            )),
         };
         watch_with(db, "123", now, sync, &Net::new().unwrap()).unwrap()
     }
 
     #[test]
     fn calendar_resize_wakes_agent_once_without_fixed_briefing() {
-        let (db, mut calendar) = setup(json!({"weekly_min_sessions": 1, "weekly_target_sessions": 1, "weekly_max_sessions": 1}));
+        let (db, mut calendar) =
+            setup(json!({"weekly_min_sessions": 1, "weekly_target_sessions": 1, "weekly_max_sessions": 1}));
         let mut session = PlannedSession::select(&db, "", []).unwrap().remove(0);
         let write = queue_session_write(&db, &session, sunday(0), false).unwrap().unwrap();
         apply_write(&db, &mut calendar, &write.id, sunday(0), false).unwrap();
         session = PlannedSession::get(&db, &session.id).unwrap().unwrap();
         let end = session.planned_end_at.mins(-25);
         let tz = crate::time::zone("Europe/Berlin").unwrap();
-        calendar.edit(session.calendar_event_id.as_deref().unwrap(), json!({"end": {"dateTime": iso(&end.local(&tz)), "timeZone": "Europe/Berlin"}})).unwrap();
+        calendar
+            .edit(
+                session.calendar_event_id.as_deref().unwrap(),
+                json!({"end": {"dateTime": iso(&end.local(&tz)), "timeZone": "Europe/Berlin"}}),
+            )
+            .unwrap();
         tick(&db, sunday(1), Some(&mut calendar));
         assert!(sent(&db).is_empty());
         let events = crate::domain::events::wake_pending(&db).unwrap();

@@ -1,10 +1,4 @@
-.venv/
 .DS_Store
-__pycache__/
-*.egg-info/
-build/
-dist/
-.pytest_cache/
 .env
 .env.*
 !.env.example

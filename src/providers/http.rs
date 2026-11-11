@@ -120,9 +120,6 @@ impl Transport for Net {
         };
         let response = builder.send()?;
         let status = response.status().as_u16();
-        Ok(Response {
-            status,
-            body: response.bytes()?.to_vec(),
-        })
+        Ok(Response { status, body: response.bytes()?.to_vec() })
     }
 }

@@ -1,9 +1,12 @@
-//! Post-workout analysis and progression (port of gymclaw/services/audit.py). Owner: WP-train.
+//! Post-workout analysis and progression.
 //! Finishing writes the audit and progression atomically, then requests replanning.
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{AgentEvent, ExerciseProgression, ExerciseStatus, PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutStatus};
+use crate::db::models::{
+    AgentEvent, ExerciseProgression, ExerciseStatus, PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise,
+    WorkoutStatus,
+};
 use crate::domain::core::{emit, mutate};
 use crate::domain::progression::{PerformanceSet, ProgressionDecision, double_progression};
 use crate::domain::workout::{cancel_rest, exercises, load_workout, logs, name, transition, unresolved};
@@ -31,7 +34,8 @@ fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDec
     let sets: Vec<PerformanceSet> = working.iter().map(|s| PerformanceSet { weight: s.weight, reps: s.reps }).collect();
     let required = exercise.config_json.get("working_sets").and_then(Value::as_u64).unwrap_or(0) as usize;
     let increment = exercise.config_json.get("increment").and_then(Value::as_f64).unwrap_or(2.5);
-    let mut decision = double_progression(&exercise.exercise_id, exercise.target_weight, exercise.rep_max, required, increment, &sets);
+    let mut decision =
+        double_progression(&exercise.exercise_id, exercise.target_weight, exercise.rep_max, required, increment, &sets);
     if exercise.target_weight == 0.0 && !working.is_empty() {
         // Unknown starting weight: the heaviest working set becomes the baseline target.
         decision.next_weight = working.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
@@ -43,7 +47,14 @@ fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDec
 
 /// Fix a logged set's weight and/or reps, during or after its workout. When the finished workout set
 /// this exercise's next weight, that weight is recomputed from the corrected sets.
-pub fn correct_set(db: &Connection, set_id: &str, weight: Option<f64>, reps: Option<i64>, now: Ts, request_id: &str) -> Result<Value> {
+pub fn correct_set(
+    db: &Connection,
+    set_id: &str,
+    weight: Option<f64>,
+    reps: Option<i64>,
+    now: Ts,
+    request_id: &str,
+) -> Result<Value> {
     mutate(db, "set.corrected", request_id, json!({"set_id": set_id, "weight": weight, "reps": reps}), now, || {
         if weight.is_none() && reps.is_none() {
             crate::bail!("ARGUMENT_REQUIRED", "Pass weight and/or reps");
@@ -53,15 +64,21 @@ pub fn correct_set(db: &Connection, set_id: &str, weight: Option<f64>, reps: Opt
         set.weight = weight.unwrap_or(set.weight);
         set.reps = reps.unwrap_or(set.reps);
         set.update(db)?;
-        let Some(exercise) = WorkoutExercise::get(db, &set.workout_exercise_id)? else { crate::bail!("EXERCISE_NOT_FOUND", "Set {set_id} has no exercise") };
+        let Some(exercise) = WorkoutExercise::get(db, &set.workout_exercise_id)? else {
+            crate::bail!("EXERCISE_NOT_FOUND", "Set {set_id} has no exercise")
+        };
         let mut next_weight = None;
-        if let Some(mut progression) = ExerciseProgression::get(db, &exercise.exercise_id)?.filter(|p| p.source_workout_id == exercise.workout_session_id) {
+        if let Some(mut progression) = ExerciseProgression::get(db, &exercise.exercise_id)?
+            .filter(|p| p.source_workout_id == exercise.workout_session_id)
+        {
             progression.next_weight = decide(db, &exercise)?.0.next_weight;
             progression.updated_at = now;
             progression.update(db)?;
             next_weight = Some(progression.next_weight);
         }
-        Ok(json!({"set_id": set.id, "exercise": name(&exercise), "before": before, "after": {"weight": set.weight, "reps": set.reps}, "next_weight": next_weight}))
+        Ok(
+            json!({"set_id": set.id, "exercise": name(&exercise), "before": before, "after": {"weight": set.weight, "reps": set.reps}, "next_weight": next_weight}),
+        )
     })
 }
 
@@ -70,11 +87,17 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
     mutate(db, "workout.completed", request_id, json!({"workout_id": workout_id}), now, || {
         let mut workout = load_workout(db, workout_id, Some(now))?;
         if workout.status == WorkoutStatus::PlanUpdated {
-            crate::bail!("WORKOUT_ALREADY_FINISHED", "Workout already finished; read audit or retry original request ID");
+            crate::bail!(
+                "WORKOUT_ALREADY_FINISHED",
+                "Workout already finished; read audit or retry original request ID"
+            );
         }
         let rows = exercises(db, workout_id)?;
         if rows.iter().any(|e| unresolved(e.status)) {
-            crate::bail!("UNRESOLVED_EXERCISES", "Resolve deferred/pending exercises or explicitly skip before finishing");
+            crate::bail!(
+                "UNRESOLVED_EXERCISES",
+                "Resolve deferred/pending exercises or explicitly skip before finishing"
+            );
         }
         if workout.status != WorkoutStatus::WorkoutComplete {
             crate::bail!("INVALID_TRANSITION", "Cannot finish workout in {}", workout.status);
@@ -93,8 +116,17 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
             warmups += logs(db, &exercise.id, Some(SetType::Warmup))?.len();
             completed_sets += working.len();
             if exercise.status == ExerciseStatus::Completed {
-                let target = ExerciseProgression { exercise_id: exercise.exercise_id.clone(), next_weight: decision.next_weight, updated_at: now, source_workout_id: workout.id.clone() };
-                if ExerciseProgression::get(db, &exercise.exercise_id)?.is_some() { target.update(db)? } else { target.insert(db)? }
+                let target = ExerciseProgression {
+                    exercise_id: exercise.exercise_id.clone(),
+                    next_weight: decision.next_weight,
+                    updated_at: now,
+                    source_workout_id: workout.id.clone(),
+                };
+                if ExerciseProgression::get(db, &exercise.exercise_id)?.is_some() {
+                    target.update(db)?
+                } else {
+                    target.insert(db)?
+                }
                 if decision.progressed {
                     let mut payload = serde_json::to_value(&decision)?;
                     payload["workout_id"] = json!(workout.id);
@@ -117,7 +149,8 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
             planned.update(db)?;
         }
         let snapshot = &workout.template_snapshot;
-        let planned_sets: i64 = snapshot["exercises"].as_array().into_iter().flatten().filter_map(|e| e["working_sets"].as_i64()).sum();
+        let planned_sets: i64 =
+            snapshot["exercises"].as_array().into_iter().flatten().filter_map(|e| e["working_sets"].as_i64()).sum();
         let template_name = snapshot["name"].as_str().unwrap_or_default().to_string();
         let error = |eta: Option<Ts>| eta.map(|eta| (now - eta).as_secs_f64());
         let count = |status: ExerciseStatus| rows.iter().filter(|e| e.status == status).count();

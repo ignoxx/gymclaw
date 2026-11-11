@@ -1,4 +1,4 @@
-//! UTC instants stored the way SQLAlchemy's `UTCDateTime` does: naive UTC text with microseconds.
+//! UTC instants, stored as naive UTC text with microseconds.
 use std::fmt;
 
 use jiff::{SignedDuration, Timestamp, Zoned, civil, tz::TimeZone};
@@ -34,12 +34,12 @@ impl Ts {
         Some(Ts(naive.to_zoned(TimeZone::UTC).ok()?.timestamp()))
     }
 
-    /// `2026-10-12 12:07:18.231715`, the SQLAlchemy SQLite storage format.
+    /// `2026-10-12 12:07:18.231715`, the DB storage format.
     pub fn db(self) -> String {
         self.0.strftime("%Y-%m-%d %H:%M:%S%.6f").to_string()
     }
 
-    /// Python `isoformat()` of an aware UTC datetime: `2026-10-14T10:30:00+00:00` (micros only when set).
+    /// ISO 8601 in UTC: `2026-10-14T10:30:00+00:00` (micros only when set).
     pub fn iso(self) -> String {
         iso(&self.0.to_zoned(TimeZone::UTC))
     }
@@ -76,7 +76,7 @@ impl std::ops::Sub<Ts> for Ts {
     }
 }
 
-/// Python `isoformat()` of an aware datetime in any zone: `2026-10-16T12:00:00+02:00`.
+/// ISO 8601 with the zone's offset: `2026-10-16T12:00:00+02:00` (micros only when set).
 pub fn iso(z: &Zoned) -> String {
     let micros = z.subsec_nanosecond() / 1000;
     let base = z.strftime("%Y-%m-%dT%H:%M:%S").to_string();
@@ -165,7 +165,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_python_formats() {
+    fn db_and_iso_formats() {
         let ts = Ts::from_db("2026-10-12 12:07:18.231715").unwrap();
         assert_eq!(ts.db(), "2026-10-12 12:07:18.231715");
         assert_eq!(ts.iso(), "2026-10-12T12:07:18.231715+00:00");
@@ -184,10 +184,13 @@ mod tests {
             "keep": ["2026-10-22", "Move Legs to 11:15", "2026-10-22 13:15", 7],
         });
         localize(&mut value, &zone("Europe/Berlin").unwrap());
-        assert_eq!(value, serde_json::json!({
-            "rows": [["2026-10-22T15:15:00+02:00", "2026-10-22T16:15:00+02:00"]],
-            "start": "2026-10-22T12:45:00+02:00",
-            "keep": ["2026-10-22", "Move Legs to 11:15", "2026-10-22 13:15", 7],
-        }));
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "rows": [["2026-10-22T15:15:00+02:00", "2026-10-22T16:15:00+02:00"]],
+                "start": "2026-10-22T12:45:00+02:00",
+                "keep": ["2026-10-22", "Move Legs to 11:15", "2026-10-22 13:15", 7],
+            })
+        );
     }
 }

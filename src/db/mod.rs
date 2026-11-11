@@ -1,7 +1,9 @@
-//! SQLite: the same file and schema the Python app used. Synchronous on purpose: one owner, short
+//! SQLite. Synchronous on purpose: one owner, short
 //! transactions, and domain code stays free of async. The async runtime calls in via `spawn_blocking`.
 pub mod models;
 mod table;
+#[cfg(test)]
+pub mod test;
 
 use std::path::Path;
 
@@ -11,10 +13,12 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::Result;
 
-/// Schema of the last Python (alembic) revision; fresh databases start here.
+/// Starting schema; fresh databases start here.
 const BASELINE: &str = include_str!("baseline.sql");
-const ALEMBIC_HEAD: &str = "3d5e7f9a1b20";
-/// Rust-owned migrations after the baseline, applied in order and tracked by `PRAGMA user_version`.
+/// Baseline marker: the one row of the `alembic_version` table (the name is historical). Every DB,
+/// fresh or the long-lived production one, carries exactly this value; anything else is refused.
+const BASELINE_MARKER: &str = "3d5e7f9a1b20";
+/// Migrations after the baseline, applied in order and tracked by `PRAGMA user_version`.
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_agent.sql"),
     include_str!("migrations/002_learned_notes.sql"),
@@ -40,14 +44,18 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
-    let has_alembic: bool = tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
-    if !has_alembic {
+    let has_baseline: bool =
+        tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
+    if !has_baseline {
         tx.execute_batch(BASELINE)?;
-        tx.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [ALEMBIC_HEAD])?;
+        tx.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [BASELINE_MARKER])?;
     } else {
-        let head: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
-        if head != ALEMBIC_HEAD {
-            crate::bail!("SCHEMA_MISMATCH", "Database is at alembic {head}; run the last Python migration ({ALEMBIC_HEAD}) first");
+        let marker: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
+        if marker != BASELINE_MARKER {
+            crate::bail!(
+                "SCHEMA_MISMATCH",
+                "Database has baseline marker {marker}, expected {BASELINE_MARKER}; it predates the baseline and can't be upgraded"
+            );
         }
     }
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -156,7 +164,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::db::models::{AgentEvent, SetLog, SetType};
+    use crate::db::models::AgentEvent;
     use crate::domain::profile::{get_profile, update_profile};
     use crate::time::Ts;
 
@@ -168,24 +176,46 @@ mod tests {
         migrate(&mut db).unwrap();
         update_profile(&db, json!({"prep_minutes": 23}).as_object().unwrap()).unwrap();
         let at = Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap();
-        AgentEvent { id: new_id(), r#type: "test".into(), created_at: at, payload_json: Json(json!({})), handled_at: None, correlation_id: None }.insert(&db).unwrap();
+        AgentEvent {
+            id: new_id(),
+            r#type: "test".into(),
+            created_at: at,
+            payload_json: Json(json!({})),
+            handled_at: None,
+            correlation_id: None,
+        }
+        .insert(&db)
+        .unwrap();
         drop(db);
         let mut db = open(&path).unwrap();
         migrate(&mut db).unwrap();
         assert_eq!(get_profile(&db).unwrap().prep_minutes, 23);
         assert_eq!(AgentEvent::select(&db, "", []).unwrap()[0].created_at, at);
         let version: String = db.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, ALEMBIC_HEAD);
+        assert_eq!(version, BASELINE_MARKER);
         let _ = std::fs::remove_file(&path);
     }
 
+    /// `schema.sql` is the schema a fresh `migrate` produces, so agents can read it in one place.
     #[test]
-    fn foreign_keys_are_enforced() {
-        let db = crate::domain::workout::tests::db();
-        let orphan = SetLog {
-            id: new_id(), workout_exercise_id: "missing".into(), set_number: 1, set_type: SetType::Working, weight: 80.0, reps: 9, rir_optional: None,
-            logged_at: Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap(), rest_started_at: None, rest_due_at: None,
-        };
-        assert!(orphan.insert(&db).is_err());
+    fn schema_snapshot_is_current() {
+        let mut db = Connection::open_in_memory().unwrap();
+        migrate(&mut db).unwrap();
+        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let mut stmt = db
+            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY tbl_name, type DESC, name")
+            .unwrap();
+        let objects: Vec<String> =
+            stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|s| s.unwrap() + ";").collect();
+        let actual = format!(
+            "-- Generated from a fresh `gymclaw migrate` (user_version {version}); don't edit. When a migration\n\
+             -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.\n\n{}\n",
+            objects.join("\n\n")
+        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db/schema.sql");
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(actual.as_str()) {
+            std::fs::write(&path, &actual).unwrap();
+            panic!("src/db/schema.sql was stale and has been regenerated; review the diff and commit it");
+        }
     }
 }

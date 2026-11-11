@@ -87,10 +87,20 @@ pub fn system(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     write!(out, "\n\n## Database (for sql_query)\n{}", schema.join("\n")).unwrap();
     let notes = meta::notes(db)?;
     for (kind, title) in [(NoteKind::Owner, "Owner notes"), (NoteKind::Learned, "Learned from the owner's behaviour")] {
-        let lines: Vec<String> = notes.iter().filter(|n| n.kind == kind).map(|n| format!("- [{}] {}", n.id.unwrap_or_default(), n.text)).collect();
+        let lines: Vec<String> = notes
+            .iter()
+            .filter(|n| n.kind == kind)
+            .map(|n| format!("- [{}] {}", n.id.unwrap_or_default(), n.text))
+            .collect();
         if !lines.is_empty() {
             let used: usize = notes.iter().filter(|n| n.kind == kind).map(|n| n.text.chars().count()).sum();
-            write!(out, "\n\n## {title} ({used}/{} chars; ids for note_edit/note_delete)\n{}", meta::budget(kind), lines.join("\n")).unwrap();
+            write!(
+                out,
+                "\n\n## {title} ({used}/{} chars; ids for note_edit/note_delete)\n{}",
+                meta::budget(kind),
+                lines.join("\n")
+            )
+            .unwrap();
         }
     }
     let (now_state, shown) = snapshot(db, now)?;
@@ -105,7 +115,8 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     let tz = profile.tz();
     let local = now.local(&tz);
     let mut out = String::new();
-    writeln!(out, "Local time: {} ({}). Week starts Monday.", local.strftime("%A %Y-%m-%d %H:%M"), profile.timezone).unwrap();
+    writeln!(out, "Local time: {} ({}). Week starts Monday.", local.strftime("%A %Y-%m-%d %H:%M"), profile.timezone)
+        .unwrap();
     const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     let days: Vec<&str> = profile.weekdays_allowed.iter().filter_map(|d| DAYS.get(*d as usize).copied()).collect();
     writeln!(
@@ -126,11 +137,17 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         "SELECT t.id, (SELECT max(w.started_at) FROM workout_session w WHERE w.template_id = t.id AND w.status = 'PLAN_UPDATED')
          FROM workout_template t WHERE lower(coalesce(t.definition_json ->> 'source', '')) NOT IN ('demo', 'demo_fixture', 'fixture', 'synthetic') ORDER BY t.id",
     )?;
-    let mut trained: Vec<(String, Option<Ts>)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut trained: Vec<(String, Option<Ts>)> =
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     let split = onboarding.as_ref().map(|o| o.split_json.0.clone()).unwrap_or_default();
     trained.sort_by_key(|(id, _)| split.iter().position(|s| s == id).unwrap_or(split.len()));
     if !trained.is_empty() {
-        let done: Vec<String> = trained.iter().map(|(id, at)| format!("{id} {}", at.map_or("never".into(), |t| t.local(&tz).strftime("%a %-d %b").to_string()))).collect();
+        let done: Vec<String> = trained
+            .iter()
+            .map(|(id, at)| {
+                format!("{id} {}", at.map_or("never".into(), |t| t.local(&tz).strftime("%a %-d %b").to_string()))
+            })
+            .collect();
         writeln!(out, "Last completed per workout: {}.", done.join(", ")).unwrap();
     }
     let setup_done = onboarding.is_some_and(|o| o.completed_fingerprint.is_some());
@@ -141,7 +158,13 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     writeln!(
         out,
         "Runtime: {}, calendar writes {}, crowd polling {}.",
-        if authority.enabled { "on" } else if authority.configured { "paused" } else { "not set up" },
+        if authority.enabled {
+            "on"
+        } else if authority.configured {
+            "paused"
+        } else {
+            "not set up"
+        },
         if authority.calendar_writes_enabled { "on" } else { "off (local plan only)" },
         if authority.crowd_polling_enabled { "on" } else { "off" },
     )
@@ -151,13 +174,22 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     let monday = local.date().checked_sub((local.weekday().to_monday_zero_offset() as i64).days())?;
     let start = Ts(monday.checked_sub(7.days())?.to_zoned(tz.clone())?.timestamp());
     let end = Ts(monday.checked_add(14.days())?.to_zoned(tz.clone())?.timestamp());
-    let sessions = PlannedSession::select(db, "WHERE planned_start_at >= ?1 AND planned_start_at < ?2 AND status != 'CANCELLED' ORDER BY planned_start_at", [start, end])?;
+    let sessions = PlannedSession::select(
+        db,
+        "WHERE planned_start_at >= ?1 AND planned_start_at < ?2 AND status != 'CANCELLED' ORDER BY planned_start_at",
+        [start, end],
+    )?;
     writeln!(out, "Sessions last week, this week and next:").unwrap();
     if sessions.is_empty() {
         writeln!(out, "- none planned").unwrap();
     }
     for s in &sessions {
-        let name = s.workout_plan_json.pointer("/template/name").and_then(Value::as_str).or(s.workout_template_id.as_deref()).unwrap_or("Workout");
+        let name = s
+            .workout_plan_json
+            .pointer("/template/name")
+            .and_then(Value::as_str)
+            .or(s.workout_template_id.as_deref())
+            .unwrap_or("Workout");
         let begin = s.planned_start_at.local(&tz);
         let follows = match &s.follows_session_id {
             Some(id) => format!(" make-up for {}", name_sessions(db, id)?),
@@ -166,8 +198,13 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         writeln!(
             out,
             "- {} {}–{} {} {}{} id={}{follows}",
-            begin.strftime("%a %-d %b"), begin.strftime("%H:%M"), s.planned_end_at.local(&tz).strftime("%H:%M"), name, s.status,
-            if s.user_locked { " locked" } else { "" }, s.id,
+            begin.strftime("%a %-d %b"),
+            begin.strftime("%H:%M"),
+            s.planned_end_at.local(&tz).strftime("%H:%M"),
+            name,
+            s.status,
+            if s.user_locked { " locked" } else { "" },
+            s.id,
         )
         .unwrap();
     }
@@ -184,11 +221,26 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
              FROM workout_exercise e WHERE e.workout_session_id = ?1 AND e.status != 'SUBSTITUTED' ORDER BY e.position",
         )?;
         let rows: Vec<String> = stmt
-            .query_map([&w.id], |r| Ok(format!("{} {} {}/{}", r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, String>(1)?, r.get::<_, i64>(3)?, r.get::<_, i64>(2)?)))?
+            .query_map([&w.id], |r| {
+                Ok(format!(
+                    "{} {} {}/{}",
+                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(2)?
+                ))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let name = w.template_snapshot.get("name").and_then(Value::as_str).unwrap_or("Workout");
         let started = w.started_at.map(|t| t.local(&tz).strftime("%H:%M").to_string()).unwrap_or_default();
-        writeln!(out, "Running workout: {name} since {started}, {} (id={}). Exercises: {}.", w.status, w.id, rows.join("; ")).unwrap();
+        writeln!(
+            out,
+            "Running workout: {name} since {started}, {} (id={}). Exercises: {}.",
+            w.status,
+            w.id,
+            rows.join("; ")
+        )
+        .unwrap();
     } else {
         writeln!(out, "No workout running.").unwrap();
     }
@@ -205,7 +257,8 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     for m in sent.iter().rev() {
         let text: String = m.text.replace('\n', " / ").chars().take(300).collect();
         let live = m.meta_json["buttons"] == true && m.meta_json.get("settled").is_none();
-        writeln!(out, "- {} {text}{}", m.at.local(&tz).strftime("%a %H:%M"), if live { " [with buttons]" } else { "" }).unwrap();
+        writeln!(out, "- {} {text}{}", m.at.local(&tz).strftime("%a %H:%M"), if live { " [with buttons]" } else { "" })
+            .unwrap();
     }
 
     let mut shown = vec![];
@@ -214,13 +267,21 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
             shown.push(e.id.clone());
         }
         crate::time::localize(&mut e.payload_json.0, &tz);
-        writeln!(out, "Open issue: {} at {} {}", e.r#type, e.created_at.local(&tz).strftime("%a %H:%M"), name_sessions(db, &e.payload_json.0.to_string())?).unwrap();
+        writeln!(
+            out,
+            "Open issue: {} at {} {}",
+            e.r#type,
+            e.created_at.local(&tz).strftime("%a %H:%M"),
+            name_sessions(db, &e.payload_json.0.to_string())?
+        )
+        .unwrap();
     }
     Ok((out, shown))
 }
 
-static SESSION_ID: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap());
+static SESSION_ID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap()
+});
 
 /// Follows every planned-session id in event text with the session as the snapshot lists it
 /// ("c002596e-… (Tue 10 Nov 11:45 Push)"). With a bare id the model guessed which session was meant
@@ -232,7 +293,12 @@ pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
     for m in SESSION_ID.find_iter(text) {
         out.push_str(&text[last..m.end()]);
         if let Some(s) = PlannedSession::get(db, m.as_str())? {
-            let name = s.workout_plan_json.pointer("/template/name").and_then(Value::as_str).or(s.workout_template_id.as_deref()).unwrap_or("Workout");
+            let name = s
+                .workout_plan_json
+                .pointer("/template/name")
+                .and_then(Value::as_str)
+                .or(s.workout_template_id.as_deref())
+                .unwrap_or("Workout");
             write!(out, " ({} {name})", s.planned_start_at.local(&tz).strftime("%a %-d %b %H:%M")).unwrap();
         }
         last = m.end();
@@ -276,7 +342,7 @@ mod tests {
     /// session today and told the owner "Push today 11:45".
     #[test]
     fn event_text_names_the_sessions_it_points_at() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let mut push = PlannedSession::new("2026-11-09".into(), Some("push".into()), true);
         push.planned_start_at = Ts::parse("2026-11-10T11:45:00+01:00", None).unwrap();
         push.merge_plan(json!({"template": {"name": "Push"}}));

@@ -70,8 +70,8 @@ impl Default for Profile {
 }
 
 impl Profile {
-    /// One rest duration for every exercise. The stored compound/template settings are
-    /// retained for legacy data; `rest --remember` still updates both profile defaults.
+    /// One rest duration for every exercise. The compound and per-exercise settings are still stored
+    /// but no longer select a timer; `rest --remember` updates both profile defaults.
     pub fn rest_seconds(&self) -> i64 {
         self.default_accessory_rest_seconds
     }
@@ -83,20 +83,40 @@ impl Profile {
     pub fn validate(&self) -> Result<()> {
         let fail = |m: &str| Err(Error::domain("INVALID_PROFILE", m.to_string()));
         zone(&self.timezone)?;
-        let counts = [self.weekly_min_sessions, self.weekly_target_sessions, self.minimum_full_rest_days_between_sessions, self.prep_minutes, self.commute_to_gym_minutes, self.commute_home_minutes];
+        let counts = [
+            self.weekly_min_sessions,
+            self.weekly_target_sessions,
+            self.minimum_full_rest_days_between_sessions,
+            self.prep_minutes,
+            self.commute_to_gym_minutes,
+            self.commute_home_minutes,
+        ];
         if counts.iter().any(|v| *v < 0) || !(0..=7).contains(&self.weekly_max_sessions) {
             return fail("Counts and minutes can't be negative; weekly maximum is 0–7");
         }
-        if [self.preferred_workout_minutes, self.minimum_workout_minutes, self.default_compound_rest_seconds, self.default_accessory_rest_seconds].iter().any(|v| *v <= 0) {
+        if [
+            self.preferred_workout_minutes,
+            self.minimum_workout_minutes,
+            self.default_compound_rest_seconds,
+            self.default_accessory_rest_seconds,
+        ]
+        .iter()
+        .any(|v| *v <= 0)
+        {
             return fail("Durations must be positive");
         }
-        if [self.crowd_preference_weight, self.calendar_preference_weight, self.recovery_weight].iter().any(|w| !w.is_finite() || *w < 0.0) {
+        if [self.crowd_preference_weight, self.calendar_preference_weight, self.recovery_weight]
+            .iter()
+            .any(|w| !w.is_finite() || *w < 0.0)
+        {
             return fail("Weights must be finite and nonnegative");
         }
         if self.weekdays_allowed.iter().any(|d| !(0..=6).contains(d)) {
             return fail("Weekdays are 0 (Monday) to 6");
         }
-        if !(self.weekly_min_sessions <= self.weekly_target_sessions && self.weekly_target_sessions <= self.weekly_max_sessions) {
+        if !(self.weekly_min_sessions <= self.weekly_target_sessions
+            && self.weekly_target_sessions <= self.weekly_max_sessions)
+        {
             return fail("Weekly minimum <= target <= maximum required");
         }
         if self.minimum_workout_minutes > self.preferred_workout_minutes {
@@ -180,11 +200,29 @@ pub fn get_profile(db: &Connection) -> Result<Profile> {
     let profile = Profile { timezone: crate::config::timezone_seed(), ..Profile::default() };
     let now = Ts::now();
     let mut row = UserProfile {
-        id: 1, timezone: String::new(), weekly_min_sessions: 0, weekly_target_sessions: 0, weekly_max_sessions: 0, weekdays_allowed: Json(vec![]),
-        minimum_full_rest_days_between_sessions: 0, earliest_workout_start: String::new(), latest_workout_finish: String::new(),
-        preferred_workout_minutes: 0, minimum_workout_minutes: 0, prep_minutes: 0, commute_to_gym_minutes: 0, commute_home_minutes: 0,
-        warmup_policy: String::new(), default_compound_rest_seconds: 0, default_accessory_rest_seconds: 0, crowd_preference_weight: 0.0,
-        calendar_preference_weight: 0.0, recovery_weight: 0.0, gym_address: None, created_at: now, updated_at: now,
+        id: 1,
+        timezone: String::new(),
+        weekly_min_sessions: 0,
+        weekly_target_sessions: 0,
+        weekly_max_sessions: 0,
+        weekdays_allowed: Json(vec![]),
+        minimum_full_rest_days_between_sessions: 0,
+        earliest_workout_start: String::new(),
+        latest_workout_finish: String::new(),
+        preferred_workout_minutes: 0,
+        minimum_workout_minutes: 0,
+        prep_minutes: 0,
+        commute_to_gym_minutes: 0,
+        commute_home_minutes: 0,
+        warmup_policy: String::new(),
+        default_compound_rest_seconds: 0,
+        default_accessory_rest_seconds: 0,
+        crowd_preference_weight: 0.0,
+        calendar_preference_weight: 0.0,
+        recovery_weight: 0.0,
+        gym_address: None,
+        created_at: now,
+        updated_at: now,
     };
     profile.write(&mut row);
     row.insert(db)?;
@@ -198,7 +236,8 @@ pub fn update_profile(db: &Connection, changes: &Map<String, Value>) -> Result<P
     for (key, value) in changes {
         object.insert(key.clone(), value.clone());
     }
-    let profile: Profile = serde_json::from_value(merged).map_err(|e| Error::domain("INVALID_PROFILE", e.to_string()))?;
+    let profile: Profile =
+        serde_json::from_value(merged).map_err(|e| Error::domain("INVALID_PROFILE", e.to_string()))?;
     profile.validate()?;
     let mut row = UserProfile::get(db, 1)?.expect("created by get_profile");
     profile.write(&mut row);
@@ -207,7 +246,7 @@ pub fn update_profile(db: &Connection, changes: &Map<String, Value>) -> Result<P
     Ok(profile)
 }
 
-/// Local wall-clock times as Python's `time.isoformat()`: "07:00:00" (input also takes "07:00").
+/// Local wall-clock times as "07:00:00" (input also takes "07:00").
 pub mod local_time {
     use jiff::civil::Time;
     use serde::{Deserialize, Deserializer, Serializer};

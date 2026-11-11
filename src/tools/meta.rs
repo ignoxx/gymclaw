@@ -5,8 +5,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Ctx, Tool, ToolDef, def};
-use crate::db::models::{AgentNote, NoteKind};
 use crate::db::Connection;
+use crate::db::models::{AgentNote, NoteKind};
 use crate::error::Result;
 
 pub fn tools() -> Vec<ToolDef> {
@@ -29,7 +29,11 @@ fn cell(value: rusqlite::types::ValueRef<'_>) -> Value {
         Text(t) => {
             let text = String::from_utf8_lossy(t);
             // JSON columns come back as JSON.
-            if text.starts_with('{') || text.starts_with('[') { serde_json::from_str(&text).unwrap_or(Value::String(text.into())) } else { Value::String(text.into()) }
+            if text.starts_with('{') || text.starts_with('[') {
+                serde_json::from_str(&text).unwrap_or(Value::String(text.into()))
+            } else {
+                Value::String(text.into())
+            }
         }
         Blob(b) => json!(format!("<{} bytes>", b.len())),
     }
@@ -52,7 +56,11 @@ impl Tool for SqlQuery {
             Some(path) => crate::db::open_readonly(std::path::Path::new(path))?,
             None => {
                 let mut copy = Connection::open_in_memory()?;
-                rusqlite::backup::Backup::new(cx.db, &mut copy)?.run_to_completion(100, std::time::Duration::from_millis(1), None)?;
+                rusqlite::backup::Backup::new(cx.db, &mut copy)?.run_to_completion(
+                    100,
+                    std::time::Duration::from_millis(1),
+                    None,
+                )?;
                 copy.execute_batch("PRAGMA query_only=ON")?;
                 copy
             }
@@ -69,7 +77,9 @@ impl Tool for SqlQuery {
         {
             let mut stmt = match db.prepare(&self.sql) {
                 Ok(stmt) => stmt,
-                Err(e) if e.to_string().contains("no such ") => crate::bail!("SQL_SCHEMA", "{e}. {}", schema_hint(&db, &self.sql)?),
+                Err(e) if e.to_string().contains("no such ") => {
+                    crate::bail!("SQL_SCHEMA", "{e}. {}", schema_hint(&db, &self.sql)?)
+                }
                 // Syntax errors and denied tables are a wrong query, not a broken database.
                 Err(e) => crate::bail!("INVALID_SQL", "{e}"),
             };
@@ -83,7 +93,9 @@ impl Tool for SqlQuery {
                 if out.len() == MAX_ROWS {
                     return Ok(json!({"columns": columns, "rows": out, "truncated": true}));
                 }
-                out.push(Value::Array((0..columns.len()).map(|i| row.get_ref(i).map(cell)).collect::<rusqlite::Result<_>>()?));
+                out.push(Value::Array(
+                    (0..columns.len()).map(|i| row.get_ref(i).map(cell)).collect::<rusqlite::Result<_>>()?,
+                ));
             }
             Ok(json!({"columns": columns, "rows": out, "truncated": false}))
         }
@@ -97,15 +109,22 @@ pub fn schema(db: &Connection) -> Result<Vec<(String, String)>> {
         "SELECT m.name, group_concat(p.name, ', ') FROM sqlite_master m JOIN pragma_table_info(m.name) p
          WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND m.name != 'alembic_version' GROUP BY m.name ORDER BY m.name",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows.into_iter().filter(|(t, _)| !SECRET_TABLES.contains(&t.as_str())).map(|(t, cols)| (t.clone(), format!("{t}({cols})"))).collect())
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(t, _)| !SECRET_TABLES.contains(&t.as_str()))
+        .map(|(t, cols)| (t.clone(), format!("{t}({cols})")))
+        .collect())
 }
 
 /// Columns of the tables a failed query names (every table if it names none).
 fn schema_hint(db: &Connection, sql: &str) -> Result<String> {
     let words: std::collections::HashSet<&str> = sql.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
     let tables = schema(db)?;
-    let named: Vec<&str> = tables.iter().filter(|(t, _)| words.contains(t.as_str())).map(|(_, line)| line.as_str()).collect();
+    let named: Vec<&str> =
+        tables.iter().filter(|(t, _)| words.contains(t.as_str())).map(|(_, line)| line.as_str()).collect();
     let lines = if named.is_empty() { tables.iter().map(|(_, line)| line.as_str()).collect() } else { named };
     Ok(format!("Schema: {}", lines.join("; ")))
 }
@@ -127,7 +146,13 @@ impl Tool for NoteAdd {
 character budget, shown with the notes; when it's full, merge, shorten or delete notes first and keep what matters most.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let note = AgentNote { id: None, kind: self.kind, text: self.text.trim().into(), created_at: cx.now, updated_at: cx.now };
+        let note = AgentNote {
+            id: None,
+            kind: self.kind,
+            text: self.text.trim().into(),
+            created_at: cx.now,
+            updated_at: cx.now,
+        };
         check_budget(cx.db, note.kind, None, &note.text)?;
         note.insert(cx.db)?;
         Ok(json!({"id": cx.db.last_insert_rowid()}))
@@ -145,7 +170,9 @@ impl Tool for NoteEdit {
     const DESCRIPTION: &'static str = "Rewrite a note (ids are shown with the notes in your instructions).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let Some(mut note) = AgentNote::get(cx.db, self.id)? else { crate::bail!("NOTE_NOT_FOUND", "No note {}", self.id) };
+        let Some(mut note) = AgentNote::get(cx.db, self.id)? else {
+            crate::bail!("NOTE_NOT_FOUND", "No note {}", self.id)
+        };
         check_budget(cx.db, note.kind, Some(&note), self.text.trim())?;
         note.text = self.text.trim().into();
         note.updated_at = cx.now;
@@ -194,8 +221,13 @@ fn check_budget(db: &Connection, kind: NoteKind, replacing: Option<&AgentNote>, 
     let (old, new) = (replacing.map_or(0, |n| n.text.chars().count()), text.chars().count());
     let (used, limit) = (used(db, kind)?, budget(kind));
     if new > old && used - old + new > limit {
-        crate::bail!("NOTE_BUDGET", "{} are at {used}/{limit} chars and this needs {} more. Condense first: merge related notes, shorten wording, \
-delete what no longer matters (note_edit/note_delete), then retry.", label(kind), new - old);
+        crate::bail!(
+            "NOTE_BUDGET",
+            "{} are at {used}/{limit} chars and this needs {} more. Condense first: merge related notes, shorten wording, \
+delete what no longer matters (note_edit/note_delete), then retry.",
+            label(kind),
+            new - old
+        );
     }
     Ok(())
 }
@@ -207,7 +239,6 @@ fn label(kind: NoteKind) -> &'static str {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,7 +246,7 @@ mod tests {
 
     #[test]
     fn query_is_read_only_and_capped() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let dir = std::env::temp_dir();
         let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
         let query = |cx: &mut Ctx, sql: &str| SqlQuery { sql: sql.into() }.run(cx);
@@ -223,19 +254,26 @@ mod tests {
         assert!(query(&mut cx, "PRAGMA query_only=OFF").is_err());
         assert!(query(&mut cx, "ATTACH DATABASE ':memory:' AS other").is_err());
         assert!(query(&mut cx, "SELECT * FROM calendar_credential").is_err());
-        let result = query(&mut cx, "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<201) SELECT x FROM n").unwrap();
+        let result =
+            query(&mut cx, "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<201) SELECT x FROM n")
+                .unwrap();
         assert_eq!(result["rows"].as_array().unwrap().len(), 200);
         assert_eq!(result["truncated"], true);
         assert!(!query(&mut cx, "SELECT name FROM sqlite_master").unwrap()["rows"].as_array().unwrap().is_empty());
         let guessed = query(&mut cx, "SELECT start_time FROM planned_session").unwrap_err().to_string();
-        assert!(guessed.contains("planned_session(") && guessed.contains("planned_start_at") && !guessed.contains("set_log("), "{guessed}");
+        assert!(
+            guessed.contains("planned_session(")
+                && guessed.contains("planned_start_at")
+                && !guessed.contains("set_log("),
+            "{guessed}"
+        );
         let missing = query(&mut cx, "SELECT * FROM sessions").unwrap_err().to_string();
         assert!(missing.contains("set_log(") && !missing.contains("calendar_credential"), "{missing}");
     }
 
     #[test]
     fn notes_stay_within_budget_but_can_always_shrink() {
-        let db = crate::domain::workout::tests::db();
+        let db = crate::db::test::db();
         let dir = std::env::temp_dir();
         let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
         let limit = budget(NoteKind::Learned);
@@ -255,5 +293,4 @@ mod tests {
         assert!(NoteEdit { id, text: "a".repeat(limit + 1) }.run(&mut cx).is_err());
         NoteEdit { id, text: "a".repeat(limit - 1) }.run(&mut cx).unwrap();
     }
-
 }

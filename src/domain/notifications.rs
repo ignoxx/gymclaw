@@ -1,4 +1,4 @@
-//! Durable session reminders (port of notifications.py). The runtime scheduler fires them. Owner: lead.
+//! Durable session reminders. The runtime scheduler fires them.
 use serde_json::{Value, json};
 
 use crate::db::models::{JobKind, JobStatus, NotificationJob, PlannedSession, SessionStatus};
@@ -17,11 +17,20 @@ pub fn pending_jobs(db: &Connection) -> Result<Vec<Value>> {
 
 /// Cancel a planned session's pending reminders.
 pub fn cancel_session_jobs(db: &Connection, session_id: &str, now: Ts) -> Result<()> {
-    for mut job in NotificationJob::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [session_id])? {
+    for mut job in NotificationJob::select(
+        db,
+        "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid",
+        [session_id],
+    )? {
         job.status = JobStatus::Cancelled;
         job.handled_at = Some(now);
         job.update(db)?;
-        emit(db, "notifications.cancel_required", now, json!({"job_id": job.id, "external_job_id": job.external_job_id}))?;
+        emit(
+            db,
+            "notifications.cancel_required",
+            now,
+            json!({"job_id": job.id, "external_job_id": job.external_job_id}),
+        )?;
     }
     Ok(())
 }
@@ -36,7 +45,11 @@ pub fn schedule_session_jobs(db: &Connection, session: &PlannedSession, now: Ts)
     }
     let revision = json!(session.source_revision);
     // Reminders of an older revision would be dropped as stale when due; cancel them now so pending jobs stay truthful.
-    for mut old in NotificationJob::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [&session.id])? {
+    for mut old in NotificationJob::select(
+        db,
+        "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid",
+        [&session.id],
+    )? {
         if old.payload_json.get("revision") != Some(&revision) {
             old.status = JobStatus::Cancelled;
             old.handled_at = Some(now);
@@ -53,13 +66,27 @@ pub fn schedule_session_jobs(db: &Connection, session: &PlannedSession, now: Ts)
         if due <= now {
             continue;
         }
-        if existing.iter().any(|j| j.kind == kind && j.due_at == due && j.status != JobStatus::Cancelled && j.payload_json.get("revision") == Some(&revision)) {
+        if existing.iter().any(|j| {
+            j.kind == kind
+                && j.due_at == due
+                && j.status != JobStatus::Cancelled
+                && j.payload_json.get("revision") == Some(&revision)
+        }) {
             continue;
         }
         let job = NotificationJob {
-            id: new_id(), kind, workout_session_id: None, planned_session_id: Some(session.id.clone()), set_log_id: None, due_at: due,
-            status: JobStatus::Pending, payload_json: Json(json!({"session_id": session.id, "revision": session.source_revision, "instruction": message})),
-            external_job_id: None, handled_at: None,
+            id: new_id(),
+            kind,
+            workout_session_id: None,
+            planned_session_id: Some(session.id.clone()),
+            set_log_id: None,
+            due_at: due,
+            status: JobStatus::Pending,
+            payload_json: Json(
+                json!({"session_id": session.id, "revision": session.source_revision, "instruction": message}),
+            ),
+            external_job_id: None,
+            handled_at: None,
         };
         job.insert(db)?;
         emit(db, "notifications.schedule_required", now, json!({"job_id": job.id, "due_at": due, "kind": kind}))?;

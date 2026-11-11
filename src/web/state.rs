@@ -1,5 +1,4 @@
-//! Read-only projection for the dashboard (port of gymclaw/dashboard_state.py). Same JSON, so the
-//! existing frontend (`web/`) works unchanged.
+//! Read-only projection for the dashboard: the JSON `web/app.js` renders.
 use std::collections::{BTreeMap, HashMap};
 
 use jiff::civil::{Date, DateTime};
@@ -9,8 +8,8 @@ use serde_json::{Value, json};
 
 use crate::db::Connection;
 use crate::db::models::{
-    AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession, RuntimeSettings, SetLog, SetType, UserProfile, WorkoutSession,
-    WorkoutTemplate,
+    AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession,
+    RuntimeSettings, SetLog, SetType, UserProfile, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
 use crate::domain::templates::get_template;
@@ -30,32 +29,14 @@ const ACTIVITY: [(&str, &str); 9] = [
     ("crowd.feedback_received", "Crowd rated"),
 ];
 
-fn hhmm(at: Ts, tz: &TimeZone) -> String {
-    at.local(tz).strftime("%H:%M").to_string()
-}
-
 fn fmt(at: Ts, tz: &TimeZone, pattern: &str) -> String {
     at.local(tz).strftime(pattern).to_string()
 }
 
-fn date_fmt(d: Date, pattern: &str) -> String {
-    d.strftime(pattern).to_string()
-}
-
-/// Python `f"{x:g}"` for weights: 40.0 → "40", 22.5 → "22.5".
-pub fn g(x: f64) -> String {
-    let text = format!("{x}");
-    text.strip_suffix(".0").map(String::from).unwrap_or(text)
-}
-
-/// Python's `round(x, digits)` (half to even).
+/// Round to `digits` decimals, half to even.
 fn round(x: f64, digits: i32) -> f64 {
     let scale = 10f64.powi(digits);
     (x * scale).round_ties_even() / scale
-}
-
-fn mean(values: &[f64]) -> f64 {
-    values.iter().sum::<f64>() / values.len() as f64
 }
 
 fn svg(name: &str, guide_id: Option<&str>) -> Option<String> {
@@ -70,18 +51,24 @@ fn start_of(day: Date, tz: &TimeZone) -> Result<Ts> {
 fn days(db: &Connection, tz: &TimeZone, today: Date) -> Result<Vec<Value>> {
     let start = start_of(today, tz)?;
     let end = start + SignedDuration::from_hours(24 * 7);
-    let rows = PlannedSession::select(db, "WHERE planned_start_at >= ?1 AND planned_start_at < ?2 AND status NOT IN ('CANCELLED', 'MISSED') ORDER BY planned_start_at", [start, end])?;
-    let by_day: HashMap<Date, &PlannedSession> = rows.iter().map(|r| (r.planned_start_at.local(tz).date(), r)).collect();
+    let rows = PlannedSession::select(
+        db,
+        "WHERE planned_start_at >= ?1 AND planned_start_at < ?2 AND status NOT IN ('CANCELLED', 'MISSED') ORDER BY planned_start_at",
+        [start, end],
+    )?;
+    let by_day: HashMap<Date, &PlannedSession> =
+        rows.iter().map(|r| (r.planned_start_at.local(tz).date(), r)).collect();
     let mut out = vec![];
     for offset in 0..7 {
         let day = today.checked_add(offset.days())?;
         let session = by_day.get(&day).map(|row| {
-            let forecast = row.workout_plan_json.get("crowd_forecast").filter(|f| f.is_object()).cloned().unwrap_or(json!({}));
-            json!({"start": hhmm(row.planned_start_at, tz), "end": hhmm(row.planned_end_at, tz), "status": row.status,
+            let forecast =
+                row.workout_plan_json.get("crowd_forecast").filter(|f| f.is_object()).cloned().unwrap_or(json!({}));
+            json!({"start": fmt(row.planned_start_at, tz, "%H:%M"), "end": fmt(row.planned_end_at, tz, "%H:%M"), "status": row.status,
                 "template": row.workout_plan_json.pointer("/template/name").cloned().unwrap_or(json!("Workout")),
                 "crowd": forecast.get("feel"), "count": forecast.get("count")})
         });
-        out.push(json!({"name": date_fmt(day, "%a"), "date": day.day(), "today": offset == 0, "session": session}));
+        out.push(json!({"name": day.strftime("%a").to_string(), "date": day.day(), "today": offset == 0, "session": session}));
     }
     Ok(out)
 }
@@ -101,12 +88,18 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     let mut exercises = vec![];
     for spec in &template.exercises {
         let last = preview::last_set(db, &spec.id)?;
-        let reps = if spec.rep_min == spec.rep_max { spec.rep_min.to_string() } else { format!("{}–{}", spec.rep_min, spec.rep_max) };
+        let reps = if spec.rep_min == spec.rep_max {
+            spec.rep_min.to_string()
+        } else {
+            format!("{}–{}", spec.rep_min, spec.rep_max)
+        };
         exercises.push(json!({"name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
-            "reps": reps, "last": last.map(|l| format!("{} × {} kg", l.reps, g(l.weight)))}));
+            "reps": reps, "last": last.map(|l| format!("{} × {} kg", l.reps, workout::g(l.weight)))}));
     }
-    Ok(json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": hhmm(row.leave_home_at, tz),
-        "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}))
+    Ok(
+        json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": fmt(row.leave_home_at, tz, "%H:%M"),
+        "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}),
+    )
 }
 
 /// The owner's workout plans (demo fixtures only when there are no others), each exercise with
@@ -133,17 +126,29 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
 
 /// Every catalog entry, for the dashboard's catalog browser. Static, so it is not part of the state.
 pub fn catalog() -> Vec<Value> {
-    illustrations::catalog().values().map(|i| json!({"guide_id": i.slug, "name": i.name, "equipment": i.equipment, "muscle": i.primary_muscle,
-        "svg_url": format!("/illustrations/{}.svg", i.slug)})).collect()
+    illustrations::catalog()
+        .values()
+        .map(|i| {
+            json!({"guide_id": i.slug, "name": i.name, "equipment": i.equipment, "muscle": i.primary_muscle,
+        "svg_url": format!("/illustrations/{}.svg", i.slug)})
+        })
+        .collect()
 }
 
 fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
-    let Some(w) = WorkoutSession::first(db, "WHERE status != 'PLAN_UPDATED' AND started_at IS NOT NULL ORDER BY started_at DESC", [])? else {
+    let Some(w) = WorkoutSession::first(
+        db,
+        "WHERE status != 'PLAN_UPDATED' AND started_at IS NOT NULL ORDER BY started_at DESC",
+        [],
+    )?
+    else {
         return Ok(Value::Null);
     };
     let data = workout::current(db, &w.id, now)?;
     let mut exercises = vec![];
-    for row in workout::exercises(db, &w.id)?.iter().filter(|r| r.status != crate::db::models::ExerciseStatus::Substituted) {
+    for row in
+        workout::exercises(db, &w.id)?.iter().filter(|r| r.status != crate::db::models::ExerciseStatus::Substituted)
+    {
         let name = row.config_json["name"].as_str().unwrap_or_default();
         exercises.push(json!({"id": row.id, "name": name, "svg_url": svg(name, row.config_json["guide_id"].as_str()), "sets": row.planned_working_sets,
             "done": workout::logs(db, &row.id, Some(SetType::Working))?.len(), "status": row.status}));
@@ -154,15 +159,17 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         "WHERE set_type = 'WORKING' AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1) ORDER BY logged_at DESC",
         [&w.id],
     )?;
-    let eta = data["eta"].as_str().and_then(|e| Ts::parse(e, None).ok()).map(|e| hhmm(e, tz));
+    let eta = data["eta"].as_str().and_then(|e| Ts::parse(e, None).ok()).map(|e| fmt(e, tz, "%H:%M"));
     let active = if active.is_object() {
         json!({"id": active["id"], "name": active["name"], "set_type": active["set_type"], "set_number": active["set_number"], "sets": active["working_sets"],
             "weight": active["target_weight"], "rep_min": active["rep_min"], "rep_max": active["rep_max"]})
     } else {
         Value::Null
     };
-    Ok(json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
-        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| format!("{} × {} kg", l.reps, g(l.weight))), "exercises": exercises}))
+    Ok(
+        json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
+        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| format!("{} × {} kg", l.reps, workout::g(l.weight))), "exercises": exercises}),
+    )
 }
 
 /// Wall-clock minutes since 1970-01-01 in `tz`; lets the browser slice days/weeks without timezone math.
@@ -173,10 +180,18 @@ fn local_minutes(at: Ts, tz: &TimeZone) -> i64 {
 }
 
 fn crowd_state(db: &Connection, tz: &TimeZone, now: Ts, polling: bool) -> Result<Value> {
-    let rows = CrowdObservation::select(db, "WHERE source = 'GYM_API' AND observed_at <= ?1 AND observed_at >= ?2 ORDER BY observed_at", [now, now - SignedDuration::from_hours(24 * 400)])?;
-    let latest = rows.last().map(|r| json!({"count": r.raw_value, "at": r.observed_at, "time": hhmm(r.observed_at, tz)}));
-    Ok(json!({"now": latest, "local_now": local_minutes(now, tz), "series": rows.iter().map(|r| json!([local_minutes(r.observed_at, tz), r.raw_value])).collect::<Vec<_>>(),
-        "polling": polling, "health": crowd::polling_health(db, now)?}))
+    let rows = CrowdObservation::select(
+        db,
+        "WHERE source = 'GYM_API' AND observed_at <= ?1 AND observed_at >= ?2 ORDER BY observed_at",
+        [now, now - SignedDuration::from_hours(24 * 400)],
+    )?;
+    let latest = rows
+        .last()
+        .map(|r| json!({"count": r.raw_value, "at": r.observed_at, "time": fmt(r.observed_at, tz, "%H:%M")}));
+    Ok(
+        json!({"now": latest, "local_now": local_minutes(now, tz), "series": rows.iter().map(|r| json!([local_minutes(r.observed_at, tz), r.raw_value])).collect::<Vec<_>>(),
+        "polling": polling, "health": crowd::polling_health(db, now)?}),
+    )
 }
 
 /// Planned workouts the attendance chart can show (same 400 days back as `series`, ~6 weeks ahead),
@@ -187,8 +202,13 @@ fn crowd_sessions(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>>
         "WHERE status != 'CANCELLED' AND planned_start_at >= ?1 AND planned_start_at < ?2 ORDER BY planned_start_at",
         [now - SignedDuration::from_hours(24 * 400), now + SignedDuration::from_hours(24 * 42)],
     )?;
-    Ok(rows.iter().map(|r| json!({"start": local_minutes(r.planned_start_at, tz), "status": r.status,
-        "name": r.workout_plan_json.pointer("/template/name").cloned().unwrap_or(json!("Workout"))})).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({"start": local_minutes(r.planned_start_at, tz), "status": r.status,
+        "name": r.workout_plan_json.pointer("/template/name").cloned().unwrap_or(json!("Workout"))})
+        })
+        .collect())
 }
 
 fn label(rating: &str) -> Value {
@@ -202,8 +222,13 @@ fn present(s: Option<&str>) -> Option<&str> {
 /// Finished workouts, newest first, with every working set. PRs: a heavier top set than any earlier
 /// session of that exercise.
 fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
-    let workouts = WorkoutSession::select(db, "WHERE status = 'PLAN_UPDATED' AND completed_at IS NOT NULL ORDER BY completed_at", [])?;
-    let ratings: HashMap<String, String> = CrowdFeedback::select(db, "", [])?.into_iter().map(|f| (f.workout_session_id, f.rating)).collect();
+    let workouts = WorkoutSession::select(
+        db,
+        "WHERE status = 'PLAN_UPDATED' AND completed_at IS NOT NULL ORDER BY completed_at",
+        [],
+    )?;
+    let ratings: HashMap<String, String> =
+        CrowdFeedback::select(db, "", [])?.into_iter().map(|f| (f.workout_session_id, f.rating)).collect();
     // Early workouts predate guide_ids; current templates know each exercise's illustration/muscle.
     let mut guides: HashMap<String, Option<String>> = HashMap::new();
     for t in WorkoutTemplate::select(db, "", [])? {
@@ -217,7 +242,8 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
     let mut best: HashMap<String, f64> = HashMap::new();
     let mut result = vec![];
     for w in &workouts {
-        let (mut exercises, mut volume, mut sets, mut prs, mut last_log, mut abandoned) = (vec![], 0.0, 0, vec![], None::<Ts>, false);
+        let (mut exercises, mut volume, mut sets, mut prs, mut last_log, mut abandoned) =
+            (vec![], 0.0, 0, vec![], None::<Ts>, false);
         for row in workout::exercises(db, &w.id)? {
             abandoned |= row.deferred_reason.as_deref() == Some("abandoned");
             let done = workout::logs(db, &row.id, Some(SetType::Working))?;
@@ -236,7 +262,8 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
                 .or_else(|| present(guides.get(&row.exercise_id).and_then(|g| g.as_deref())))
                 .unwrap_or(&row.exercise_id);
             // An id that isn't a catalog slug falls back to an exact catalog name for its picture.
-            let muscle = illustrations::primary_muscle(Some(guide)).or_else(|| illustrations::search(&name, None, None, 1).first().map(|e| e.primary_muscle.clone()));
+            let muscle = illustrations::primary_muscle(Some(guide))
+                .or_else(|| illustrations::search(&name, None, None, 1).first().map(|e| e.primary_muscle.clone()));
             exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, illustrations::catalog().contains_key(guide).then_some(guide)),
                 "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps})).collect::<Vec<_>>()}));
         }
@@ -272,16 +299,23 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
         let start = monday.checked_sub((7 * back).days())?;
         let end = start.checked_add(7.days())?;
         let count = done.iter().filter(|w| (start..end).contains(&workout_date(w))).count();
-        weeks.push(json!({"label": date_fmt(start, "%-d %b"), "start": start.to_string(), "count": count}));
+        weeks.push(json!({"label": start.strftime("%-d %b").to_string(), "start": start.to_string(), "count": count}));
     }
-    let volume_between = |start: Date, end: Date| -> i64 { done.iter().filter(|w| (start..end).contains(&workout_date(w))).map(|w| w["volume"].as_i64().unwrap_or(0)).sum() };
+    let volume_between = |start: Date, end: Date| -> i64 {
+        done.iter().filter(|w| (start..end).contains(&workout_date(w))).map(|w| w["volume"].as_i64().unwrap_or(0)).sum()
+    };
     let mut order: Vec<String> = vec![];
     let mut progress: HashMap<String, Value> = HashMap::new();
     for w in done.iter().rev() {
         for exercise in w["exercises"].as_array().into_iter().flatten() {
             let sets = exercise["sets"].as_array().cloned().unwrap_or_default();
-            // Best set by estimated 1-rep max, so 12 × 40 and 8 × 50 compare on one line (first max wins, like Python).
-            let key = |s: &Value| (one_rep_max(s["weight"].as_f64().unwrap_or(0.0), s["reps"].as_i64().unwrap_or(0)), s["reps"].as_i64().unwrap_or(0));
+            // Best set by estimated 1-rep max, so 12 × 40 and 8 × 50 compare on one line (on a tie the first set wins).
+            let key = |s: &Value| {
+                (
+                    one_rep_max(s["weight"].as_f64().unwrap_or(0.0), s["reps"].as_i64().unwrap_or(0)),
+                    s["reps"].as_i64().unwrap_or(0),
+                )
+            };
             let Some(top) = sets.iter().fold(None::<&Value>, |best, s| match best {
                 Some(b) if key(b).partial_cmp(&key(s)) != Some(std::cmp::Ordering::Less) => Some(b),
                 _ => Some(s),
@@ -308,21 +342,34 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
                 muscle_order.push(key);
                 (0.0, 0)
             });
-            entry.0 += sets.iter().map(|s| s["weight"].as_f64().unwrap_or(0.0) * s["reps"].as_f64().unwrap_or(0.0)).sum::<f64>();
+            entry.0 += sets
+                .iter()
+                .map(|s| s["weight"].as_f64().unwrap_or(0.0) * s["reps"].as_f64().unwrap_or(0.0))
+                .sum::<f64>();
             entry.1 += sets.len() as i64;
         }
     }
-    let mut muscle_list: Vec<(String, f64, i64)> = muscle_order.into_iter().map(|m| (m.clone(), muscles[&m].0, muscles[&m].1)).collect();
+    let mut muscle_list: Vec<(String, f64, i64)> =
+        muscle_order.into_iter().map(|m| (m.clone(), muscles[&m].0, muscles[&m].1)).collect();
     muscle_list.sort_by(|a, b| b.1.total_cmp(&a.1));
     // Gym crowd by weekday × hour: mean of daily means, so busy days don't count twice.
     let mut cells: BTreeMap<(i8, i8), BTreeMap<Date, Vec<f64>>> = BTreeMap::new();
-    for row in CrowdObservation::select(db, "WHERE source = 'GYM_API' AND observed_at >= ?1", [now - SignedDuration::from_hours(24 * 90)])? {
+    for row in CrowdObservation::select(
+        db,
+        "WHERE source = 'GYM_API' AND observed_at >= ?1",
+        [now - SignedDuration::from_hours(24 * 90)],
+    )? {
         let local = row.observed_at.local(tz);
-        cells.entry((local.weekday().to_monday_zero_offset(), local.hour())).or_default().entry(local.date()).or_default().push(row.raw_value);
+        cells
+            .entry((local.weekday().to_monday_zero_offset(), local.hour()))
+            .or_default()
+            .entry(local.date())
+            .or_default()
+            .push(row.raw_value);
     }
     let heatmap: Vec<Value> = cells
         .iter()
-        .map(|((d, h), dates)| json!({"weekday": d, "hour": h, "count": round(mean(&dates.values().map(|v| mean(v)).collect::<Vec<_>>()), 1), "days": dates.len()}))
+        .map(|((d, h), dates)| json!({"weekday": d, "hour": h, "count": round(crowd::mean(&dates.values().map(|v| crowd::mean(v)).collect::<Vec<_>>()), 1), "days": dates.len()}))
         .collect();
     let recent_cut = today.checked_sub(30.days())?;
     let recent: Vec<&Value> = done.iter().filter(|w| workout_date(w) >= recent_cut).collect();
@@ -344,7 +391,7 @@ fn body_weight(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>> {
         .iter()
         .map(|row| {
             let week: Vec<f64> = rows.iter().filter(|r| row.measured_at - SignedDuration::from_hours(24 * 7) < r.measured_at && r.measured_at <= row.measured_at).map(|r| r.kg).collect();
-            json!({"date": row.measured_at.local(tz).date().to_string(), "label": fmt(row.measured_at, tz, "%a %-d %b %Y"), "kg": row.kg, "avg": round(mean(&week), 1)})
+            json!({"date": row.measured_at.local(tz).date().to_string(), "label": fmt(row.measured_at, tz, "%a %-d %b %Y"), "kg": row.kg, "avg": round(crowd::mean(&week), 1)})
         })
         .collect())
 }
@@ -354,10 +401,18 @@ fn body_weight(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>> {
 fn memory(db: &Connection) -> Result<Value> {
     let notes = crate::tools::meta::notes(db)?;
     let list = |kind: NoteKind| -> Vec<Value> {
-        notes.iter().filter(|n| n.kind == kind).map(|n| json!({"id": n.id, "text": n.text, "updated_at": iso(&n.updated_at.local(&TimeZone::UTC))})).collect()
+        notes
+            .iter()
+            .filter(|n| n.kind == kind)
+            .map(|n| json!({"id": n.id, "text": n.text, "updated_at": iso(&n.updated_at.local(&TimeZone::UTC))}))
+            .collect()
     };
-    let usage = |kind: NoteKind| -> Result<Value> { Ok(json!({"used": crate::tools::meta::used(db, kind)?, "limit": crate::tools::meta::budget(kind)})) };
-    Ok(json!({"owner": list(NoteKind::Owner), "learned": list(NoteKind::Learned), "usage": {"owner": usage(NoteKind::Owner)?, "learned": usage(NoteKind::Learned)?}}))
+    let usage = |kind: NoteKind| -> Result<Value> {
+        Ok(json!({"used": crate::tools::meta::used(db, kind)?, "limit": crate::tools::meta::budget(kind)}))
+    };
+    Ok(
+        json!({"owner": list(NoteKind::Owner), "learned": list(NoteKind::Learned), "usage": {"owner": usage(NoteKind::Owner)?, "learned": usage(NoteKind::Learned)?}}),
+    )
 }
 
 /// The whole dashboard state.
@@ -376,10 +431,10 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     crowd["sessions"] = json!(crowd_sessions(db, &tz, now)?);
     Ok(json!({
         "demo": false, "live_database_accessed": true, "captured_at": iso(&now.local(&TimeZone::UTC)), "timezone": profile.timezone,
-        "range": format!("{} – {}", date_fmt(today, "%-d %b"), date_fmt(today.checked_add(6.days())?, "%-d %b")),
+        "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
         "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "plans": plans(db)?,
-        "activity": events.iter().map(|e| json!({"time": hhmm(e.created_at, &tz), "day": fmt(e.created_at, &tz, "%a"),
+        "activity": events.iter().map(|e| json!({"time": fmt(e.created_at, &tz, "%H:%M"), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
     }))
 }
