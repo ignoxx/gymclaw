@@ -738,10 +738,9 @@ mod tests {
         assert_eq!(second["data"]["active_exercise"]["target_weight"], 50.0); // warm-up unchanged
         let row = second["data"]["active_exercise"]["id"].as_str().unwrap();
         assert_eq!(WorkoutExercise::get(&db, row).unwrap().unwrap().target_weight, 82.5);
-        let replans: i64 = db
-            .query_row("SELECT count(*) FROM agent_event WHERE type = 'planning.replan_required'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(replans, 1);
+        // The finish wakes the agent once for its wrap-up (it used to be a replan it read as housekeeping).
+        let wakes = crate::domain::events::wake_pending(&db).unwrap();
+        assert_eq!(wakes.iter().filter(|e| e["type"] == "workout.wrap_up").count(), 1);
     }
 
     /// The owner always did the plan's new exercise: relabeling each past workout onto it gathers the

@@ -11,7 +11,7 @@ use crate::time::Ts;
 /// owner hears about a lasting outage from `crowd::polling_alert`.
 /// A personal-calendar change is not here: it never moves a session, and a conflict it causes arrives as
 /// `planning.attention`, so waking the agent for the change itself only invites an empty reply.
-pub const ACTIONABLE: [&str; 8] = [
+pub const ACTIONABLE: [&str; 9] = [
     "notifications.delivery_unknown",
     "calendar.write_blocked",
     "planning.attention",
@@ -20,6 +20,7 @@ pub const ACTIONABLE: [&str; 8] = [
     "workout.missed",
     "planning.weekly_briefing",
     "workout.stale",
+    "workout.wrap_up",
 ];
 
 /// One event per distinct situation, including across restarts and acknowledgement. A quiet timer
@@ -71,8 +72,14 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 /// Only decisions wake the model. Delivery/permission issues stay in the inbox until explicitly
 /// resolved; acknowledging a model wake must not imply the owner granted authority. A no-show is
 /// sent by the outbox as the session's own message; the owner's answer reaches the agent.
-pub const WAKE: [&str; 5] =
-    ["planning.attention", "planning.replan_required", "workout.missed", "planning.weekly_briefing", "workout.stale"];
+pub const WAKE: [&str; 6] = [
+    "planning.attention",
+    "planning.replan_required",
+    "workout.missed",
+    "planning.weekly_briefing",
+    "workout.stale",
+    "workout.wrap_up",
+];
 
 /// The weekly review waits while the Sunday recap is still queued or sending: the agent's take follows
 /// the recap, whether it went out or not.
