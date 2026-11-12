@@ -550,6 +550,12 @@ impl Bot {
                 Err(_) => {}
             }
         }
+        if reply.message.is_none() && !outcome.actions.is_empty() {
+            // Nothing sent, but state changed: later turns still need to know what this one did.
+            let text = crate::agent::context::saved(outcome.actions.iter().map(String::as_str));
+            let meta = json!({"kind": crate::agent::context::SILENT_ACTIONS, "run": outcome.run_id});
+            self.remember(ChatRole::Bot, format!("Silent turn. {text}"), None, meta).await;
+        }
         if let Some(message) = &reply.message {
             let buttons: Vec<(String, String)> =
                 message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
@@ -592,7 +598,7 @@ impl Bot {
             "ok": sent.is_ok(), "error": sent.as_ref().err().map(|e| scrub(&e.to_string(), 500)), "text": scrub(text, 4000)}));
         match sent {
             Ok(id) => {
-                let meta = json!({"kind": if outcome.failed { "failure" } else { "reply" }, "run": outcome.run_id, "buttons": buttons.iter().map(|b| &b.0).collect::<Vec<_>>()});
+                let meta = json!({"kind": if outcome.failed { "failure" } else { "reply" }, "run": outcome.run_id, "buttons": buttons.iter().map(|b| &b.0).collect::<Vec<_>>(), "actions": outcome.actions});
                 self.remember(ChatRole::Assistant, text.to_string(), Some(id), meta).await;
                 true
             }
