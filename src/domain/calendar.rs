@@ -479,7 +479,7 @@ mod tests {
         let db = crate::db::test::db();
         let mut provider = FixtureCalendarProvider::default();
         update_profile(&db, &changes(json!({"earliest_workout_start": "19:00", "latest_workout_finish": "21:10", "minimum_workout_minutes": 70,
-            "default_compound_rest_seconds": 180, "default_accessory_rest_seconds": 120}))).unwrap();
+            "rest_seconds": 120}))).unwrap();
         let specs: Vec<Value> = [("bench", 10), ("row", 9), ("fly", 6), ("raise", 5), ("curl", 3), ("triceps", 2)]
             .map(|(key, priority)| {
                 let mut name = key.to_string();

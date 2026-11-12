@@ -72,7 +72,9 @@ pub struct Template {
     pub id: String,
     pub name: String,
     pub exercises: Vec<ExerciseSpec>,
+    /// Swap options, with the same fields as an exercise. Keep the saved ones when re-saving, or they are lost.
     #[serde(default)]
+    #[schemars(with = "Vec<serde_json::Map<String, serde_json::Value>>")]
     pub alternatives: Vec<ExerciseSpec>,
     #[serde(default = "d40")]
     pub set_duration_seconds: i64,

@@ -512,6 +512,11 @@ pub fn resolve_delivery(db: &Connection, delivery_id: &str, sent: bool, now: Ts)
     row.status = if sent { DeliveryStatus::Sent } else { DeliveryStatus::Pending };
     row.handled_at = Some(now);
     row.update(db)?;
+    // The owner answered the open question either way; left open it sat in the agent's open issues.
+    db.execute(
+        "UPDATE agent_event SET handled_at = ?1 WHERE type = 'notifications.delivery_unknown' AND handled_at IS NULL AND payload_json ->> 'delivery_id' = ?2",
+        rusqlite::params![now, row.id],
+    )?;
     if sent {
         acknowledge_delivery_events(db, &row, now)?;
     }
@@ -605,6 +610,11 @@ mod tests {
         assert!(ok.calls().is_empty());
         // The owner says it never arrived: queued again, then sent once.
         resolve_delivery(&db, &id, false, now()).unwrap();
+        assert!(
+            AgentEvent::first(&db, "WHERE type = 'notifications.delivery_unknown' AND handled_at IS NULL", [])
+                .unwrap()
+                .is_none()
+        );
         let data = deliver(&path, ok.as_ref(), &id, now()).await.unwrap();
         assert_eq!((data["status"].as_str(), data["external_message_id"].as_str()), (Some("SENT"), Some("100")));
         assert_eq!(ok.calls().len(), 1);

@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::{Ctx, Effect, Tool, ToolDef, def};
+use super::{Ctx, Effect, Listed, Tool, ToolDef, def};
 use crate::domain::backfill::{PastSet, log_past};
 use crate::domain::body::{self, WeighIn};
 use crate::domain::coach::{self, Action};
@@ -222,6 +222,7 @@ pub struct WorkoutAudit {
 
 impl Tool for WorkoutAudit {
     const NAME: &'static str = "workout_audit";
+    const LISTED: Listed = Listed::Never;
     const DESCRIPTION: &'static str =
         "Saved audit of a finished workout: sets, duration, ETA error, progressions, crowd feedback.";
 
@@ -406,6 +407,7 @@ pub struct OnboardingStatus {}
 impl Tool for OnboardingStatus {
     const NAME: &'static str = "onboarding_status";
     const DESCRIPTION: &'static str = "Setup progress: step (INTERVIEW, PLAN, REVIEW, READY), the next question, answers so far, and the review fingerprint.";
+    const LISTED: Listed = Listed::InSetup;
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         onboarding::status(cx.db)
@@ -424,6 +426,7 @@ pub struct OnboardingAnswer {
 
 impl Tool for OnboardingAnswer {
     const NAME: &'static str = "onboarding_answer";
+    const LISTED: Listed = Listed::InSetup;
     const DESCRIPTION: &'static str =
         "Save the owner's interview answers (only what they actually said; defaults never count).";
 
@@ -451,7 +454,7 @@ pub struct PlanSet {
 impl Tool for PlanSet {
     const NAME: &'static str = "plan_set";
     const DESCRIPTION: &'static str = "Set the owner's training plan: in setup, and whenever the owner changes what they train or how often. \
-        You plan workouts by it; code only rotates the templates as a default for sessions you haven't given one (side_effects).";
+        You plan workouts by it; code only gives a newly drafted session a default template, never changes one afterwards.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         onboarding::update(
@@ -472,6 +475,7 @@ pub struct OnboardingFinish {
 
 impl Tool for OnboardingFinish {
     const NAME: &'static str = "onboarding_finish";
+    const LISTED: Listed = Listed::InSetup;
     const DESCRIPTION: &'static str =
         "Finish setup after the owner confirmed the summary. Grants no calendar or runtime authority.";
 
@@ -504,6 +508,7 @@ pub struct BodyList {}
 impl Tool for BodyList {
     const NAME: &'static str = "body_list";
     const DESCRIPTION: &'static str = "All weigh-ins (newest first) and the weekly trend.";
+    const LISTED: Listed = Listed::Never;
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let zone = get_profile(cx.db)?.tz();

@@ -32,33 +32,75 @@ pub enum Effect {
     Coach(CoachView),
 }
 
+/// Whether the model is offered a tool. A hidden tool still runs when called by name (from `gymclaw call`,
+/// the dashboard, or a model that remembers it); it just stops costing context on every call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listed {
+    Always,
+    /// A read the state snapshot or `sql_query` already covers.
+    Never,
+    /// Only until setup is finished; setup never restarts.
+    InSetup,
+}
+
 pub trait Tool: DeserializeOwned + JsonSchema {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
+    const LISTED: Listed = Listed::Always;
     fn run(self, cx: &mut Ctx) -> Result<Value>;
 }
 
 pub struct ToolDef {
     pub name: &'static str,
     pub description: &'static str,
+    pub listed: Listed,
     /// JSON schema of the arguments (inlined, no `$ref`s).
     pub schema: fn() -> Value,
     pub call: fn(&mut Ctx, Value) -> Result<Value>,
+}
+
+/// Inlined JSON schema of a tool's arguments. The struct's own doc comment is dropped: it is written
+/// for developers, and the tool description already tells the model what the call is for.
+/// Number formats (`int64`, `double`) and `default: null` are dropped too: serde checks those, and they
+/// cost context on every call.
+pub fn schema<T: JsonSchema>() -> Value {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("format");
+                if object.get("default").is_some_and(Value::is_null) {
+                    object.remove("default");
+                }
+                for (key, child) in object.iter_mut() {
+                    if key == "properties" {
+                        // Field names, not keywords: a field called `format` stays.
+                        child.as_object_mut().into_iter().flat_map(|p| p.values_mut()).for_each(strip);
+                    } else {
+                        strip(child);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let settings = schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
+    let mut schema = settings.into_generator().into_root_schema_for::<T>().to_value();
+    if let Some(object) = schema.as_object_mut() {
+        for key in ["$schema", "title", "description"] {
+            object.remove(key);
+        }
+    }
+    strip(&mut schema);
+    schema
 }
 
 pub fn def<T: Tool>() -> ToolDef {
     ToolDef {
         name: T::NAME,
         description: T::DESCRIPTION,
-        schema: || {
-            let settings = schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
-            let mut schema = settings.into_generator().into_root_schema_for::<T>().to_value();
-            if let Some(object) = schema.as_object_mut() {
-                object.remove("$schema");
-                object.remove("title");
-            }
-            schema
-        },
+        listed: T::LISTED,
+        schema: schema::<T>,
         call: |cx, args| {
             let args = if args.is_null() { Value::Object(Default::default()) } else { args };
             let parsed: T = serde_json::from_value(args)

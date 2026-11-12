@@ -1,4 +1,4 @@
--- Generated from a fresh `gymclaw migrate` (user_version 4); don't edit. When a migration
+-- Generated from a fresh `gymclaw migrate` (user_version 5); don't edit. When a migration
 -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
 
 CREATE TABLE agent_button (
@@ -333,12 +333,9 @@ CREATE TABLE user_profile (
 	prep_minutes INTEGER NOT NULL, 
 	commute_to_gym_minutes INTEGER NOT NULL, 
 	commute_home_minutes INTEGER NOT NULL, 
-	warmup_policy VARCHAR NOT NULL, 
-	default_compound_rest_seconds INTEGER NOT NULL, 
-	default_accessory_rest_seconds INTEGER NOT NULL, 
+	rest_seconds INTEGER NOT NULL, 
 	crowd_preference_weight DOUBLE NOT NULL, 
 	calendar_preference_weight DOUBLE NOT NULL, 
-	recovery_weight DOUBLE NOT NULL, 
 	created_at DATETIME NOT NULL, 
 	updated_at DATETIME NOT NULL, gym_address VARCHAR, 
 	PRIMARY KEY (id), 

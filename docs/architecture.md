@@ -45,8 +45,7 @@ serves the agent and `gymclaw call`, so anything the agent can do can be reprodu
 
 Tools include general `session_create`/`session_update` (exact time, duration, template, status),
 read-only `sql_query`, `get_week`, `workout`, and profile/notes tools. Session edits lock the session
-and return rule warnings; no other sessions change. Mutations that touch other sessions return
-`side_effects`, so a reply can't contradict the state. Tools that show something in Telegram push
+and return rule warnings; no other sessions change. Tools that show something in Telegram push
 `Effect::Coach(CoachView)`; the runtime renders it after the transaction commits.
 
 The runtime derives `request_id` (`tg-<message id>-<call index>`, `tg-cb:<callback id>`), so the

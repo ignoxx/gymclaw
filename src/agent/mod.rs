@@ -141,19 +141,18 @@ pub struct Agent {
     pub clock: Arc<dyn Fn() -> Ts + Send + Sync>,
 }
 
-/// Tool definitions in OpenAI format, `reply` last.
-pub fn tool_specs() -> Vec<Value> {
+/// Tool definitions in OpenAI format, `reply` last: the tools the model is offered (see `tools::Listed`).
+pub fn tool_specs(setup_done: bool) -> Vec<Value> {
     let mut specs: Vec<Value> = tools::all()
         .iter()
+        .filter(|t| match t.listed {
+            tools::Listed::Always => true,
+            tools::Listed::Never => false,
+            tools::Listed::InSetup => !setup_done,
+        })
         .map(|t| json!({"type": "function", "function": {"name": t.name, "description": t.description, "parameters": (t.schema)()}}))
         .collect();
-    let settings = schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
-    let mut schema = settings.into_generator().into_root_schema_for::<Reply>().to_value();
-    if let Some(o) = schema.as_object_mut() {
-        o.remove("$schema");
-        o.remove("title");
-    }
-    specs.push(json!({"type": "function", "function": {"name": REPLY, "description": "Finish the turn: what the owner gets. Call it once, last. With no fields the owner gets nothing.", "parameters": schema}}));
+    specs.push(json!({"type": "function", "function": {"name": REPLY, "description": "Finish the turn: what the owner gets. Call it once, last. With no fields the owner gets nothing.", "parameters": tools::schema::<Reply>()}}));
     specs
 }
 
@@ -305,8 +304,13 @@ impl Agent {
         settles: &mut Vec<String>,
     ) -> Result<Reply> {
         let now = (self.clock)();
-        let ((system, shown), history, tz) = in_tx(&self.db_path, move |db| {
-            Ok((context::system(db, now)?, context::history(db)?, crate::domain::profile::get_profile(db)?.tz()))
+        let ((system, shown), history, tz, setup_done) = in_tx(&self.db_path, move |db| {
+            Ok((
+                context::system(db, now)?,
+                context::history(db)?,
+                crate::domain::profile::get_profile(db)?.tz(),
+                crate::domain::onboarding::finished(db)?,
+            ))
         })
         .await?;
         settles.extend(shown);
@@ -316,7 +320,7 @@ impl Agent {
         messages.extend(history);
         let images = media::attach(&mut messages, &input.images).await;
         let model = if images > 0 { &self.vision_model } else { &self.chat_model };
-        let specs = tool_specs();
+        let specs = tool_specs(setup_done);
         let prompt = messages
             .iter()
             .rev()

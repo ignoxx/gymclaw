@@ -626,12 +626,7 @@ pub fn handle_action(
 ) -> Result<CoachView> {
     let seconds = if action == Action::Rest { Some(needed(seconds, "seconds")?) } else { seconds };
     if action == Action::Rest && remember {
-        let changes: Map<String, Value> =
-            [("default_compound_rest_seconds", seconds), ("default_accessory_rest_seconds", seconds)]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), json!(v)))
-                .collect();
-        update_profile(db, &changes)?;
+        update_profile(db, &Map::from_iter([("rest_seconds".to_string(), json!(seconds))]))?;
     }
     if action == Action::Relabel {
         return relabel(db, None, needed(exercise, "exercise")?, which, now, request_id);
@@ -959,7 +954,7 @@ mod tests {
         let over = handle_tap(&db, &data(&rest, "−30s"), at(30), "cb-2").unwrap();
         assert!(over.cleanup == Some(Cleanup::Delete) && over.cards[0].kind == CardKind::Set);
         let profile = crate::domain::profile::get_profile(&db).unwrap();
-        assert_eq!((profile.default_compound_rest_seconds, profile.default_accessory_rest_seconds), (60, 60));
+        assert_eq!(profile.rest_seconds, 60);
     }
 
     #[test]
@@ -985,10 +980,7 @@ mod tests {
 
     #[test]
     fn one_rest_duration_overrides_per_exercise_settings() {
-        use crate::domain::{
-            compression::compress_template,
-            profile::{get_profile, update_profile},
-        };
+        use crate::domain::{compression::compress_template, profile::get_profile};
         let db = db();
         push(&db);
         handle_action(&db, Action::End, None, None, None, false, at(0), "end").unwrap();
@@ -1000,7 +992,6 @@ mod tests {
         template.exercises[0].warmup_weight = Some(40.0);
         template.exercises[1].rest_seconds = Some(60);
         import_template(&db, &template).unwrap();
-        update_profile(&db, &serde_json::from_value(json!({"default_compound_rest_seconds": 150})).unwrap()).unwrap();
         let result = start(&db, Some("push"), None, false, at(2), "restart").unwrap();
         let workout = active_workout(&db).unwrap().unwrap();
         assert!(exercises(&db, &workout.id).unwrap().iter().all(|row| row.rest_seconds == 120));

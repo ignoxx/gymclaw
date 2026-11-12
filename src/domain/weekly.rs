@@ -453,12 +453,22 @@ pub fn announce(db: &Connection, recipient: &str, now: Ts, unpublished: bool) ->
     crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient, &[])?;
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
-    let payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent, "calendar_published": !unpublished});
+    let payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
     let mut event = emit(db, "planning.weekly_briefing", now, payload)?;
     event.correlation_id = Some(key);
     event.update(db)?;
     Ok(json!({"event_id": event.id, "recap": message}))
 }
+
+/// How the agent answers the weekly briefing. It rides on the event, so the guidance costs context once a
+/// week instead of on every call.
+const WEEKLY_REVIEW: &str = "Weekly briefing. The recap the owner just got (in your context) already shows last week and \
+    next week's plan. Your take on it, up to five short lines: how the week really went (patterns and effort, not the recap's \
+    numbers), what next week asks of the owner, and anything in the plan that looks off (a clash, a slot they usually miss). \
+    Fix what you can and say what you changed; ask only what is the owner's call. Reply with no fields when you have nothing \
+    to add. It is also your weekly review: compare recent_sessions with your notes, then save, revise or delete learned notes \
+    on patterns that held for at least two weeks (when the owner really trains, which slots they miss or move). Mention a \
+    learning only when it changes next week's plan.";
 
 /// Weeks of sessions the Sunday review looks back on.
 const REVIEW_WEEKS: i64 = 4;
