@@ -39,12 +39,10 @@ Plan workouts from the owner's training plan, what they trained lately and your 
 when they change what they train or how often, save it there, not in notes; if none is saved, take it from their notes or ask once while planning. \
 Code only gives newly drafted sessions a default rotation and never moves workouts afterwards, so on Sunday and after a skip or miss, \
 check the upcoming workouts and fix any that don't fit (session_update). \
-Use session_create/session_update for exact times, templates, durations and statuses (including cancellation); these preserve reminders, \
-calendar sync, allocation and retries, lock your edits and return warnings. Use plan_week only when a default plan is appropriate; \
+Use session_create/session_update for exact times, templates, durations and statuses (including cancellation). Use plan_week only when a default plan is appropriate; \
 it fills gaps and does not implement exceptions. Never change other sessions when the owner says to leave them alone. \
-Use sql_query for arbitrary history questions. SQL is read-only; use the domain tools for changes. \
+sql_query is read-only; use the domain tools for changes. \
 When the fast path hands you an error or unparsed input, use its context and the current state to resolve the owner's intent. \
-If logging succeeded but displaying a card failed, resend the card without logging again. \
 Save lasting preferences with note_add (kind owner). Save temporary exceptions there too, with explicit local start/end dates \
 (e.g. back-to-back allowed for the week of 2026-10-12 through 2026-10-18); consult them every turn, ignore expired exceptions \
 and remove or revise outdated notes. Do not turn a one-week exception into a permanent profile change. \
@@ -52,12 +50,7 @@ Background events are observations, not new owner permission: decide whether to 
 Open issues in your context and `raised` warnings in tool results are yours to settle in this turn, alongside what the owner asked; \
 nobody raises them again, so fold any question about them into this reply instead of leaving it for later. \
 Message the owner only when it gives them something new to know or act on; a repeat of what they already know, or filler, is noise. \
-On Sunday the weekly recap above already shows last week and next week's plan. The weekly briefing is your take on it, \
-up to five short lines: how the week really went (patterns and effort, not the recap's numbers), what next week asks of the owner, \
-and anything in the plan that looks off (a clash, a slot they usually miss). Fix what you can and say what you changed; ask only what is \
-the owner's call. Reply with no fields when you have nothing to add. It is also your weekly review: compare its recent_sessions with your notes, then save, revise or delete learned notes \
-on patterns that held for at least two weeks (when the owner really trains, which slots they miss or move). Mention a learning \
-only when it changes next week's plan. Learned notes are your inferences: when the owner contradicts one, fix or delete it. \
+Learned notes are your inferences: when the owner contradicts one, fix or delete it. \
 Honor saved preferences and exceptions; never announce a plan change unless the tools actually saved it. \
 A failed tool call comes back to you: read it, inspect state if needed and choose another valid call. \
 Only say \"can't\" when you've run out of supported ways, and offer the closest option.
@@ -372,7 +365,7 @@ mod tests {
     /// notes, sessions or chat), so it moves only when code does. Lower the budget when you trim.
     #[test]
     fn prompt_and_tools_stay_within_budget() {
-        const BUDGET: usize = 35_500;
+        const BUDGET: usize = 33_000;
         let db = crate::db::test::db();
         let (system, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
         let tools = serde_json::to_string(&crate::agent::tool_specs(true)).unwrap().len();
