@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::{Ctx, Tool, ToolDef, def};
+use super::{Ctx, Listed, Tool, ToolDef, def};
 use crate::db::models::{BlockKind, OnboardingState, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
@@ -232,6 +232,7 @@ pub struct ProfileGet {}
 impl Tool for ProfileGet {
     const NAME: &'static str = "profile_get";
     const DESCRIPTION: &'static str = "The owner's training constraints: timezone, sessions per week, allowed weekdays, workout window, durations, commute, rest.";
+    const LISTED: Listed = Listed::Never;
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         Ok(serde_json::to_value(get_profile(cx.db)?)?)
@@ -306,6 +307,7 @@ pub struct AvailabilityList {}
 impl Tool for AvailabilityList {
     const NAME: &'static str = "availability_list";
     const DESCRIPTION: &'static str = "Away/sick/busy blocks, with whether each is in effect now.";
+    const LISTED: Listed = Listed::Never;
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         Ok(json!({"blocks": availability::list_blocks(cx.db, cx.now)?}))
@@ -384,6 +386,7 @@ pub struct EventsPending {
 
 impl Tool for EventsPending {
     const NAME: &'static str = "events_pending";
+    const LISTED: Listed = Listed::Never;
     const DESCRIPTION: &'static str =
         "Unhandled events that need attention (unknown deliveries, blocked calendar writes, crowd source down).";
 
@@ -399,7 +402,8 @@ pub struct EventAck {
 
 impl Tool for EventAck {
     const NAME: &'static str = "event_ack";
-    const DESCRIPTION: &'static str = "Mark an event handled once the owner knows about it.";
+    const DESCRIPTION: &'static str =
+        "Mark an open issue handled (id from its Open issue line) once the owner knows about it.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         events::ack(cx.db, &self.event_id, cx.now)
@@ -412,6 +416,7 @@ pub struct CalendarPendingWrites {}
 impl Tool for CalendarPendingWrites {
     const NAME: &'static str = "calendar_pending_writes";
     const DESCRIPTION: &'static str = "Calendar changes queued for Google Calendar but not published yet.";
+    const LISTED: Listed = Listed::Never;
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         Ok(json!({"writes": calendar_writes::pending_writes(cx.db)?}))
