@@ -46,19 +46,24 @@ pub struct ToolDef {
     pub call: fn(&mut Ctx, Value) -> Result<Value>,
 }
 
+/// Inlined JSON schema of a tool's arguments. The struct's own doc comment is dropped: it is written
+/// for developers, and the tool description already tells the model what the call is for.
+pub fn schema<T: JsonSchema>() -> Value {
+    let settings = schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
+    let mut schema = settings.into_generator().into_root_schema_for::<T>().to_value();
+    if let Some(object) = schema.as_object_mut() {
+        for key in ["$schema", "title", "description"] {
+            object.remove(key);
+        }
+    }
+    schema
+}
+
 pub fn def<T: Tool>() -> ToolDef {
     ToolDef {
         name: T::NAME,
         description: T::DESCRIPTION,
-        schema: || {
-            let settings = schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
-            let mut schema = settings.into_generator().into_root_schema_for::<T>().to_value();
-            if let Some(object) = schema.as_object_mut() {
-                object.remove("$schema");
-                object.remove("title");
-            }
-            schema
-        },
+        schema: schema::<T>,
         call: |cx, args| {
             let args = if args.is_null() { Value::Object(Default::default()) } else { args };
             let parsed: T = serde_json::from_value(args)

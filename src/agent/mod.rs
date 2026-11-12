@@ -147,13 +147,7 @@ pub fn tool_specs() -> Vec<Value> {
         .iter()
         .map(|t| json!({"type": "function", "function": {"name": t.name, "description": t.description, "parameters": (t.schema)()}}))
         .collect();
-    let settings = schemars::generate::SchemaSettings::draft07().with(|s| s.inline_subschemas = true);
-    let mut schema = settings.into_generator().into_root_schema_for::<Reply>().to_value();
-    if let Some(o) = schema.as_object_mut() {
-        o.remove("$schema");
-        o.remove("title");
-    }
-    specs.push(json!({"type": "function", "function": {"name": REPLY, "description": "Finish the turn: what the owner gets. Call it once, last. With no fields the owner gets nothing.", "parameters": schema}}));
+    specs.push(json!({"type": "function", "function": {"name": REPLY, "description": "Finish the turn: what the owner gets. Call it once, last. With no fields the owner gets nothing.", "parameters": tools::schema::<Reply>()}}));
     specs
 }
 

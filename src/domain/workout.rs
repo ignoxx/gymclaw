@@ -485,7 +485,7 @@ pub fn make_exercise(
         rep_min: spec.rep_min,
         rep_max: spec.rep_max,
         target_weight: progression.map_or(spec.target_weight, |p| p.next_weight),
-        rest_seconds: profile.rest_seconds(),
+        rest_seconds: profile.rest_seconds,
         substituted_from_exercise_id: None,
         deferred_reason: None,
         config_json: Json(config),
@@ -839,11 +839,8 @@ pub(crate) mod tests {
     }
 
     fn short(db: &Connection) -> String {
-        crate::domain::profile::update_profile(
-            db,
-            &serde_json::from_value(json!({"default_accessory_rest_seconds": 100})).unwrap(),
-        )
-        .unwrap();
+        crate::domain::profile::update_profile(db, &serde_json::from_value(json!({"rest_seconds": 100})).unwrap())
+            .unwrap();
         let bench = spec(
             json!({"id": "bench", "name": "Bench", "role": "press", "primary": true, "working_sets": 2, "target_weight": 80, "warmup_weight": 50, "rest_seconds": 100}),
         );

@@ -580,7 +580,6 @@ mod tests {
         );
         let changed = call(&db, "session_update", json!({"session_id": id, "fields": {"start": "2026-10-14T12:00", "end": "2026-10-14T13:10", "template_id": "legs", "status": "COMMITTED"}}), sunday(), "raw-update").unwrap();
         assert_eq!(changed["data"]["session"]["workout_plan"]["template"]["id"], "legs");
-        assert_eq!(changed["data"]["side_effects"], json!([]));
         let mut calendar =
             crate::providers::fixture_calendar::FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin");
         let write = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();

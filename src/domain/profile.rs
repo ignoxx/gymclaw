@@ -32,12 +32,11 @@ pub struct Profile {
     pub prep_minutes: i64,
     pub commute_to_gym_minutes: i64,
     pub commute_home_minutes: i64,
-    pub warmup_policy: String,
-    pub default_compound_rest_seconds: i64,
-    pub default_accessory_rest_seconds: i64,
+    /// Rest between sets, the same for every exercise. `rest` mid-workout changes it for that workout;
+    /// with `remember` it is saved here.
+    pub rest_seconds: i64,
     pub crowd_preference_weight: f64,
     pub calendar_preference_weight: f64,
-    pub recovery_weight: f64,
     /// Calendar event location: calendar apps derive travel time / time-to-leave from it.
     pub gym_address: Option<String>,
 }
@@ -58,24 +57,15 @@ impl Default for Profile {
             prep_minutes: 15,
             commute_to_gym_minutes: 20,
             commute_home_minutes: 20,
-            warmup_policy: "first_primary_exercise_one_warmup_set".into(),
-            default_compound_rest_seconds: 150,
-            default_accessory_rest_seconds: 90,
+            rest_seconds: 90,
             crowd_preference_weight: 1.0,
             calendar_preference_weight: 1.0,
-            recovery_weight: 1.0,
             gym_address: None,
         }
     }
 }
 
 impl Profile {
-    /// One rest duration for every exercise. The compound and per-exercise settings are still stored
-    /// but no longer select a timer; `rest --remember` updates both profile defaults.
-    pub fn rest_seconds(&self) -> i64 {
-        self.default_accessory_rest_seconds
-    }
-
     pub fn tz(&self) -> TimeZone {
         zone(&self.timezone).unwrap_or(TimeZone::UTC)
     }
@@ -94,21 +84,10 @@ impl Profile {
         if counts.iter().any(|v| *v < 0) || !(0..=7).contains(&self.weekly_max_sessions) {
             return fail("Counts and minutes can't be negative; weekly maximum is 0–7");
         }
-        if [
-            self.preferred_workout_minutes,
-            self.minimum_workout_minutes,
-            self.default_compound_rest_seconds,
-            self.default_accessory_rest_seconds,
-        ]
-        .iter()
-        .any(|v| *v <= 0)
-        {
+        if [self.preferred_workout_minutes, self.minimum_workout_minutes, self.rest_seconds].iter().any(|v| *v <= 0) {
             return fail("Durations must be positive");
         }
-        if [self.crowd_preference_weight, self.calendar_preference_weight, self.recovery_weight]
-            .iter()
-            .any(|w| !w.is_finite() || *w < 0.0)
-        {
+        if [self.crowd_preference_weight, self.calendar_preference_weight].iter().any(|w| !w.is_finite() || *w < 0.0) {
             return fail("Weights must be finite and nonnegative");
         }
         if self.weekdays_allowed.iter().any(|d| !(0..=6).contains(d)) {
@@ -130,9 +109,6 @@ impl Profile {
         days.dedup();
         if days.len() != self.weekdays_allowed.len() {
             return fail("Duplicate allowed weekdays");
-        }
-        if self.warmup_policy != "first_primary_exercise_one_warmup_set" {
-            return fail("Unknown warmup policy");
         }
         if let Some(address) = &self.gym_address
             && !(3..=200).contains(&address.chars().count())
@@ -158,12 +134,9 @@ impl Profile {
             prep_minutes: row.prep_minutes,
             commute_to_gym_minutes: row.commute_to_gym_minutes,
             commute_home_minutes: row.commute_home_minutes,
-            warmup_policy: row.warmup_policy.clone(),
-            default_compound_rest_seconds: row.default_compound_rest_seconds,
-            default_accessory_rest_seconds: row.default_accessory_rest_seconds,
+            rest_seconds: row.rest_seconds,
             crowd_preference_weight: row.crowd_preference_weight,
             calendar_preference_weight: row.calendar_preference_weight,
-            recovery_weight: row.recovery_weight,
             gym_address: row.gym_address.clone(),
         })
     }
@@ -182,12 +155,9 @@ impl Profile {
         row.prep_minutes = self.prep_minutes;
         row.commute_to_gym_minutes = self.commute_to_gym_minutes;
         row.commute_home_minutes = self.commute_home_minutes;
-        row.warmup_policy = self.warmup_policy.clone();
-        row.default_compound_rest_seconds = self.default_compound_rest_seconds;
-        row.default_accessory_rest_seconds = self.default_accessory_rest_seconds;
+        row.rest_seconds = self.rest_seconds;
         row.crowd_preference_weight = self.crowd_preference_weight;
         row.calendar_preference_weight = self.calendar_preference_weight;
-        row.recovery_weight = self.recovery_weight;
         row.gym_address = self.gym_address.clone();
     }
 }
@@ -214,12 +184,9 @@ pub fn get_profile(db: &Connection) -> Result<Profile> {
         prep_minutes: 0,
         commute_to_gym_minutes: 0,
         commute_home_minutes: 0,
-        warmup_policy: String::new(),
-        default_compound_rest_seconds: 0,
-        default_accessory_rest_seconds: 0,
+        rest_seconds: 0,
         crowd_preference_weight: 0.0,
         calendar_preference_weight: 0.0,
-        recovery_weight: 0.0,
         gym_address: None,
         created_at: now,
         updated_at: now,

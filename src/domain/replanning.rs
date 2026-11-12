@@ -322,9 +322,7 @@ pub fn edit_session(
         }
         // Its warnings (and what it does to its neighbours) are this edit's answer, not news later.
         inspect(db, &edited, now, false)?;
-        Ok(
-            json!({"session": crate::domain::scheduling::session_data(&session), "from": from, "warnings": warnings, "side_effects": []}),
-        )
+        Ok(json!({"session": crate::domain::scheduling::session_data(&session), "from": from, "warnings": warnings}))
     })
 }
 
@@ -376,7 +374,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(moved["data"]["warnings"], json!(["skips a rest day"]));
-        assert_eq!(moved["data"]["side_effects"], json!([]));
 
         let repaired = inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
         assert_eq!(repaired["changed"], json!([]));
