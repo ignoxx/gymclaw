@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::db::models::{ExerciseProgression, WorkoutTemplate};
+use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
 use crate::domain::illustrations::{catalog, search};
 use crate::error::{Error, Result};
@@ -140,15 +140,28 @@ impl Template {
         for spec in &all {
             spec.validate()?;
         }
-        let ids: HashSet<&str> = all.iter().map(|s| s.id.as_str()).collect();
-        if ids.len() != all.len() {
-            return invalid("Exercise IDs must be unique within template");
-        }
-        // Names are how the agent picks between variants that share a picture (see `pick`).
-        let names: HashSet<String> = all.iter().map(|s| s.name.trim().to_lowercase()).collect();
-        if names.len() != all.len() {
-            return invalid("Exercise names must be unique within template");
-        }
+        // Names are how the agent picks between variants that share a picture (see `pick`). The error
+        // names both clashing exercises (often an alternative) so the caller can rename or remove one.
+        let kind = |i: usize| if i < self.exercises.len() { "exercise" } else { "alternative" };
+        let unique = |field: &str, key: fn(&ExerciseSpec) -> String| -> Result<()> {
+            for (i, a) in all.iter().enumerate() {
+                if let Some(j) = all[..i].iter().position(|b| key(b) == key(a)) {
+                    let b = all[j];
+                    return invalid(&format!(
+                        "Exercise {field}s must be unique within template: {} '{}' ({}) and {} '{}' ({}) clash; rename or remove one",
+                        kind(j),
+                        b.name,
+                        b.id,
+                        kind(i),
+                        a.name,
+                        a.id
+                    ));
+                }
+            }
+            Ok(())
+        };
+        unique("ID", |s| s.id.clone())?;
+        unique("name", |s| s.name.trim().to_lowercase())?;
         let mut seen: HashSet<&str> = HashSet::new();
         for spec in &self.exercises {
             if !spec.requires_completed.iter().all(|r| seen.contains(r.as_str())) {
@@ -325,7 +338,6 @@ pub fn edit_exercise(
 ) -> Result<Value> {
     let mut definition = serde_json::to_value(get_template(db, template_id)?)?;
     let name = definition["name"].as_str().unwrap_or_default().to_string();
-    let rows = definition["exercises"].as_array_mut().expect("exercises array");
     let key = exercise.trim().to_lowercase();
     let find = |rows: &[Value]| {
         pick(
@@ -333,6 +345,15 @@ pub fn edit_exercise(
             &rows.iter().map(|e| [e["id"].as_str(), e["name"].as_str(), e["guide_id"].as_str()]).collect::<Vec<_>>(),
         )
     };
+    // Change and Remove reach alternatives too, so a clashing alternative can be renamed or dropped.
+    let planned = definition["exercises"].as_array().expect("exercises array");
+    let list =
+        if matches!(edit, ExerciseEdit::Add(_)) || find(planned)?.is_some() { "exercises" } else { "alternatives" };
+    let names: Vec<String> = planned.iter().filter_map(|e| e["name"].as_str().map(String::from)).collect();
+    let not_found = || -> Result<Value> {
+        crate::bail!("EXERCISE_NOT_FOUND", "'{exercise}' isn't in {name} ({})", names.join(", "))
+    };
+    let rows = definition[list].as_array_mut().expect("exercise list");
     match edit {
         ExerciseEdit::Add(changes) => {
             let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
@@ -361,7 +382,7 @@ pub fn edit_exercise(
             rows.insert(at, spec);
         }
         ExerciseEdit::Remove => {
-            let Some(i) = find(rows)? else { return not_found(exercise, &name, rows) };
+            let Some(i) = find(rows)? else { return not_found() };
             let removed = rows.remove(i);
             for row in rows.iter_mut() {
                 if let Some(required) = row["requires_completed"].as_array_mut() {
@@ -370,7 +391,7 @@ pub fn edit_exercise(
             }
         }
         ExerciseEdit::Change(changes) => {
-            let Some(i) = find(rows)? else { return not_found(exercise, &name, rows) };
+            let Some(i) = find(rows)? else { return not_found() };
             rows[i].as_object_mut().unwrap().extend(changes.clone());
             let id = rows[i]["id"].as_str().unwrap_or_default().to_string();
             if let Some(at) = position {
@@ -390,9 +411,24 @@ pub fn edit_exercise(
     import_template(db, &template)
 }
 
-fn not_found<T>(exercise: &str, name: &str, rows: &[Value]) -> Result<T> {
-    let names: Vec<&str> = rows.iter().filter_map(|e| e["name"].as_str()).collect();
-    crate::bail!("EXERCISE_NOT_FOUND", "'{exercise}' isn't in {name} ({})", names.join(", "))
+/// Warning when an edit or import drops exercise ids that have logged history. History and the
+/// learned next weight are keyed by exercise id, so a new id starts from nothing.
+pub fn orphaned_history(db: &Connection, before: &Template, after: &Template) -> Result<Option<String>> {
+    let mut orphaned = vec![];
+    for spec in before.exercises.iter().chain(&before.alternatives) {
+        if after.spec(&spec.id).is_none() {
+            let logged = WorkoutExercise::select(db, "WHERE exercise_id = ?1", [&spec.id])?.len();
+            if logged > 0 {
+                orphaned.push(format!("{} ({}, {logged} logged)", spec.name, spec.id));
+            }
+        }
+    }
+    Ok((!orphaned.is_empty()).then(|| {
+        format!(
+            "No longer in the plan, with history left behind: {}. History and next weight follow the exercise id, so to only rename or change the picture keep the id. If the owner always did the new exercise, move each past workout with workout relabel (workout_id, which).",
+            orphaned.join(", ")
+        )
+    }))
 }
 
 #[cfg(test)]
@@ -486,5 +522,13 @@ mod tests {
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();
         assert_eq!(missing.code(), "EXERCISE_NOT_FOUND");
         assert!(missing.to_string().contains("Bench Press"), "{missing}");
+        // A name taken by an alternative says which one, and the alternative itself can be renamed.
+        let rename = object(json!({"name": "dumbbell fly"}));
+        let clash = edit_exercise(&db, "upper-a", "row", ExerciseEdit::Change(&rename), None).unwrap_err();
+        assert!(clash.to_string().contains("alternative 'Dumbbell Fly' (db-fly)"), "{clash}");
+        let alt =
+            edit_exercise(&db, "upper-a", "db-fly", ExerciseEdit::Change(&object(json!({"name": "Old fly"}))), None);
+        assert_eq!(alt.unwrap()["alternatives"][0]["name"], "Old fly");
+        edit_exercise(&db, "upper-a", "row", ExerciseEdit::Change(&rename), None).unwrap();
     }
 }

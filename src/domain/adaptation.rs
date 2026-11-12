@@ -458,6 +458,11 @@ fn resolve(
     }
     let template = snapshot(workout)?;
     let mut known: Vec<ExerciseSpec> = template.exercises.into_iter().chain(template.alternatives).collect();
+    // A past workout's snapshot may predate the plan's current exercises ("I always did the one in
+    // my plan now"), so those count too.
+    if let Some(current) = workout.template_id.as_deref().and_then(|id| get_template(db, id).ok()) {
+        known.extend(current.exercises.into_iter().chain(current.alternatives));
+    }
     for row in &rows {
         known.push(spec_of(row)?);
     }
@@ -620,10 +625,15 @@ pub fn relabel(
                     updated_at: now,
                     source_workout_id: workout.id.clone(),
                 };
-                if ExerciseProgression::get(db, &spec.id)?.is_some() {
-                    moved.update(db)?
-                } else {
-                    moved.insert(db)?
+                // The target's own next weight wins when it comes from a later workout.
+                match ExerciseProgression::get(db, &spec.id)? {
+                    None => moved.insert(db)?,
+                    Some(existing) => {
+                        let source = WorkoutSession::get(db, &existing.source_workout_id)?;
+                        if source.and_then(|w| w.started_at) <= workout.started_at {
+                            moved.update(db)?
+                        }
+                    }
                 }
                 progression.delete(db)?;
             }
@@ -648,7 +658,7 @@ mod tests {
     use crate::db::test::db;
     use crate::domain::audit::{finish, get_audit};
     use crate::domain::set_parser::SetInput;
-    use crate::domain::templates::{Template, get_template, import_template};
+    use crate::domain::templates::{Template, get_template, import_template, orphaned_history};
     use crate::domain::workout::tests::{at, spec};
     use crate::domain::workout::{current, log_set, start};
 
@@ -732,6 +742,50 @@ mod tests {
             .query_row("SELECT count(*) FROM agent_event WHERE type = 'planning.replan_required'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(replans, 1);
+    }
+
+    /// The owner always did the plan's new exercise: relabeling each past workout onto it gathers the
+    /// history, and the newest workout's next weight wins whichever order the fixes come in.
+    #[test]
+    fn relabel_past_workouts_onto_a_renamed_plan_exercise() {
+        let db = db();
+        let legs = |id: &str, name: &str| Template {
+            id: "legs".into(),
+            name: "Legs".into(),
+            exercises: vec![spec(
+                json!({"id": id, "name": name, "role": "hinge", "working_sets": 1, "target_weight": 20}),
+            )],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        let workout = |t: i64, weight: f64| {
+            let rid = format!("w{t}");
+            let id = start(&db, Some("legs"), None, false, at(t), &rid).unwrap()["data"]["workout_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            log_set(&db, &id, &set(weight, 12), at(t + 40), &format!("{rid}-set")).unwrap();
+            finish(&db, &id, at(t + 100), &format!("{rid}-finish")).unwrap();
+            id
+        };
+        let before = legs("sl-rdl", "Single-leg RDL");
+        import_template(&db, &before).unwrap();
+        let (old, mid) = (workout(0, 20.0), workout(1000, 25.0));
+        import_template(&db, &legs("db-rdl", "Dumbbell RDL")).unwrap();
+        let warning = orphaned_history(&db, &before, &get_template(&db, "legs").unwrap()).unwrap().unwrap();
+        assert!(warning.contains("Single-leg RDL (sl-rdl, 2 logged)"), "{warning}");
+        workout(2000, 30.0);
+        let newest = progression(&db, "db-rdl");
+        assert!(newest.is_some_and(|w| w > progression(&db, "sl-rdl").unwrap()));
+        // The past snapshots only know sl-rdl; the plan's current exercise resolves anyway.
+        relabel(&db, &mid, "db-rdl", None, at(3000), "fix-mid").unwrap();
+        relabel(&db, &old, "db-rdl", None, at(3001), "fix-old").unwrap();
+        let ids: Vec<String> =
+            WorkoutExercise::select(&db, "", []).unwrap().into_iter().map(|e| e.exercise_id).collect();
+        assert_eq!(ids, ["db-rdl"; 3]);
+        assert_eq!((progression(&db, "db-rdl"), progression(&db, "sl-rdl")), (newest, None));
     }
 
     #[test]
