@@ -32,15 +32,28 @@ pub enum Effect {
     Coach(CoachView),
 }
 
+/// Whether the model is offered a tool. A hidden tool still runs when called by name (from `gymclaw call`,
+/// the dashboard, or a model that remembers it); it just stops costing context on every call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listed {
+    Always,
+    /// A read the state snapshot or `sql_query` already covers.
+    Never,
+    /// Only until setup is finished; setup never restarts.
+    InSetup,
+}
+
 pub trait Tool: DeserializeOwned + JsonSchema {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
+    const LISTED: Listed = Listed::Always;
     fn run(self, cx: &mut Ctx) -> Result<Value>;
 }
 
 pub struct ToolDef {
     pub name: &'static str,
     pub description: &'static str,
+    pub listed: Listed,
     /// JSON schema of the arguments (inlined, no `$ref`s).
     pub schema: fn() -> Value,
     pub call: fn(&mut Ctx, Value) -> Result<Value>,
@@ -63,6 +76,7 @@ pub fn def<T: Tool>() -> ToolDef {
     ToolDef {
         name: T::NAME,
         description: T::DESCRIPTION,
+        listed: T::LISTED,
         schema: schema::<T>,
         call: |cx, args| {
             let args = if args.is_null() { Value::Object(Default::default()) } else { args };

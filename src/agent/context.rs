@@ -6,7 +6,9 @@ use jiff::{SignedDuration, ToSpan};
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{ChatMessage, ChatRole, NoteKind, OnboardingState, PlannedSession, WorkoutSession};
+use crate::db::models::{
+    AvailabilityBlock, ChatMessage, ChatRole, NoteKind, OnboardingState, PlannedSession, WorkoutSession,
+};
 use crate::domain::profile::get_profile;
 use crate::error::Result;
 use crate::runtime::outbox::runtime_authority;
@@ -168,6 +170,19 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         if authority.crowd_polling_enabled { "on" } else { "off" },
     )
     .unwrap();
+    // Without this the agent didn't know the owner was away unless it went looking.
+    for b in AvailabilityBlock::select(db, "WHERE status = 'ACTIVE' AND end_at > ?1 ORDER BY start_at", [now])? {
+        let now_on = if b.start_at <= now { " (now)" } else { "" };
+        writeln!(
+            out,
+            "Owner unavailable{now_on}: {} {} to {} id={}",
+            b.kind,
+            b.start_at.local(&tz).strftime("%a %-d %b %H:%M"),
+            b.end_at.local(&tz).strftime("%a %-d %b %H:%M"),
+            b.id,
+        )
+        .unwrap();
+    }
 
     // Last week too: on a Monday, yesterday's skip or miss is still news.
     let monday = local.date().checked_sub((local.weekday().to_monday_zero_offset() as i64).days())?;
@@ -268,9 +283,10 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         crate::time::localize(&mut e.payload_json.0, &tz);
         writeln!(
             out,
-            "Open issue: {} at {} {}",
+            "Open issue: {} at {} id={} {}",
             e.r#type,
             e.created_at.local(&tz).strftime("%a %H:%M"),
+            e.id,
             name_sessions(db, &e.payload_json.0.to_string())?
         )
         .unwrap();
@@ -356,10 +372,21 @@ mod tests {
     /// notes, sessions or chat), so it moves only when code does. Lower the budget when you trim.
     #[test]
     fn prompt_and_tools_stay_within_budget() {
-        const BUDGET: usize = 38_000;
+        const BUDGET: usize = 35_500;
         let db = crate::db::test::db();
         let (system, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
-        let tools = serde_json::to_string(&crate::agent::tool_specs()).unwrap().len();
+        let tools = serde_json::to_string(&crate::agent::tool_specs(true)).unwrap().len();
         assert!(system.len() + tools <= BUDGET, "system {} + tools {tools} chars is over {BUDGET}", system.len());
+    }
+
+    /// A hidden tool named in the prompt or in an offered tool sends the model after a tool it isn't given.
+    #[test]
+    fn prompt_names_only_offered_tools() {
+        let specs = crate::agent::tool_specs(true);
+        let offered: Vec<&str> = specs.iter().filter_map(|s| s["function"]["name"].as_str()).collect();
+        let text = format!("{SYSTEM_PROMPT}{}", Value::Array(specs.clone()));
+        let named: Vec<&str> =
+            crate::tools::all().iter().map(|t| t.name).filter(|n| !offered.contains(n) && text.contains(n)).collect();
+        assert!(named.is_empty(), "hidden but named: {named:?}");
     }
 }

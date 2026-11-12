@@ -115,6 +115,11 @@ fn missing(row: &OnboardingState) -> Vec<&'static str> {
 }
 
 /// Where setup stands: step, next question, answers, profile, split and the review fingerprint.
+/// Setup is done once the owner confirmed the summary; it never restarts.
+pub fn finished(db: &Connection) -> Result<bool> {
+    Ok(OnboardingState::get(db, 1)?.is_some_and(|o| o.completed_fingerprint.is_some()))
+}
+
 pub fn status(db: &Connection) -> Result<Value> {
     let row = state(db)?;
     let missing = missing(&row);
