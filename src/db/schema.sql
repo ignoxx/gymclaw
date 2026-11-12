@@ -1,4 +1,4 @@
--- Generated from a fresh `gymclaw migrate` (user_version 5); don't edit. When a migration
+-- Generated from a fresh `gymclaw migrate` (user_version 6); don't edit. When a migration
 -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
 
 CREATE TABLE agent_button (
@@ -299,20 +299,21 @@ CREATE TABLE runtime_settings (
 );
 
 CREATE TABLE "set_log" (
-	id VARCHAR NOT NULL, 
-	workout_exercise_id VARCHAR NOT NULL, 
-	set_number INTEGER NOT NULL, 
-	set_type VARCHAR NOT NULL, 
-	weight DOUBLE NOT NULL, 
-	reps INTEGER NOT NULL, 
-	rir_optional DOUBLE, 
-	logged_at DATETIME NOT NULL, 
-	rest_started_at DATETIME, 
-	rest_due_at DATETIME, 
-	PRIMARY KEY (id), 
-	CONSTRAINT ck_set_log_legacy CHECK (set_type IN ('WARMUP','WORKING')), 
-	CONSTRAINT uq_exercise_set UNIQUE (workout_exercise_id, set_type, set_number), 
-	CONSTRAINT ck_set_values CHECK (weight >= 0 AND reps > 0 AND set_number > 0), 
+	id VARCHAR NOT NULL,
+	workout_exercise_id VARCHAR NOT NULL,
+	set_number INTEGER NOT NULL,
+	set_type VARCHAR NOT NULL,
+	weight DOUBLE NOT NULL,
+	reps INTEGER NOT NULL,
+	rir_optional DOUBLE,
+	logged_at DATETIME NOT NULL,
+	rest_started_at DATETIME,
+	rest_due_at DATETIME,
+	seconds INTEGER,
+	PRIMARY KEY (id),
+	CONSTRAINT ck_set_log_legacy CHECK (set_type IN ('WARMUP','WORKING')),
+	CONSTRAINT uq_exercise_set UNIQUE (workout_exercise_id, set_type, set_number),
+	CONSTRAINT ck_set_values CHECK (weight >= 0 AND set_number > 0 AND reps >= 0 AND (reps > 0 OR seconds > 0)),
 	FOREIGN KEY(workout_exercise_id) REFERENCES workout_exercise (id)
 );
 

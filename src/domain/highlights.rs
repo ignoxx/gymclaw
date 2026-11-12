@@ -44,7 +44,10 @@ pub struct Highlights {
     pub name: String,
     pub started_at: Ts,
     pub minutes: i64,
+    /// Working sets of reps; timed sets are in `timed`.
     pub sets: usize,
+    /// Time per timed exercise (bike, plank) in seconds, in workout order.
+    pub timed: Vec<(String, i64)>,
     /// Kilograms moved in working sets (weight × reps).
     pub volume: f64,
     /// Minutes and volume of the previous session of the same workout.
@@ -99,13 +102,17 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
     };
     let Some(start) = session.started_at else { crate::bail!("WORKOUT_NOT_STARTED", "Workout has no start time") };
     let name = session.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
-    let mut lifts = Vec::new();
+    let (mut lifts, mut timed) = (Vec::new(), Vec::new());
     for row in WorkoutExercise::select(db, "WHERE workout_session_id = ?1 ORDER BY position", [workout_id])? {
         let sets = SetLog::select(db, "WHERE set_type = 'WORKING' AND workout_exercise_id = ?1", [&row.id])?;
-        let Some(best) = top(sets.iter()) else { continue };
+        let seconds: i64 = sets.iter().filter_map(|s| s.seconds).sum();
+        if seconds > 0 {
+            timed.push((workout::name(&row).to_string(), seconds));
+        }
+        let Some(best) = top(sets.iter().filter(|s| s.seconds.is_none())) else { continue };
         let earlier = SetLog::select(
             db,
-            "WHERE set_type = 'WORKING' AND logged_at < ?1 AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE exercise_id = ?2 AND workout_session_id != ?3) ORDER BY logged_at",
+            "WHERE set_type = 'WORKING' AND seconds IS NULL AND logged_at < ?1 AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE exercise_id = ?2 AND workout_session_id != ?3) ORDER BY logged_at",
             (start, &row.exercise_id, workout_id),
         )?;
         if let Some(change) = change(best, &earlier) {
@@ -126,7 +133,8 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
         name,
         started_at: start,
         minutes: session.actual_duration_seconds.unwrap_or(0).div_euclid(60),
-        sets: sets.len(),
+        sets: sets.iter().filter(|s| s.seconds.is_none()).count(),
+        timed,
         volume: volume(&sets),
         last,
         lifts,
@@ -166,6 +174,7 @@ mod tests {
             logged_at: Ts::now(),
             rest_started_at: None,
             rest_due_at: None,
+            seconds: None,
         }
     }
 

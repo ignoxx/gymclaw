@@ -636,7 +636,7 @@ mod tests {
     use crate::domain::templates::{Template, import_template};
 
     fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {
-        SetInput { weight, reps, set_type, rir: None }
+        SetInput { weight, reps, set_type, rir: None, seconds: None }
     }
 
     /// A workout resting after its first working set: (workout id, rest job id).

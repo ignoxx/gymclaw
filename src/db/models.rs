@@ -183,6 +183,8 @@ table!(SetLog = "set_log" {
     logged_at: Ts,
     rest_started_at: Option<Ts>,
     rest_due_at: Option<Ts>,
+    /// A timed set (bike, plank): its length, with reps 0. None for reps × weight.
+    seconds: Option<i64>,
 });
 
 table!(WorkoutTemplate = "workout_template" {

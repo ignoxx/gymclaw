@@ -382,8 +382,9 @@ function renderWorkout(focus, workout) {
     pose.append(thumb(workout.exercises.find(e => e.id === active.id)?.svg_url));
     focus.append(pose);
     const target = el('div', 'target');
-    target.append(el('strong', '', active.rep_min === active.rep_max ? active.rep_min : `${active.rep_min}–${active.rep_max}`), el('span', '', 'reps'));
-    if (active.weight) target.append(el('span', 'times', '×'), el('strong', '', active.weight), el('span', '', 'kg'));
+    if (active.time) target.append(el('strong', '', active.time));
+    else target.append(el('strong', '', active.rep_min === active.rep_max ? active.rep_min : `${active.rep_min}–${active.rep_max}`), el('span', '', 'reps'));
+    if (active.weight && !active.time) target.append(el('span', 'times', '×'), el('strong', '', active.weight), el('span', '', 'kg'));
     focus.append(target);
     const status = el('div', 'status');
     const label = el('strong', '', active.set_type === 'WARMUP' ? 'Warm-up' : `Set ${active.set_number} of ${active.sets}`);
@@ -413,7 +414,7 @@ function renderNext(focus, next) {
   for (const exercise of next.exercises) {
     const row = el('li');
     const text = el('div');
-    text.append(el('strong', '', exercise.name), el('span', '', `${exercise.sets} sets of ${exercise.reps}`));
+    text.append(el('strong', '', exercise.name), el('span', '', exercise.time ? (exercise.sets > 1 ? `${exercise.sets} × ${exercise.time}` : exercise.time) : `${exercise.sets} sets of ${exercise.reps}`));
     row.append(thumb(exercise.svg_url), text, el('em', '', exercise.last ? `Last ${exercise.last}` : ''));
     list.append(row);
   }
@@ -636,7 +637,10 @@ function renderHistory(history) {
     const when = el('div', 'when');
     when.append(el('strong', '', workout.label), el('span', '', workout.time));
     const what = el('div', 'what');
-    what.append(el('strong', '', workout.template), el('span', '', [`${workout.minutes} min`, `${workout.sets} sets`, tonnes(workout.volume)].join(' · ')));
+    // A ride or a plank shows its time, not "0 sets · 0 kg".
+    const timed = workout.exercises.flatMap(e => e.sets).reduce((sum, s) => sum + (s.seconds || 0), 0);
+    const work = [timed && `${duration(timed)} timed`, workout.sets && `${workout.sets} sets`, workout.volume && tonnes(workout.volume)];
+    what.append(el('strong', '', workout.template), el('span', '', [`${workout.minutes} min`, ...work.filter(Boolean)].join(' · ')));
     const tags = el('div', 'tags');
     if (workout.prs.length) tags.append(el('em', 'tag pr', `${workout.prs.length} PR${workout.prs.length > 1 ? 's' : ''}`));
     if (workout.crowd) tags.append(el('em', `tag ${dataClass('crowd', workout.crowd)}`, workout.crowd));
@@ -646,7 +650,7 @@ function renderHistory(history) {
       const row = el('div', 'set-row');
       const name = el('span', 'set-name', exercise.name);
       if (workout.prs.includes(exercise.name)) name.append(el('em', 'tag pr', 'PR'));
-      row.append(name, el('span', 'set-list', exercise.sets.map(s => `${s.reps}×${s.weight}`).join('   ')));
+      row.append(name, el('span', 'set-list', exercise.sets.map(s => s.seconds ? duration(s.seconds) : `${s.reps}×${s.weight}`).join('   ')));
       table.append(row);
     }
     item.append(summary, table);
@@ -732,10 +736,13 @@ const exView = { view: 'plans', query: '', equipment: null };
 let catalog = null;
 let detailOf = null;
 
-const setText = set => set.weight ? `${set.reps} × ${kgs(set.weight)}` : `${set.reps} reps`;
+// A timed set's length: '25 min', '45 s', '1 min 30 s'.
+const duration = seconds => [[Math.floor(seconds / 3600), 'h'], [Math.floor(seconds % 3600 / 60), 'min'], [seconds % 60, 's']]
+  .filter(([n]) => n).map(([n, unit]) => `${n} ${unit}`).join(' ') || '0 s';
+const setText = set => set.seconds ? duration(set.seconds) : set.weight ? `${set.reps} × ${kgs(set.weight)}` : `${set.reps} reps`;
 const repRange = e => e.rep_min === e.rep_max ? e.rep_min : `${e.rep_min}–${e.rep_max}`;
-// Heaviest set; more reps break a tie.
-const bestSet = sets => sets.reduce((a, b) => (b.weight > a.weight || (b.weight === a.weight && b.reps > a.reps) ? b : a));
+// Heaviest set; more reps break a tie. Timed: the longest.
+const bestSet = sets => sets.reduce((a, b) => (b.weight > a.weight || (b.weight === a.weight && (b.reps > a.reps || (b.seconds || 0) > (a.seconds || 0))) ? b : a));
 const muscleRank = muscle => { const i = MUSCLES.indexOf(muscle); return i < 0 ? MUSCLES.length : i; };
 
 /* Every exercise ever logged, from History (newest workout first), with its sessions newest first. */
@@ -799,7 +806,7 @@ function renderExercises() {
       if (!exercises.length) continue;
       list.append(group(plan.name, `${exercises.length} exercise${exercises.length === 1 ? '' : 's'}`, exercises.map(e => {
         const last = logged.get(e.id)?.sessions[0];
-        const target = `${e.sets} × ${repRange(e)}${e.weight && !e.bodyweight ? ` · ${kgs(e.weight)}` : ''}`;
+        const target = e.time ? `${e.sets} × ${e.time}` : `${e.sets} × ${repRange(e)}${e.weight && !e.bodyweight ? ` · ${kgs(e.weight)}` : ''}`;
         return exerciseRow(e, target, last ? `Last ${setText(bestSet(last.sets))}` : 'Not logged yet', () => openExercise({ id: e.id }));
       })));
     }

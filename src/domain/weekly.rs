@@ -22,7 +22,7 @@ use crate::domain::profile::get_profile;
 use crate::domain::replanning::{commit_upcoming, inspect_weeks, retire_session};
 use crate::domain::scheduling::schedule_week;
 use crate::domain::templates::get_template;
-use crate::domain::workout::g;
+use crate::domain::workout::{format_time, g};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -584,7 +584,7 @@ fn days_line(db: &Connection, week_start: Date, workouts: &[WorkoutSession], tz:
 }
 
 /// Sunday Telegram message, sent by code before the agent's take on it. Last week: workouts by day,
-/// time and volume trained, records, new targets, body weight (the only place GymClaw asks for a
+/// time and volume trained, timed work (bike, plank), records, new targets, body weight (the only place GymClaw asks for a
 /// weigh-in). Then next week's sessions. 🔥 effect when the week hit its target.
 pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> Result<(String, Option<&'static str>)> {
     let profile = get_profile(db)?;
@@ -625,9 +625,16 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
         }
         lines.push(trained);
     }
-    let mut records = Vec::new();
+    let (mut records, mut timed) = (Vec::new(), Vec::<(String, i64)>::new());
     for w in &workouts {
-        for lift in highlights::workout(db, &w.id)?.lifts.into_iter().filter(|l| l.record()) {
+        let h = highlights::workout(db, &w.id)?;
+        for (name, seconds) in h.timed {
+            match timed.iter_mut().find(|(n, _)| *n == name) {
+                Some(total) => total.1 += seconds,
+                None => timed.push((name, seconds)),
+            }
+        }
+        for lift in h.lifts.into_iter().filter(|l| l.record()) {
             let set = if lift.weight == 0.0 {
                 format!("{} reps", lift.reps)
             } else {
@@ -635,6 +642,11 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
             };
             records.push(format!("{} {set}", lift.name));
         }
+    }
+    if !timed.is_empty() {
+        let parts: Vec<String> =
+            timed.iter().map(|(name, seconds)| format!("{name} {}", format_time(*seconds))).collect();
+        lines.push(format!("⏱ {}", parts.join(" · ")));
     }
     if !records.is_empty() {
         lines.push(format!("🏆 {}", records.join(" · ")));
@@ -850,8 +862,13 @@ mod tests {
                 .unwrap()
                 .to_string();
             for (n, reps) in [8, 8].iter().enumerate() {
-                let set =
-                    crate::domain::set_parser::SetInput { weight, reps: *reps, set_type: SetType::Working, rir: None };
+                let set = crate::domain::set_parser::SetInput {
+                    weight,
+                    reps: *reps,
+                    set_type: SetType::Working,
+                    rir: None,
+                    seconds: None,
+                };
                 crate::domain::workout::log_set(&db, &id, &set, at.mins(5 + n as i64 * 5), &format!("{key}-{n}"))
                     .unwrap();
             }

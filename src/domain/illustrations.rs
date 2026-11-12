@@ -82,6 +82,11 @@ pub fn bodyweight(guide_id: Option<&str>) -> bool {
     guide_id.and_then(|g| catalog().get(g)).is_some_and(|i| i.exercise_type.starts_with("bodyweight"))
 }
 
+/// Done for time in the catalog (cardio machines, planks).
+pub fn timed(guide_id: Option<&str>) -> bool {
+    guide_id.and_then(|g| catalog().get(g)).is_some_and(|i| i.exercise_type.ends_with("duration"))
+}
+
 /// Gym shorthand the owner types ("DB RDL"), spelled out the way catalog names are.
 const ALIASES: &[(&str, &str)] = &[
     ("db", "dumbbell"),

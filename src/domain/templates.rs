@@ -7,9 +7,20 @@ use serde_json::{Map, Value};
 
 use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
-use crate::domain::illustrations::{catalog, search};
+use crate::domain::illustrations::{catalog, search, timed};
 use crate::error::{Error, Result};
 use crate::time::Ts;
+
+// How an exercise is done and logged (plain comments: the field doc is what the agent reads).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Measure {
+    // Sets of reps at a weight.
+    #[default]
+    Reps,
+    // Timed (bike, rower, treadmill, plank): each working set is `minutes` long and logged as a time.
+    Time,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +53,10 @@ pub struct ExerciseSpec {
     pub requires_completed: Vec<String>,
     #[serde(default)]
     pub substitutes: Vec<String>,
+    #[serde(default)]
+    pub measure: Measure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<f64>,
 }
 
 fn d3() -> i64 {
@@ -123,7 +138,20 @@ impl ExerciseSpec {
         if self.rep_min > self.rep_max {
             return invalid("Rep minimum exceeds maximum");
         }
+        match (self.measure, self.minutes) {
+            (Measure::Time, Some(m)) if m.is_finite() && m > 0.0 => {}
+            (Measure::Time, _) => return invalid(&format!("{} is timed: pass minutes (per set) > 0", self.name)),
+            (Measure::Reps, Some(_)) => {
+                return invalid(&format!("{}: minutes is only for measure \"time\"", self.name));
+            }
+            (Measure::Reps, None) => {}
+        }
         Ok(())
+    }
+
+    /// Length of one working set of a timed exercise.
+    pub fn set_seconds(&self) -> Option<i64> {
+        self.minutes.filter(|_| self.measure == Measure::Time).map(|m| (m * 60.0).round() as i64)
     }
 }
 
@@ -188,12 +216,17 @@ impl Template {
                 }
             }
         }
-        if let Some(first) = self.exercises.iter().find(|s| s.primary)
+        if let Some(first) = self.warmup_exercise()
             && first.warmup_weight.is_none()
         {
             return invalid("First primary exercise requires explicit warmup_weight");
         }
         Ok(())
+    }
+
+    /// The first primary lift: it gets the warm-up set. Timed exercises never do.
+    pub fn warmup_exercise(&self) -> Option<&ExerciseSpec> {
+        self.exercises.iter().find(|s| s.primary && s.measure == Measure::Reps)
     }
 
     pub fn spec(&self, id: &str) -> Option<&ExerciseSpec> {
@@ -366,6 +399,11 @@ pub fn edit_exercise(
                 crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{exercise}'. Pass one guide_id: {options}");
             };
             let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
+            if timed(Some(&item.slug)) {
+                // Cardio machines and holds are done for time unless the fields say otherwise.
+                spec["measure"] = serde_json::json!(Measure::Time);
+                spec["working_sets"] = serde_json::json!(1);
+            }
             spec.as_object_mut().unwrap().extend(changes.clone());
             // Exercises are told apart by id; the guide_id only picks the picture, so two machine
             // variants can share one.
@@ -394,7 +432,12 @@ pub fn edit_exercise(
         }
         ExerciseEdit::Change(changes) => {
             let Some(i) = find(rows)? else { return not_found() };
-            rows[i].as_object_mut().unwrap().extend(changes.clone());
+            let row = rows[i].as_object_mut().unwrap();
+            row.extend(changes.clone());
+            if row.get("measure") == Some(&serde_json::json!(Measure::Reps)) && !changes.contains_key("minutes") {
+                // Back to reps: the time target goes with the time measure.
+                row.remove("minutes");
+            }
             let id = rows[i]["id"].as_str().unwrap_or_default().to_string();
             if let Some(at) = position {
                 let row = rows.remove(i);
@@ -532,5 +575,29 @@ mod tests {
             edit_exercise(&db, "upper-a", "db-fly", ExerciseEdit::Change(&object(json!({"name": "Old fly"}))), None);
         assert_eq!(alt.unwrap()["alternatives"][0]["name"], "Old fly");
         edit_exercise(&db, "upper-a", "row", ExerciseEdit::Change(&rename), None).unwrap();
+    }
+
+    #[test]
+    fn timed_exercises_need_minutes_and_lose_them_going_back_to_reps() {
+        let db = db();
+        import_template(&db, &seed()).unwrap();
+        // A catalog cardio machine is timed by default; it can't be saved without its time.
+        let bare = edit_exercise(&db, "upper-a", "cycling", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
+        assert!(bare.to_string().contains("Cycling is timed: pass minutes"), "{bare}");
+        let added =
+            edit_exercise(&db, "upper-a", "cycling", ExerciseEdit::Add(&object(json!({"minutes": 20}))), None).unwrap();
+        let bike = &added["exercises"][4];
+        assert_eq!(
+            (bike["measure"].as_str(), bike["minutes"].as_f64(), bike["working_sets"].as_i64()),
+            (Some("time"), Some(20.0), Some(1))
+        );
+        assert_eq!(get_template(&db, "upper-a").unwrap().exercises[4].set_seconds(), Some(1200));
+        // Minutes on a lift is a mistake, not a silent no-op.
+        let lift = edit_exercise(&db, "upper-a", "row", ExerciseEdit::Change(&object(json!({"minutes": 5}))), None);
+        assert_eq!(lift.unwrap_err().code(), "INVALID_TEMPLATE");
+        let back =
+            edit_exercise(&db, "upper-a", "cycling", ExerciseEdit::Change(&object(json!({"measure": "reps"}))), None)
+                .unwrap();
+        assert!(back["exercises"][4].get("minutes").is_none() && back["exercises"][4]["measure"] == "reps");
     }
 }

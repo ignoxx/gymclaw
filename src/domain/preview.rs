@@ -16,7 +16,7 @@ use crate::domain::illustrations::for_exercise;
 use crate::domain::profile::get_profile;
 use crate::domain::templates::get_template;
 use crate::domain::view::{Card, CardKind};
-use crate::domain::workout::g;
+use crate::domain::workout::{format_time, g};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -35,7 +35,7 @@ pub fn last_set(db: &Connection, exercise_id: &str) -> Result<Option<SetLog>> {
     )
 }
 
-/// One line per planned exercise ('1. Barbell row · 2 sets of 8–12 · last 10 × 60 kg'), from the
+/// One line per planned exercise ('1. Barbell row · 2 sets of 8–12 · last 10 × 60 kg', '2. Cycling · 25 min'), from the
 /// current template; used in previews and calendar event bodies.
 pub fn plan_lines(db: &Connection, session: &PlannedSession) -> Result<Vec<String>> {
     let template = get_template(db, session.workout_template_id.as_deref().unwrap_or_default())?;
@@ -48,8 +48,15 @@ pub fn plan_lines(db: &Connection, session: &PlannedSession) -> Result<Vec<Strin
             format!("{}–{}", spec.rep_min, spec.rep_max)
         };
         let count = sets.and_then(|s| s.get(&spec.id)).and_then(Value::as_i64).unwrap_or(spec.working_sets);
-        let last =
-            last_set(db, &spec.id)?.map(|l| format!(" · last {} × {} kg", l.reps, g(l.weight))).unwrap_or_default();
+        let last = last_set(db, &spec.id)?;
+        if let Some(seconds) = spec.set_seconds() {
+            let time = format_time(seconds);
+            let plan = if count == 1 { time } else { format!("{count} × {time}") };
+            let last = last.and_then(|l| l.seconds).map(|s| format!(" · last {}", format_time(s))).unwrap_or_default();
+            lines.push(format!("{}. {} · {plan}{last}", index + 1, spec.name));
+            continue;
+        }
+        let last = last.map(|l| format!(" · last {} × {} kg", l.reps, g(l.weight))).unwrap_or_default();
         lines.push(format!("{}. {} · {count} sets of {reps}{last}", index + 1, spec.name));
     }
     Ok(lines)

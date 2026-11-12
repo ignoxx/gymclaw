@@ -23,10 +23,25 @@ const SET_SPACING: SignedDuration = SignedDuration::from_mins(3);
 pub struct PastSet {
     /// Exercise ID, guide_id or exact name.
     pub exercise: String,
+    #[serde(default)]
     pub reps: i64,
     /// kg; 0 or omitted for bodyweight.
     #[serde(default)]
     pub weight: f64,
+    // A timed set instead of reps. Plain comment: every doc line here is prompt budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<f64>,
+}
+
+impl PastSet {
+    fn value(&self) -> SetInput {
+        match self.minutes {
+            Some(minutes) => SetInput::timed((minutes * 60.0).round() as i64),
+            None => {
+                SetInput { weight: self.weight, reps: self.reps, set_type: SetType::Working, rir: None, seconds: None }
+            }
+        }
+    }
 }
 
 /// Replay the owner's sets (in the order done) through the normal workout flow, backdated from `at`,
@@ -40,8 +55,11 @@ pub fn log_past(
     now: Ts,
     request_id: &str,
 ) -> Result<Value> {
-    if sets.iter().any(|s| s.exercise.is_empty() || s.reps <= 0 || !s.weight.is_finite() || s.weight < 0.0) {
-        return Err(Error::domain("INVALID_INPUT", "Each set needs an exercise, reps > 0 and weight ≥ 0"));
+    if sets.iter().any(|s| s.exercise.is_empty() || s.value().validate().is_err()) {
+        return Err(Error::domain(
+            "INVALID_INPUT",
+            "Each set needs an exercise and reps > 0 with weight ≥ 0, or minutes",
+        ));
     }
     let intent = json!({"at": at, "template_id": template_id, "sets": sets});
     mutate(db, "workout.logged_past", request_id, intent, now, || {
@@ -82,8 +100,7 @@ pub fn log_past(
             if named.is_none_or(|i| rows[i].status != ExerciseStatus::Active) {
                 switch_to(db, &workout.id, &item.exercise, false, when, &format!("{request_id}:switch:{index}"))?;
             }
-            let value = SetInput { weight: item.weight, reps: item.reps, set_type: SetType::Working, rir: None };
-            log_set(db, &workout.id, &value, when, &format!("{request_id}:set:{index}"))?;
+            log_set(db, &workout.id, &item.value(), when, &format!("{request_id}:set:{index}"))?;
             when = when + step;
         }
         let summary =
@@ -127,7 +144,7 @@ mod tests {
         )
         .unwrap();
         // The owner did face pulls instead of the pec deck, and tells us the next day.
-        let set = |exercise: &str, reps, weight| PastSet { exercise: exercise.into(), reps, weight };
+        let set = |exercise: &str, reps, weight| PastSet { exercise: exercise.into(), reps, weight, minutes: None };
         let sets = [set("bench", 10, 80.0), set("bench", 10, 80.0), set("bench", 10, 80.0), set("face-pull", 15, 20.0)];
         let logged = log_past(&db, &sets, at(0), Some("upper"), at(86400), "tg-9-past").unwrap();
         assert_eq!(logged["data"]["sets"], 4);

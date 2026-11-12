@@ -12,7 +12,7 @@ use crate::error::Result;
 pub fn compress_template(template: &Template, profile: &Profile, budget_seconds: i64) -> Result<Value> {
     let exercises = &template.exercises;
     let mut counts: HashMap<&str, i64> = exercises.iter().map(|e| (e.id.as_str(), e.working_sets)).collect();
-    let first_primary = exercises.iter().find(|e| e.primary).map(|e| e.id.as_str());
+    let first_primary = template.warmup_exercise().map(|e| e.id.as_str());
     let mut protected: HashSet<&str> = first_primary.into_iter().collect();
     for spec in exercises.iter().rev() {
         if protected.contains(spec.id.as_str()) {
@@ -29,7 +29,7 @@ pub fn compress_template(template: &Template, profile: &Profile, budget_seconds:
         for (index, spec) in kept.iter().enumerate() {
             let rest = profile.rest_seconds;
             let sets = counts[spec.id.as_str()];
-            seconds += sets * template.set_duration_seconds + (sets - 1).max(0) * rest;
+            seconds += sets * spec.set_seconds().unwrap_or(template.set_duration_seconds) + (sets - 1).max(0) * rest;
             if index < kept.len() - 1 {
                 seconds += rest + template.transition_seconds;
             }
