@@ -65,7 +65,7 @@ impl Config {
         let (data_dir, db_path) = Self::paths();
         let need = |name: &str| var(name).ok_or_else(|| format!("{name} is required"));
         let owner_id = owner_id()?;
-        let model = var("GYMCLAW_MODEL").unwrap_or_else(|| "z-ai/glm-5.3-flash".into());
+        let model = var("GYMCLAW_MODEL").unwrap_or_else(|| "anthropic/claude-haiku-5.5".into());
         Ok(Config {
             data_dir,
             db_path,

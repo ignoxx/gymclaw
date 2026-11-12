@@ -2,14 +2,14 @@
 # Container start: verify egress lockdown, migrate the DB, then run the bot in the foreground.
 #
 # Required env: GYMCLAW_TELEGRAM_USER_ID, TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY.
-# Optional env: GYMCLAW_MODEL (default z-ai/glm-5.3-flash), GYMCLAW_PROVIDER (OpenRouter provider
-# tried first, default inference-net/fp4; `auto` = OpenRouter's routing), GYMCLAW_MODEL_FAST,
+# Optional env: GYMCLAW_MODEL (default anthropic/claude-haiku-5.5), GYMCLAW_PROVIDER (OpenRouter provider
+# tried first, default `auto` = OpenRouter's routing), GYMCLAW_MODEL_FAST,
 # GYMCLAW_MODEL_VISION, GYMCLAW_ALLOW_DIRECT_EGRESS=1 (local testing only).
 set -euo pipefail
 OWNER="${GYMCLAW_TELEGRAM_USER_ID:?GYMCLAW_TELEGRAM_USER_ID required}"
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN required}" "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY required}"
 [[ "$OWNER" =~ ^[0-9]+$ ]] || { echo "GYMCLAW_TELEGRAM_USER_ID must be numeric" >&2; exit 1; }
-export GYMCLAW_PROVIDER="${GYMCLAW_PROVIDER:-inference-net/fp4}"
+export GYMCLAW_PROVIDER="${GYMCLAW_PROVIDER:-auto}"
 
 # Fail closed: the only way out must be the egress proxy. If the container can open
 # a direct connection, the internal network was replaced by one with internet access.
