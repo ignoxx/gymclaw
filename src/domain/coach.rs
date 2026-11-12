@@ -582,6 +582,34 @@ fn needed<T>(value: Option<T>, name: &str) -> Result<T> {
     value.ok_or_else(|| Error::domain("ARGUMENT_REQUIRED", format!("Missing {name}")))
 }
 
+/// Owner says a logged exercise was really `exercise`. `workout_id` picks any past workout; default
+/// is the running workout, else the latest. A running workout gets its next card.
+pub fn relabel(
+    db: &Connection,
+    workout_id: Option<&str>,
+    exercise: &str,
+    which: Option<&str>,
+    now: Ts,
+    request_id: &str,
+) -> Result<CoachView> {
+    let workout = match workout_id {
+        Some(id) => WorkoutSession::get(db, id)?,
+        None => match active_workout(db)? {
+            Some(w) => Some(w),
+            None => WorkoutSession::first(db, "ORDER BY started_at DESC", [])?,
+        },
+    };
+    let Some(workout) = workout else { crate::bail!("NO_WORKOUT", "No workout to correct") };
+    let result = adaptation::relabel(db, &workout.id, exercise, which, now, request_id)?;
+    let ack = format!("✏️ Saved as {}.", result["data"]["name"].as_str().unwrap_or(exercise));
+    let cards = if workout.status != WorkoutStatus::PlanUpdated {
+        after_change(db, &workout.id, now, request_id)?
+    } else {
+        vec![]
+    };
+    Ok(acked(ack, cards))
+}
+
 /// Agent-initiated action: 'card', 'swap', 'later', 'next', 'end' on the current exercise;
 /// 'switch' (exercise: do this one now), 'relabel' (exercise: what was really done, which: the logged one;
 /// also after the workout), 'rest' (seconds for this workout; remember: also the default from now on).
@@ -605,25 +633,10 @@ pub fn handle_action(
                 .collect();
         update_profile(db, &changes)?;
     }
-    let running = active_workout(db)?;
     if action == Action::Relabel {
-        let workout = match running {
-            Some(w) => w,
-            None => match WorkoutSession::first(db, "ORDER BY started_at DESC", [])? {
-                Some(w) => w,
-                None => crate::bail!("NO_WORKOUT", "No workout to correct"),
-            },
-        };
-        let exercise = needed(exercise, "exercise")?;
-        let result = adaptation::relabel(db, &workout.id, exercise, which, now, request_id)?;
-        let ack = format!("✏️ Saved as {}.", result["data"]["name"].as_str().unwrap_or(exercise));
-        let cards = if workout.status != WorkoutStatus::PlanUpdated {
-            after_change(db, &workout.id, now, request_id)?
-        } else {
-            vec![]
-        };
-        return Ok(acked(ack, cards));
+        return relabel(db, None, needed(exercise, "exercise")?, which, now, request_id);
     }
+    let running = active_workout(db)?;
     let Some(workout) = running else {
         if action == Action::Rest && remember {
             return Ok(acked(format!("Rest is {}s from now on.", seconds.unwrap_or_default()), vec![]));

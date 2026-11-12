@@ -11,7 +11,7 @@ use crate::domain::illustrations::search;
 use crate::domain::onboarding::{self, Update};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{
-    ExerciseEdit, Template, edit_exercise, get_template, import_template, require_illustrations,
+    ExerciseEdit, Template, edit_exercise, get_template, import_template, orphaned_history, require_illustrations,
 };
 use crate::domain::view::CoachView;
 use crate::domain::{audit, workout};
@@ -62,7 +62,8 @@ pub enum WorkoutAction {
     Swap,
     /// `exercise`: the owner is doing this now (any exercise, any time); finishes or replaces the current one.
     Switch,
-    /// `exercise`: what the owner really did; `which`: the logged exercise to fix (default the latest). Works after the workout too.
+    /// `exercise`: what the owner really did; `which`: the logged exercise to fix (default the latest); `workout_id`: any past workout.
+    /// Moves that workout's sets and next weight. "I always did X": once per past workout.
     Relabel,
     /// `seconds` between sets for this workout; `remember` also makes it the default.
     Rest,
@@ -88,6 +89,8 @@ pub struct Workout {
     pub exercise: Option<String>,
     /// relabel: the logged exercise to correct.
     pub which: Option<String>,
+    /// relabel: a past workout (workout_session.id from sql_query); default the running or latest one.
+    pub workout_id: Option<String>,
     /// rest: seconds between sets.
     pub seconds: Option<i64>,
     /// rest: also the default for future workouts.
@@ -170,7 +173,14 @@ impl Tool for Workout {
             WorkoutAction::Card => coach_action(Action::Card)?,
             WorkoutAction::Swap => coach_action(Action::Swap)?,
             WorkoutAction::Switch => coach_action(Action::Switch)?,
-            WorkoutAction::Relabel => coach_action(Action::Relabel)?,
+            WorkoutAction::Relabel => coach::relabel(
+                db,
+                self.workout_id.as_deref(),
+                self.exercise.as_deref().unwrap_or_default(),
+                self.which.as_deref(),
+                now,
+                &rid,
+            )?,
             WorkoutAction::Rest => coach_action(Action::Rest)?,
             WorkoutAction::Later => coach_action(Action::Later)?,
             WorkoutAction::Next => coach_action(Action::Next)?,
@@ -267,13 +277,25 @@ impl Tool for TemplateImport {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         require_illustrations(&self.template)?;
-        import_template(cx.db, &self.template)
+        let before = get_template(cx.db, &self.template.id).ok();
+        let result = import_template(cx.db, &self.template)?;
+        warn_orphans(cx, before, &self.template.id, result)
     }
 }
 
 /// Upcoming sessions (and their calendar events) follow the edited plan.
 fn edited(cx: &Ctx, definition: Value) -> Result<Value> {
     Ok(json!({"template": definition, "refreshed_sessions": crate::domain::weekly::refresh_plans(cx.db, cx.now)?}))
+}
+
+/// Adds a `warning` when the save left logged history behind on ids the plan no longer has.
+fn warn_orphans(cx: &Ctx, before: Option<Template>, template_id: &str, mut result: Value) -> Result<Value> {
+    if let Some(before) = before
+        && let Some(warning) = orphaned_history(cx.db, &before, &get_template(cx.db, template_id)?)?
+    {
+        result["warning"] = json!(warning);
+    }
+    Ok(result)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -291,20 +313,20 @@ pub struct TemplateEditExercise {
 
 impl Tool for TemplateEditExercise {
     const NAME: &'static str = "template_edit_exercise";
-    const DESCRIPTION: &'static str =
-        "Change one exercise of a saved plan: weight, sets, reps, rest, or its place in the order.";
+    const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, rest, or its place in the order. \
+        History and next weight follow the exercise id: to rename or fix the picture, keep the id.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        edited(
-            cx,
-            edit_exercise(
-                cx.db,
-                &self.template_id,
-                &self.exercise,
-                ExerciseEdit::Change(&self.changes),
-                self.position,
-            )?,
-        )
+        let before = get_template(cx.db, &self.template_id)?;
+        let definition = edit_exercise(
+            cx.db,
+            &self.template_id,
+            &self.exercise,
+            ExerciseEdit::Change(&self.changes),
+            self.position,
+        )?;
+        let result = edited(cx, definition)?;
+        warn_orphans(cx, Some(before), &self.template_id, result)
     }
 }
 
@@ -345,7 +367,7 @@ pub struct TemplateRemoveExercise {
 
 impl Tool for TemplateRemoveExercise {
     const NAME: &'static str = "template_remove_exercise";
-    const DESCRIPTION: &'static str = "Remove an exercise from a saved plan.";
+    const DESCRIPTION: &'static str = "Remove an exercise or alternative from a saved plan. Its logged history stays.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         edited(cx, edit_exercise(cx.db, &self.template_id, &self.exercise, ExerciseEdit::Remove, None)?)
