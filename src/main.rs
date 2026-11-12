@@ -1,8 +1,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use gymclaw::agent::openrouter::OpenRouter;
+use gymclaw::agent::turnlog::TurnLog;
+use gymclaw::agent::{Agent, ChatModel, ModelReply, TurnInput};
 use gymclaw::config::Config;
 use gymclaw::error::{Error, Result};
 use gymclaw::time::Ts;
@@ -47,6 +51,23 @@ enum Command {
         /// Desktop-app OAuth client JSON downloaded from Google Cloud.
         #[arg(long, default_value = "data/google-client.json")]
         client_file: PathBuf,
+    },
+    /// Re-run the agent's turn on a database copy: the chat's newest owner message,
+    /// answered at `--at`, with `--model`. Tools write to that copy; every model step prints to stderr.
+    /// For diagnosing a prod turn: snapshot, rewind the rows the turn changed, replay.
+    Replay {
+        /// The database copy to answer from; its tools write to it, so never the bot's own.
+        #[arg(long, env = "GYMCLAW_DB")]
+        db: PathBuf,
+        #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
+        key: String,
+        /// The owner's local time to answer at (ISO 8601).
+        #[arg(long)]
+        at: String,
+        #[arg(long, env = "GYMCLAW_MODEL", default_value = "anthropic/claude-haiku-5.5")]
+        model: String,
+        #[arg(long, env = "GYMCLAW_PROVIDER")]
+        provider: Option<String>,
     },
     /// Serve the read-only dashboard.
     Dashboard {
@@ -106,6 +127,49 @@ fn call(tool: &str, args: Option<String>, now: Option<String>, request_id: Optio
     Ok(result)
 }
 
+/// Prints each model step (reasoning, text, tool calls) as it happens.
+struct Tap(OpenRouter);
+
+#[async_trait::async_trait]
+impl ChatModel for Tap {
+    async fn complete(&self, model: &str, messages: &[Value], tools: &[Value], force_text: bool) -> Result<ModelReply> {
+        let reply =
+            self.0.complete(model, messages, tools, force_text).await.inspect_err(|e| eprintln!("model error: {e}"))?;
+        let m = &reply.message;
+        eprintln!("--- step ({} ms)", reply.ms);
+        for key in ["reasoning", "content"] {
+            if let Some(text) = m[key].as_str().filter(|t| !t.trim().is_empty()) {
+                eprintln!("{key}: {text}");
+            }
+        }
+        for call in m["tool_calls"].as_array().into_iter().flatten() {
+            eprintln!("call {} {}", call["function"]["name"].as_str().unwrap_or("?"), call["function"]["arguments"]);
+        }
+        Ok(reply)
+    }
+}
+
+async fn replay(db_path: PathBuf, key: &str, at: &str, model: String, provider: Option<String>) -> Result<Value> {
+    let tz = gymclaw::domain::profile::get_profile(&db::open(&db_path)?)?.tz();
+    let now = Ts::parse(at, Some(&tz))?;
+    let data_dir = db_path.parent().map(|p| p.join("replay")).unwrap_or_else(|| "replay".into());
+    let agent = Agent {
+        db_path,
+        data_dir,
+        model: Arc::new(Tap(OpenRouter::new(key, provider)?)),
+        vision_model: model.clone(),
+        chat_model: model,
+        coach: None,
+        log: TurnLog::default(),
+        clock: Arc::new(move || now),
+    };
+    let outcome =
+        agent.turn(TurnInput { key: format!("replay-{}", db::new_id()), images: vec![], background: false }).await;
+    Ok(
+        json!({"failed": outcome.failed, "reply": outcome.reply.message.map(|m| m.text), "react": outcome.reply.react, "saved": outcome.actions}),
+    )
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -152,6 +216,7 @@ async fn main() -> ExitCode {
                 .expect("calendar auth thread")
                 .map(Some)
         }
+        Command::Replay { db, key, at, model, provider } => replay(db, &key, &at, model, provider).await.map(Some),
         Command::Dashboard { addr, allowed_host } => {
             gymclaw::web::dashboard(Config::paths().1, addr, allowed_host).await.map(|_| None)
         }
