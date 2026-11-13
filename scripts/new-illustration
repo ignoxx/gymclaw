@@ -1,0 +1,269 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["numpy", "scipy", "scikit-image", "pillow"]
+# ///
+"""Draw a missing exercise picture in the Workout Guide style. Walkthrough: docs/illustrations.md.
+
+  scripts/new-illustration draw <slug> "<what the picture shows>" [--like a,b,c] [-n 2]
+  scripts/new-illustration clean <slug> <png>… [--like a,b,c] [--frames]
+  scripts/new-illustration animate <slug> <still.png> "<the movement>" [--like a,b,c]
+  scripts/new-illustration install <slug> <svg>
+
+draw     asks an image model for candidates, with catalog pictures (--like, closest first) as references.
+clean    matches a candidate to the catalog's line width and size, traces it with Workout Guide's own
+         vectorizer and prints a contact sheet next to the --like pictures. With --frames the PNGs are
+         one animation's frames: one crop, one scale, one line correction, so nothing jitters.
+animate  turns a still (a draw candidate) into a looping 16-frame animation, then cleans its frames.
+install  copies the chosen SVG to assets/workout-guide/<slug>/ and renders its Telegram PNG.
+         The manifest entry is added by hand (see the walkthrough).
+
+Work files go to target/illustrations/<slug>/: raw/ (model output), norm/ (cleaned PNGs), and per
+candidate an SVG plus its Telegram PNG. Needs OPENROUTER_API_KEY (draw, animate),
+rsvg-convert + ImageMagick (brew install librsvg imagemagick), node, and ffmpeg for animation previews.
+"""
+import argparse, base64, hashlib, io, json, os, shutil, subprocess, sys, urllib.request
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageSequence
+from scipy import ndimage
+from skimage.morphology import skeletonize
+
+ROOT = Path(__file__).resolve().parent.parent
+ASSETS = ROOT / "assets/workout-guide"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "gymclaw-illustrations"
+MODEL = os.environ.get("ILLUSTRATION_MODEL", "openai/gpt-image-2.6-sunburst")
+STYLE_REFS = "arnold-press,machine-row,bulgarian-split-squat"
+
+DRAW_PROMPT = """Use case: style-transfer
+Asset type: one illustration in an existing exercise-illustration library; it must be indistinguishable in style from the references.
+Input images: style references only (same artist). Match their exact drawing style, line weight, anatomy and level of detail. They are shown white on black; draw the new image as pure black lines on a pure white background (it gets inverted later).
+Primary request: {what} Side view, slightly three-quarter, like the references.
+Style: clean, sparse contour line art with as few lines as the references (machine tubes drawn as single simple outlines, no weight-stack plate details, no double lines, minimal muscle lines), same stroke thickness as the references, the same muscular faceless figure with the same head, shorts and sneakers, no shading, no fills, no hatching, no gradients.
+Composition: whole figure and equipment centred, about the same share of the canvas as the references, generous empty margin on all sides.
+Colour: only pure black lines on pure white. No grey.
+Avoid: text, labels, logos, floor shadows, background elements, extra people, colour."""
+
+ANIMATE_PROMPT = """Animate this exercise illustration as a seamless looping animation of one smooth repetition. Frame 1 is exactly this image. {movement} Only the body parts that move in this exercise, and the parts of the equipment they push or pull, move. The rest of the equipment, the seat, the camera, the framing, the line style and the stroke thickness stay identical in every frame. Pure black lines on pure white, no shading, no text."""
+
+# Upstream's scripts/lib/vectorize-png.mjs, unchanged except for CommonJS imports.
+TRACE_JS = """
+const potrace = require('potrace'), sharp = require('sharp'), { optimize } = require('svgo');
+const fs = require('node:fs');
+const OPTIONS = { alphaMax: 1, background: potrace.Potrace.COLOR_TRANSPARENT, color: '#fff',
+  optCurve: true, optTolerance: 0.2, threshold: 128, turdSize: 0 };
+(async () => {
+  for (let i = 2; i < process.argv.length; i += 2) {
+    const [input, output] = [process.argv[i], process.argv[i + 1]];
+    const mask = await sharp(fs.readFileSync(input)).ensureAlpha().extractChannel('alpha').negate().png().toBuffer();
+    const svg = await new Promise((resolve, reject) => {
+      const tracer = new potrace.Potrace(OPTIONS);
+      tracer.loadImage(mask, (e) => (e ? reject(e) : resolve(tracer.getSVG())));
+    });
+    fs.writeFileSync(output, `${optimize(svg, { multipass: true, path: output }).data}\\n`);
+  }
+})();
+"""
+
+
+def ink_of(path: Path) -> np.ndarray:
+    """Ink mask (0..1) of a PNG (light or dark lines, on transparent or an opaque background) or an SVG."""
+    if path.suffix == ".svg":
+        png = subprocess.run(["rsvg-convert", "-w", "512", "-h", "512", path], capture_output=True, check=True).stdout
+        im = Image.open(io.BytesIO(png)).convert("RGBA")
+    else:
+        im = Image.open(path).convert("RGBA")
+    a = np.asarray(im, dtype=float) / 255.0
+    lum = a[..., :3].mean(-1)
+    if a[..., 3].min() < 0.99:
+        light = lum[a[..., 3] > 0.5].mean() > 0.5
+        return a[..., 3] * (lum if light else 1 - lum)
+    return 1 - lum if lum.mean() > 0.5 else lum
+
+
+def metrics(ink: np.ndarray) -> dict:
+    """Line width (px at 512), ink share of the figure's box, and figure size as a share of the canvas."""
+    m = ink > 0.5
+    ys, xs = np.nonzero(m)
+    h, w = m.shape
+    return {
+        "stroke": float(2 * np.median(ndimage.distance_transform_edt(m)[skeletonize(m)])) * 512 / w,
+        "density": float(m.sum() / ((np.ptp(ys) + 1) * (np.ptp(xs) + 1))),
+        "size": float(max(np.ptp(ys) + 1, np.ptp(xs) + 1) / max(h, w)),
+    }
+
+
+def profile() -> dict:
+    """Catalog medians and p10–p90 of the metrics, over the art drawn for Workout Guide itself
+    (Everkinetic tracings and our own additions are left out). Cached per manifest version."""
+    manifest = (ASSETS / "manifest.json").read_bytes()
+    cached = CACHE / f"profile-{hashlib.sha1(manifest).hexdigest()[:12]}.json"
+    if cached.exists():
+        return json.loads(cached.read_text())
+    rows = [
+        metrics(ink_of(ASSETS / e["slug"] / "frame-1.svg"))
+        for e in json.loads(manifest)
+        if "source" not in e["frames"][0]["attribution"]
+    ]
+    out = {
+        k: {q: float(np.percentile([r[k] for r in rows], p)) for q, p in (("p10", 10), ("median", 50), ("p90", 90))}
+        for k in rows[0]
+    }
+    CACHE.mkdir(parents=True, exist_ok=True)
+    cached.write_text(json.dumps(out))
+    return out
+
+
+def disk(r: int) -> np.ndarray:
+    y, x = np.ogrid[-r : r + 1, -r : r + 1]
+    return x * x + y * y <= r * r
+
+
+def normalize(srcs: list[Path], outs: list[Path], prof: dict) -> None:
+    """Crop to the figure (the union over all frames), scale it to the catalog's median size, match the
+    median line width, and write bilevel white-on-transparent 512 px PNGs like Workout Guide's sources.
+    Works at 2x so line corrections are half-pixel precise."""
+    inks = [ink_of(s) for s in srcs]
+    ys, xs = np.nonzero(np.max([i > 0.5 for i in inks], axis=0))
+    side = 1024
+    scale = prof["size"]["median"] * side / max(np.ptp(ys) + 1, np.ptp(xs) + 1)
+    steps = None
+    for ink, out in zip(inks, outs):
+        crop = ink[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+        im = Image.fromarray((crop * 255).astype(np.uint8))
+        a = np.asarray(im.resize((round(crop.shape[1] * scale), round(crop.shape[0] * scale)), Image.LANCZOS)) / 255.0
+        canvas = np.zeros((side, side))
+        y0, x0 = (side - a.shape[0]) // 2, (side - a.shape[1]) // 2
+        canvas[y0 : y0 + a.shape[0], x0 : x0 + a.shape[1]] = a
+        if steps is None:
+            # Final-pixel width difference ≈ the 2x-pixel radius to grow or shrink by.
+            steps = round(prof["stroke"]["median"] - metrics(canvas)["stroke"])
+        if steps > 0:
+            canvas = ndimage.grey_dilation(canvas, footprint=disk(steps))
+        elif steps < 0:
+            canvas = ndimage.grey_erosion(canvas, footprint=disk(-steps))
+        small = Image.fromarray((np.clip(canvas, 0, 1) * 255).astype(np.uint8)).resize((512, 512), Image.LANCZOS)
+        rgba = np.zeros((512, 512, 4), np.uint8)
+        rgba[..., :3] = 255
+        rgba[..., 3] = np.where(np.asarray(small) > 128, 255, 0)
+        Image.fromarray(rgba).save(out)
+
+
+def trace(pairs: list[tuple[Path, Path]]) -> None:
+    deps = CACHE / "node_modules"
+    if not (deps / "svgo").exists():
+        CACHE.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["npm", "install", "--silent", "--prefix", CACHE, "potrace@2.1.8", "sharp@0.35.5", "svgo@4.1.0"],
+                       check=True, stdout=subprocess.DEVNULL)
+    args = [str(p) for pair in pairs for p in pair]
+    subprocess.run(["node", "-", *args], input=TRACE_JS.encode(), check=True, env={**os.environ, "NODE_PATH": str(deps)})
+
+
+def sheet(renders: list[Path], like: list[str], out: Path) -> None:
+    """Row 1: the --like catalog pictures. Row 2: the candidates. 256 px tiles."""
+    row = lambda paths: ["(", *map(str, paths), "-resize", "256x256", "+append", ")"]
+    refs = [ASSETS / s / "frame-1.png" for s in like]
+    subprocess.run(["magick", *row(refs), *row(renders), "-background", "black", "-append", out], check=True)
+    print(f"sheet: {out}")
+
+
+def report(name: str, path: Path, prof: dict) -> None:
+    m = metrics(ink_of(path))
+    flags = [k for k in m if not prof[k]["p10"] <= m[k] <= prof[k]["p90"] + (0.03 if k == "density" else 0)]
+    stats = "  ".join(f"{k} {m[k]:.3g} (catalog {prof[k]['median']:.3g})" for k in m)
+    print(f"{name}: {stats}{'  ⚠ off-style: ' + ', '.join(flags) if flags else ''}")
+
+
+def generate(body: dict) -> list[bytes]:
+    key = os.environ.get("OPENROUTER_API_KEY") or sys.exit("OPENROUTER_API_KEY is not set")
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/images",
+        json.dumps({"model": MODEL, "aspect_ratio": "1:1", "quality": "high", **body}).encode(),
+        {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        resp = json.load(urllib.request.urlopen(req, timeout=600))
+    except urllib.error.HTTPError as e:
+        sys.exit(f"{MODEL}: HTTP {e.code} {e.read()[:600]!r}")
+    print(f"{MODEL}: ${resp.get('usage', {}).get('cost', '?')}")
+    return [base64.b64decode(d["b64_json"]) for d in resp["data"]]
+
+
+def reference(path: Path) -> dict:
+    return {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()}}
+
+
+def clean(work: Path, pngs: list[Path], like: list[str], frames: bool = False) -> None:
+    """normalize → trace → render (scripts/render-illustrations, as for the catalog) → report → sheet."""
+    prof = profile()
+    (work / "norm").mkdir(exist_ok=True)
+    norms = [work / "norm" / p.name for p in pngs]
+    if frames:
+        normalize(pngs, norms, prof)
+    else:
+        for png, norm in zip(pngs, norms):
+            normalize([png], [norm], prof)
+    svgs = [work / f"{p.stem}.svg" for p in pngs]
+    trace(list(zip(norms, svgs)))
+    subprocess.run([ROOT / "scripts/render-illustrations", *svgs], check=True, stdout=subprocess.DEVNULL)
+    for svg in svgs:
+        report(svg.name, svg, prof)
+    if not frames:
+        sheet([s.with_suffix(".png") for s in svgs], like, work / "sheet.png")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name, extra in (("draw", ["what"]), ("clean", ["pngs+"]), ("animate", ["still", "movement"]), ("install", ["svg"])):
+        p = sub.add_parser(name)
+        p.add_argument("slug")
+        for a in extra:
+            p.add_argument(a.rstrip("+"), nargs="+" if a.endswith("+") else None)
+        p.add_argument("--like", default=STYLE_REFS, help="catalog slugs, closest exercise first")
+        p.add_argument("-n", type=int, default=2, help="draw: number of candidates")
+        p.add_argument("--frames", action="store_true", help="clean: the PNGs are one animation's frames")
+    a = ap.parse_args()
+    like = a.like.split(",")
+    work = ROOT / "target/illustrations" / a.slug
+    raw = work / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+
+    if a.cmd == "draw":
+        refs = [reference(ASSETS / s / "frame-1.png") for s in like]
+        images = generate({"prompt": DRAW_PROMPT.format(what=a.what), "n": a.n, "output_format": "png", "background": "opaque",
+                           "input_references": refs})
+        n0 = len(list(raw.glob("draw-*.png")))
+        pngs = [raw / f"draw-{n0 + i}.png" for i in range(len(images))]
+        for png, data in zip(pngs, images):
+            png.write_bytes(data)
+        clean(work, pngs, like)
+    elif a.cmd == "clean":
+        clean(work, [Path(p) for p in a.pngs], like, a.frames)
+    elif a.cmd == "animate":
+        body = {"prompt": ANIMATE_PROMPT.format(movement=a.movement), "output_format": "gif", "frame_count": 16,
+                "frame_duration_ms": 90, "input_references": [reference(Path(a.still))]}
+        gif = raw / "anim.gif"
+        gif.write_bytes(generate(body)[0])
+        pngs = []
+        for i, frame in enumerate(ImageSequence.Iterator(Image.open(gif))):
+            pngs.append(raw / f"frame-{i:02d}.png")
+            frame.convert("RGB").save(pngs[-1])
+        clean(work, pngs, like, frames=True)
+        if shutil.which("ffmpeg"):
+            mp4 = work / "anim.mp4"  # Telegram plays MP4 animations crisply; it re-encodes GIFs
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-framerate", "11", "-stream_loop", "2",
+                            "-i", work / "frame-%02d.png", "-vf", "scale=720:720", "-c:v", "libx264",
+                            "-crf", "20", "-pix_fmt", "yuv420p", mp4], check=True)
+            print(f"preview: {mp4}")
+    elif a.cmd == "install":
+        dest = ASSETS / a.slug
+        dest.mkdir(exist_ok=True)
+        shutil.copy(a.svg, dest / "frame-1.svg")
+        subprocess.run([ROOT / "scripts/render-illustrations", dest / "frame-1.svg"], check=True)
+        print(f"installed {dest}; now add its manifest entry (docs/illustrations.md)")
+
+
+if __name__ == "__main__":
+    main()

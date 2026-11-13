@@ -2790,6 +2790,54 @@
     }
   },
   {
+    "id": "exercise-horizontal-leg-press",
+    "slug": "horizontal-leg-press",
+    "name": "Horizontal Leg Press",
+    "exerciseType": "weight_reps",
+    "equipment": "Machine",
+    "primaryMuscle": "Quads",
+    "secondaryMuscles": [
+      "Glutes",
+      "Hamstrings"
+    ],
+    "isStretch": false,
+    "frames": [
+      {
+        "index": 1,
+        "path": "assets/horizontal-leg-press/frame-1.svg",
+        "width": 512,
+        "height": 512,
+        "format": "svg",
+        "attribution": {
+          "creator": "GymClaw",
+          "creatorUrl": "https://github.com/ignoxx/gymclaw",
+          "license": "CC BY-SA 4.0",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "source": {
+            "name": "Workout Guide",
+            "url": "https://github.com/bryllim/workout-guide",
+            "license": "CC BY-SA 4.0",
+            "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+            "changes": "Drawn by an image model (GPT Image 2.6) with Workout Guide frames as style references, matched to the catalog's line width and size, and vector-traced with Workout Guide's vectorizer (scripts/new-illustration)."
+          }
+        }
+      }
+    ],
+    "attribution": {
+      "creator": "GymClaw",
+      "creatorUrl": "https://github.com/ignoxx/gymclaw",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "source": {
+        "name": "Workout Guide",
+        "url": "https://github.com/bryllim/workout-guide",
+        "license": "CC BY-SA 4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "changes": "Drawn by an image model (GPT Image 2.6) with Workout Guide frames as style references, matched to the catalog's line width and size, and vector-traced with Workout Guide's vectorizer (scripts/new-illustration)."
+      }
+    }
+  },
+  {
     "id": "exercise-bulgarian-split-squat",
     "slug": "bulgarian-split-squat",
     "name": "Bulgarian Split Squat",
