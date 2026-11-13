@@ -54,7 +54,7 @@ pub enum WorkoutAction {
     Preview,
     /// No args: today's planned session. template_id/planned_session_id only to start something else.
     Start,
-    /// `text` like "10x40" (10 reps at 40 kg) logs a set.
+    /// `text` like "10x40" (10 reps at 40 kg) or "25 min" logs a set; with `workout_id` and `which`, into that finished workout.
     Log,
     /// Resend the current card.
     Card,
@@ -62,7 +62,7 @@ pub enum WorkoutAction {
     Swap,
     /// `exercise`: the owner is doing this now (any exercise, any time); finishes or replaces the current one.
     Switch,
-    /// `exercise`: what the owner really did; `which`: the logged exercise to fix (default the latest); `workout_id`: any past workout.
+    /// `exercise`: what the owner really did; `which` (default the latest), `workout_id`: see below.
     /// Moves that workout's sets and next weight. "I always did X": once per past workout.
     Relabel,
     /// `seconds` between sets for this workout; `remember` also makes it the default.
@@ -79,7 +79,7 @@ pub enum WorkoutAction {
 #[serde(deny_unknown_fields)]
 pub struct Workout {
     pub action: WorkoutAction,
-    /// start: a template to start instead of today's planned session.
+    // Undocumented fields (template_id, seconds, remember) are described on their action.
     pub template_id: Option<String>,
     /// log: the set, reps first, e.g. "10x40" (bodyweight: "13 reps").
     pub text: Option<String>,
@@ -87,13 +87,11 @@ pub struct Workout {
     pub planned_session_id: Option<String>,
     /// switch/relabel: guide_id or exact exercise name.
     pub exercise: Option<String>,
-    /// relabel: the logged exercise to correct.
+    /// relabel: the logged exercise to correct; log: its exercise.
     pub which: Option<String>,
-    /// relabel: a past workout (workout_session.id from sql_query); default the running or latest one.
+    /// relabel/log: a past workout (workout_session.id from sql_query); default the running or latest one.
     pub workout_id: Option<String>,
-    /// rest: seconds between sets.
     pub seconds: Option<i64>,
-    /// rest: also the default for future workouts.
     #[serde(default)]
     pub remember: bool,
 }
@@ -111,8 +109,7 @@ fn shown(view: &CoachView) -> Value {
 impl Tool for Workout {
     const NAME: &'static str = "workout";
     const DESCRIPTION: &'static str = "Drive the live workout in Telegram. Sends exercise cards (image, target, quick buttons) to the owner directly, \
-        so after calling it don't repeat the card; reply only if the owner asked a question. The result's `card` is what the owner now sees. \
-        `exercise` takes a guide_id or exact name; on EXERCISE_UNKNOWN pick one of the suggested guide_ids.";
+        so after calling it don't repeat the card; reply only if the owner asked a question. The result's `card` is what the owner now sees.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let missing = match self.action {
@@ -127,6 +124,13 @@ impl Tool for Workout {
             }
             WorkoutAction::Rest if self.seconds.is_none() => {
                 Some(("rest", "seconds", r#"{"action":"rest","seconds":90}"#))
+            }
+            WorkoutAction::Log if self.workout_id.is_some() && self.which.as_deref().is_none_or(str::is_empty) => {
+                Some((
+                    "log with workout_id",
+                    "which",
+                    r#"{"action":"log","workout_id":"…","which":"Cycling","text":"25 min"}"#,
+                ))
             }
             _ => None,
         };
@@ -155,13 +159,23 @@ impl Tool for Workout {
                 return Ok(json!({"workout": running.map(|w| workout::current(db, &w.id, now)).transpose()?}));
             }
             WorkoutAction::Preview => coach::preview(db, now, self.planned_session_id.as_deref(), cx.data_dir)?,
+            WorkoutAction::Log if self.workout_id.is_some() => {
+                return audit::add_set(
+                    db,
+                    self.workout_id.as_deref().unwrap_or_default(),
+                    self.which.as_deref().unwrap_or_default(),
+                    self.text.as_deref().unwrap_or_default(),
+                    now,
+                    &rid,
+                );
+            }
             WorkoutAction::Log => {
                 let view = coach::handle_text(db, self.text.as_deref().unwrap_or_default(), now, &rid)?;
                 if !view.handled {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
                     crate::bail!(
                         "NOT_LOGGED",
-                        "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps). Check status, then ask the owner."
+                        "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps) or a time on a timed exercise (25 min). Check status, then ask the owner."
                     );
                 }
                 view
@@ -238,15 +252,17 @@ pub struct SetCorrect {
     pub set_id: String,
     pub weight: Option<f64>,
     pub reps: Option<i64>,
+    pub minutes: Option<f64>,
 }
 
 impl Tool for SetCorrect {
     const NAME: &'static str = "set_correct";
-    const DESCRIPTION: &'static str = "Fix a logged set's weight or reps when the owner says it was logged wrong, during or after the workout. \
+    const DESCRIPTION: &'static str = "Fix a logged set's weight, reps or minutes when the owner says it was logged wrong, during or after the workout. \
         Find the set with sql_query on set_log. Recomputes that exercise's next weight if this workout set it.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        audit::correct_set(cx.db, &self.set_id, self.weight, self.reps, cx.now, &cx.request_id)
+        let seconds = self.minutes.map(|m| (m * 60.0).round() as i64);
+        audit::correct_set(cx.db, &self.set_id, self.weight, self.reps, seconds, cx.now, &cx.request_id)
     }
 }
 
@@ -305,7 +321,8 @@ pub struct TemplateEditExercise {
     pub template_id: String,
     /// The exercise: ID, guide_id or name.
     pub exercise: String,
-    /// Fields to change, e.g. {"target_weight":85,"working_sets":4,"rep_min":6,"rep_max":8}. A new target_weight also resets the learned next weight.
+    /// Fields to change, e.g. {"target_weight":85,"working_sets":4,"rep_min":6,"rep_max":8} or
+    /// {"measure":"time","minutes":25}. A new target_weight also resets the learned next weight.
     #[serde(default)]
     pub changes: Map<String, Value>,
     /// 0-based new place in the order.
@@ -314,7 +331,7 @@ pub struct TemplateEditExercise {
 
 impl Tool for TemplateEditExercise {
     const NAME: &'static str = "template_edit_exercise";
-    const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, rest, or its place in the order. \
+    const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, time, rest, or its place in the order. \
         History and next weight follow the exercise id: to rename or fix the picture, keep the id.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {

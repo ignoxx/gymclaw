@@ -20,7 +20,7 @@ use crate::domain::core::{emit, mutate};
 use crate::domain::illustrations::{Entry, bodyweight, for_exercise, primary_muscle};
 use crate::domain::profile::get_profile;
 use crate::domain::set_parser::SetInput;
-use crate::domain::templates::{ExerciseSpec, Template, get_template};
+use crate::domain::templates::{ExerciseSpec, Measure, Template, get_template};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -145,6 +145,31 @@ pub fn guide_id(exercise: &WorkoutExercise) -> Option<&str> {
     config_str(exercise, "guide_id")
 }
 
+/// How the exercise is logged; rows from before timed exercises are reps.
+pub fn measure(exercise: &WorkoutExercise) -> Measure {
+    exercise.config_json.get("measure").and_then(|m| serde_json::from_value(m.clone()).ok()).unwrap_or_default()
+}
+
+/// Planned length of one working set of a timed exercise.
+pub fn target_seconds(exercise: &WorkoutExercise) -> Option<i64> {
+    let minutes = exercise.config_json.get("minutes").and_then(Value::as_f64);
+    minutes.filter(|_| measure(exercise) == Measure::Time).map(|m| (m * 60.0).round() as i64)
+}
+
+/// The owner did it the other way today (rode the bike stored as 3 × 8–10): the first set decides how
+/// this workout's row is logged, and a ride is one block. The saved template doesn't change.
+pub fn set_measure(db: &Connection, exercise: &mut WorkoutExercise, timed: bool) -> Result<()> {
+    if timed {
+        exercise.planned_working_sets = 1;
+    }
+    if let Some(config) = exercise.config_json.as_object_mut() {
+        config.insert("measure".into(), json!(if timed { Measure::Time } else { Measure::Reps }));
+        config.remove("minutes");
+        config.insert("warmup_required".into(), Value::Bool(false));
+    }
+    exercise.update(db)
+}
+
 /// Whether a JSON value is set: null, false, 0, "", [] and {} are not.
 fn truthy(value: Option<&Value>) -> bool {
     match value {
@@ -256,7 +281,7 @@ pub fn estimate_finish(db: &Connection, workout: &WorkoutSession, now: Ts) -> Re
     let mut total = pending_rest(db, &workout.id)?.map_or(0.0, |job| (job.due_at - now).as_secs_f64().max(0.0));
     for (index, exercise) in rows.iter().enumerate() {
         let remaining = (exercise.planned_working_sets - working_count(db, &exercise.id)?).max(0) as f64;
-        total += remaining * duration;
+        total += remaining * target_seconds(exercise).map_or(duration, |s| s as f64);
         if warmup_pending(db, exercise)? {
             total += duration;
         }
@@ -292,6 +317,25 @@ pub fn format_target(rep_min: i64, rep_max: i64, target_weight: f64) -> String {
     if target_weight != 0.0 { format!("{reps} × {} kg", g(target_weight)) } else { format!("{reps} reps") }
 }
 
+/// A time the way the owner says it: '25 min', '45 s', '1 min 30 s', '1 h 5 min'.
+pub fn format_time(seconds: i64) -> String {
+    let (h, m, s) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    let parts = [(h, "h"), (m, "min"), (s, "s")];
+    let text: Vec<String> = parts.iter().filter(|(n, _)| *n > 0).map(|(n, unit)| format!("{n} {unit}")).collect();
+    if text.is_empty() { "0 s".into() } else { text.join(" ") }
+}
+
+/// The next timed set's length: this workout's last one, else the target, else last time's.
+pub fn next_timed_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<i64>> {
+    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop().and_then(|s| s.seconds) {
+        return Ok(Some(own));
+    }
+    if let Some(target) = target_seconds(exercise) {
+        return Ok(Some(target));
+    }
+    Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.and_then(|s| s.seconds))
+}
+
 /// Latest working set for this exercise: this workout first, else any earlier workout.
 pub fn last_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<SetLog>> {
     if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop() {
@@ -325,6 +369,8 @@ pub fn expected_weight(db: &Connection, workout_id: &str) -> Result<Option<f64>>
 pub struct LastSet {
     pub weight: f64,
     pub reps: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<i64>,
 }
 
 /// The exercise the owner should do now, as `current` reports it.
@@ -345,6 +391,10 @@ pub struct Active {
     pub target_weight: f64,
     pub rep_min: i64,
     pub rep_max: i64,
+    pub measure: Measure,
+    /// Timed exercise: the next set's length (see `next_timed_set`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -396,7 +446,7 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
             name: name(active).to_string(),
             primary_muscle: primary_muscle(guide),
             new_exercise: logs(db, &active.id, None)?.is_empty(),
-            last_set: last.map(|l| LastSet { weight: l.weight, reps: l.reps }),
+            last_set: last.map(|l| LastSet { weight: l.weight, reps: l.reps, seconds: l.seconds }),
             set_type: if is_warmup { SetType::Warmup } else { SetType::Working },
             set_number: if is_warmup { 1 } else { working_count(db, &active.id)? + 1 },
             working_sets: active.planned_working_sets,
@@ -404,14 +454,20 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
             target_weight: if is_warmup { warmup_weight(active) } else { active.target_weight },
             rep_min: if is_warmup { warmup_reps } else { active.rep_min },
             rep_max: if is_warmup { warmup_reps } else { active.rep_max },
+            measure: measure(active),
+            seconds: if measure(active) == Measure::Time { next_timed_set(db, active)? } else { None },
         };
         let step = if is_warmup {
             "warm-up".to_string()
         } else {
             format!("set {}/{}", data.set_number, active.planned_working_sets)
         };
-        instruction =
-            format!("{} · {step} · {}", data.name, format_target(data.rep_min, data.rep_max, data.target_weight));
+        let target = match (data.measure, data.seconds) {
+            (Measure::Reps, _) => format_target(data.rep_min, data.rep_max, data.target_weight),
+            (Measure::Time, Some(seconds)) => format_time(seconds),
+            (Measure::Time, None) => "timed".into(),
+        };
+        instruction = format!("{} · {step} · {target}", data.name);
         active_data = Some(data);
     } else if rows.iter().any(|e| unresolved(e.status)) {
         instruction = "Deferred equipment unresolved. Retry, substitute, or explicitly skip.".into();
@@ -473,7 +529,7 @@ pub fn make_exercise(
     let profile = get_profile(db)?;
     let progression = ExerciseProgression::get(db, &spec.id)?;
     let mut config = serde_json::to_value(spec)?;
-    config["warmup_required"] = Value::Bool(warmup);
+    config["warmup_required"] = Value::Bool(warmup && spec.measure == Measure::Reps);
     let row = WorkoutExercise {
         id: new_id(),
         workout_session_id: workout_id.into(),
@@ -600,7 +656,7 @@ pub fn start(
             notes: None,
         };
         workout.insert(db)?;
-        let first_primary = template.exercises.iter().find(|e| e.primary).map(|e| e.id.clone());
+        let first_primary = template.warmup_exercise().map(|e| e.id.clone());
         for (index, spec) in template.exercises.iter().enumerate() {
             let mut row = make_exercise(
                 db,
@@ -644,6 +700,14 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             crate::bail!("INVALID_TRANSITION", "Cannot log set in {}", workout.status);
         }
         let mut active = active_exercise(db, workout_id)?;
+        let timed = value.seconds.is_some();
+        if timed != (measure(&active) == Measure::Time) {
+            if working_count(db, &active.id)? > 0 {
+                let how = if timed { "reps × weight" } else { "a time, e.g. 25 min" };
+                crate::bail!("INVALID_SET", "{} is logged as {how} in this workout", name(&active));
+            }
+            set_measure(db, &mut active, timed)?;
+        }
         let needs_warmup = warmup_pending(db, &active)?;
         if value.set_type == SetType::Working && needs_warmup {
             // Going straight to working sets skips the warm-up; it is a suggestion, not a gate.
@@ -667,6 +731,7 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             logged_at: now,
             rest_started_at: None,
             rest_due_at: None,
+            seconds: value.seconds,
         };
         row.insert(db)?;
         if value.set_type == SetType::Working {
@@ -713,7 +778,7 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             }
         }
         let mut result = touch(db, &mut workout, now)?;
-        result["logged_set"] = json!({"id": row.id, "weight": row.weight, "reps": row.reps, "set_type": row.set_type, "set_number": row.set_number});
+        result["logged_set"] = json!({"id": row.id, "weight": row.weight, "reps": row.reps, "seconds": row.seconds, "set_type": row.set_type, "set_number": row.set_number});
         Ok(result)
     })
 }
@@ -835,7 +900,7 @@ pub(crate) mod tests {
     }
 
     fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {
-        SetInput { weight, reps, set_type, rir: None }
+        SetInput { weight, reps, set_type, rir: None, seconds: None }
     }
 
     fn short(db: &Connection) -> String {

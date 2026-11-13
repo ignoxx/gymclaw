@@ -16,14 +16,14 @@ use crate::domain::adaptation::{self, spec_of};
 use crate::domain::audit;
 use crate::domain::crowd::{LABELS, record_feedback};
 use crate::domain::highlights::{self, Change};
-use crate::domain::illustrations::{bodyweight, catalog};
+use crate::domain::illustrations::{bodyweight, catalog, timed};
 use crate::domain::profile::update_profile;
-use crate::domain::set_parser::{SetInput, parse_set};
-use crate::domain::templates::remember_swap;
+use crate::domain::set_parser::{SetInput, parse_duration, parse_set};
+use crate::domain::templates::{Measure, remember_swap};
 use crate::domain::view::{Button, Card, CardKind, Cleanup, CoachView};
 use crate::domain::workout::{
-    self, active_workout, cut_rest, exercises, expected_weight, format_target, g, guide_id, log_set, logs, name,
-    pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved,
+    self, active_workout, cut_rest, exercises, expected_weight, format_target, format_time, g, guide_id, log_set, logs,
+    measure, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -103,7 +103,9 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
         } else {
             next_set(db, row, active.bodyweight)?.map_or(0.0, |(w, _)| w)
         };
-        let target = if weight > 0.0 {
+        let target = if active.measure == Measure::Time {
+            active.seconds.map_or("timed".into(), format_time)
+        } else if weight > 0.0 {
             kg(weight)
         } else if active.bodyweight {
             "Bodyweight".into()
@@ -136,7 +138,18 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     } else {
         let set_line = format!("Set {}/{}", active.set_number, active.working_sets);
         let (mut lines, mut buttons) = (vec![head], vec![]);
-        if let Some((weight, reps)) = next_set(db, row, active.bodyweight)? {
+        if active.measure == Measure::Time {
+            // One tap logs the planned time; any other time is typed.
+            let step = if active.working_sets > 1 { format!("{set_line} · ") } else { String::new() };
+            if let Some(seconds) = active.seconds {
+                lines.push(format!("{step}⏱ {}", format_time(seconds)));
+                lines.push("✍️ Other time? Reply it, e.g. `30 min`".into());
+                buttons.push(vec![button(format!("✅ {}", format_time(seconds)), &["time", r, &seconds.to_string()])?]);
+            } else {
+                lines.push(format!("{step}⏱ **? min**"));
+                lines.push("✍️ **Reply the time:** `25 min`".into());
+            }
+        } else if let Some((weight, reps)) = next_set(db, row, active.bodyweight)? {
             lines.push(format!("{set_line} · {}", format_target(active.rep_min, active.rep_max, weight)));
             buttons
                 .push(vec![button(format!("✅ {}", done(reps, weight)), &["log", r, &g(weight), &reps.to_string()])?]);
@@ -215,8 +228,12 @@ fn tonnes(kg: f64) -> String {
 }
 
 /// One exercise's working sets for the details quote: "Bench 85 kg: 8 · 8 · 7" when the weight held,
-/// else "Bench 8 × 85 · 7 × 82.5 kg"; "Dips 15 · 12 reps" for bodyweight.
+/// else "Bench 8 × 85 · 7 × 82.5 kg"; "Dips 15 · 12 reps" for bodyweight; "Cycling 25 min" when timed.
 fn sets_line(name: &str, sets: &[Value]) -> String {
+    let times: Vec<String> = sets.iter().filter_map(|s| s["seconds"].as_i64()).map(format_time).collect();
+    if !times.is_empty() {
+        return format!("{name} {}", times.join(" · "));
+    }
     let pairs: Vec<(f64, i64)> =
         sets.iter().map(|s| (s["weight"].as_f64().unwrap_or(0.0), s["reps"].as_i64().unwrap_or(0))).collect();
     let reps = |pairs: &[(f64, i64)]| pairs.iter().map(|(_, r)| r.to_string()).collect::<Vec<_>>().join(" · ");
@@ -257,8 +274,13 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
     let profile = crate::domain::profile::get_profile(db)?;
     let tz = profile.tz();
     let volume = if h.volume > 0.0 { format!(" · {}", tonnes(h.volume)) } else { String::new() };
-    let sets = if h.sets == 1 { "1 set".to_string() } else { format!("{} sets", h.sets) };
-    let mut lines = vec![format!("🏁 **{} done** · {} min · {sets}{volume}", h.name, h.minutes)];
+    let sets = match h.sets {
+        // Only timed work (a bike session): its minutes are the next lines, not "0 sets".
+        0 if !h.timed.is_empty() => String::new(),
+        1 => " · 1 set".to_string(),
+        n => format!(" · {n} sets"),
+    };
+    let mut lines = vec![format!("🏁 **{} done** · {} min{sets}{volume}", h.name, h.minutes)];
     if let Some((minutes, volume)) = h.last {
         let mut versus = Vec::new();
         if minutes.abs_diff(h.minutes) >= 3 {
@@ -275,6 +297,9 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
         if !versus.is_empty() {
             lines.push(format!("{} vs last {}", versus.join(" · "), h.name));
         }
+    }
+    for (name, seconds) in &h.timed {
+        lines.push(format!("⏱ **{name}** {}", format_time(*seconds)));
     }
     for lift in &h.lifts {
         let set = done(lift.reps, lift.weight);
@@ -341,7 +366,7 @@ fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
     Ok(vec![exercise_card(db, workout_id, now)?])
 }
 
-/// Typed text during a workout ("10x40"). `handled: false` when it isn't a set; the agent gets it.
+/// Typed text during a workout ("10x40", "25 min"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
     let Some(workout) =
         active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting))
@@ -349,6 +374,23 @@ pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Re
         return Ok(CoachView::default());
     };
     let active = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
+    if let Some(row) = &active {
+        // A time only counts on a timed exercise, or a catalog cardio machine still stored as reps (the
+        // first set decides): on a lift, "5 min" is talk, not a set.
+        let is_timed = measure(row) == Measure::Time;
+        let catalog_timed = timed(guide_id(row)) && working_count(db, &row.id)? == 0;
+        match parse_duration(text) {
+            Some(seconds) if is_timed || catalog_timed => {
+                log_set(db, &workout.id, &SetInput::timed(seconds), now, request_id)?;
+                return Ok(CoachView {
+                    react: Some("👍".into()),
+                    ..acked(format!("✅ {}", format_time(seconds)), after_change(db, &workout.id, now, request_id)?)
+                });
+            }
+            _ if is_timed => return Ok(CoachView::default()),
+            _ => {}
+        }
+    }
     let is_bodyweight = active.as_ref().is_some_and(|a| bodyweight(guide_id(a)));
     let parsed = expected_weight(db, &workout.id)
         .and_then(|expected| parse_set(text, SetType::Working, expected, is_bodyweight));
@@ -409,8 +451,19 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
         "log" => {
             let weight: f64 = arg(1)?.parse().map_err(|_| invalid("Bad weight"))?;
             let reps: i64 = arg(2)?.parse().map_err(|_| invalid("Bad reps"))?;
-            log_set(db, id, &SetInput { weight, reps, set_type: SetType::Working, rir: None }, now, request_id)?;
+            log_set(
+                db,
+                id,
+                &SetInput { weight, reps, set_type: SetType::Working, rir: None, seconds: None },
+                now,
+                request_id,
+            )?;
             next(Some(format!("✅ {}", done(reps, weight))))
+        }
+        "time" => {
+            let seconds: i64 = arg(1)?.parse().map_err(|_| invalid("Bad seconds"))?;
+            log_set(db, id, &SetInput::timed(seconds), now, request_id)?;
+            next(Some(format!("✅ {}", format_time(seconds))))
         }
         "warm" => {
             let target = workout::state(db, id, now)?
@@ -419,7 +472,13 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
             log_set(
                 db,
                 id,
-                &SetInput { weight: target.target_weight, reps: target.rep_max, set_type: SetType::Warmup, rir: None },
+                &SetInput {
+                    weight: target.target_weight,
+                    reps: target.rep_max,
+                    set_type: SetType::Warmup,
+                    rir: None,
+                    seconds: None,
+                },
                 now,
                 request_id,
             )?;
@@ -933,7 +992,7 @@ mod tests {
         handle_tap(&db, &data(&live(&db, at(110)), "⏭ Next exercise"), at(112), "cb-1").unwrap();
         handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
-        let fixed = crate::domain::audit::correct_set(&db, &set.id, Some(95.0), None, at(700), "fix").unwrap();
+        let fixed = crate::domain::audit::correct_set(&db, &set.id, Some(95.0), None, None, at(700), "fix").unwrap();
         assert_eq!(
             (fixed["data"]["before"]["weight"].as_f64(), fixed["data"]["next_weight"].as_f64()),
             (Some(90.0), Some(95.0))
@@ -1050,6 +1109,99 @@ mod tests {
         let done = handle_text(&db, "13 reps", at(90), "m2").unwrap();
         assert_eq!(done.ack.as_deref(), Some("✅ 13 reps"));
         assert!(done.cards.iter().all(|c| c.rest_until.is_none()) && done.cards[0].text.starts_with("🏁"));
+    }
+
+    /// The owner's cardio day: one 25-minute ride on the bike.
+    fn cardio(db: &Connection, cycling: Value) {
+        let template = Template {
+            id: "cardio".into(),
+            name: "Cardio".into(),
+            exercises: vec![spec(cycling)],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(db, &template).unwrap();
+    }
+
+    #[test]
+    fn a_timed_exercise_is_logged_in_minutes_and_counts_as_done() {
+        let db = db();
+        cardio(
+            &db,
+            json!({"id": "cycling", "name": "Cycling", "role": "conditioning", "guide_id": "cycling", "working_sets": 1, "target_weight": 0, "measure": "time", "minutes": 25}),
+        );
+        let started = start(&db, Some("cardio"), None, false, at(0), "start").unwrap();
+        assert_eq!(started["data"]["eta"], json!(at(1500)), "the ride's 25 min, not one 40 s set");
+        let card = live(&db, at(1));
+        assert!(card.text.contains("⏱ 25 min") && !card.text.contains("reps"), "{}", card.text);
+        data(&card, "✅ 25 min");
+        assert!(!handle_text(&db, "10x40", at(5), "m0").unwrap().handled, "reps on a ride go to the agent");
+        let done = handle_text(&db, "27m", at(1700), "m1").unwrap();
+        assert_eq!(done.ack.as_deref(), Some("✅ 27 min"));
+        let summary = &done.cards[0].text;
+        assert!(summary.starts_with("🏁 **Cardio done** · 28 min\n⏱ **Cycling** 27 min\n"), "{summary}");
+        assert!(summary.contains("\n>> Cycling 27 min\n") && !summary.contains("sets"), "{summary}");
+        let row = &exercises(&db, &WorkoutSession::first(&db, "", []).unwrap().unwrap().id).unwrap()[0];
+        assert_eq!(row.status, ExerciseStatus::Completed);
+        assert!(ExerciseProgression::get(&db, "cycling").unwrap().is_none(), "no next weight for a ride");
+    }
+
+    /// 2026-11-12: Cycling was stored as 3 × 8–10 at 0 kg; "25 min" couldn't be logged and ending the
+    /// workout marked it skipped. A catalog cardio machine still stored as reps takes a time as its
+    /// first set; a lift doesn't take one at all.
+    #[test]
+    fn a_cardio_machine_stored_as_reps_takes_a_time() {
+        let db = db();
+        cardio(
+            &db,
+            json!({"id": "cycling", "name": "Cycling", "role": "conditioning", "guide_id": "cycling", "working_sets": 3, "target_weight": 0}),
+        );
+        start(&db, Some("cardio"), None, false, at(0), "start").unwrap();
+        let logged = handle_action(&db, Action::Card, None, None, None, false, at(1), "card").unwrap();
+        assert!(logged.cards[0].text.contains("Set 1/3"), "{}", logged.cards[0].text);
+        let done = handle_text(&db, "25 min", at(1500), "m1").unwrap();
+        assert!(done.cards[0].text.contains("⏱ **Cycling** 25 min"), "{}", done.cards[0].text);
+        let lifting = crate::db::test::db();
+        push(&lifting);
+        assert!(!handle_text(&lifting, "5 min", at(5), "talk").unwrap().handled);
+    }
+
+    /// The fix for the 2026-11-12 workout: the agent adds the ride to the finished workout, and the skipped
+    /// exercise counts as done, in minutes.
+    #[test]
+    fn a_skipped_ride_is_added_to_the_finished_workout() {
+        let db = db();
+        cardio(
+            &db,
+            json!({"id": "cycling", "name": "Cycling", "role": "conditioning", "guide_id": "cycling", "working_sets": 3, "target_weight": 0}),
+        );
+        start(&db, Some("cardio"), None, false, at(0), "start").unwrap();
+        let ended = handle_action(&db, Action::End, None, None, None, false, at(1800), "end").unwrap();
+        assert!(ended.cards[0].text.contains("~~Cycling~~ skipped"), "{}", ended.cards[0].text);
+        let id = WorkoutSession::first(&db, "", []).unwrap().unwrap().id;
+        let fixed = audit::add_set(&db, &id, "cycling", "25 min", at(7200), "fix").unwrap()["data"].clone();
+        assert_eq!(
+            (fixed["status_before"].as_str(), fixed["status"].as_str(), fixed["seconds"].as_i64()),
+            (Some("SKIPPED"), Some("COMPLETED"), Some(1500))
+        );
+        let row = &exercises(&db, &id).unwrap()[0];
+        assert_eq!((measure(row), row.deferred_reason.as_deref()), (Measure::Time, None));
+        let h = highlights::workout(&db, &id).unwrap();
+        assert_eq!((h.timed, h.sets), (vec![("Cycling".to_string(), 1500)], 0));
+        // Logged during the workout, so later history keeps its order.
+        assert_eq!(logs(&db, &row.id, None).unwrap()[0].logged_at, at(1800));
+        // A second, different kind of set on it is refused; a wrong time is corrected instead.
+        let mixed = audit::add_set(&db, &id, "cycling", "10x40", at(7201), "mixed").unwrap_err();
+        assert!(mixed.to_string().contains("logged as a time"), "{mixed}");
+        let set_id = fixed["set_id"].as_str().unwrap();
+        let corrected = audit::correct_set(&db, set_id, None, None, Some(1560), at(7202), "fix-time").unwrap();
+        assert_eq!(corrected["data"]["after"]["seconds"], 1560);
+        assert_eq!(
+            audit::correct_set(&db, set_id, Some(40.0), None, None, at(7203), "kg").unwrap_err().code(),
+            "INVALID_SET"
+        );
     }
 
     fn planned(

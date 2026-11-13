@@ -1,5 +1,6 @@
 //! Parse a whole-message set in either order ("9x80", "80kgx9", "9 reps at 80"). Reps first is the default.
-//! Bodyweight exercises also take reps alone ("13", "13 reps", "13x").
+//! Bodyweight exercises also take reps alone ("13", "13 reps", "13x"). Timed exercises take a time
+//! with its unit ("25 min", "25m", "90s", "1:30").
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -17,6 +18,9 @@ pub struct SetInput {
     #[serde(default = "working")]
     pub set_type: SetType,
     pub rir: Option<f64>,
+    /// A timed set's length (reps 0, weight 0).
+    #[serde(default)]
+    pub seconds: Option<i64>,
 }
 
 fn working() -> SetType {
@@ -24,15 +28,26 @@ fn working() -> SetType {
 }
 
 impl SetInput {
+    /// A timed working set.
+    pub fn timed(seconds: i64) -> Self {
+        SetInput { weight: 0.0, reps: 0, set_type: SetType::Working, rir: None, seconds: Some(seconds) }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if !self.weight.is_finite()
             || self.weight < 0.0
-            || self.reps <= 0
+            || self.reps < 0
             || self.rir.is_some_and(|r| !r.is_finite() || r < 0.0)
         {
             crate::bail!("INVALID_SET", "Weight must be ≥ 0, reps > 0");
         }
-        Ok(())
+        match self.seconds {
+            None if self.reps == 0 => crate::bail!("INVALID_SET", "Weight must be ≥ 0, reps > 0"),
+            Some(s) if !(1..=6 * 3600).contains(&s) || self.reps != 0 || self.set_type != SetType::Working => {
+                crate::bail!("INVALID_SET", "A timed set is one working set of 1 s to 6 h, without reps")
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -43,6 +58,27 @@ static AT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(&format!(r"^(\d+)\s*reps?\s*(?:at|@)\s*({NUMBER})\s*(?:kg)?$")).unwrap());
 static REPS_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)\s*(?:reps?|[x×*])?$").unwrap());
 const MAX_PLAUSIBLE_REPS: f64 = 30.0;
+static DURATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"^({NUMBER})\s*(h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)$|^(\d+):([0-5]\d)$")).unwrap()
+});
+
+/// A time with its unit in seconds: "25 min", "25m", "1.5h", "90s", "1:30" (minutes:seconds). A bare
+/// number is not a time: on a reps card it means reps.
+pub fn parse_duration(text: &str) -> Option<i64> {
+    let clean = text.trim().to_lowercase();
+    let m = DURATION.captures(&clean)?;
+    let seconds = if let (Some(minutes), Some(secs)) = (m.get(3), m.get(4)) {
+        minutes.as_str().parse::<f64>().ok()? * 60.0 + secs.as_str().parse::<f64>().ok()?
+    } else {
+        let unit = match &m[2][..1] {
+            "h" => 3600.0,
+            "m" => 60.0,
+            _ => 1.0,
+        };
+        number(&m[1]) * unit
+    };
+    Some(seconds.round() as i64).filter(|s| *s > 0)
+}
 
 fn ambiguous<T>() -> Result<T> {
     crate::bail!("AMBIGUOUS_SET", "How many reps and what weight? E.g. 9x80.")
@@ -55,7 +91,7 @@ fn number(text: &str) -> f64 {
 /// Order is decided by unit words, then rep plausibility (only one side above 30 is the weight), then closeness to `expected_weight`, then reps-first.
 pub fn parse_set(text: &str, set_type: SetType, expected_weight: Option<f64>, bodyweight: bool) -> Result<SetInput> {
     let clean = text.trim().to_lowercase();
-    let set = |weight: f64, reps: i64| Ok(SetInput { weight, reps, set_type, rir: None });
+    let set = |weight: f64, reps: i64| Ok(SetInput { weight, reps, set_type, rir: None, seconds: None });
     if bodyweight
         && let Some(m) = REPS_ONLY.captures(&clean)
         && let Ok(reps) = m[1].parse::<i64>()
@@ -102,7 +138,7 @@ mod tests {
     }
 
     fn set(weight: f64, reps: i64) -> SetInput {
-        SetInput { weight, reps, set_type: SetType::Working, rir: None }
+        SetInput { weight, reps, set_type: SetType::Working, rir: None, seconds: None }
     }
 
     #[test]
@@ -140,6 +176,19 @@ mod tests {
     fn bodyweight_set_is_reps_alone() {
         for text in ["13", "13 reps", "13x", "13 ×"] {
             assert_eq!(parse_set(text, SetType::Working, None, true).unwrap(), set(0.0, 13), "{text}");
+        }
+    }
+
+    #[test]
+    fn times_need_a_unit() {
+        for (text, seconds) in
+            [("25 min", 1500), ("25m", 1500), ("25 Minutes", 1500), ("1.5h", 5400), ("90s", 90), ("1:30", 90)]
+        {
+            assert_eq!(parse_duration(text), Some(seconds), "{text}");
+            assert!(parse(text).is_err(), "{text} is not reps × weight");
+        }
+        for text in ["25", "10x40", "0 min", "1:75", "25 min 30"] {
+            assert_eq!(parse_duration(text), None, "{text}");
         }
     }
 

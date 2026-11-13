@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/003_session_follows.sql"),
     include_str!("migrations/004_plan_text.sql"),
     include_str!("migrations/005_profile_rest.sql"),
+    include_str!("migrations/006_timed_sets.sql"),
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -43,8 +44,25 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Foreign keys are off while migrating, so a migration can rebuild a table other tables reference
+/// (SQLite's documented way to change a CHECK); a migration that leaves more broken foreign keys than
+/// it found is rolled back.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
+    let enforced: bool = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF")?;
+    let result = apply(conn);
+    if enforced {
+        conn.execute_batch("PRAGMA foreign_keys=ON")?;
+    }
+    result
+}
+
+fn apply(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
+    let broken = |tx: &rusqlite::Transaction| -> Result<i64> {
+        Ok(tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?)
+    };
+    let before = broken(&tx)?;
     let has_baseline: bool =
         tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
     if !has_baseline {
@@ -63,6 +81,10 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         tx.execute_batch(sql)?;
         tx.execute_batch(&format!("PRAGMA user_version = {}", index + 1))?;
+    }
+    let after = broken(&tx)?;
+    if after > before {
+        crate::bail!("SCHEMA_MISMATCH", "Migrations broke {} foreign keys", after - before);
     }
     tx.commit()?;
     Ok(())
@@ -195,6 +217,50 @@ mod tests {
         let version: String = db.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, BASELINE_MARKER);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 006 rebuilds set_log, which notification_job references, and turns the owner's cardio Cycling
+    /// (3 × 8–10 at 0 kg) into one 25-minute timed block.
+    #[test]
+    fn timed_sets_migration_keeps_sets_and_times_the_cardio_bike() {
+        let mut db = Connection::open_in_memory().unwrap();
+        // Off while planting rows whose parents a test doesn't need; on for migrate, as `open` leaves it.
+        db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        db.execute_batch(BASELINE).unwrap();
+        db.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [BASELINE_MARKER]).unwrap();
+        for sql in &MIGRATIONS[..5] {
+            db.execute_batch(sql).unwrap();
+        }
+        db.execute_batch(
+            r#"PRAGMA user_version = 5;
+            INSERT INTO workout_template VALUES ('cardio', '{"id":"cardio","name":"Cardio","exercises":[
+                {"id":"warm","name":"Rower","role":"warmup","target_weight":0},
+                {"id":"cycling","name":"Cycling","role":"conditioning","working_sets":3,"target_weight":0}]}', '2026-11-01 00:00:00');
+            INSERT INTO set_log (id, workout_exercise_id, set_number, set_type, weight, reps, logged_at)
+                VALUES ('s1', 'e1', 1, 'WORKING', 80, 8, '2026-11-01 18:00:00');
+            INSERT INTO notification_job (id, kind, workout_session_id, set_log_id, due_at, status, payload_json)
+                VALUES ('j1', 'REST', 'w1', 's1', '2026-11-01 18:01:30', 'FIRED', '{}');
+            PRAGMA foreign_keys=ON;"#,
+        )
+        .unwrap();
+        migrate(&mut db).unwrap();
+        let (reps, seconds): (i64, Option<i64>) = db
+            .query_row("SELECT reps, seconds FROM set_log WHERE id = 's1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((reps, seconds), (8, None));
+        let to_sets: i64 = db
+            .query_row(
+                "SELECT count(*) FROM pragma_foreign_key_check('notification_job') WHERE \"table\" = 'set_log'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(to_sets, 0, "the rest job still points at its set");
+        let template = crate::domain::templates::get_template(&db, "cardio").unwrap();
+        let [rower, bike] = &template.exercises[..] else { panic!("two exercises") };
+        assert_eq!((rower.set_seconds(), bike.set_seconds(), bike.working_sets), (None, Some(1500), 1));
+        let enforced: bool = db.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        assert!(enforced, "foreign keys are back on after migrating");
     }
 
     /// `schema.sql` is the schema a fresh `migrate` produces, so agents can read it in one place.

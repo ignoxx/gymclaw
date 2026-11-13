@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
-use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, primary_muscle, search, similar};
-use crate::domain::templates::{ExerciseSpec, get_template, pick, remember_swap};
+use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, primary_muscle, search, similar, timed};
+use crate::domain::templates::{ExerciseSpec, Measure, get_template, pick, remember_swap};
 use crate::domain::workout::{
     active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logs, make_exercise,
-    name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
+    measure, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -39,7 +39,7 @@ pub fn find_exercise(db: &Connection, workout_id: &str, exercise_id: Option<&str
 
 /// Template spec stored on a workout exercise (its config without workout-only keys).
 pub fn spec_of(row: &WorkoutExercise) -> Result<ExerciseSpec> {
-    const FIELDS: [&str; 16] = [
+    const FIELDS: [&str; 18] = [
         "id",
         "name",
         "role",
@@ -56,6 +56,8 @@ pub fn spec_of(row: &WorkoutExercise) -> Result<ExerciseSpec> {
         "priority",
         "requires_completed",
         "substitutes",
+        "measure",
+        "minutes",
     ];
     let fields: serde_json::Map<String, Value> = row
         .config_json
@@ -480,10 +482,20 @@ fn resolve(
         crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{query}'. Pass one guide_id: {options}");
     };
     let base = |k: &str| current.and_then(|c| c.config_json.get(k).cloned());
+    // A cardio machine or hold is timed; from another timed exercise it keeps that one's sets and time.
+    let is_timed = timed(Some(&item.slug));
+    let from_timed = current.is_some_and(|c| measure(c) == Measure::Time);
+    let sets = match current {
+        Some(c) if is_timed == from_timed => c.planned_working_sets,
+        _ if is_timed => 1,
+        _ => 3,
+    };
     let spec = json!({
         "id": item.slug, "name": item.name, "role": base("role").unwrap_or(json!("accessory")), "guide_id": item.slug,
-        "working_sets": current.map_or(3, |c| c.planned_working_sets), "rep_min": base("rep_min").unwrap_or(json!(8)),
+        "working_sets": sets, "rep_min": base("rep_min").unwrap_or(json!(8)),
         "rep_max": base("rep_max").unwrap_or(json!(12)), "target_weight": 0, "increment": base("increment").unwrap_or(json!(2.5)),
+        "measure": if is_timed { Measure::Time } else { Measure::Reps },
+        "minutes": if is_timed && from_timed { base("minutes") } else { None },
     });
     Ok((None, serde_json::from_value(spec)?))
 }
@@ -688,7 +700,7 @@ mod tests {
     }
 
     fn set(weight: f64, reps: i64) -> SetInput {
-        SetInput { weight, reps, set_type: SetType::Working, rir: None }
+        SetInput { weight, reps, set_type: SetType::Working, rir: None, seconds: None }
     }
 
     fn bench_done(db: &Connection) -> String {

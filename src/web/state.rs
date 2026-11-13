@@ -94,7 +94,8 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
             format!("{}–{}", spec.rep_min, spec.rep_max)
         };
         exercises.push(json!({"name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
-            "reps": reps, "last": last.map(|l| format!("{} × {} kg", l.reps, workout::g(l.weight)))}));
+            "reps": reps, "time": spec.set_seconds().map(workout::format_time),
+            "last": last.map(|l| l.seconds.map_or_else(|| format!("{} × {} kg", l.reps, workout::g(l.weight)), workout::format_time))}));
     }
     Ok(
         json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": fmt(row.leave_home_at, tz, "%H:%M"),
@@ -117,7 +118,8 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
             let next = ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight);
             exercises.push(json!({"id": spec.id, "name": spec.name, "guide_id": spec.guide_id, "svg_url": svg(&spec.name, spec.guide_id.as_deref()),
                 "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
-                "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds}));
+                "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
+                "time": spec.set_seconds().map(workout::format_time)}));
         }
         out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));
     }
@@ -162,13 +164,14 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     let eta = data["eta"].as_str().and_then(|e| Ts::parse(e, None).ok()).map(|e| fmt(e, tz, "%H:%M"));
     let active = if active.is_object() {
         json!({"id": active["id"], "name": active["name"], "set_type": active["set_type"], "set_number": active["set_number"], "sets": active["working_sets"],
-            "weight": active["target_weight"], "rep_min": active["rep_min"], "rep_max": active["rep_max"]})
+            "weight": active["target_weight"], "rep_min": active["rep_min"], "rep_max": active["rep_max"],
+            "time": active["seconds"].as_i64().map(workout::format_time)})
     } else {
         Value::Null
     };
     Ok(
         json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
-        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| format!("{} × {} kg", l.reps, workout::g(l.weight))), "exercises": exercises}),
+        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| l.seconds.map_or_else(|| format!("{} × {} kg", l.reps, workout::g(l.weight)), workout::format_time)), "exercises": exercises}),
     )
 }
 
@@ -257,7 +260,7 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             let entry = best.entry(row.exercise_id.clone()).or_insert(0.0);
             *entry = entry.max(top);
             volume += done.iter().map(|s| s.weight * s.reps as f64).sum::<f64>();
-            sets += done.len();
+            sets += done.iter().filter(|s| s.seconds.is_none()).count();
             let guide = present(row.config_json["guide_id"].as_str())
                 .or_else(|| present(guides.get(&row.exercise_id).and_then(|g| g.as_deref())))
                 .unwrap_or(&row.exercise_id);
@@ -265,7 +268,7 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             let muscle = illustrations::primary_muscle(Some(guide))
                 .or_else(|| illustrations::search(&name, None, None, 1).first().map(|e| e.primary_muscle.clone()));
             exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, illustrations::catalog().contains_key(guide).then_some(guide)),
-                "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps})).collect::<Vec<_>>()}));
+                "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds})).collect::<Vec<_>>()}));
         }
         let started_at = w.started_at.or(w.completed_at).expect("completed workout");
         let mut seconds = w.actual_duration_seconds.unwrap_or(0);
@@ -309,6 +312,9 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
     for w in done.iter().rev() {
         for exercise in w["exercises"].as_array().into_iter().flatten() {
             let sets = exercise["sets"].as_array().cloned().unwrap_or_default();
+            if sets.iter().any(|s| s["seconds"].is_i64()) {
+                continue; // timed: no 1-rep max to chart
+            }
             // Best set by estimated 1-rep max, so 12 × 40 and 8 × 50 compare on one line (on a tie the first set wins).
             let key = |s: &Value| {
                 (
