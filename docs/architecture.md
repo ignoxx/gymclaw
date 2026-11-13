@@ -33,6 +33,7 @@ the agent read source and ran ad-hoc queries on prod, then told the owner things
 | `src/runtime/` | `serve`: bot loop, scheduler, outbox |
 | `src/telegram/` | Bot API client, coach card renderer, Markdown |
 | `src/web/` | the dashboard |
+| `assets/workout-guide/` | exercise catalog and pictures; missing ones are drawn with `scripts/new-illustration` ([illustrations.md](illustrations.md)) |
 
 Rows go through `db::models` (`get/select/first/insert/update`). Status columns are enums.
 Mutations run in `domain::core::mutate(db, operation, request_id, intent, now, …)`, which makes
