@@ -136,7 +136,11 @@ impl ChatModel for Tap {
         let reply =
             self.0.complete(model, messages, tools, force_text).await.inspect_err(|e| eprintln!("model error: {e}"))?;
         let m = &reply.message;
-        eprintln!("--- step ({} ms)", reply.ms);
+        let u = &reply.usage;
+        eprintln!(
+            "--- step ({} ms; tokens in {:?}, cached {:?}, out {:?}, reasoning {:?})",
+            reply.ms, u.input, u.cache_read, u.output, u.reasoning
+        );
         for key in ["reasoning", "content"] {
             if let Some(text) = m[key].as_str().filter(|t| !t.trim().is_empty()) {
                 eprintln!("{key}: {text}");

@@ -72,10 +72,10 @@ pub const HISTORY: i64 = 30;
 /// Marker row written by `/new`; the window starts after the newest one.
 pub const BOUNDARY: &str = "boundary";
 
-/// System prompt with schema, notes and the state snapshot. Most stable first, so provider prompt
-/// caching covers as much as possible. Also returns the wake events shown as open issues: the turn
-/// that sees them settles them.
-pub fn system(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
+/// System prompt in two parts: instructions, schema and notes, which change only when code or notes
+/// do (the provider caches them across turns), then the state snapshot. Also returns the wake events
+/// shown as open issues: the turn that sees them settles them.
+pub fn system(db: &Connection, now: Ts) -> Result<(String, String, Vec<String>)> {
     let mut out = String::from(SYSTEM_PROMPT);
     let schema: Vec<String> = meta::schema(db)?.into_iter().map(|(_, line)| line).collect();
     write!(out, "\n\n## Database (for sql_query)\n{}", schema.join("\n")).unwrap();
@@ -98,8 +98,7 @@ pub fn system(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         }
     }
     let (now_state, shown) = snapshot(db, now)?;
-    write!(out, "\n\n## Now\n{now_state}").unwrap();
-    Ok((out, shown))
+    Ok((out, format!("\n\n## Now\n{now_state}"), shown))
 }
 
 /// Fresh state the model would otherwise have to look up every turn, and the wake events among its
@@ -438,7 +437,8 @@ mod tests {
     fn prompt_and_tools_stay_within_budget() {
         const BUDGET: usize = 33_000;
         let db = crate::db::test::db();
-        let (system, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
+        let (stable, now, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
+        let system = stable + &now;
         let tools = serde_json::to_string(&crate::agent::tool_specs(true)).unwrap().len();
         assert!(system.len() + tools <= BUDGET, "system {} + tools {tools} chars is over {BUDGET}", system.len());
     }

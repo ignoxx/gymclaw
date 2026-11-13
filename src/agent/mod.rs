@@ -318,7 +318,7 @@ impl Agent {
         actions: &mut Vec<String>,
     ) -> Result<Reply> {
         let now = (self.clock)();
-        let ((system, shown), history, tz, setup_done) = in_tx(&self.db_path, move |db| {
+        let ((stable, now_state, shown), history, tz, setup_done) = in_tx(&self.db_path, move |db| {
             Ok((
                 context::system(db, now)?,
                 context::history(db)?,
@@ -328,7 +328,10 @@ impl Agent {
         })
         .await?;
         settles.extend(shown);
-        let mut messages = vec![json!({"role": "system", "content": system})];
+        let system = format!("{stable}{now_state}");
+        let mut messages = vec![json!({"role": "system", "content": [
+            {"type": "text", "text": stable}, {"type": "text", "text": now_state},
+        ]})];
         let history_chars = Value::Array(history.clone()).to_string().len();
         let history_len = history.len();
         messages.extend(history);
