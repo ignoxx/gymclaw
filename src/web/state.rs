@@ -17,9 +17,10 @@ use crate::domain::{crowd, illustrations, preview, workout};
 use crate::error::Result;
 use crate::time::{Ts, iso};
 
-const ACTIVITY: [(&str, &str); 9] = [
+const ACTIVITY: [(&str, &str); 10] = [
     ("workout.started", "Workout started"),
     ("workout.completed", "Workout finished"),
+    ("workout.discarded", "Workout discarded"),
     ("workout.set_logged", "Set logged"),
     ("workout.substituted", "Exercise swapped"),
     ("planning.week_planned", "Week planned"),

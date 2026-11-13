@@ -56,7 +56,7 @@ pub async fn blocking<T: Send + 'static>(
     .unwrap_or_else(|e| Err(Error::domain("INTERNAL", format!("worker failed: {e}"))))
 }
 
-/// `blocking` inside one transaction, committed when `f` succeeds.
+/// `blocking` inside one transaction (holding the write lock, see `db::open`), committed when `f` succeeds.
 pub async fn in_tx<T: Send + 'static>(
     db_path: &Path,
     f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,

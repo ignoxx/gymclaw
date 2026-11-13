@@ -14,7 +14,7 @@ use crate::domain::set_parser::{SetInput, parse_duration, parse_set};
 use crate::domain::templates::Measure;
 use crate::domain::templates::pick;
 use crate::domain::workout::{
-    cancel_rest, exercises, guide_id, load_workout, logs, measure, name, set_measure, transition, unresolved,
+    self, cancel_rest, exercises, guide_id, load_workout, logs, measure, name, set_measure, transition, unresolved,
 };
 use crate::error::Result;
 use crate::time::Ts;
@@ -183,7 +183,15 @@ const WRAP_UP: &str = "Wrap-up due. The summary card in your context already sho
     stuck, a comeback, grinding through a bad day, what got skipped) and one thing to aim for next time. Never repeat the card's numbers.";
 
 /// Finish a WORKOUT_COMPLETE workout: progression, PLAN_UPDATED. Mutation result envelope.
+/// A workout with nothing logged can't finish (it would count as trained): the agent logs what the owner
+/// did, or discards it (`workout::discard`).
 pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Value> {
+    if workout::logged_sets(db, workout_id)? == 0 {
+        crate::bail!(
+            "NOTHING_LOGGED",
+            "Nothing is logged, so this workout can't count as done. Log what the owner did first (e.g. \"25 min\"), or discard it if they didn't train."
+        );
+    }
     mutate(db, "workout.completed", request_id, json!({"workout_id": workout_id}), now, || {
         let mut workout = load_workout(db, workout_id, Some(now))?;
         if workout.status == WorkoutStatus::PlanUpdated {

@@ -27,7 +27,8 @@ Praise PRs, wrap-ups and other earned wins; keep it specific. Never a yes-man: i
 call it out in one line, then do what they asked. Humor and swearing are welcome when they fit the moment (\"holy shit, 100kg\", \"skipped legs again, really?\"). \
 Ask one question at a time; put choices in buttons under a short message, not typed lists. If a reaction says it (👍 got it, 👌 noted), react instead of writing. \
 Times are always the owner's local time. During a workout the cards do the talking: after a tool showed a card, stay silent unless the owner asked something. \
-A finished workout wakes you with its own wrap-up instruction.
+A finished workout wakes you with its own wrap-up instruction. \
+Start a workout only once the owner is at the gym or asks; on the way (\"there in 5\"), send a Start button (value e.g. \"Start Pull\").
 
 The owner leads; the plan follows. When they ask for something, do it, then say what you did in one line. Make the saved state match \
 what they say they're doing, want or did, instead of steering them back to the plan or asking for confirmation. Planner rules (time window, \
@@ -35,8 +36,8 @@ rest days, weekly count) are defaults, not limits: when the owner's choice break
 You own planning decisions: weekly placement, which workout goes in which session, exceptions, calendar clashes, no-shows and week rollover. \
 Plan workouts from the owner's training plan, what they trained lately and your notes. The plan lives in plan_set (their words plus its templates): \
 when they change what they train or how often, save it there, not in notes; if none is saved, take it from their notes or ask once while planning. \
-Code only gives newly drafted sessions a default rotation and never moves workouts afterwards, so on Sunday and after a skip or miss, \
-check the upcoming workouts and fix any that don't fit (session_update). \
+Code only gives new sessions a default workout and never moves it, so on Sunday and after a skip or miss, fix upcoming ones (session_update). \
+Unless the plan says otherwise, next is the workout trained longest ago (\"Last completed\"); a missed or moved session's workout doesn't carry over. \
 Use session_create/session_update for exact times, templates, durations and statuses (including cancellation). plan_week only fills gaps with a default plan; \
 it doesn't do exceptions. Never change other sessions when the owner says to leave them alone. \
 sql_query is read-only; use the domain tools for changes. \
@@ -133,7 +134,8 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     let mut trained: Vec<(String, Option<Ts>)> =
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     let split = onboarding.as_ref().map(|o| o.split_json.0.clone()).unwrap_or_default();
-    trained.sort_by_key(|(id, _)| split.iter().position(|s| s == id).unwrap_or(split.len()));
+    // Longest ago first (never trained before that), ties in plan order: the rotation's next pick leads.
+    trained.sort_by_key(|(id, at)| (*at, split.iter().position(|s| s == id).unwrap_or(split.len())));
     if !trained.is_empty() {
         let done: Vec<String> = trained
             .iter()
@@ -141,7 +143,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
                 format!("{id} {}", at.map_or("never".into(), |t| t.local(&tz).strftime("%a %-d %b").to_string()))
             })
             .collect();
-        writeln!(out, "Last completed per workout: {}.", done.join(", ")).unwrap();
+        writeln!(out, "Last completed per workout, longest ago first: {}.", done.join(", ")).unwrap();
     }
     let setup_done = onboarding.is_some_and(|o| o.completed_fingerprint.is_some());
     if !setup_done {
@@ -435,7 +437,7 @@ mod tests {
     /// notes, sessions or chat), so it moves only when code does. Lower the budget when you trim.
     #[test]
     fn prompt_and_tools_stay_within_budget() {
-        const BUDGET: usize = 33_000;
+        const BUDGET: usize = 33_500;
         let db = crate::db::test::db();
         let (stable, now, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
         let system = stable + &now;
