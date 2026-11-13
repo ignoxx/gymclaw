@@ -117,6 +117,9 @@ pub struct Outcome {
     /// Wake events this turn saw (open issues, `raised` results). Settled once its reply is delivered;
     /// empty when the turn failed, so they stay pending.
     pub settles: Vec<String>,
+    /// What the turn's tool calls saved, one line each ("session_update {…}"), sessions named as they
+    /// were before the call. Stored with the reply so later turns see what was done, not only what was said.
+    pub actions: Vec<String>,
 }
 
 /// What a turn answers.
@@ -215,11 +218,10 @@ fn trigger(input: &TurnInput) -> &'static str {
 }
 
 impl Agent {
-    /// Run one tool call in its own transaction. Returns the JSON the model sees, whether it succeeded
-    /// and whether it changed the database. Decision events the call itself raised come back in
-    /// `raised` (with their IDs, for `Outcome::settles`): this turn answers them, no background turn
-    /// repeats them.
-    async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool, bool, Vec<String>) {
+    /// Run one tool call in its own transaction. Returns the JSON the model sees, whether it succeeded,
+    /// what it saved (None when it changed nothing) and the decision events it raised (with their
+    /// IDs, for `Outcome::settles`): this turn answers them, no background turn repeats them.
+    async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool, Option<String>, Vec<String>) {
         let now = (self.clock)();
         let data_dir = self.data_dir.clone();
         let name_owned = name.to_string();
@@ -228,10 +230,17 @@ impl Agent {
             let tx = db.transaction()?;
             let mark = crate::domain::events::mark(&tx)?;
             let before = tx.total_changes();
+            let described = context::name_sessions(&tx, &format!("{name_owned} {}", scrub(&args.to_string(), 400)))?;
             let mut cx = tools::Ctx { db: &tx, now, request_id, data_dir: &data_dir, effects: vec![] };
             let mut value = tools::call(&mut cx, &name_owned, args)?;
             let effects = std::mem::take(&mut cx.effects);
-            let wrote = tx.total_changes() > before;
+            let saved = (tx.total_changes() > before).then(|| {
+                match value.pointer("/data/session/id").and_then(Value::as_str) {
+                    // A created session: its id, so a later cancel or move of it reads as the same one.
+                    Some(id) if !described.contains(&id[..8]) => format!("{described} → new session {}", &id[..8]),
+                    _ => described,
+                }
+            });
             let raised = crate::domain::events::raised_since(&tx, mark)?;
             if !raised.is_empty() {
                 let shown: Vec<Value> =
@@ -245,11 +254,11 @@ impl Agent {
                 };
             }
             tx.commit()?;
-            Ok((value, effects, wrote, raised.into_iter().map(|e| e.id).collect()))
+            Ok((value, effects, saved, raised.into_iter().map(|e| e.id).collect()))
         })
         .await;
         match result {
-            Ok((value, effects, wrote, raised)) => {
+            Ok((value, effects, saved, raised)) => {
                 for Effect::Coach(view) in effects {
                     if let Some(coach) = &self.coach
                         && let Err(e) = coach.apply(&view, None, None).await
@@ -257,9 +266,9 @@ impl Agent {
                         tracing::warn!("coach card from {name} not shown: {e}");
                     }
                 }
-                (value, true, wrote, raised)
+                (value, true, saved, raised)
             }
-            Err(e) => (e.to_json(), false, false, vec![]),
+            Err(e) => (e.to_json(), false, None, vec![]),
         }
     }
 
@@ -270,8 +279,12 @@ impl Agent {
         let mut state = FailureState::default();
         let mut calls_log = vec![];
         let mut settles = vec![];
-        let result =
-            tokio::time::timeout(DEADLINE, self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles)).await;
+        let mut actions = vec![];
+        let result = tokio::time::timeout(
+            DEADLINE,
+            self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles, &mut actions),
+        )
+        .await;
         let (reply, failed, error) = match result {
             Ok(Ok(reply)) => (reply, false, None),
             Ok(Err(e)) => {
@@ -292,7 +305,7 @@ impl Agent {
         if failed {
             settles.clear();
         }
-        Outcome { reply, failed, run_id, settles }
+        Outcome { reply, failed, run_id, settles, actions }
     }
 
     async fn run(
@@ -302,9 +315,10 @@ impl Agent {
         state: &mut FailureState,
         calls_log: &mut Vec<Value>,
         settles: &mut Vec<String>,
+        actions: &mut Vec<String>,
     ) -> Result<Reply> {
         let now = (self.clock)();
-        let ((system, shown), history, tz, setup_done) = in_tx(&self.db_path, move |db| {
+        let ((stable, now_state, shown), history, tz, setup_done) = in_tx(&self.db_path, move |db| {
             Ok((
                 context::system(db, now)?,
                 context::history(db)?,
@@ -314,7 +328,10 @@ impl Agent {
         })
         .await?;
         settles.extend(shown);
-        let mut messages = vec![json!({"role": "system", "content": system})];
+        let system = format!("{stable}{now_state}");
+        let mut messages = vec![json!({"role": "system", "content": [
+            {"type": "text", "text": stable}, {"type": "text", "text": now_state},
+        ]})];
         let history_chars = Value::Array(history.clone()).to_string().len();
         let history_len = history.len();
         messages.extend(history);
@@ -442,9 +459,11 @@ impl Agent {
                             steps += 1;
                             index += 1;
                             state.tool_calls += 1;
-                            let (result, ok, wrote, raised) =
+                            let (result, ok, saved, raised) =
                                 self.tool(&name, args, format!("{}-{index}", input.key)).await;
                             settles.extend(raised);
+                            let wrote = saved.is_some();
+                            actions.extend(saved);
                             if let Some(entry) = seen.get_mut(&key) {
                                 if ok {
                                     entry.2 = Some(result.clone());
@@ -616,6 +635,8 @@ mod tests {
         let message = outcome.reply.message.unwrap();
         assert_eq!(message.text, "Noted.");
         assert_eq!(message.buttons[0].value, "Forget the lunges note");
+        // What the turn saved goes with the reply into the history.
+        assert_eq!(outcome.actions, [r#"note_add {"kind":"owner","text":"Hates lunges"}"#]);
         let db = crate::db::open(&dir.join("gymclaw.db")).unwrap();
         assert_eq!(AgentNote::select(&db, "", []).unwrap()[0].text, "Hates lunges");
         // The note is in the next turn's prompt.

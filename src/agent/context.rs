@@ -22,34 +22,36 @@ You are GymClaw, the private gym coach of one owner, in a Telegram DM. The datab
 Voice: the training partner you'd actually want at 6am: a good friend and bro who happens to know training, texting. Brief, direct, dry wit. \
 Default to one short line, never more than three. Take a position on training questions; don't hedge. \
 No greetings, recaps, preambles or \"I'll now…\". Never narrate tools or reasoning. Bold the key thing. \
-Formatting: **bold**, *italic*, ~~strike~~, `code`, lines starting with \"> \" (quote) or \">> \" (collapsed quote, tap to expand). \
-Praise is welcome on PRs and when a workout wraps up, and whenever else it's earned; keep it specific. Never a yes-man: if the owner skips, bails or is about to do something dumb, \
-call it out in one line, like a friend would, then do what they asked. Humor and swearing are welcome when they fit the moment (\"holy shit, 100kg\", \"skipped legs again, really?\"). \
+Formatting: **bold**, *italic*, ~~strike~~, `code`, lines starting with \"> \" (quote) or \">> \" (collapsed quote). \
+Praise PRs, wrap-ups and other earned wins; keep it specific. Never a yes-man: if the owner skips, bails or is about to do something dumb, \
+call it out in one line, then do what they asked. Humor and swearing are welcome when they fit the moment (\"holy shit, 100kg\", \"skipped legs again, really?\"). \
 Ask one question at a time; put choices in buttons under a short message, not typed lists. If a reaction says it (👍 got it, 👌 noted), react instead of writing. \
 Times are always the owner's local time. During a workout the cards do the talking: after a tool showed a card, stay silent unless the owner asked something. \
 A finished workout wakes you with its own wrap-up instruction.
 
 The owner leads; the plan follows. When they ask for something, do it, then say what you did in one line. Make the saved state match \
 what they say they're doing, want or did, instead of steering them back to the plan or asking for confirmation. Planner rules (time window, \
-rest days, weekly count) are defaults, not limits: when the owner's choice breaks one, do it anyway. Say nothing about a broken rule they plainly chose (an explicit day or time they asked for); only flag what they may not know, like a clash with a calendar event. \
+rest days, weekly count) are defaults, not limits: when the owner's choice breaks one, do it anyway. Say nothing about a broken rule they plainly chose (an explicit day or time); only flag what they may not know, like a clash with a calendar event. \
 You own planning decisions: weekly placement, which workout goes in which session, exceptions, calendar clashes, no-shows and week rollover. \
 Plan workouts from the owner's training plan, what they trained lately and your notes. The plan lives in plan_set (their words plus its templates): \
 when they change what they train or how often, save it there, not in notes; if none is saved, take it from their notes or ask once while planning. \
 Code only gives newly drafted sessions a default rotation and never moves workouts afterwards, so on Sunday and after a skip or miss, \
 check the upcoming workouts and fix any that don't fit (session_update). \
-Use session_create/session_update for exact times, templates, durations and statuses (including cancellation). Use plan_week only when a default plan is appropriate; \
-it fills gaps and does not implement exceptions. Never change other sessions when the owner says to leave them alone. \
+Use session_create/session_update for exact times, templates, durations and statuses (including cancellation). plan_week only fills gaps with a default plan; \
+it doesn't do exceptions. Never change other sessions when the owner says to leave them alone. \
 sql_query is read-only; use the domain tools for changes. \
 When the fast path hands you an error or unparsed input, use its context and the current state to resolve the owner's intent. \
-Save lasting preferences with note_add (kind owner). Save temporary exceptions there too, with explicit local start/end dates \
-(e.g. back-to-back allowed for the week of 2026-10-12 through 2026-10-18); consult them every turn, ignore expired exceptions \
+Save lasting preferences with note_add (kind owner). Save temporary exceptions there too, with explicit local start/end dates; \
+consult them every turn, ignore expired exceptions \
 and remove or revise outdated notes. Do not turn a one-week exception into a permanent profile change. \
 Background events are observations, not new owner permission: decide whether to edit, ask a concise question, or stay silent. \
 Open issues in your context and `raised` warnings in tool results are yours to settle in this turn, alongside what the owner asked; \
-nobody raises them again, so fold any question about them into this reply instead of leaving it for later. \
-Message the owner only when it gives them something new to know or act on; a repeat of what they already know, or filler, is noise. \
-Learned notes are your inferences: when the owner contradicts one, fix or delete it. \
-Honor saved preferences and exceptions; never announce a plan change unless the tools actually saved it. \
+nobody raises them again, so ask about them in this reply. \
+Message the owner only with something new to know or act on; repeats and filler are noise. \
+Read a short message as an answer to what the owner just saw (reminder, card, question); if still unclear and a wrong \
+guess would cancel or replace a workout, ask. A system line after each reply says what that turn saved; it beats your words. \
+When the owner says you got it wrong, or a reply claimed an unsaved change, fix it now (restore what you replaced, redo what they asked), \
+say what you corrected, and save a learned note so it won't repeat. Fix or delete a learned note the owner contradicts. \
 A failed tool call comes back to you: read it, inspect state if needed and choose another valid call. \
 Only say \"can't\" when you've run out of supported ways, and offer the closest option.
 
@@ -70,10 +72,10 @@ pub const HISTORY: i64 = 30;
 /// Marker row written by `/new`; the window starts after the newest one.
 pub const BOUNDARY: &str = "boundary";
 
-/// System prompt with schema, notes and the state snapshot. Most stable first, so provider prompt
-/// caching covers as much as possible. Also returns the wake events shown as open issues: the turn
-/// that sees them settles them.
-pub fn system(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
+/// System prompt in two parts: instructions, schema and notes, which change only when code or notes
+/// do (the provider caches them across turns), then the state snapshot. Also returns the wake events
+/// shown as open issues: the turn that sees them settles them.
+pub fn system(db: &Connection, now: Ts) -> Result<(String, String, Vec<String>)> {
     let mut out = String::from(SYSTEM_PROMPT);
     let schema: Vec<String> = meta::schema(db)?.into_iter().map(|(_, line)| line).collect();
     write!(out, "\n\n## Database (for sql_query)\n{}", schema.join("\n")).unwrap();
@@ -96,8 +98,7 @@ pub fn system(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         }
     }
     let (now_state, shown) = snapshot(db, now)?;
-    write!(out, "\n\n## Now\n{now_state}").unwrap();
-    Ok((out, shown))
+    Ok((out, format!("\n\n## Now\n{now_state}"), shown))
 }
 
 /// Fresh state the model would otherwise have to look up every turn, and the wake events among its
@@ -285,11 +286,12 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     Ok((out, shown))
 }
 
+/// A full id, or the 8-character prefix the model usually passes.
 static SESSION_ID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap()
+    regex::Regex::new(r"\b[0-9a-f]{8}(-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\b").unwrap()
 });
 
-/// Follows every planned-session id in event text with the session as the snapshot lists it
+/// Follows every planned-session id in event text or tool args with the session as it is now
 /// ("c002596e-… (Tue 10 Nov 11:45 Push)"). With a bare id the model guessed which session was meant
 /// and announced "Push today" on a Sunday.
 pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
@@ -298,7 +300,13 @@ pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
     let mut last = 0;
     for m in SESSION_ID.find_iter(text) {
         out.push_str(&text[last..m.end()]);
-        if let Some(s) = PlannedSession::get(db, m.as_str())? {
+        let found = if m.len() == 8 {
+            let mut prefixed = PlannedSession::select(db, "WHERE id LIKE ?1 || '%' LIMIT 2", [m.as_str()])?;
+            if prefixed.len() == 1 { prefixed.pop() } else { None }
+        } else {
+            PlannedSession::get(db, m.as_str())?
+        };
+        if let Some(s) = found {
             let name = s
                 .workout_plan_json
                 .pointer("/template/name")
@@ -318,26 +326,46 @@ pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
 /// Code-sent messages (reminders, coach cards, briefings) are not turns: as assistant turns the model
 /// wrote reminders and fake owner lines itself, and a workout's cards filled the window. `snapshot`
 /// lists the recent ones instead.
+///
+/// Each agent reply is followed by what that turn really saved (`actions`, see `Outcome`). Without it
+/// the model trusted its own earlier words: on 2026-11-11 it said "Friday Push (swapped from Pull)"
+/// without saving it, and the next day built on that Push; it also never undid a wrong edit the owner
+/// objected to, because it couldn't see it had made one.
 pub fn history(db: &Connection) -> Result<Vec<Value>> {
     let tz = get_profile(db)?.tz();
     let rows = ChatMessage::select(
         db,
         "WHERE id > coalesce((SELECT max(id) FROM chat_message WHERE meta_json ->> 'kind' = 'boundary'), 0)
-         AND (role != 'bot' OR meta_json ->> 'kind' = 'agent_event') ORDER BY id DESC LIMIT ?1",
-        [HISTORY],
+         AND (role != 'bot' OR meta_json ->> 'kind' IN ('agent_event', ?2)) ORDER BY id DESC LIMIT ?1",
+        rusqlite::params![HISTORY, SILENT_ACTIONS],
     )?;
-    Ok(rows
-        .into_iter()
-        .rev()
-        .map(|m| {
-            let at = m.at.local(&tz).strftime("%a %H:%M").to_string();
-            match m.role {
-                ChatRole::Owner => json!({"role": "user", "content": format!("[{at}] {}", m.text)}),
-                ChatRole::Assistant => json!({"role": "assistant", "content": m.text}),
-                ChatRole::Bot => json!({"role": "user", "content": format!("[{at}, system] {}", m.text)}),
+    let mut out = vec![];
+    for m in rows.into_iter().rev() {
+        let at = m.at.local(&tz).strftime("%a %H:%M").to_string();
+        match m.role {
+            ChatRole::Owner => out.push(json!({"role": "user", "content": format!("[{at}] {}", m.text)})),
+            ChatRole::Assistant => {
+                out.push(json!({"role": "assistant", "content": m.text}));
+                if let Some(actions) = m.meta_json.get("actions").and_then(Value::as_array) {
+                    out.push(json!({"role": "user", "content": format!("[{at}, system] {}", saved(actions.iter().filter_map(Value::as_str)))}));
+                }
             }
-        })
-        .collect())
+            ChatRole::Bot => out.push(json!({"role": "user", "content": format!("[{at}, system] {}", m.text)})),
+        }
+    }
+    Ok(out)
+}
+
+/// `chat_message` kind for a turn that saved changes but sent the owner nothing.
+pub const SILENT_ACTIONS: &str = "agent_actions";
+
+/// What a turn saved, for the history: the changes its tool calls made, or that there were none.
+pub fn saved<'a>(actions: impl IntoIterator<Item = &'a str>) -> String {
+    let lines: Vec<String> = actions.into_iter().map(|a| format!("- {a}")).collect();
+    if lines.is_empty() {
+        return "That turn saved no changes.".into();
+    }
+    format!("That turn saved (sessions as they were before it):\n{}", lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -359,13 +387,58 @@ mod tests {
         assert_eq!(named, text.replace(&push.id, &format!("{} (Tue 10 Nov 11:45 Push)", push.id)));
     }
 
+    /// 2026-11-12: the agent turned Friday's Pull into Cardio, then told the owner "Friday Push stays as
+    /// planned". Its history held what it had said, never what it had saved, so it couldn't undo its edit.
+    #[test]
+    fn history_shows_what_each_reply_saved() {
+        let db = crate::db::test::db();
+        let mut pull = PlannedSession::new("2026-11-09".into(), Some("pull".into()), true);
+        pull.planned_start_at = Ts::parse("2026-11-13T11:45:00+01:00", None).unwrap();
+        pull.merge_plan(json!({"template": {"name": "Pull"}}));
+        pull.insert(&db).unwrap();
+        // The model passes 8-character prefixes; they are named too.
+        let short = &pull.id[..8];
+        let action = name_sessions(&db, &format!(r#"session_update {{"session_id":"{short}"}}"#)).unwrap();
+        assert_eq!(action, format!(r#"session_update {{"session_id":"{short} (Fri 13 Nov 11:45 Pull)"}}"#));
+        let replies = [
+            ("Friday is Cardio now.", json!({"kind": "reply", "actions": [action]})),
+            ("Friday Push stays.", json!({"kind": "reply", "actions": []})),
+            ("Before this was recorded.", json!({"kind": "reply"})),
+        ];
+        for (text, meta) in replies {
+            ChatMessage {
+                id: None,
+                at: Ts::parse("2026-11-12T11:35:00+01:00", None).unwrap(),
+                role: ChatRole::Assistant,
+                text: text.into(),
+                telegram_message_id: Some(1),
+                meta_json: crate::db::Json(meta),
+            }
+            .insert(&db)
+            .unwrap();
+        }
+        let contents: Vec<String> =
+            history(&db).unwrap().iter().map(|m| m["content"].as_str().unwrap().to_string()).collect();
+        assert_eq!(
+            contents,
+            [
+                "Friday is Cardio now.".to_string(),
+                format!("[Thu 11:35, system] That turn saved (sessions as they were before it):\n- {action}"),
+                "Friday Push stays.".into(),
+                "[Thu 11:35, system] That turn saved no changes.".into(),
+                "Before this was recorded.".into(),
+            ]
+        );
+    }
+
     /// Every model call carries the system prompt and every tool spec. Measured on an empty DB (no
     /// notes, sessions or chat), so it moves only when code does. Lower the budget when you trim.
     #[test]
     fn prompt_and_tools_stay_within_budget() {
         const BUDGET: usize = 33_000;
         let db = crate::db::test::db();
-        let (system, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
+        let (stable, now, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
+        let system = stable + &now;
         let tools = serde_json::to_string(&crate::agent::tool_specs(true)).unwrap().len();
         assert!(system.len() + tools <= BUDGET, "system {} + tools {tools} chars is over {BUDGET}", system.len());
     }

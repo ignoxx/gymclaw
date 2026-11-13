@@ -32,8 +32,8 @@ docker compose up -d --build
 | `TELEGRAM_BOT_TOKEN` | yes | |
 | `OPENROUTER_API_KEY` | yes | |
 | `TZ` | no | Your IANA timezone. Also seeds the profile timezone on first start. Default `Europe/Berlin`. |
-| `GYMCLAW_MODEL` | no | OpenRouter model ID. Default `z-ai/glm-5.3-flash`. |
-| `GYMCLAW_PROVIDER` | no | Pinned OpenRouter provider. Default `inference-net/fp4`. |
+| `GYMCLAW_MODEL` | no | OpenRouter model ID. Default `anthropic/claude-haiku-5.5`. |
+| `GYMCLAW_PROVIDER` | no | Pinned OpenRouter provider. Default `auto` (OpenRouter picks). |
 | `GYMCLAW_MODEL_FAST`, `GYMCLAW_MODEL_VISION` | no | Models for background triage and photos. Default: `GYMCLAW_MODEL`. |
 | `EGRESS_EXTRA_HOSTS` | no | Extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
 | `GYMCLAW_DASHBOARD_HOST` | no | Hostname for the dashboard behind Traefik. The bot's Telegram menu button opens it as a Mini App. |

@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::{ChatModel, ModelReply, Usage};
 use crate::error::{Error, Result};
 
-/// GLM reasons even at "minimal", and a cut-off answer is worse than a slow one.
+/// Models reason even at "minimal", and a cut-off answer is worse than a slow one.
 pub const MAX_TOKENS: u32 = 16384;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -28,7 +28,7 @@ impl OpenRouter {
 
 /// Request body. `force_text` asks for a plain answer with no further tool calls.
 pub fn body(model: &str, messages: &[Value], tools: &[Value], force_text: bool, provider: Option<&str>) -> Value {
-    // GLM can't turn reasoning off (`enabled: false` is a 400); minimal keeps it to a few hundred tokens.
+    // Some models (GLM) can't turn reasoning off (`enabled: false` is a 400); minimal keeps it to a few hundred tokens.
     let mut body =
         json!({"model": model, "messages": messages, "max_tokens": MAX_TOKENS, "reasoning": {"effort": "minimal"}});
     if !tools.is_empty() {
@@ -37,6 +37,14 @@ pub fn body(model: &str, messages: &[Value], tools: &[Value], force_text: bool, 
     }
     if let Some(p) = provider {
         body["provider"] = json!({"order": [p], "allow_fallbacks": true});
+    }
+    // Claude caches only what's marked: the system prompt's stable first part for an hour (owner turns
+    // are often further apart than 5 minutes), and the whole request for the turn's next step.
+    if model.starts_with("anthropic/") {
+        if let Some(stable) = body.pointer_mut("/messages/0/content/0") {
+            stable["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
+        }
+        body["cache_control"] = json!({"type": "ephemeral"});
     }
     body
 }

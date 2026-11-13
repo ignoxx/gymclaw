@@ -11,6 +11,7 @@ gymclaw migrate      # schema: src/db/baseline.sql, then src/db/migrations (resu
 gymclaw backup [dest]
 gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
 gymclaw dashboard    # dashboard; writes only the agent's notes and plan targets
+GYMCLAW_DB=copy.db gymclaw replay --at <local time> [--model …]   # re-run the agent on the chat's last owner message
 ```
 
 ## Why one binary
@@ -74,7 +75,7 @@ model never has to. Timestamps without an offset are the owner's local time.
   plain sentence from `failure.rs` that never claims nothing was saved. Fix a misbehaving turn at its
   source (event, prompt, tool result) rather than adding a filter, and pin the fix with a test next
   to the existing ones.
-- Models via OpenRouter: `GYMCLAW_MODEL` (chat, default GLM), `GYMCLAW_MODEL_FAST`,
+- Models via OpenRouter: `GYMCLAW_MODEL` (chat, default Claude Haiku 5.5; GLM 5.3 Flash misread owners and claimed edits it never saved in replays), `GYMCLAW_MODEL_FAST`,
   `GYMCLAW_MODEL_VISION`; `GYMCLAW_PROVIDER` pins the provider (`reasoning.effort: minimal`).
 
 ## Telegram

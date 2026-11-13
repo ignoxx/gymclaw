@@ -14,8 +14,8 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?}
       # Only `gymclaw calendar-auth` reads it; afterwards the DB stays bound to that calendar.
       GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-}
-      GYMCLAW_MODEL: ${GYMCLAW_MODEL:-z-ai/glm-5.3-flash}
-      GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-inference-net/fp4}
+      GYMCLAW_MODEL: ${GYMCLAW_MODEL:-anthropic/claude-haiku-5.5}
+      GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-auto}
       GYMCLAW_MODEL_FAST: ${GYMCLAW_MODEL_FAST:-}
       GYMCLAW_MODEL_VISION: ${GYMCLAW_MODEL_VISION:-}
       # Telegram menu button opens the dashboard as a Mini App; unset leaves the "/" menu.
