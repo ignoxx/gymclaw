@@ -14,6 +14,7 @@ use crate::db::Connection;
 use crate::db::models::{ExerciseStatus, PlannedSession, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::adaptation::{self, spec_of};
 use crate::domain::audit;
+use crate::domain::core::mutate;
 use crate::domain::crowd::{LABELS, record_feedback};
 use crate::domain::highlights::{self, Change};
 use crate::domain::illustrations::{bodyweight, catalog, timed};
@@ -600,6 +601,26 @@ pub fn end_workout(db: &Connection, workout: &WorkoutSession, now: Ts, request_i
     Ok(CoachView { cards: after_change(db, &workout.id, now, request_id)?, ..handled() })
 }
 
+/// Delete a workout with nothing logged (the running one, or `workout_id`) and reopen its session. The
+/// live card is retired only when it belongs to that workout.
+pub fn discard_workout(db: &Connection, workout_id: Option<&str>, now: Ts, request_id: &str) -> Result<CoachView> {
+    let running = active_workout(db)?;
+    let Some(id) = workout_id.map(String::from).or_else(|| running.as_ref().map(|w| w.id.clone())) else {
+        crate::bail!("NO_WORKOUT", "No workout running; pass workout_id to discard a finished one");
+    };
+    let name =
+        workout::load_workout(db, &id, None)?.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
+    mutate(db, "workout.discarded", request_id, json!({"workout_id": id}), now, || {
+        let session = workout::discard(db, &id, now)?;
+        Ok(json!({"workout_id": id, "session": session.map(|s| json!({"id": s.id, "status": s.status}))}))
+    })?;
+    let ack = format!("🗑 {name} discarded");
+    Ok(match running {
+        Some(w) if w.id == id => CoachView { ack: Some(ack), ..handled() },
+        _ => CoachView { ack: Some(ack), keep: true, ..handled() },
+    })
+}
+
 /// The live countdown reached rest_until: close the rest and show the next set card.
 pub fn handle_rest_over(db: &Connection, now: Ts) -> Result<CoachView> {
     let Some(workout) = active_workout(db)? else { return Ok(handled()) };
@@ -1042,7 +1063,7 @@ mod tests {
         use crate::domain::{compression::compress_template, profile::get_profile};
         let db = db();
         push(&db);
-        handle_action(&db, Action::End, None, None, None, false, at(0), "end").unwrap();
+        discard_workout(&db, None, at(0), "discard").unwrap();
         handle_action(&db, Action::Rest, None, None, Some(120), true, at(1), "rest").unwrap();
         let mut template = get_template(&db, "push").unwrap();
         template.exercises[0].rest_seconds = Some(180);
@@ -1169,15 +1190,28 @@ mod tests {
     }
 
     /// The fix for the 2026-11-12 workout: the agent adds the ride to the finished workout, and the skipped
-    /// exercise counts as done, in minutes.
+    /// exercise counts as done, in minutes. (Ending with nothing logged at all now fails instead.)
     #[test]
     fn a_skipped_ride_is_added_to_the_finished_workout() {
         let db = db();
-        cardio(
-            &db,
+        let crunch = spec(
+            json!({"id": "crunch", "name": "Crunch", "role": "core", "guide_id": "cable-crunch", "working_sets": 1, "target_weight": 40}),
+        );
+        let cycling = spec(
             json!({"id": "cycling", "name": "Cycling", "role": "conditioning", "guide_id": "cycling", "working_sets": 3, "target_weight": 0}),
         );
+        let template = Template {
+            id: "cardio".into(),
+            name: "Cardio".into(),
+            exercises: vec![crunch, cycling],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(&db, &template).unwrap();
         start(&db, Some("cardio"), None, false, at(0), "start").unwrap();
+        handle_text(&db, "12x40", at(60), "crunch").unwrap();
         let ended = handle_action(&db, Action::End, None, None, None, false, at(1800), "end").unwrap();
         assert!(ended.cards[0].text.contains("~~Cycling~~ skipped"), "{}", ended.cards[0].text);
         let id = WorkoutSession::first(&db, "", []).unwrap().unwrap().id;
@@ -1186,10 +1220,10 @@ mod tests {
             (fixed["status_before"].as_str(), fixed["status"].as_str(), fixed["seconds"].as_i64()),
             (Some("SKIPPED"), Some("COMPLETED"), Some(1500))
         );
-        let row = &exercises(&db, &id).unwrap()[0];
+        let row = &exercises(&db, &id).unwrap()[1];
         assert_eq!((measure(row), row.deferred_reason.as_deref()), (Measure::Time, None));
         let h = highlights::workout(&db, &id).unwrap();
-        assert_eq!((h.timed, h.sets), (vec![("Cycling".to_string(), 1500)], 0));
+        assert_eq!((h.timed, h.sets), (vec![("Cycling".to_string(), 1500)], 1));
         // Logged during the workout, so later history keeps its order.
         assert_eq!(logs(&db, &row.id, None).unwrap()[0].logged_at, at(1800));
         // A second, different kind of set on it is refused; a wrong time is corrected instead.
@@ -1216,6 +1250,44 @@ mod tests {
             (start, start.mins(60), start.mins(-30), start.mins(-15), start.mins(60));
         plan.insert(db).unwrap();
         plan
+    }
+
+    /// 2026-11-13: "I'll do push", Push started, then "sorry, I meant pull". The empty Push must not count
+    /// as trained: starting Pull replaces it on the same session, and ending an empty workout discards it.
+    #[test]
+    fn an_empty_workout_never_counts_as_trained() {
+        use crate::db::models::{PlannedSession, SessionStatus};
+        let db = db();
+        push(&db);
+        discard_workout(&db, None, at(60), "discard-first").unwrap();
+        import_template(
+            &db,
+            &Template { id: "pull".into(), name: "Pull".into(), ..get_template(&db, "push").unwrap() },
+        )
+        .unwrap();
+        let plan = planned(&db, "push", at(0), SessionStatus::Committed);
+        start(&db, None, Some(&plan.id), false, at(120), "start-push").unwrap();
+        start(&db, Some("pull"), None, false, at(180), "start-pull").unwrap();
+        let running = active_workout(&db).unwrap().unwrap();
+        assert_eq!(
+            (running.template_id.as_deref(), running.planned_session_id.as_deref()),
+            (Some("pull"), Some(plan.id.as_str()))
+        );
+        assert_eq!(WorkoutSession::select(&db, "", []).unwrap().len(), 1);
+        // Nothing logged can't end as done; discarded after its window, the session is missed as if never started.
+        let end = handle_action(&db, Action::End, None, None, None, false, at(3601), "end-2").unwrap_err();
+        assert_eq!(end.code(), "NOTHING_LOGGED");
+        let discarded = discard_workout(&db, None, at(3601), "discard").unwrap();
+        assert_eq!(discarded.ack.as_deref(), Some("🗑 Pull discarded"));
+        assert!(WorkoutSession::select(&db, "", []).unwrap().is_empty());
+        assert_eq!(PlannedSession::get(&db, &plan.id).unwrap().unwrap().status, SessionStatus::Missed);
+        // A workout with a set keeps blocking a new start.
+        start(&db, Some("pull"), Some(&plan.id), false, at(3700), "start-3").unwrap();
+        handle_text(&db, "10x90", at(3710), "m1").unwrap();
+        assert_eq!(
+            start(&db, Some("push"), None, false, at(3800), "start-4").unwrap_err().code(),
+            "WORKOUT_ALREADY_ACTIVE"
+        );
     }
 
     #[test]
@@ -1293,7 +1365,7 @@ mod tests {
     fn start_button_starts_once_without_a_blind_warmup() {
         let db = db();
         push(&db);
-        handle_action(&db, Action::End, None, None, None, false, at(1), "end").unwrap();
+        discard_workout(&db, None, at(1), "discard").unwrap();
         let legs = Template {
             id: "legs".into(),
             name: "Legs".into(),
@@ -1326,7 +1398,7 @@ mod tests {
         push(&db);
         let tz = crate::time::zone("Europe/Berlin").unwrap();
         assert!(evidence(&db, at(60), &tz).unwrap().is_empty()); // started from chat
-        handle_action(&db, Action::End, None, None, None, false, at(60), "end").unwrap();
+        discard_workout(&db, None, at(60), "discard").unwrap();
         let tomorrow = at(86400);
         let plan = planned(&db, "push", tomorrow, crate::db::models::SessionStatus::Committed);
         begin(&db, &plan.id[..8], tomorrow, "begin").unwrap();

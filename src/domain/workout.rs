@@ -4,7 +4,8 @@
 //! with a different intent fails. Rest jobs are durable `notification_job` rows; the scheduler and the
 //! coach's live countdown fire them. Rows are written back as soon as they change (no autoflush).
 //!
-//! - One unfinished workout at a time (`WORKOUT_ALREADY_ACTIVE`).
+//! - One unfinished workout at a time (`WORKOUT_ALREADY_ACTIVE`); a new start replaces one with nothing logged.
+//! - Nothing logged never counts as trained: `finish` refuses it, `discard` deletes it and reopens its session.
 //! - A workout runs on its own snapshot of the template; editing the template doesn't change it.
 //! - Warm-ups never count toward volume or progression, and logging a working set skips a pending one.
 use jiff::SignedDuration;
@@ -103,6 +104,36 @@ pub fn working_count(db: &Connection, exercise_row_id: &str) -> Result<i64> {
 /// The running workout (anything not yet PLAN_UPDATED), latest first.
 pub fn active_workout(db: &Connection) -> Result<Option<WorkoutSession>> {
     WorkoutSession::first(db, "WHERE status != 'PLAN_UPDATED' ORDER BY started_at DESC", [])
+}
+
+/// Sets of any kind (warm-ups, timed) logged in a workout.
+pub fn logged_sets(db: &Connection, workout_id: &str) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT count(*) FROM set_log s JOIN workout_exercise e ON e.id = s.workout_exercise_id WHERE e.workout_session_id = ?1",
+        [workout_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Delete a workout with nothing logged (started by mistake, or as the wrong workout) and reopen its
+/// planned slot, so it never counts as trained. The slot is open again while its window lasts, else
+/// missed, as if it had never started. Returns the reopened slot.
+pub fn discard(db: &Connection, workout_id: &str, now: Ts) -> Result<Option<PlannedSession>> {
+    if logged_sets(db, workout_id)? > 0 {
+        crate::bail!("WORKOUT_HAS_SETS", "That workout has logged sets; end it to keep them");
+    }
+    let workout = load_workout(db, workout_id, None)?;
+    for table in ["notification_job", "crowd_feedback", "workout_exercise"] {
+        db.execute(&format!("DELETE FROM {table} WHERE workout_session_id = ?1"), [workout_id])?;
+    }
+    db.execute("DELETE FROM workout_session WHERE id = ?1", [workout_id])?;
+    let Some(mut planned) = workout.planned_session_id.map(|id| PlannedSession::get(db, &id)).transpose()?.flatten()
+    else {
+        return Ok(None);
+    };
+    planned.status = if planned.planned_end_at > now { SessionStatus::Committed } else { SessionStatus::Missed };
+    planned.update(db)?;
+    Ok(Some(planned))
 }
 
 pub fn pending_rest(db: &Connection, workout_id: &str) -> Result<Option<NotificationJob>> {
@@ -581,6 +612,8 @@ fn blocked_at(db: &Connection, now: Ts) -> Result<bool> {
 }
 
 /// Start a workout. Without `template_id` it starts the given planned session, else today's one.
+/// A running workout with nothing logged is replaced ("sorry, I meant pull"): it is discarded, and
+/// the new one takes its slot unless `planned_session_id` names another.
 pub fn start(
     db: &Connection,
     template_id: Option<&str>,
@@ -590,19 +623,6 @@ pub fn start(
     request_id: &str,
 ) -> Result<Value> {
     let intent = json!({"template_id": template_id, "planned_session_id": planned_session_id});
-    let (template_id, planned_session_id) = match template_id {
-        Some(t) => (t.to_string(), planned_session_id.map(String::from)),
-        None => {
-            let planned = match planned_session_id {
-                Some(id) => PlannedSession::get(db, id)?,
-                None => todays_session(db, now)?,
-            };
-            match planned {
-                Some(PlannedSession { workout_template_id: Some(t), id, .. }) => (t, Some(id)),
-                _ => crate::bail!("NO_PLANNED_SESSION", "No planned workout today; pass template_id"),
-            }
-        }
-    };
     mutate(db, "workout.started", request_id, intent, now, || {
         if blocked_at(db, now)? {
             crate::bail!(
@@ -610,9 +630,27 @@ pub fn start(
                 "User availability override active; remove/change it explicitly before starting"
             );
         }
-        if active_workout(db)?.is_some() {
-            crate::bail!("WORKOUT_ALREADY_ACTIVE", "Finish existing workout before starting another");
+        let mut planned_session_id = planned_session_id.map(String::from);
+        if let Some(running) = active_workout(db)? {
+            if logged_sets(db, &running.id)? > 0 {
+                crate::bail!("WORKOUT_ALREADY_ACTIVE", "Finish existing workout before starting another");
+            }
+            let replaced = discard(db, &running.id, now)?;
+            planned_session_id = planned_session_id.or(replaced.map(|p| p.id));
         }
+        let (template_id, planned_session_id) = match template_id {
+            Some(t) => (t.to_string(), planned_session_id),
+            None => {
+                let planned = match &planned_session_id {
+                    Some(id) => PlannedSession::get(db, id)?,
+                    None => todays_session(db, now)?,
+                };
+                match planned {
+                    Some(PlannedSession { workout_template_id: Some(t), id, .. }) => (t, Some(id)),
+                    _ => crate::bail!("NO_PLANNED_SESSION", "No planned workout today; pass template_id"),
+                }
+            }
+        };
         let mut template = get_template(db, &template_id)?;
         let mut planned = match &planned_session_id {
             Some(id) => match PlannedSession::get(db, id)? {
@@ -1051,8 +1089,8 @@ pub(crate) mod tests {
         let db = db();
         let id = short(&db);
         type Action<'a> = &'a dyn Fn(&Connection) -> Result<Value>;
-        let actions: [Action; 4] = [
-            &|db| start(db, Some("short"), None, false, at(0), "duplicate-active"),
+        let actions: [Action; 3] = [
+            // Discards the empty running workout, then fails: the discard rolls back too.
             &|db| start(db, Some("unknown"), None, false, at(0), "start"),
             &|db| {
                 transition(db, &mut load_workout(db, &id, None)?, WorkoutStatus::PlanUpdated, at(0))

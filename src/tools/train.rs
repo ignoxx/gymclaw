@@ -53,6 +53,7 @@ pub enum WorkoutAction {
     /// Next (or the given) planned session: one image with every exercise plus the plan. For "what's on today".
     Preview,
     /// No args: today's planned session. template_id/planned_session_id only to start something else.
+    /// Replaces a running workout with nothing logged, on its session.
     Start,
     /// `text` like "10x40" (10 reps at 40 kg) or "25 min" logs a set; with `workout_id` and `which`, into that finished workout.
     Log,
@@ -71,8 +72,10 @@ pub enum WorkoutAction {
     Later,
     /// Move on to the next exercise.
     Next,
-    /// End early, save, show the summary.
+    /// End early, save, show the summary. Fails with nothing logged: log first.
     End,
+    /// Delete a workout with nothing logged (running, or `workout_id`); reopens its session.
+    Discard,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -89,7 +92,7 @@ pub struct Workout {
     pub exercise: Option<String>,
     /// relabel: the logged exercise to correct; log: its exercise.
     pub which: Option<String>,
-    /// relabel/log: a past workout (workout_session.id from sql_query); default the running or latest one.
+    /// relabel/log/discard: a past workout (workout_session.id from sql_query); default the running or latest one.
     pub workout_id: Option<String>,
     pub seconds: Option<i64>,
     #[serde(default)]
@@ -199,6 +202,7 @@ impl Tool for Workout {
             WorkoutAction::Later => coach_action(Action::Later)?,
             WorkoutAction::Next => coach_action(Action::Next)?,
             WorkoutAction::End => coach_action(Action::End)?,
+            WorkoutAction::Discard => coach::discard_workout(db, self.workout_id.as_deref(), now, &rid)?,
         };
         let result = shown(&view);
         cx.effects.push(Effect::Coach(view));

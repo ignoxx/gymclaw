@@ -16,7 +16,7 @@ use jiff::{SignedDuration, ToSpan};
 use serde_json::json;
 use tokio::sync::{Mutex, Notify};
 
-use super::{Health, blocking, in_tx, outbox};
+use super::{Health, blocking, outbox};
 use crate::db::models::{AgentEvent, JobKind, NotificationJob};
 use crate::domain::core::emit;
 use crate::domain::{profile, ticks};
@@ -103,7 +103,14 @@ impl Scheduler {
             }
         };
         let r = recipient.clone();
-        note(in_tx(&self.db_path, move |db| ticks::watch(db, &r, Ts::now())).await, "watch");
+        // Calendar and crowd ticks fetch over the network inside their transaction (`network_tx`).
+        let watch = blocking(&self.db_path, move |db| {
+            let tx = crate::db::network_tx(db)?;
+            let data = ticks::watch(&tx, &r, Ts::now())?;
+            tx.commit()?;
+            Ok(data)
+        });
+        note(watch.await, "watch");
         let r = recipient.clone();
         // Commits per step (plan, publish, recap), so no outer transaction.
         let weekly = blocking(&self.db_path, move |db| weekly_if_due(db, &r, Ts::now())).await;
@@ -115,7 +122,13 @@ impl Scheduler {
         }
         if authority.crowd_polling_enabled && last_crowd.is_none_or(|t| t.elapsed() >= CROWD_EVERY) {
             *last_crowd = Some(Instant::now());
-            note(in_tx(&self.db_path, |db| ticks::poll_crowd(db, Ts::now())).await, "crowd poll");
+            let poll = blocking(&self.db_path, |db| {
+                let tx = crate::db::network_tx(db)?;
+                let data = ticks::poll_crowd(&tx, Ts::now())?;
+                tx.commit()?;
+                Ok(data)
+            });
+            note(poll.await, "crowd poll");
         }
         if authority.calendar_writes_enabled {
             // Network per write; it commits each write itself, so no outer transaction.
@@ -212,7 +225,7 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
         return Ok(json!({"due": false}));
     }
     // Drafting and the agent event are idempotent per week, including across crashes.
-    let tx = db.unchecked_transaction()?;
+    let tx = crate::db::network_tx(db)?;
     let mut data = ticks::weekly(&tx, now)?;
     tx.commit()?;
     // Publish before recording the weekly run; the agent reads the actual outbox state.

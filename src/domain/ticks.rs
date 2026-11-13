@@ -105,12 +105,12 @@ pub fn poll_crowd(db: &Connection, _now: Ts) -> Result<Value> {
 pub fn publish(db: &Connection, now: Ts) -> Result<Value> {
     let state = google_state(db)?;
     let net = Net::new()?;
-    let tx = db.unchecked_transaction()?;
+    let tx = crate::db::network_tx(db)?;
     sync_calendar(&tx, &mut google_provider(&tx, Some(&state.calendar_id), &net)?, now)?;
     tx.commit()?;
     let mut results = Vec::new();
     for _ in 0..50 {
-        let tx = db.unchecked_transaction()?;
+        let tx = crate::db::network_tx(db)?;
         let Some(write) = pending_writes(&tx)?.into_iter().next() else { break };
         let result = apply_write(
             &tx,

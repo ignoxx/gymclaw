@@ -900,8 +900,8 @@ mod tests {
                 .unwrap();
         assert!(skipped["data"]["active_exercise"].is_null());
         skip_exercise(&db, &id, queue[1]["id"].as_str().unwrap(), "dependency skipped", at(0), "skip-b").unwrap();
-        let result = finish(&db, &id, at(0), "finish").unwrap()["data"].clone();
-        assert_eq!((result["skips"].as_i64(), result["completed_sets"].as_i64()), (Some(2), Some(0)));
+        // Everything skipped, nothing logged: it can't count as a workout done.
+        assert_eq!(finish(&db, &id, at(0), "finish").unwrap_err().code(), "NOTHING_LOGGED");
         assert!(ExerciseProgression::select(&db, "", []).unwrap().is_empty());
     }
 

@@ -226,7 +226,7 @@ impl Agent {
         let data_dir = self.data_dir.clone();
         let name_owned = name.to_string();
         let result = blocking(&self.db_path, move |db| {
-            // Reading `mark` takes the read lock, so until commit only this call adds events.
+            // The transaction holds the write lock (`db::open`), so until commit only this call adds events.
             let tx = db.transaction()?;
             let mark = crate::domain::events::mark(&tx)?;
             let before = tx.total_changes();
