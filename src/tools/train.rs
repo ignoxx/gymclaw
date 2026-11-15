@@ -362,7 +362,8 @@ impl Tool for TemplateEditExercise {
 #[serde(deny_unknown_fields)]
 pub struct TemplateAddExercise {
     pub template_id: String,
-    /// Catalog guide_id or exact catalog name (see catalog_search).
+    /// Catalog guide_id or exact catalog name (see catalog_search). With no catalog match and a
+    /// fields.id, it's the owner's own exercise under this name, without a picture.
     pub exercise: String,
     /// Fields overriding the defaults, e.g. {"working_sets":3,"rep_min":10,"rep_max":12,"target_weight":20}.
     /// A variant of an exercise already in the plan needs its own "id", "name" and, when known,

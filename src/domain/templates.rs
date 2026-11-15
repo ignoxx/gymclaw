@@ -514,21 +514,35 @@ pub fn edit_exercise(
     match edit {
         ExerciseEdit::Add(changes) => {
             let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
-            let Some(item) = item else {
-                let options: Vec<String> =
-                    search(exercise, None, None, 5).iter().map(|o| format!("{} ({})", o.guide_id, o.name)).collect();
-                let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
-                crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{exercise}'. Pass one guide_id: {options}");
+            let mut spec = match item {
+                Some(item) => {
+                    let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
+                    if timed(Some(&item.slug)) {
+                        // Cardio machines and holds are done for time unless the fields say otherwise.
+                        spec["measure"] = serde_json::json!(Measure::Time);
+                        spec["working_sets"] = serde_json::json!(1);
+                    }
+                    if default_load(&item.slug) == Load::Assisted {
+                        spec["load"] = serde_json::json!(Load::Assisted);
+                    }
+                    spec
+                }
+                // The owner's own exercise, kept under their name without a picture (#101).
+                None if changes.contains_key("id") => {
+                    serde_json::json!({"name": exercise.trim(), "role": "accessory", "target_weight": 0})
+                }
+                None => {
+                    let options: Vec<String> = search(exercise, None, None, 5)
+                        .iter()
+                        .map(|o| format!("{} ({})", o.guide_id, o.name))
+                        .collect();
+                    let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
+                    crate::bail!(
+                        "EXERCISE_UNKNOWN",
+                        "No exact match for '{exercise}'. Pass one guide_id: {options}; or, to keep the owner's name without a picture, pass fields.id"
+                    );
+                }
             };
-            let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
-            if timed(Some(&item.slug)) {
-                // Cardio machines and holds are done for time unless the fields say otherwise.
-                spec["measure"] = serde_json::json!(Measure::Time);
-                spec["working_sets"] = serde_json::json!(1);
-            }
-            if default_load(&item.slug) == Load::Assisted {
-                spec["load"] = serde_json::json!(Load::Assisted);
-            }
             spec.as_object_mut().unwrap().extend(changes.clone());
             // Exercises are told apart by id; the guide_id only picks the picture, so two machine
             // variants can share one.
@@ -691,6 +705,14 @@ mod tests {
             (named["exercises"][0]["target_weight"].as_f64(), named["exercises"][5]["target_weight"].as_f64()),
             (Some(85.0), Some(60.0))
         );
+        // No catalog match: an error with the closest matches, or the owner's name kept without a picture.
+        let unknown = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
+        assert_eq!(unknown.code(), "EXERCISE_UNKNOWN");
+        let own = object(json!({"id": "zottman"}));
+        let kept = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&own), None).unwrap();
+        let zottman = kept["exercises"].as_array().unwrap().last().unwrap();
+        assert_eq!((zottman["name"].as_str(), zottman.get("guide_id")), (Some("Zottman curl"), Some(&Value::Null)));
+        edit_exercise(&db, "upper-a", "zottman", ExerciseEdit::Remove, None).unwrap();
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();
