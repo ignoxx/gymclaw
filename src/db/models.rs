@@ -23,6 +23,9 @@ sql_enum!(BlockKind { Travel = "TRAVEL", Sick = "SICK", Unavailable = "UNAVAILAB
 sql_enum!(BlockStatus { Active = "ACTIVE", Retracted = "RETRACTED" });
 sql_enum!(ChatRole { Owner = "owner", Assistant = "assistant", Bot = "bot" });
 sql_enum!(NoteKind { Owner = "owner", Learned = "learned" });
+sql_enum!(GoalKind { Lift = "lift", BodyWeight = "body_weight", CardioMinutesWeek = "cardio_minutes_week", SessionsWeek = "sessions_week", Other = "other" });
+sql_enum!(GoalStatus { Active = "ACTIVE", Done = "DONE", Dropped = "DROPPED" });
+sql_enum!(Intensity { Easy = "easy", Moderate = "moderate", Hard = "hard" });
 
 impl SessionStatus {
     /// Sessions that take a slot in the week.
@@ -371,6 +374,44 @@ table!(AgentButton = "agent_button" {
     id: String,
     label: String,
     value: String,
+    created_at: Ts,
+});
+
+table!(
+    /// What the owner trains toward, in their words; `domain::goals` computes progress by `kind`.
+    Goal = "goal" {
+    id: String,
+    text: String,
+    kind: GoalKind,
+    /// Lift goals: the exercise as logged (`workout_exercise.exercise_id`).
+    exercise_id: Option<String>,
+    /// kg (lift: estimated 1-rep max; body weight), minutes a week, or workouts a week.
+    target: Option<f64>,
+    /// YYYY-MM-DD.
+    target_date: Option<String>,
+    status: GoalStatus,
+    /// The agent's current 4–6 week block toward the goal, in words.
+    block_text: Option<String>,
+    created_at: Ts,
+    updated_at: Ts,
+    closed_at: Option<Ts>,
+});
+
+table!(
+    /// Training outside the gym; `weekly` ones repeat at the same local weekday and time.
+    Activity = "activity" {
+    id: String,
+    /// The owner's words: "run 8k", "football".
+    kind: String,
+    started_at: Ts,
+    minutes: i64,
+    intensity: Intensity,
+    notes: Option<String>,
+    weekly: bool,
+    /// Weekly: no occurrences from here on.
+    until_at: Option<Ts>,
+    /// Logged by mistake: counts nowhere.
+    removed_at: Option<Ts>,
     created_at: Ts,
 });
 

@@ -123,6 +123,11 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         let words = o.plan_text.as_deref().map_or("none saved".into(), |p| format!("\"{p}\""));
         writeln!(out, "Training plan (plan_set): {words}; templates {}.", o.split_json.join(", ")).unwrap();
     }
+    let goals = crate::domain::goals::active(db)?;
+    if !goals.is_empty() {
+        let named: Vec<String> = goals.iter().map(|g| format!("\"{}\" id={}", g.text, g.id)).collect();
+        writeln!(out, "Goals (progress: goal list): {}.", named.join(", ")).unwrap();
+    }
     // Every real template, plan first: a workout outside the plan (cardio added by hand) still shows.
     let mut stmt = db.prepare(
         "SELECT t.id, (SELECT max(w.started_at) FROM workout_session w WHERE w.template_id = t.id AND w.status = 'PLAN_UPDATED')

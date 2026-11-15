@@ -11,6 +11,7 @@ use crate::domain::core::{emit, mutate};
 use crate::domain::progression::{PerformanceSet, ProgressionDecision, double_progression};
 use crate::domain::set_parser::{SetInput, parse_block, parse_set};
 use crate::domain::templates::{Load, Measure, pick};
+use crate::domain::trends;
 use crate::domain::workout::{
     self, cancel_rest, exercises, guide_id, kind, load_workout, logs, measure, name, reps_alone, set_measure,
     transition, unresolved,
@@ -66,6 +67,10 @@ fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDec
         &sets,
     );
     decision.previous_weight = exercise.target_weight;
+    if set_kind.load != Load::Assisted {
+        // Easy sessions jump further, grinds hold (`trends::sized`). Its signals are kilograms lifted.
+        decision = trends::sized(decision, trends::effort_of(db, exercise, &sets)?, increment);
+    }
     // Back from signed; an assisted target stops at no help (0).
     decision.next_weight = set_kind.signed(decision.next_weight).max(0.0);
     if set_kind.load == Load::Assisted && exercise.target_weight == 0.0 && decision.progressed {

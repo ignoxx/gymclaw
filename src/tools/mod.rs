@@ -3,6 +3,7 @@
 pub mod meta;
 pub mod ops;
 pub mod plan;
+pub mod progress;
 pub mod train;
 
 use std::path::Path;
@@ -111,7 +112,7 @@ pub fn def<T: Tool>() -> ToolDef {
 }
 
 pub fn all() -> Vec<ToolDef> {
-    [plan::tools(), train::tools(), meta::tools(), ops::tools()].into_iter().flatten().collect()
+    [plan::tools(), train::tools(), progress::tools(), meta::tools(), ops::tools()].into_iter().flatten().collect()
 }
 
 pub fn call(cx: &mut Ctx, name: &str, args: Value) -> Result<Value> {

@@ -26,8 +26,8 @@ the agent read source and ran ad-hoc queries on prod, then told the owner things
 | `src/main.rs`, `src/config.rs` | CLI and environment |
 | `src/db/` | schema (`schema.sql`, generated), baseline and migrations, typed rows (`models.rs`), test fixtures (`test.rs`) |
 | `src/time.rs`, `src/error.rs` | timestamps (naive UTC in the DB), `CODE: message` errors |
-| `src/domain/` | planning, scheduling, calendar sync/writes, crowd model, workout, coach, progression, onboarding, body, ticks |
-| `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries) |
+| `src/domain/` | planning, scheduling, calendar sync/writes, crowd model, workout, coach, progression, effort and lift trends (`trends.rs`), goals, activities outside the gym, onboarding, body, ticks |
+| `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `progress.rs` (goals, activities), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries) |
 | `src/providers/` | Google Calendar + OAuth, ICS feed, crowd sources, photo decoding/EXIF |
 | `src/agent/` | OpenRouter client, per-turn context, media, failure handling, turn log |
 | `src/runtime/` | `serve`: bot loop, scheduler, outbox |
@@ -63,6 +63,19 @@ model never has to. Timestamps without an offset are the owner's local time.
   schema discovery and a concise schema description in the tool docs. OAuth credentials and the
   private feed URL stay excluded. There is no raw SQL write tool; session edits reconcile calendar,
   allocation and reminder state through the validated domain layer.
+- Effort and trends (`domain::trends`) come from logged reps and weight only, never rest time: reps
+  against the range, drop-off across sets at one weight, chosen weight against the target, estimated
+  1-rep max (Epley) against the recent best. Effort sizes the default jump after a workout (easy: two
+  increments, grind: hold). Trends stay out of the standing context: the Sunday wake carries stalls,
+  easy streaks and hard sets per muscle against the 4-week average, and the `lift_history` view
+  answers "how's my bench going?" through `sql_query`.
+- Goals (`goal` table, `goal` tool) are the owner's words plus an optional measurable target; code
+  computes progress by kind (lift → recent best 1-rep max, body weight, cardio minutes, sessions).
+  The "Now" snapshot only names the active goals; progress goes into the Sunday recap and wake, where
+  the agent keeps each goal's block (`block_text`, its 4–6 week plan in words) current.
+- Activities (`activity` table, `activity` tool) are training outside the gym, one-off or weekly.
+  Code stores them, lists them in `get_week` and the Sunday wake, and counts their minutes toward
+  cardio goals; what one means for the plan is the agent's call.
 - The agent owns planning decisions and exceptions. `note_add {kind: owner}` records standing
   preferences and date-bounded exceptions; owner and learned notes appear in every prompt. Background
   events are observations, never fresh owner permission.

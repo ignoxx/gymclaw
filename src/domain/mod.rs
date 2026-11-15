@@ -17,9 +17,11 @@ pub mod coach;
 pub mod highlights;
 pub mod onboarding;
 pub mod preview;
+pub mod trends;
 pub mod workout;
 
 // Planning
+pub mod activities;
 pub mod availability;
 pub mod calendar;
 pub mod calendar_busy;
@@ -27,6 +29,7 @@ pub mod calendar_writes;
 pub mod compression;
 pub mod crowd;
 pub mod events;
+pub mod goals;
 pub mod habits;
 pub mod notifications;
 pub mod personal_calendar;
