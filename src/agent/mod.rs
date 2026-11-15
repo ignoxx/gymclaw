@@ -259,8 +259,9 @@ impl Agent {
         let result = blocking(&self.db_path, move |db| {
             // The transaction holds the write lock (`db::open`), so until commit only this call adds events.
             let tx = db.transaction()?;
-            // This connection is the call's own, so the recording holds exactly its writes.
-            let mut session = turnlog::record(&tx)?;
+            // This connection is the call's own, so the recording holds exactly its writes. Best effort:
+            // logging never fails a call.
+            let mut session = turnlog::record(&tx).inspect_err(|e| tracing::warn!("changes not recorded: {e}")).ok();
             let mark = crate::domain::events::mark(&tx)?;
             let before = tx.total_changes();
             let described = context::name_sessions(&tx, &format!("{name_owned} {}", scrub(&args.to_string(), 400)))?;
@@ -286,7 +287,7 @@ impl Agent {
                     other => json!({"result": other, "raised": shown}),
                 };
             }
-            let changes = turnlog::changes(&mut session)?;
+            let changes = session.as_mut().and_then(|s| turnlog::changes(s).ok().flatten());
             drop(session);
             tx.commit()?;
             Ok((value, effects, saved, raised.into_iter().map(|e| e.id).collect(), changes))
