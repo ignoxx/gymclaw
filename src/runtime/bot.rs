@@ -3,7 +3,7 @@
 //! - `gc:` taps and typed sets go to the coach on the fast lane (no model, in arrival order).
 //! - `btn:<id>` taps, `handled: false` sets and everything else go to the agent. Turns are serialized;
 //!   messages that arrive during a turn are collected into the next one.
-//! - `/new` starts a fresh chat window, `/status` answers without the model.
+//! - `/status` answers without the model. There is no `/new`: the window is the last messages, always current.
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -34,21 +34,18 @@ const SESSION: &str = "telegram:owner";
 
 #[derive(Debug, PartialEq)]
 pub enum Route {
-    New,
     Status,
     /// Try the coach first.
     Set,
     Agent,
 }
 
-/// The "/" menu Telegram shows; `route` handles each (and `/reset` as `/new`). Set on startup.
-pub const COMMANDS: &[(&str, &str)] =
-    &[("new", "Start a fresh conversation"), ("status", "Bot health and what's running")];
+/// The "/" menu Telegram shows; `route` handles each. Set on startup.
+pub const COMMANDS: &[(&str, &str)] = &[("status", "Bot health and what's running")];
 
 pub fn route(text: &str) -> Route {
     let command = text.split_whitespace().next().unwrap_or("").split('@').next().unwrap_or("");
     match command {
-        "/new" | "/reset" => Route::New,
         "/status" => Route::Status,
         _ if SET_LIKE.is_match(text) => Route::Set,
         _ => Route::Agent,
@@ -199,7 +196,6 @@ impl Bot {
         let images = self.media(&message).await;
         if images.is_empty() {
             match route(&text) {
-                Route::New => return self.new_window(message.message_id).await,
                 Route::Status => return self.send_status().await,
                 Route::Set => {
                     let _ = self.fast.send(Fast::Text { message_id: message.message_id, text });
@@ -276,23 +272,6 @@ impl Bot {
         }
         self.inbox.lock().await.push(Inbound { message_id, key, images });
         self.inbox_ready.notify_one();
-    }
-
-    async fn new_window(&self, message_id: i64) {
-        let saved = blocking(self.db(), |db| {
-            ChatMessage {
-                id: None,
-                at: Ts::now(),
-                role: ChatRole::Bot,
-                text: "/new".into(),
-                telegram_message_id: None,
-                meta_json: Json(json!({"kind": "boundary"})),
-            }
-            .insert(db)
-        })
-        .await;
-        let emoji = if saved.is_ok() { "👍" } else { "🤷" };
-        let _ = self.tg.react(self.owner, message_id, Some(emoji)).await;
     }
 
     async fn send_status(&self) {
@@ -854,9 +833,9 @@ mod tests {
         for text in ["how long do I rest?", "it's occupied", "80x9 then 80x10", "x"] {
             assert_eq!(route(text), Route::Agent, "{text}");
         }
-        assert_eq!(route("/new"), Route::New);
+        assert_eq!(route("/new"), Route::Agent);
         assert_eq!(route("/status@gymclaw_bot"), Route::Status);
         // The menu only offers commands the bot handles.
-        assert!(COMMANDS.iter().all(|(c, _)| matches!(route(&format!("/{c}")), Route::New | Route::Status)));
+        assert!(COMMANDS.iter().all(|(c, _)| route(&format!("/{c}")) == Route::Status));
     }
 }

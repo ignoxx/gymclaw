@@ -93,7 +93,7 @@ model never has to. Timestamps without an offset are the owner's local time.
   the rest countdown edits every 5 s.
 - Photos/documents in (HEIC included, via libheif ≥ 1.17) → vision model; EXIF capture date for
   scale backfill.
-- `/new` clears the chat window; `/status` shows runtime health without the model. Startup sets the
+- `/status` shows runtime health without the model; there is no `/new`, the chat window is always the latest messages. Startup sets the
   Telegram "/" menu to exactly these (`bot::COMMANDS`).
 - Every outbound message (agent, coach, reminders, briefings) goes into `chat_message`. The agent's
   history holds only the conversation (owner, agent, background prompts); code-sent messages from the
