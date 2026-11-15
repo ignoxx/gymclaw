@@ -437,6 +437,34 @@ fn memory(db: &Connection) -> Result<Value> {
     )
 }
 
+/// What the agent built, on or off, each with its versions newest first, and the latest capability gaps.
+fn extensions(db: &Connection, tz: &TimeZone) -> Result<Value> {
+    use crate::domain::extensions::{CapabilityGap, Extension, ExtensionVersion};
+    let mut items = vec![];
+    for e in Extension::select(db, "ORDER BY enabled DESC, kind, name", [])? {
+        let versions: Vec<Value> = ExtensionVersion::select(
+            db,
+            "WHERE extension_id = ?1 ORDER BY version DESC",
+            [e.id],
+        )?
+        .into_iter()
+        .map(|v| {
+            json!({"version": v.version, "author": v.author, "enabled": v.enabled, "summary": v.spec_json.summary(),
+                "same": v.spec_json == e.spec_json, "when": fmt(v.created_at, tz, "%a %-d %b %H:%M")})
+        })
+        .collect();
+        items.push(
+            json!({"id": e.id, "kind": e.kind, "name": e.name, "enabled": e.enabled, "summary": e.spec_json.summary(),
+            "spec": e.spec_json, "versions": versions}),
+        );
+    }
+    let gaps: Vec<Value> = CapabilityGap::select(db, "ORDER BY id DESC LIMIT 20", [])?
+        .into_iter()
+        .map(|g| json!({"when": fmt(g.at, tz, "%a %-d %b %H:%M"), "source": g.source, "asked": g.asked, "tried": g.tried, "why": g.why}))
+        .collect();
+    Ok(json!({"items": items, "gaps": gaps}))
+}
+
 /// The whole dashboard state.
 pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let profile = if UserProfile::get(db, 1)?.is_some() { get_profile(db)? } else { Profile::default() };
@@ -455,7 +483,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
         "demo": false, "live_database_accessed": true, "captured_at": iso(&now.local(&TimeZone::UTC)), "timezone": profile.timezone,
         "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
-        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "plans": plans(db)?,
+        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db)?,
         "activity": events.iter().map(|e| json!({"time": fmt(e.created_at, &tz, "%H:%M"), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
     }))

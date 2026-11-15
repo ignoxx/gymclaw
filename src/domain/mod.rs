@@ -29,6 +29,7 @@ pub mod calendar_writes;
 pub mod compression;
 pub mod crowd;
 pub mod events;
+pub mod extensions;
 pub mod goals;
 pub mod habits;
 pub mod notifications;

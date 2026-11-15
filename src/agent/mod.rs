@@ -22,6 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::domain::extensions::GapSource;
 use crate::error::{Error, Result};
 use crate::runtime::{blocking, in_tx};
 use crate::telegram::Media;
@@ -329,6 +330,7 @@ impl Agent {
                 (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
             Err(_) => {
+                self.gap(GapSource::Deadline, &run_id, state.tool_calls).await;
                 state.error = "turn deadline exceeded".into();
                 (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
@@ -442,6 +444,14 @@ impl Agent {
 
             let content = reply.message["content"].as_str();
             if tool_calls.is_empty() || force_text {
+                if force_text {
+                    self.gap(
+                        if looping { GapSource::RepeatedCall } else { GapSource::StepCap },
+                        run_id,
+                        state.tool_calls,
+                    )
+                    .await;
+                }
                 if reply.finish_reason.as_deref() == Some("length") && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("OUTPUT_LIMIT", "model stopped at the output limit");
                 }
@@ -560,6 +570,18 @@ impl Agent {
                 });
                 return Ok(reply);
             }
+        }
+    }
+
+    /// Logs a capability gap for a turn that ran out of room (step cap, deadline, repeated call), for
+    /// review. Never fails the turn.
+    async fn gap(&self, source: GapSource, run_id: &str, calls: usize) {
+        let (run, now) = (run_id.to_string(), (self.clock)());
+        let logged =
+            blocking(&self.db_path, move |db| crate::domain::extensions::log_turn_gap(db, source, &run, calls, now))
+                .await;
+        if let Err(e) = logged {
+            tracing::warn!("capability gap not logged: {e}");
         }
     }
 
@@ -836,6 +858,14 @@ mod tests {
         assert!(!outcome.failed);
         assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Couldn't do that."));
         assert_eq!(script.seen.lock().unwrap().len(), 4);
+        assert_eq!(gaps(&agent), [("repeated_call".to_string(), "remember I hate lunges".to_string())]);
+    }
+
+    /// Capability gaps the turn logged: (source, what it was answering).
+    fn gaps(agent: &Agent) -> Vec<(String, String)> {
+        let db = crate::db::open(&agent.db_path).unwrap();
+        let mut stmt = db.prepare("SELECT source, asked FROM capability_gap ORDER BY id").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
     }
 
     /// Prod 2026-10-22: a call missing required fields was repeated until STUCK. Both the error and
@@ -897,6 +927,7 @@ mod tests {
         assert!(seen.last().unwrap().1, "the last call forbids tools");
         // The script's 13th message still has tool calls; with tools forbidden its text is the answer.
         assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Working on it…"));
+        assert_eq!(gaps(&agent), [("step_cap".to_string(), "remember I hate lunges".to_string())]);
     }
 
     #[tokio::test]

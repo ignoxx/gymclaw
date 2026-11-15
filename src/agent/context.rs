@@ -1,5 +1,5 @@
 //! What the model sees each turn: a short system prompt, the DB schema, the owner's and learned notes,
-//! a fresh state snapshot from the DB, and the recent chat. Target: well under 15k tokens.
+//! the extensions it built (one line each), a fresh state snapshot from the DB, and the recent chat. Target: well under 15k tokens.
 use std::fmt::Write;
 
 use jiff::{SignedDuration, ToSpan};
@@ -70,7 +70,7 @@ pub use crate::domain::events::ACTIONABLE;
 /// Chat rows in the window.
 pub const HISTORY: i64 = 30;
 
-/// System prompt in two parts: instructions, schema and notes, which change only when code or notes
+/// System prompt in two parts: instructions, schema, notes and extensions, which change only when code or notes
 /// do (the provider caches them across turns), then the state snapshot. Also returns the wake events
 /// shown as open issues: the turn that sees them settles them.
 pub fn system(db: &Connection, now: Ts) -> Result<(String, String, Vec<String>)> {
@@ -94,6 +94,9 @@ pub fn system(db: &Connection, now: Ts) -> Result<(String, String, Vec<String>)>
             )
             .unwrap();
         }
+    }
+    if let Some(extensions) = crate::domain::extensions::prompt(db)? {
+        out.push_str(&extensions);
     }
     let (now_state, shown) = snapshot(db, now)?;
     Ok((out, format!("\n\n## Now\n{now_state}"), shown))

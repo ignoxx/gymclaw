@@ -1,4 +1,4 @@
--- Generated from a fresh `gymclaw migrate` (user_version 8); don't edit. When a migration
+-- Generated from a fresh `gymclaw migrate` (user_version 9); don't edit. When a migration
 -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
 
 CREATE TABLE activity (
@@ -22,6 +22,16 @@ CREATE TABLE agent_button (
 	value TEXT NOT NULL,
 	created_at DATETIME NOT NULL
 );
+
+CREATE TABLE agent_data (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	collection VARCHAR NOT NULL,
+	at DATETIME NOT NULL,
+	data_json JSON NOT NULL,
+	created_at DATETIME NOT NULL
+);
+
+CREATE INDEX ix_agent_data_collection_at ON agent_data (collection, at);
 
 CREATE TABLE agent_event (
 	id VARCHAR NOT NULL, 
@@ -129,6 +139,16 @@ CREATE TABLE calendar_write (
 	FOREIGN KEY(planned_session_id) REFERENCES planned_session (id)
 );
 
+CREATE TABLE capability_gap (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	at DATETIME NOT NULL,
+	source VARCHAR NOT NULL CHECK (source IN ('agent', 'step_cap', 'deadline', 'repeated_call')),
+	asked TEXT NOT NULL,
+	tried TEXT NOT NULL,
+	why TEXT NOT NULL,
+	run_id VARCHAR
+);
+
 CREATE TABLE chat_message (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	at DATETIME NOT NULL,
@@ -184,6 +204,29 @@ CREATE TABLE exercise_progression (
 	source_workout_id VARCHAR NOT NULL, 
 	PRIMARY KEY (exercise_id), 
 	FOREIGN KEY(source_workout_id) REFERENCES workout_session (id)
+);
+
+CREATE TABLE extension (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind VARCHAR NOT NULL CHECK (kind IN ('playbook', 'collection', 'trigger')),
+	name VARCHAR NOT NULL,
+	spec_json JSON NOT NULL,
+	enabled BOOLEAN NOT NULL,
+	version INTEGER NOT NULL,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	UNIQUE (kind, name)
+);
+
+CREATE TABLE extension_version (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	extension_id INTEGER NOT NULL REFERENCES extension (id),
+	version INTEGER NOT NULL,
+	spec_json JSON NOT NULL,
+	enabled BOOLEAN NOT NULL,
+	author VARCHAR NOT NULL CHECK (author IN ('agent', 'owner')),
+	created_at DATETIME NOT NULL,
+	UNIQUE (extension_id, version)
 );
 
 CREATE TABLE goal (

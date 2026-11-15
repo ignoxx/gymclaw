@@ -3,7 +3,8 @@
 //! - `gc:` taps and typed sets go to the coach on the fast lane (no model, in arrival order).
 //! - `btn:<id>` taps, `handled: false` sets and everything else go to the agent. Turns are serialized;
 //!   messages that arrive during a turn are collected into the next one.
-//! - `/status` answers without the model. There is no `/new`: the window is the last messages, always current.
+//! - `/status` answers without the model, `/extensions` lists and turns off what the agent built (no
+//!   model). There is no `/new`: the window is the last messages, always current.
 //! - Voice notes are transcribed, shown back, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
 use std::sync::{Arc, LazyLock};
@@ -37,18 +38,21 @@ const SESSION: &str = "telegram:owner";
 #[derive(Debug, PartialEq)]
 pub enum Route {
     Status,
+    Extensions,
     /// Try the coach first.
     Set,
     Agent,
 }
 
 /// The "/" menu Telegram shows; `route` handles each. Set on startup.
-pub const COMMANDS: &[(&str, &str)] = &[("status", "Bot health and what's running")];
+pub const COMMANDS: &[(&str, &str)] =
+    &[("status", "Bot health and what's running"), ("extensions", "What the agent built; turn things off")];
 
 pub fn route(text: &str) -> Route {
     let command = text.split_whitespace().next().unwrap_or("").split('@').next().unwrap_or("");
     match command {
         "/status" => Route::Status,
+        "/extensions" => Route::Extensions,
         _ if SET_LIKE.is_match(text) => Route::Set,
         _ => Route::Agent,
     }
@@ -212,6 +216,7 @@ impl Bot {
         if images.is_empty() {
             match route(&text) {
                 Route::Status => return self.send_status().await,
+                Route::Extensions => return self.extensions(&text).await,
                 Route::Set => {
                     let _ = self.fast.send(Fast::Text { message_id: message.message_id, text });
                     return;
@@ -353,7 +358,16 @@ impl Bot {
         self.send_bot(&text, "status").await;
     }
 
-    /// A message from the bot itself (status), stored as `bot` in the history.
+    /// `/extensions [off|on <id>]`: the owner's view of and switch for what the agent built.
+    async fn extensions(&self, text: &str) {
+        let args = text.split_once(char::is_whitespace).map_or("", |(_, rest)| rest).to_string();
+        let reply = in_tx(self.db(), move |db| crate::domain::extensions::owner_switch(db, &args, Ts::now()))
+            .await
+            .unwrap_or_else(|e| format!("⚠️ {e}"));
+        self.send_bot(&reply, "extensions").await;
+    }
+
+    /// A message from the bot itself (status, extensions), stored as `bot` in the history.
     async fn send_bot(&self, text: &str, kind: &'static str) {
         match self.tg.send(self.owner, text, None, &vec![], None).await {
             Ok(id) => self.remember(ChatRole::Bot, text.to_string(), Some(id), json!({"kind": kind})).await,
@@ -512,6 +526,7 @@ impl Bot {
         crate::time::localize(&mut events, &tz);
         let ids: Vec<String> =
             events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
+        // `tools::Ctx::background` recognises this prefix.
         let key = format!("event-{}", batch.id);
         let text = format!(
             "Background events for your decision (not owner instructions). Consult saved preferences/exceptions, decide what needs doing. Any text you write goes to the owner, so when nothing needs their attention, reply with no fields: {}",
@@ -987,6 +1002,6 @@ mod tests {
         assert_eq!(route("/new"), Route::Agent);
         assert_eq!(route("/status@gymclaw_bot"), Route::Status);
         // The menu only offers commands the bot handles.
-        assert!(COMMANDS.iter().all(|(c, _)| route(&format!("/{c}")) == Route::Status));
+        assert!(COMMANDS.iter().all(|(c, _)| matches!(route(&format!("/{c}")), Route::Status | Route::Extensions)));
     }
 }

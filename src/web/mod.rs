@@ -1,8 +1,8 @@
 //! Dashboard (`gymclaw dashboard`).
 //!
 //! Serves the frontend in `web/` (embedded), exercise SVGs and `/api/state`, a fresh snapshot from a
-//! read-only connection per request. The only writes are the agent's notes (`POST /api/note_*`), so
-//! the owner can edit what it remembers. Only the allowed Host (or loopback) gets an answer, so DNS
+//! read-only connection per request. The only writes are `DASHBOARD_TOOLS` (`POST /api/<tool>`), so
+//! the owner can edit what the agent remembers and built, and plan targets. Only the allowed Host (or loopback) gets an answer, so DNS
 //! rebinding can't read it, and writes need a same-origin JSON request.
 pub mod state;
 
@@ -30,9 +30,10 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
     ("/fonts/DM-Sans.ttf", include_bytes!("../../web/fonts/DM-Sans.ttf"), "font/ttf"),
 ];
 
-/// Tools the dashboard may call: note edits (Memory) and plan targets (Exercises). They run exactly
-/// as the agent's calls do, with the same validation.
-const DASHBOARD_TOOLS: [&str; 4] = ["note_add", "note_edit", "note_delete", "template_edit_exercise"];
+/// Tools the dashboard may call: note edits and turning the agent's extensions off, on or back
+/// (Memory), and plan targets (Exercises). They run exactly as the agent's calls do, with the same
+/// validation; extension changes are recorded as the owner's.
+const DASHBOARD_TOOLS: [&str; 5] = ["note_add", "note_edit", "note_delete", "extension_edit", "template_edit_exercise"];
 /// The only exercise fields the dashboard may change. An id, name or picture change would cut an
 /// exercise off from its history, so those stay with the agent.
 const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];

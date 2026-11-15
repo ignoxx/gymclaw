@@ -10,7 +10,7 @@ gymclaw tools        # tool names, descriptions, JSON schemas
 gymclaw migrate      # schema: src/db/baseline.sql, then src/db/migrations (result: src/db/schema.sql)
 gymclaw backup [dest]
 gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
-gymclaw dashboard    # dashboard; writes only the agent's notes and plan targets
+gymclaw dashboard    # dashboard; writes only the agent's notes, its extensions' on/off switch and plan targets
 GYMCLAW_DB=copy.db gymclaw replay --at <local time> [--model …]   # re-run the agent on the chat's last owner message
 gymclaw rewind <run> --db copy.db --turns <dir>   # undo a turn's tool calls on a DB copy (turn-log changesets)
 gymclaw backfill --db copy.db --turns <dir> --out <file> [--git .]   # index past turns with outcome labels
@@ -28,8 +28,8 @@ the agent read source and ran ad-hoc queries on prod, then told the owner things
 | `src/main.rs`, `src/config.rs` | CLI and environment |
 | `src/db/` | schema (`schema.sql`, generated), baseline and migrations, typed rows (`models.rs`), test fixtures (`test.rs`) |
 | `src/time.rs`, `src/error.rs` | timestamps (naive UTC in the DB), `CODE: message` errors |
-| `src/domain/` | planning, scheduling, calendar sync/writes, crowd model, workout, coach, progression, effort and lift trends (`trends.rs`), goals, activities outside the gym, onboarding, body, ticks |
-| `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `progress.rs` (goals, activities), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries) |
+| `src/domain/` | planning, scheduling, calendar sync/writes, crowd model, workout, coach, progression, effort and lift trends (`trends.rs`), goals, activities outside the gym, onboarding, body, ticks, extensions (the agent's own layer) |
+| `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `progress.rs` (goals, activities), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries), `extensions.rs` (playbooks, collections, triggers, capability gaps) |
 | `src/providers/` | Google Calendar + OAuth, ICS feed, crowd sources, photo decoding/EXIF |
 | `src/agent/` | OpenRouter client, per-turn context, media, failure handling, turn log |
 | `src/runtime/` | `serve`: bot loop, scheduler, outbox |
@@ -91,6 +91,19 @@ model never has to. Timestamps without an offset are the owner's local time.
   plain sentence from `failure.rs` that never claims nothing was saved. Fix a misbehaving turn at its
   source (event, prompt, tool result) rather than adding a filter, and pin the fix with a test next
   to the existing ones.
+- Extensions (`domain::extensions`, #92): the layer the agent writes at runtime, built on the tools
+  above and never around them. A **playbook** is named steps for a request that keeps coming back; a
+  **collection** is the agent's own log (`agent_data` rows via `data_add`, read with `sql_query`); a
+  **trigger** is a daily/weekly local time or a finished workout that raises an `extension.trigger`
+  decision event carrying the agent's own instruction, so it wakes through the same path as every other
+  background event and may stay silent. Triggers run no logic and get no owner permission: the
+  `extension.trigger` wake is a background turn, where `runtime_resume` (and with it calendar writes)
+  refuses. One wake per trigger per slot, slots older than an hour are skipped, at most 8 trigger wakes a
+  day. Every change is a new `extension_version` row and can be restored; enabled extensions appear in
+  the prompt as one line each, the owner lists and switches them with `/extensions` or the dashboard's
+  Memory tab. A request no tool covers goes to `capability_gap` (the `capability_gap` tool, plus a row
+  for every turn that hit the step cap, the deadline or the identical-call breaker), listed for review
+  and never acted on by code.
 - Models via OpenRouter: `GYMCLAW_MODEL` (chat, default Claude Haiku 5.5; GLM 5.3 Flash misread owners and claimed edits it never saved in replays), `GYMCLAW_MODEL_FAST`,
   `GYMCLAW_MODEL_VISION`, `GYMCLAW_MODEL_AUDIO` (voice notes, default Gemini 3.5 Flash Lite);
   `GYMCLAW_PROVIDER` pins the provider (`reasoning.effort: minimal`).
@@ -116,7 +129,8 @@ model never has to. Timestamps without an offset are the owner's local time.
 - Voice notes and audio files → `GYMCLAW_MODEL_AUDIO` (Telegram's OGG/Opus sent as is), shown back
   as "🎙 “…”", then routed exactly like typed text (set parser first). Adds the transcription call,
   typically 1–3 s, before the coach or the agent sees it.
-- `/status` shows runtime health without the model; there is no `/new`, the chat window is always the latest messages. Startup sets the
+- `/status` shows runtime health and `/extensions` lists and switches the agent's extensions, both
+  without the model; there is no `/new`, the chat window is always the latest messages. Startup sets the
   Telegram "/" menu to exactly these (`bot::COMMANDS`).
 - Every outbound message (agent, coach, reminders, briefings) goes into `chat_message`. The agent's
   history holds only the conversation (owner, agent, background prompts); code-sent messages from the
@@ -132,7 +146,8 @@ model never has to. Timestamps without an offset are the owner's local time.
 
 - In-process: `ticks::watch` every 60 s (calendar sync, personal feed, reminders), `ticks::weekly`
   Sunday from 23:00 profile-local, `ticks::poll_crowd` every 15 min when enabled, `ticks::publish`
-  after ticks when calendar writes are enabled. A no-show is sent as the session's last reminder
+  after ticks when calendar writes are enabled, `extensions::fire_due` every tick for the agent's
+  triggers. A no-show is sent as the session's last reminder
   (Start, plus Skip/Move handed to the agent). Conflicts, missed slots, stale workouts
   and week rollover create durable decision events rather than automatic replans. The two fixed
   messages are numbers only: the workout summary card and the Sunday recap (`weekly::recap`), both

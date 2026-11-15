@@ -1,4 +1,4 @@
-/* View of GymClaw state. Presentation only, except the Memory tab (the agent's notes) and the
+/* View of GymClaw state. Presentation only, except the Memory tab (the agent's notes and extensions) and the
    Exercises tab (plan targets), which edit through GymClaw's own tools. */
 const SVG = 'http://www.w3.org/2000/svg';
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -699,7 +699,7 @@ function renderMemory(memory) {
     usage.textContent = `${used}/${limit} chars`;
     usage.classList.toggle('warn', used >= limit * 0.9);
   }
-  for (const list of document.querySelectorAll('.notes')) {
+  for (const list of document.querySelectorAll('.notes[data-kind]')) {
     // Don't replace a line while it's being typed in; the next refresh catches up.
     if (list.contains(document.activeElement)) continue;
     const kind = list.dataset.kind;
@@ -723,6 +723,42 @@ function renderMemory(memory) {
     add.append(editable('', PLACEHOLDER[kind], next => toolCall('note_add', { kind, text: next })));
     list.append(add);
   }
+}
+
+/* What the agent built: one line each with an on/off switch, its versions (restore any) under it.
+   Then the requests it couldn't handle, newest first. Both edit only through extension_edit. */
+function renderExtensions(extensions) {
+  const list = document.getElementById('extensions');
+  list.replaceChildren();
+  for (const item of extensions.items) {
+    const row = el('li', `note ext${item.enabled ? '' : ' off'}`);
+    const details = el('details', 'note-text');
+    const summary = el('summary');
+    summary.append(el('strong', '', item.name), ` · ${item.kind} · ${item.summary}`);
+    details.append(summary);
+    for (const v of item.versions) {
+      const line = el('div', 'ext-version', `v${v.version} ${v.when} · ${v.author}${v.enabled ? '' : ' · off'} · ${v.summary}`);
+      if (!v.same) {
+        const restore = el('button', 'forget', 'Restore');
+        restore.addEventListener('click', () => toolCall('extension_edit', { id: item.id, restore_version: v.version }).catch(() => row.classList.add('failed')));
+        line.append(' ', restore);
+      }
+      details.append(line);
+    }
+    const toggle = el('button', 'forget', item.enabled ? 'Turn off' : 'Turn on');
+    toggle.addEventListener('click', () => toolCall('extension_edit', { id: item.id, enabled: !item.enabled }).catch(() => row.classList.add('failed')));
+    row.append(details, toggle);
+    list.append(row);
+  }
+  if (!extensions.items.length) list.append(el('li', 'note empty', 'Nothing yet.'));
+  const gaps = document.getElementById('gaps');
+  gaps.replaceChildren();
+  for (const gap of extensions.gaps) {
+    const row = el('li', 'note');
+    row.append(el('span', 'note-text', `${gap.asked} — ${gap.why}${gap.source === 'agent' ? ` (tried: ${gap.tried})` : ''}`), el('time', '', gap.when));
+    gaps.append(row);
+  }
+  if (!extensions.gaps.length) gaps.append(el('li', 'note empty', 'Nothing logged.'));
 }
 
 /* ---------- Exercises ---------- */
@@ -996,7 +1032,7 @@ function showTab() {
   if (tab === 'progress') renderInsights(state);
   if (tab === 'history') renderHistory(state.history);
   if (tab === 'exercises') renderExercises();
-  if (tab === 'memory') renderMemory(state.memory);
+  if (tab === 'memory') { renderMemory(state.memory); renderExtensions(state.extensions); }
 }
 
 let rendered = '';

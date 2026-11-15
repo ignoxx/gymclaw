@@ -28,6 +28,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/006_timed_sets.sql"),
     include_str!("migrations/007_set_measures.sql"),
     include_str!("migrations/008_goals_activities.sql"),
+    include_str!("migrations/009_extensions.sql"),
 ];
 
 /// Read-write connection. WAL lets readers (the dashboard, a sync waiting on Google) run alongside a
