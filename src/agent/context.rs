@@ -1,5 +1,5 @@
 //! What the model sees each turn: a short system prompt, the DB schema, the owner's and learned notes,
-//! a fresh state snapshot from the DB, and the chat since the last `/new`. Target: well under 15k tokens.
+//! a fresh state snapshot from the DB, and the recent chat. Target: well under 15k tokens.
 use std::fmt::Write;
 
 use jiff::{SignedDuration, ToSpan};
@@ -69,9 +69,6 @@ A button tap comes back to you as the button's value, so make values plain reque
 pub use crate::domain::events::ACTIONABLE;
 /// Chat rows in the window.
 pub const HISTORY: i64 = 30;
-
-/// Marker row written by `/new`; the window starts after the newest one.
-pub const BOUNDARY: &str = "boundary";
 
 /// System prompt in two parts: instructions, schema and notes, which change only when code or notes
 /// do (the provider caches them across turns), then the state snapshot. Also returns the wake events
@@ -329,7 +326,7 @@ pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
     Ok(out)
 }
 
-/// The conversation since the last `/new` as OpenAI messages, oldest first: the owner (user), the agent
+/// The last `HISTORY` rows of conversation as OpenAI messages, oldest first: the owner (user), the agent
 /// (assistant) and background-event prompts (user, marked system). Owner turns carry their local time.
 /// Code-sent messages (reminders, coach cards, briefings) are not turns: as assistant turns the model
 /// wrote reminders and fake owner lines itself, and a workout's cards filled the window. `snapshot`
@@ -344,8 +341,7 @@ pub fn history(db: &Connection) -> Result<Vec<Value>> {
     let tz = get_profile(db)?.tz();
     let rows = ChatMessage::select(
         db,
-        "WHERE id > coalesce((SELECT max(id) FROM chat_message WHERE meta_json ->> 'kind' = 'boundary'), 0)
-         AND (role != 'bot' OR meta_json ->> 'kind' IN ('agent_event', ?2)) AND meta_json ->> 'kind' IS NOT 'set'
+        "WHERE (role != 'bot' OR meta_json ->> 'kind' IN ('agent_event', ?2)) AND meta_json ->> 'kind' IS NOT 'set'
          ORDER BY id DESC LIMIT ?1",
         rusqlite::params![HISTORY, SILENT_ACTIONS],
     )?;
