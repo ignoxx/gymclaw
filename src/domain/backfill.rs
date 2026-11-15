@@ -28,7 +28,7 @@ pub struct PastSet {
     /// kg; 0 or omitted for bodyweight.
     #[serde(default)]
     pub weight: f64,
-    // A timed set instead of reps. Plain comment: every doc line here is prompt budget.
+    // A timed set instead of reps. Plain comment: every doc line here goes into the model's prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minutes: Option<f64>,
 }

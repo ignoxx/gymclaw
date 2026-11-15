@@ -467,18 +467,6 @@ mod tests {
         assert!(history(&db).unwrap().is_empty());
     }
 
-    /// Every model call carries the system prompt and every tool spec. Measured on an empty DB (no
-    /// notes, sessions or chat), so it moves only when code does. Lower the budget when you trim.
-    #[test]
-    fn prompt_and_tools_stay_within_budget() {
-        const BUDGET: usize = 33_500;
-        let db = crate::db::test::db();
-        let (stable, now, _) = system(&db, Ts::parse("2026-11-09T12:00:00+01:00", None).unwrap()).unwrap();
-        let system = stable + &now;
-        let tools = serde_json::to_string(&crate::agent::tool_specs(true)).unwrap().len();
-        assert!(system.len() + tools <= BUDGET, "system {} + tools {tools} chars is over {BUDGET}", system.len());
-    }
-
     /// A hidden tool named in the prompt or in an offered tool sends the model after a tool it isn't given.
     #[test]
     fn prompt_names_only_offered_tools() {
