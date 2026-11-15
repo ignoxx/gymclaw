@@ -12,6 +12,8 @@ gymclaw backup [dest]
 gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
 gymclaw dashboard    # dashboard; writes only the agent's notes and plan targets
 GYMCLAW_DB=copy.db gymclaw replay --at <local time> [--model …]   # re-run the agent on the chat's last owner message
+gymclaw rewind <run> --db copy.db --turns <dir>   # undo a turn's tool calls on a DB copy (turn-log changesets)
+gymclaw backfill --db copy.db --turns <dir> --out <file> [--git .]   # index past turns with outcome labels
 ```
 
 ## Why one binary
@@ -90,7 +92,8 @@ model never has to. Timestamps without an offset are the owner's local time.
   source (event, prompt, tool result) rather than adding a filter, and pin the fix with a test next
   to the existing ones.
 - Models via OpenRouter: `GYMCLAW_MODEL` (chat, default Claude Haiku 5.5; GLM 5.3 Flash misread owners and claimed edits it never saved in replays), `GYMCLAW_MODEL_FAST`,
-  `GYMCLAW_MODEL_VISION`; `GYMCLAW_PROVIDER` pins the provider (`reasoning.effort: minimal`).
+  `GYMCLAW_MODEL_VISION`, `GYMCLAW_MODEL_AUDIO` (voice notes, default Gemini 3.5 Flash Lite);
+  `GYMCLAW_PROVIDER` pins the provider (`reasoning.effort: minimal`).
 
 ## Telegram
 
@@ -110,6 +113,9 @@ model never has to. Timestamps without an offset are the owner's local time.
   the rest countdown edits every 5 s.
 - Photos/documents in (HEIC included, via libheif ≥ 1.17) → vision model; EXIF capture date for
   scale backfill.
+- Voice notes and audio files → `GYMCLAW_MODEL_AUDIO` (Telegram's OGG/Opus sent as is), shown back
+  as "🎙 “…”", then routed exactly like typed text (set parser first). Adds the transcription call,
+  typically 1–3 s, before the coach or the agent sees it.
 - `/status` shows runtime health without the model; there is no `/new`, the chat window is always the latest messages. Startup sets the
   Telegram "/" menu to exactly these (`bot::COMMANDS`).
 - Every outbound message (agent, coach, reminders, briefings) goes into `chat_message`. The agent's
@@ -118,7 +124,9 @@ model never has to. Timestamps without an offset are the owner's local time.
   and no-show each replace the previous one, and its buttons go once the session can't be started.
 - Per-owner serialized turns; messages arriving during a turn are collected into the next one.
 - Turn log: JSONL events in `data/turns/YYYY-MM-DD.jsonl`, secrets redacted
-  ([format](../src/agent/turnlog.rs)).
+  ([format](../src/agent/turnlog.rs)): each model step's exact request and response, the release
+  that ran it, the rows each tool call changed, and outcome labels (failures, the owner's 👍/👎 on a
+  bot message). Copying, querying, rewinding and backfilling: [turns.md](turns.md).
 
 ## Scheduler and outbox
 

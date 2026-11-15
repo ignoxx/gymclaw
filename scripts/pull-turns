@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Copy the agent turn log (and optionally a DB snapshot) from a GymClaw host to this machine, for
+# `gymclaw backfill`, `gymclaw rewind`/`replay` and DuckDB (docs/turns.md).
+#
+#   scripts/pull-turns <ssh host> [local dir] [--with-db]
+#
+# Reads from the running bot container over `ssh <host> docker …` (set CONTAINER to pick one), so it
+# needs no access to Docker's volume paths. Writes <local dir>/turns (default ./gymclaw-turns) and,
+# with --with-db, <local dir>/gymclaw.db. Everything lands owner-only: full prompts hold chat, notes
+# and calendar data, and the DB holds OAuth tokens. Safe to re-run; nightly from cron, e.g.
+#   15 4 * * * cd ~/gymclaw && scripts/pull-turns myhost ~/gymclaw-turns >> ~/gymclaw-turns.log 2>&1
+set -euo pipefail
+
+usage() { echo "usage: scripts/pull-turns <ssh host> [local dir] [--with-db]" >&2; exit 2; }
+HOST="" DEST="" WITH_DB=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-db) WITH_DB=1 ;;
+    -*) usage ;;
+    *) if [ -z "$HOST" ]; then HOST="$arg"; elif [ -z "$DEST" ]; then DEST="$arg"; else usage; fi ;;
+  esac
+done
+[ -n "$HOST" ] || usage
+DEST="${DEST:-gymclaw-turns}"
+
+umask 077
+mkdir -p "$DEST"
+
+# The bot's container: built from a gymclaw image, not the dashboard or the egress proxy.
+if [ -z "${CONTAINER:-}" ]; then
+  # shellcheck disable=SC2016 # expanded by awk on this side, not by the shell
+  CONTAINER="$(ssh "$HOST" docker ps --format '{{.Names}}\ {{.Image}}' \
+    | awk '$2 ~ /gymclaw/ && $1 !~ /dashboard|egress/ { print $1; exit }')"
+fi
+[ -n "$CONTAINER" ] || { echo "No running gymclaw container on $HOST; set CONTAINER." >&2; exit 1; }
+echo "Pulling from $HOST:$CONTAINER into $DEST"
+
+# Into a fresh dir, then swapped in, so an interrupted pull never leaves a half-written copy.
+rm -rf "$DEST/turns.new"
+mkdir "$DEST/turns.new"
+# shellcheck disable=SC2016 # expanded inside the container
+ssh "$HOST" docker exec "$CONTAINER" sh -c '"cd \"\${GYMCLAW_TURN_LOG_DIR:-/opt/gymclaw/data/turns}\" && tar -cf - ."' \
+  | tar -C "$DEST/turns.new" -xf -
+rm -rf "$DEST/turns.old"
+[ ! -d "$DEST/turns" ] || mv "$DEST/turns" "$DEST/turns.old"
+mv "$DEST/turns.new" "$DEST/turns"
+rm -rf "$DEST/turns.old"
+echo "turns: $(find "$DEST/turns" -name '*.jsonl' | wc -l | tr -d ' ') day files"
+
+if [ "$WITH_DB" = 1 ]; then
+  # A consistent snapshot via `gymclaw backup`, streamed out of the container's tmpfs.
+  ssh "$HOST" docker exec "$CONTAINER" sh -c '"gymclaw backup /tmp/pull.db >/dev/null && cat /tmp/pull.db && rm -f /tmp/pull.db"' \
+    > "$DEST/gymclaw.db.new"
+  mv "$DEST/gymclaw.db.new" "$DEST/gymclaw.db"
+  echo "db: $DEST/gymclaw.db"
+fi

@@ -35,6 +35,7 @@ docker compose up -d --build
 | `GYMCLAW_MODEL` | no | OpenRouter model ID. Default `anthropic/claude-haiku-5.5`. |
 | `GYMCLAW_PROVIDER` | no | Pinned OpenRouter provider. Default `auto` (OpenRouter picks). |
 | `GYMCLAW_MODEL_FAST`, `GYMCLAW_MODEL_VISION` | no | Models for background triage and photos. Default: `GYMCLAW_MODEL`. |
+| `GYMCLAW_MODEL_AUDIO` | no | Transcribes voice notes; needs audio input. Default `google/gemini-3.5-flash-lite`. Adds ~1–3 s before a spoken set is logged. |
 | `EGRESS_EXTRA_HOSTS` | no | Extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
 | `GYMCLAW_DASHBOARD_HOST` | no | Hostname for the dashboard behind Traefik. The bot's Telegram menu button opens it as a Mini App. |
 

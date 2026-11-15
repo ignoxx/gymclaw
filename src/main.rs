@@ -54,7 +54,7 @@ enum Command {
     },
     /// Re-run the agent's turn on a database copy: the chat's newest owner message,
     /// answered at `--at`, with `--model`. Tools write to that copy; every model step prints to stderr.
-    /// For diagnosing a prod turn: snapshot, rewind the rows the turn changed, replay.
+    /// For diagnosing a prod turn: snapshot, rewind the rows the turn changed (`rewind`), replay.
     Replay {
         /// The database copy to answer from; its tools write to it, so never the bot's own.
         #[arg(long, env = "GYMCLAW_DB")]

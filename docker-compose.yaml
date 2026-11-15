@@ -18,6 +18,7 @@ services:
       GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-auto}
       GYMCLAW_MODEL_FAST: ${GYMCLAW_MODEL_FAST:-}
       GYMCLAW_MODEL_VISION: ${GYMCLAW_MODEL_VISION:-}
+      GYMCLAW_MODEL_AUDIO: ${GYMCLAW_MODEL_AUDIO:-}
       # Telegram menu button opens the dashboard as a Mini App; unset leaves the "/" menu.
       GYMCLAW_DASHBOARD_HOST: ${GYMCLAW_DASHBOARD_HOST:-}
       TZ: ${TZ:-Europe/Berlin}
