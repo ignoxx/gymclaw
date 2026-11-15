@@ -36,7 +36,8 @@ pub fn double_progression(
     increment: f64,
     performance: &[PerformanceSet],
 ) -> ProgressionDecision {
-    let complete = performance.len() == required_sets;
+    // An extra set is still the prescribed volume done.
+    let complete = performance.len() >= required_sets;
     let managed = performance.iter().filter(|s| s.reps >= rep_min - REP_SLACK).map(|s| milli(s.weight)).max();
     let base = managed.filter(|&m| complete && m > milli(target_weight)).unwrap_or(milli(target_weight));
     let achieved = complete && performance.iter().all(|s| milli(s.weight) >= base && s.reps >= rep_max);
@@ -92,6 +93,7 @@ mod tests {
         // Two reps short of 8 still counts; four short is too heavy.
         assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 10), (55.0, 6)]).next_weight, 55.0);
         assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 10), (55.0, 4)]).next_weight, 50.0);
+        assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 8), (55.0, 8), (55.0, 8)]).next_weight, 55.0);
         // Progress only once every set is at the new weight and at rep max.
         assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 12), (55.0, 12)]).next_weight, 55.0);
         assert_eq!(run(55.0, 12, 2, 2.5, &[(55.0, 12), (55.0, 12)]).next_weight, 57.5);
