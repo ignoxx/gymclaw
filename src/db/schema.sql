@@ -1,4 +1,4 @@
--- Generated from a fresh `gymclaw migrate` (user_version 9); don't edit. When a migration
+-- Generated from a fresh `gymclaw migrate` (user_version 10); don't edit. When a migration
 -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
 
 CREATE TABLE activity (
@@ -241,6 +241,14 @@ CREATE TABLE goal (
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL,
 	closed_at DATETIME
+);
+
+CREATE TABLE gym_location (
+	name VARCHAR NOT NULL,
+	equipment_json JSON NOT NULL,
+	notes TEXT,
+	updated_at DATETIME NOT NULL,
+	PRIMARY KEY (name)
 );
 
 CREATE TABLE learned_preference (

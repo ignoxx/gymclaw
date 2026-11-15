@@ -11,7 +11,7 @@ use crate::domain::illustrations::search;
 use crate::domain::onboarding::{self, Update};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{
-    ExerciseEdit, Template, edit_exercise, get_template, import_template, orphaned_history, require_illustrations,
+    ExerciseEdit, Template, edit_exercise, get_template, import_template, missing_pictures, orphaned_history,
 };
 use crate::domain::view::CoachView;
 use crate::domain::{audit, workout};
@@ -289,7 +289,8 @@ impl Tool for TemplateGet {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TemplateImport {
-    /// The whole plan. Every exercise needs a guide_id from catalog_search; the first primary exercise needs warmup_weight.
+    /// The whole plan. guide_id: the catalog_search match's picture (keep the owner's name); omit if none.
+    /// The first primary exercise needs warmup_weight.
     pub template: Template,
 }
 
@@ -298,9 +299,11 @@ impl Tool for TemplateImport {
     const DESCRIPTION: &'static str = "Save a whole workout plan (new, or replacing one with the same id). For small changes use template_edit_exercise.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        require_illustrations(&self.template)?;
         let before = get_template(cx.db, &self.template.id).ok();
-        let result = import_template(cx.db, &self.template)?;
+        let mut result = import_template(cx.db, &self.template)?;
+        if let Some(warning) = missing_pictures(&self.template) {
+            result["pictures"] = json!(warning);
+        }
         warn_orphans(cx, before, &self.template.id, result)
     }
 }
@@ -416,7 +419,7 @@ pub struct CatalogSearch {
 
 impl Tool for CatalogSearch {
     const NAME: &'static str = "catalog_search";
-    const DESCRIPTION: &'static str = "Find illustrated exercises (guide_id, name, equipment, muscle). Plans and swaps only use catalog pictures; when unsure which one the owner means, show the candidates with reply exercises.";
+    const DESCRIPTION: &'static str = "Find illustrated exercises (guide_id, name, equipment, muscle). When unsure which one the owner means, show the candidates with reply exercises.";
 
     fn run(self, _cx: &mut Ctx) -> Result<Value> {
         let results = search(&self.query, self.muscle.as_deref(), self.equipment.as_deref(), self.limit.unwrap_or(8));

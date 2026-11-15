@@ -94,6 +94,14 @@ enum Command {
         #[arg(long)]
         git: Option<PathBuf>,
     },
+    /// Every logged set as CSV in Strong's format (Hevy and others import it); to stdout, or `path`.
+    Export { path: Option<PathBuf> },
+    /// Exercise pictures. `missing`: exercises with no picture of their own (plans first, then by
+    /// logged sets), the work list for scripts/new-illustration.
+    Illustrations {
+        #[command(subcommand)]
+        command: IllustrationsCommand,
+    },
     /// Serve the read-only dashboard.
     Dashboard {
         #[arg(long, default_value = "127.0.0.1:8766")]
@@ -101,6 +109,11 @@ enum Command {
         #[arg(long, default_value = "gymclaw.localhost")]
         allowed_host: String,
     },
+}
+
+#[derive(Subcommand)]
+enum IllustrationsCommand {
+    Missing,
 }
 
 fn calendar_auth(calendar_id: &str, client_file: &std::path::Path) -> Result<Value> {
@@ -259,6 +272,22 @@ async fn main() -> ExitCode {
             let count = |source: &str| records.iter().filter(|r| r["source"] == source).count();
             Ok(Some(json!({"ok": true, "out": out, "captured": count("capture"), "backfilled": count("backfill")})))
         })(),
+        Command::Export { path } => {
+            let csv = db::open(&Config::paths().1).and_then(|conn| gymclaw::domain::import::export_csv(&conn));
+            match (csv, path) {
+                (Ok(csv), Some(path)) => {
+                    std::fs::write(&path, csv).map_err(Error::from).map(|_| Some(json!({"ok": true, "path": path})))
+                }
+                (Ok(csv), None) => {
+                    print!("{csv}");
+                    Ok(None)
+                }
+                (Err(e), _) => Err(e),
+            }
+        }
+        Command::Illustrations { command: IllustrationsCommand::Missing } => db::open(&Config::paths().1)
+            .and_then(|conn| gymclaw::domain::illustrations::missing(&conn))
+            .map(|missing| Some(json!(missing))),
         Command::Dashboard { addr, allowed_host } => {
             gymclaw::web::dashboard(Config::paths().1, addr, allowed_host).await.map(|_| None)
         }

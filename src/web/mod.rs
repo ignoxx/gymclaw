@@ -1,8 +1,9 @@
 //! Dashboard (`gymclaw dashboard`).
 //!
-//! Serves the frontend in `web/` (embedded), exercise SVGs and `/api/state`, a fresh snapshot from a
-//! read-only connection per request. The only writes are `DASHBOARD_TOOLS` (`POST /api/<tool>`), so
-//! the owner can edit what the agent remembers and built, and plan targets. Only the allowed Host (or loopback) gets an answer, so DNS
+//! Serves the frontend in `web/` (embedded), exercise SVGs, `/api/state` (a fresh snapshot from a
+//! read-only connection per request) and `/export.csv` (every logged set, `import::export_csv`). The
+//! only writes are `DASHBOARD_TOOLS` (`POST /api/<tool>`), so the owner can edit what the agent
+//! remembers and built, and plan targets. Only the allowed Host (or loopback) gets an answer, so DNS
 //! rebinding can't read it, and writes need a same-origin JSON request.
 pub mod state;
 
@@ -157,6 +158,22 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
                 tracing::warn!("dashboard state panicked: {e}");
                 error(StatusCode::SERVICE_UNAVAILABLE)
             }
+        };
+    }
+    if path == "/export.csv" {
+        let db_path = app.db_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::domain::import::export_csv(&crate::db::open_readonly(&db_path)?)
+        })
+        .await;
+        return match result {
+            Ok(Ok(csv)) => {
+                let mut response = reply(StatusCode::OK, csv.into_bytes(), "text/csv");
+                let name = HeaderValue::from_static("attachment; filename=\"gymclaw-sets.csv\"");
+                response.headers_mut().insert(header::CONTENT_DISPOSITION, name);
+                response
+            }
+            _ => error(StatusCode::SERVICE_UNAVAILABLE),
         };
     }
     if path == "/api/catalog" {

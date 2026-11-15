@@ -370,6 +370,14 @@ table!(AgentNote = "agent_note" {
     updated_at: Ts,
 });
 
+// A saved training place: what equipment is there (catalog names) and the owner's words.
+table!(GymLocation = "gym_location" {
+    name: String,
+    equipment_json: Json<Vec<String>>,
+    notes: Option<String>,
+    updated_at: Ts,
+});
+
 table!(AgentButton = "agent_button" {
     id: String,
     label: String,

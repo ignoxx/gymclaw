@@ -213,7 +213,8 @@ impl Bot {
             None => message.body().unwrap_or("").to_string(),
         };
         let images = self.media(&message).await;
-        if images.is_empty() {
+        let export = self.export(&message).await;
+        if images.is_empty() && export.is_none() {
             match route(&text) {
                 Route::Status => return self.send_status().await,
                 Route::Extensions => return self.extensions(&text).await,
@@ -228,7 +229,10 @@ impl Bot {
         for image in &images {
             text.push_str(&format!("\n[photo saved at {}]", image.path.display()));
         }
-        if message.photo.is_none() && message.document.is_some() && images.is_empty() {
+        if let Some(export) = &export {
+            text.push('\n');
+            text.push_str(export);
+        } else if message.photo.is_none() && message.document.is_some() && images.is_empty() {
             text.push_str("\n[a file that isn't an image; it wasn't saved]");
         }
         let meta = if voice.is_some() { json!({"kind": "voice"}) } else { json!({}) };
@@ -302,7 +306,7 @@ impl Bot {
             (Some(sizes), _) => {
                 sizes.iter().max_by_key(|s| s.width).map(|s| (s.file_id.clone(), s.file_unique_id.clone()))
             }
-            (None, Some(doc)) => Some((doc.file_id.clone(), doc.file_unique_id.clone())),
+            (None, Some(doc)) if !media::is_csv(doc) => Some((doc.file_id.clone(), doc.file_unique_id.clone())),
             _ => None,
         };
         let Some((file_id, unique)) = file else { return vec![] };
@@ -320,6 +324,29 @@ impl Bot {
                 vec![]
             }
         }
+    }
+
+    /// A CSV document (another app's workout export): saved under `data/imports/`, handed to the agent
+    /// as its path plus a summary to import from (`import::summary`).
+    async fn export(&self, message: &Message) -> Option<String> {
+        let doc = message.document.as_ref().filter(|d| media::is_csv(d))?;
+        let saved = match self.tg.download(&doc.file_id).await {
+            Ok(bytes) => media::save_import(&self.agent.data_dir, &doc.file_unique_id, &bytes).await,
+            Err(e) => Err(e),
+        };
+        let path = match saved {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!("saving CSV failed: {e}");
+                return Some("[a CSV file that couldn't be saved]".into());
+            }
+        };
+        let file = path.clone();
+        let summary = blocking(self.db(), move |db| crate::domain::import::summary(db, &file)).await;
+        Some(match summary {
+            Ok(summary) => format!("[CSV saved at {}]\n{summary}", path.display()),
+            Err(e) => format!("[CSV saved at {}; {e}]", path.display()),
+        })
     }
 
     /// Queue an owner message for the agent: 👀, stored in the chat history, collected into the next turn.

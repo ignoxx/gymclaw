@@ -90,10 +90,12 @@ impl SetKind {
         }
     }
 
-    /// A logged set: "10 × 40 kg", "12 reps", "25 min", "2 km". Its fields say what it measured.
+    /// A logged set: "10 × 40 kg", "12 reps", "25 min", "2 km", "2 km in 10 min" (an import can carry
+    /// both). Its fields say what it measured.
     pub fn set(self, weight: f64, reps: i64, seconds: Option<i64>, meters: Option<f64>) -> String {
         match (seconds, meters) {
-            (Some(seconds), _) => self.reps(&format_time(seconds)),
+            (Some(seconds), Some(meters)) => format!("{} in {}", format_distance(meters), format_time(seconds)),
+            (Some(seconds), None) => self.reps(&format_time(seconds)),
             (None, Some(meters)) => format_distance(meters),
             (None, None) => self.target(reps, reps, weight),
         }
@@ -350,23 +352,26 @@ impl Template {
     }
 }
 
-/// Owner templates need a catalog guide_id on every exercise, so every card has an image.
-pub fn require_illustrations(template: &Template) -> Result<()> {
-    let missing: Vec<&str> = template
+/// Warning for exercises saved without a guide_id, with their closest catalog matches. They are
+/// allowed: the card shows the closest picture meanwhile and the exercise is on the missing-pictures
+/// list. The agent asks the owner once whether one of the matches is what they meant.
+pub fn missing_pictures(template: &Template) -> Option<String> {
+    let missing: Vec<String> = template
         .exercises
         .iter()
         .chain(&template.alternatives)
         .filter(|s| s.guide_id.is_none())
-        .map(|s| s.name.as_str())
+        .map(|s| {
+            let options: Vec<String> = search(&s.name, None, None, 3).into_iter().map(|e| e.guide_id).collect();
+            format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
+        })
         .collect();
-    if !missing.is_empty() {
-        crate::bail!(
-            "ILLUSTRATION_REQUIRED",
-            "Set guide_id (closest match from catalog search) for: {}",
-            missing.join(", ")
-        );
-    }
-    Ok(())
+    (!missing.is_empty()).then(|| {
+        format!(
+            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template_edit_exercise (keep id and name).",
+            missing.join("; ")
+        )
+    })
 }
 
 pub fn import_template(db: &Connection, template: &Template) -> Result<Value> {
