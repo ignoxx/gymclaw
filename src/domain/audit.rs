@@ -175,13 +175,6 @@ pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: 
     })
 }
 
-/// Wakes the agent for its take under the summary card. The guidance rides on the event, so it costs
-/// context only on the turn that needs it; as a generic replan event the agent read it as housekeeping
-/// and stayed silent.
-const WRAP_UP: &str = "Wrap-up due. The summary card in your context already shows the numbers (records, pace, volume, \
-    next targets, the week so far). Add your take, up to three short lines: what the session means (a record after weeks \
-    stuck, a comeback, grinding through a bad day, what got skipped) and one thing to aim for next time. Never repeat the card's numbers.";
-
 /// Finish a WORKOUT_COMPLETE workout: progression, PLAN_UPDATED. Mutation result envelope.
 /// A workout with nothing logged can't finish (it would count as trained): the agent logs what the owner
 /// did, or discards it (`workout::discard`).
@@ -273,9 +266,10 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
             "progressions": progressions, "progression_count": progressed, "exercises": performance,
             "instruction": format!("{template_name} complete. {completed_sets}/{planned_sets} working sets · {} min · {progressed} progressions.", duration.div_euclid(60)),
         });
-        // PLAN_UPDATED means training targets persisted.
+        // PLAN_UPDATED means training targets persisted. The summary card is the wrap-up; the agent wakes
+        // only to fix upcoming sessions (an agent take was praise with nothing in it, 2026-11-13).
         transition(db, &mut workout, WorkoutStatus::PlanUpdated, now)?;
-        emit(db, "workout.wrap_up", now, json!({"workout_id": workout.id, "instruction": WRAP_UP}))?;
+        emit(db, "planning.replan_required", now, json!({"workout_id": workout.id, "reason": "workout_completed"}))?;
         Ok(audit)
     })
 }

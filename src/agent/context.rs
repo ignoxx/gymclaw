@@ -23,11 +23,11 @@ Voice: the training partner you'd actually want at 6am: a good friend and bro wh
 Default to one short line, never more than three. Take a position on training questions; don't hedge. \
 No greetings, recaps, preambles or \"I'll now…\". Never narrate tools or reasoning. Bold the key thing. \
 Formatting: **bold**, *italic*, ~~strike~~, `code`, lines starting with \"> \" (quote) or \">> \" (collapsed quote). \
-Praise PRs, wrap-ups and other earned wins; keep it specific. Never a yes-man: if the owner skips, bails or is about to do something dumb, \
+Praise PRs and other earned wins; keep it specific. Never a yes-man: if the owner skips, bails or is about to do something dumb, \
 call it out in one line, then do what they asked. Humor and swearing are welcome when they fit the moment (\"holy shit, 100kg\", \"skipped legs again, really?\"). \
 Ask one question at a time; put choices in buttons under a short message, not typed lists. If a reaction says it (👍 got it, 👌 noted), react instead of writing. \
 Times are always the owner's local time. During a workout the cards do the talking: after a tool showed a card, stay silent unless the owner asked something. \
-A finished workout wakes you with its own wrap-up instruction. \
+A finished workout's summary card is the whole wrap-up: add nothing about the workout unless the owner asks. \
 Start a workout only once the owner is at the gym or asks; on the way (\"there in 5\"), send a Start button (value e.g. \"Start Pull\").
 
 The owner leads; the plan follows. When they ask for something, do it, then say what you did in one line. Make the saved state match \
@@ -253,17 +253,23 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         writeln!(out, "No workout running.").unwrap();
     }
 
-    // What code sent the owner lately and is still in their chat (reminders, cards, briefings).
+    // What code sent the owner lately and is still in their chat (reminders, cards, briefings), in full:
+    // cut at 300 chars, the agent saw half a workout summary and made up missing sets (2026-11-13). Only
+    // the newest coach card counts: the workout above is the live state, and a workout's 30 set cards
+    // pushed reminders out.
     let sent = ChatMessage::select(
         db,
-        "WHERE role = 'bot' AND telegram_message_id IS NOT NULL AND at > ?1 AND meta_json ->> 'removed' IS NULL ORDER BY id DESC LIMIT 5",
+        "WHERE role = 'bot' AND telegram_message_id IS NOT NULL AND at > ?1 AND meta_json ->> 'removed' IS NULL
+         AND (meta_json ->> 'kind' IS NOT 'coach' OR id = (SELECT max(id) FROM chat_message WHERE meta_json ->> 'kind' = 'coach'
+              AND telegram_message_id IS NOT NULL AND meta_json ->> 'removed' IS NULL))
+         ORDER BY id DESC LIMIT 5",
         [now - SignedDuration::from_hours(24)],
     )?;
     if !sent.is_empty() {
         writeln!(out, "Sent automatically in the last 24 h (the owner sees these; newest last):").unwrap();
     }
     for m in sent.iter().rev() {
-        let text: String = m.text.replace('\n', " / ").chars().take(300).collect();
+        let text = m.text.replace('\n', " / ");
         let live = m.meta_json["buttons"] == true && m.meta_json.get("settled").is_none();
         writeln!(out, "- {} {text}{}", m.at.local(&tz).strftime("%a %H:%M"), if live { " [with buttons]" } else { "" })
             .unwrap();
@@ -327,7 +333,8 @@ pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
 /// (assistant) and background-event prompts (user, marked system). Owner turns carry their local time.
 /// Code-sent messages (reminders, coach cards, briefings) are not turns: as assistant turns the model
 /// wrote reminders and fake owner lines itself, and a workout's cards filled the window. `snapshot`
-/// lists the recent ones instead.
+/// lists the recent ones instead. Typed sets aren't either: the coach logged them, and a workout's worth
+/// filled a third of the window.
 ///
 /// Each agent reply is followed by what that turn really saved (`actions`, see `Outcome`). Without it
 /// the model trusted its own earlier words: on 2026-11-11 it said "Friday Push (swapped from Pull)"
@@ -338,7 +345,8 @@ pub fn history(db: &Connection) -> Result<Vec<Value>> {
     let rows = ChatMessage::select(
         db,
         "WHERE id > coalesce((SELECT max(id) FROM chat_message WHERE meta_json ->> 'kind' = 'boundary'), 0)
-         AND (role != 'bot' OR meta_json ->> 'kind' IN ('agent_event', ?2)) ORDER BY id DESC LIMIT ?1",
+         AND (role != 'bot' OR meta_json ->> 'kind' IN ('agent_event', ?2)) AND meta_json ->> 'kind' IS NOT 'set'
+         ORDER BY id DESC LIMIT ?1",
         rusqlite::params![HISTORY, SILENT_ACTIONS],
     )?;
     let mut out = vec![];
@@ -431,6 +439,32 @@ mod tests {
                 "Before this was recorded.".into(),
             ]
         );
+    }
+
+    /// 2026-11-13: cut at 300 chars, the workout summary lost its curl lines and the agent asked the owner
+    /// to log curl sets that were all there. Set cards and typed sets crowded out everything else.
+    #[test]
+    fn context_shows_whole_messages_without_workout_clutter() {
+        let db = crate::db::test::db();
+        let now = Ts::parse("2026-11-13T14:00:00+01:00", None).unwrap();
+        let message = |role, text: &str, kind: &str| {
+            let meta = crate::db::Json(json!({"kind": kind}));
+            let at = now - SignedDuration::from_mins(5);
+            ChatMessage { id: None, at, role, text: text.into(), telegram_message_id: Some(1), meta_json: meta }
+                .insert(&db)
+                .unwrap();
+        };
+        message(ChatRole::Bot, "⏰ Pull at 12:00", "delivery");
+        for n in 1..=6 {
+            message(ChatRole::Bot, &format!("Set {n}/6"), "coach");
+            message(ChatRole::Owner, "8x30", "set");
+        }
+        let rows = ">> Seated cable row 80 kg: 8 · 8\n".repeat(12);
+        message(ChatRole::Bot, &format!("🏁 Pull done\n{rows}>> Dumbbell curl 30 kg: 6 · 6"), "coach");
+        let (context, _) = snapshot(&db, now).unwrap();
+        assert!(context.contains(">> Dumbbell curl 30 kg: 6 · 6"), "{context}");
+        assert!(context.contains("⏰ Pull at 12:00") && !context.contains("Set 6/6"), "{context}");
+        assert!(history(&db).unwrap().is_empty());
     }
 
     /// Every model call carries the system prompt and every tool spec. Measured on an empty DB (no
