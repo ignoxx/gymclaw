@@ -400,6 +400,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_lists_plan_and_logged_exercises_without_a_picture() {
+        let db = crate::db::test::db();
+        let plan = serde_json::json!({"id": "legs", "name": "Legs", "exercises": [
+            {"id": "squat", "name": "Squat", "role": "squat", "guide_id": "squat", "primary": true, "target_weight": 100, "warmup_weight": 50},
+            {"id": "hip-thrust-machine", "name": "Hip Thrust Machine", "role": "glutes", "target_weight": 60}]});
+        crate::domain::templates::import_template(&db, &serde_json::from_value(plan).unwrap()).unwrap();
+        let history = |exercise: &str, config: &str| {
+            db.execute_batch(&format!(
+                "INSERT INTO workout_session (id, status, waited_for_equipment_count) VALUES ('w-{exercise}', 'PLAN_UPDATED', 0);
+                 INSERT INTO workout_exercise (id, workout_session_id, exercise_id, position, status, planned_working_sets, rep_min, rep_max, target_weight, rest_seconds, config_json)
+                 VALUES ('e-{exercise}', 'w-{exercise}', '{exercise}', 0, 'COMPLETED', 1, 8, 8, 0, 90, '{config}');
+                 INSERT INTO set_log (id, workout_exercise_id, set_number, set_type, weight, reps, logged_at) VALUES ('s-{exercise}', 'e-{exercise}', 1, 'WORKING', 50, 8, '2026-11-01 18:00:00');"
+            ))
+            .unwrap();
+        };
+        // An early workout without guide_ids: its plan entry has a picture now, so it isn't missing.
+        history("squat", r#"{"name": "Squat"}"#);
+        history("old-press", r#"{"name": "Old Press"}"#);
+        let missing = missing(&db).unwrap();
+        let rows: Vec<(&str, bool, i64)> =
+            missing.iter().map(|m| (m.exercise_id.as_str(), m.in_plan, m.logged_sets)).collect();
+        assert_eq!(rows, [("hip-thrust-machine", true, 0), ("old-press", false, 1)]);
+        assert_eq!(missing[0].stand_in.as_deref(), Some("smith-machine-hip-thrust"));
+    }
+
+    #[test]
     fn fitting_swaps_keep_the_muscle_within_the_equipment() {
         let dumbbells = |i: &Item| ["Dumbbell", "Bodyweight"].contains(&needs(i));
         let options = fitting("bench-press", dumbbells, &HashSet::new(), &HashSet::new(), 3);

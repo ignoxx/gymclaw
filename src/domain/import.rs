@@ -279,8 +279,7 @@ impl Target {
 
     /// The owner's own name, kept: no picture until one is drawn.
     fn own(name: &str) -> Target {
-        let slug: String =
-            name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let slug: String = name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let id = slug.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
         Target { id, name: name.trim().into(), guide_id: None }
     }
@@ -733,6 +732,19 @@ mod tests {
             (Some(0), Some(2))
         );
         assert_eq!(SetLog::select(&db, "", []).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn summary_says_where_each_name_goes() {
+        let db = db();
+        plan(&db);
+        let path = std::env::temp_dir().join(format!("gymclaw-strong-{}.csv", new_id()));
+        std::fs::write(&path, STRONG).unwrap();
+        let text = summary(&db, &path).unwrap();
+        assert!(text.starts_with("Strong export: 2 workouts, 2026-03-02 – 2026-03-05"), "{text}");
+        assert!(text.contains("- Bench Press (Barbell) (4) → bench (Bench)"), "{text}");
+        assert!(text.contains("- Cable Thing (1) → ? closest:"), "{text}");
+        assert!(text.contains("unit \"lb\""), "{text}");
     }
 
     #[test]

@@ -203,7 +203,7 @@ fn replacement_spec(
         return Ok(spec);
     }
     let item = catalog().get(substitute_id);
-    let muscle = primary_muscle(guide_id(original));
+    let muscle = for_exercise(name(original), guide_id(original)).map(|p| p.primary_muscle);
     let Some(item) = item.filter(|i| muscle.as_deref() == Some(i.primary_muscle.as_str())) else {
         crate::bail!(
             "INVALID_SUBSTITUTION",
@@ -371,8 +371,9 @@ pub fn alternatives(
     let mut exclude = used.clone();
     exclude.extend(back.iter().map(|(k, _)| k.clone()));
     exclude.extend(options.iter().filter_map(|o| o.illustration.as_ref().map(|i| i.guide_id.clone())));
-    if let Some(guide) = guide_id(&exercise) {
-        for item in similar(guide, &exclude, &history, limit) {
+    // An exercise without a picture of its own swaps like its stand-in picture.
+    if let Some(picture) = for_exercise(name(&exercise), guide_id(&exercise)) {
+        for item in similar(&picture.guide_id, &exclude, &history, limit) {
             options.push(SwapOption {
                 substitute_id: item.guide_id.clone(),
                 name: item.name.clone(),

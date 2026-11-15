@@ -9,6 +9,8 @@ gymclaw call <tool> '<json>'|- [--now …] [--request-id …]   # any agent tool
 gymclaw tools        # tool names, descriptions, JSON schemas
 gymclaw migrate      # schema: src/db/baseline.sql, then src/db/migrations (result: src/db/schema.sql)
 gymclaw backup [dest]
+gymclaw export [path]  # every logged set as CSV in Strong's format (also the dashboard's /export.csv)
+gymclaw illustrations missing  # exercises with no picture of their own, the work list for scripts/new-illustration
 gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
 gymclaw dashboard    # dashboard; writes only the agent's notes, its extensions' on/off switch and plan targets
 GYMCLAW_DB=copy.db gymclaw replay --at <local time> [--model …]   # re-run the agent on the chat's last owner message
@@ -29,7 +31,7 @@ the agent read source and ran ad-hoc queries on prod, then told the owner things
 | `src/db/` | schema (`schema.sql`, generated), baseline and migrations, typed rows (`models.rs`), test fixtures (`test.rs`) |
 | `src/time.rs`, `src/error.rs` | timestamps (naive UTC in the DB), `CODE: message` errors |
 | `src/domain/` | planning, scheduling, calendar sync/writes, crowd model, workout, coach, progression, effort and lift trends (`trends.rs`), goals, activities outside the gym, onboarding, body, ticks, extensions (the agent's own layer) |
-| `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `progress.rs` (goals, activities), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries), `extensions.rs` (playbooks, collections, triggers, capability gaps) |
+| `src/tools/` | the tool registry: `plan.rs` (week, profile, calendar, crowd), `train.rs` (workout, templates, onboarding, body), `progress.rs` (goals, activities), `exercises.rs` (history import, rebuild for today's equipment), `meta.rs` (SQL, notes), `ops.rs` (runtime, deliveries), `extensions.rs` (playbooks, collections, triggers, capability gaps) |
 | `src/providers/` | Google Calendar + OAuth, ICS feed, crowd sources, photo decoding/EXIF |
 | `src/agent/` | OpenRouter client, per-turn context, media, failure handling, turn log |
 | `src/runtime/` | `serve`: bot loop, scheduler, outbox |
@@ -51,6 +53,13 @@ Tools include general `session_create`/`session_update` (exact time, duration, t
 read-only `sql_query`, `get_week`, `workout`, and profile/notes tools. Session edits lock the session
 and return rule warnings; no other sessions change. Tools that show something in Telegram push
 `Effect::Coach(CoachView)`; the runtime renders it after the transaction commits.
+
+Exercises come from the catalog (`domain::illustrations`), which also reads other apps' names
+("Bench Press (Barbell)", "RDL"); one saved without a picture gets a warning with its closest matches,
+never a refusal. `history_import` writes another app's history (Strong/Hevy CSV, or workouts the agent
+read from screenshots) as finished workouts, skipping any already logged, and sets next weights from
+it (`domain::import`). `workout_rebuild` swaps what doesn't fit the equipment at hand for the closest
+same-muscle exercise that does, with places saved by name in `gym_location` (`domain::equipment`).
 
 The runtime derives `request_id` (`tg-<message id>-<call index>`, `tg-cb:<callback id>`), so the
 model never has to. Timestamps without an offset are the owner's local time.
@@ -125,7 +134,9 @@ model never has to. Timestamps without an offset are the owner's local time.
 - Coach card: one live card per exercise with image, target and quick buttons, edited in place;
   the rest countdown edits every 5 s.
 - Photos/documents in (HEIC included, via libheif ≥ 1.17) → vision model; EXIF capture date for
-  scale backfill.
+  scale backfill. A CSV document (a Strong or Hevy export) is saved to `data/imports/` and the agent
+  gets its path plus a summary (`domain::import::summary`: workouts, dates, each exercise name and
+  its match) to import with `history_import`.
 - Voice notes and audio files → `GYMCLAW_MODEL_AUDIO` (Telegram's OGG/Opus sent as is), shown back
   as "🎙 “…”", then routed exactly like typed text (set parser first). Adds the transcription call,
   typically 1–3 s, before the coach or the agent sees it.
