@@ -1,5 +1,6 @@
-//! Double progression: complete the prescribed volume at the target weight, or hold. Every set at or
-//! above target moves the baseline up to the lightest of them, so the target follows what the owner lifts.
+//! Double progression: complete the prescribed volume at the target weight, or hold. A heavier weight the
+//! owner managed (reps within `REP_SLACK` of the range's bottom) becomes the new baseline, so the next
+//! first set offers what they ended on, not the ramp-up set before it.
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug)]
@@ -17,6 +18,10 @@ pub struct ProgressionDecision {
     pub reason: &'static str,
 }
 
+/// Reps a set may fall short of `rep_min` and still count as managed: 6 × 55 on an 8–12 range keeps
+/// 55 to build reps on; 4 × 55 is too heavy.
+const REP_SLACK: i64 = 2;
+
 /// Weights compared and added in tenths of grams, so 82.5 + 2.5 is exactly 85.
 fn milli(weight: f64) -> i64 {
     (weight * 10_000.0).round() as i64
@@ -25,14 +30,16 @@ fn milli(weight: f64) -> i64 {
 pub fn double_progression(
     exercise_id: &str,
     target_weight: f64,
+    rep_min: i64,
     rep_max: i64,
     required_sets: usize,
     increment: f64,
     performance: &[PerformanceSet],
 ) -> ProgressionDecision {
-    let complete = performance.len() == required_sets;
-    let lightest = performance.iter().map(|s| milli(s.weight)).min().unwrap_or(0);
-    let base = if complete && lightest > milli(target_weight) { lightest } else { milli(target_weight) };
+    // An extra set is still the prescribed volume done.
+    let complete = performance.len() >= required_sets;
+    let managed = performance.iter().filter(|s| s.reps >= rep_min - REP_SLACK).map(|s| milli(s.weight)).max();
+    let base = managed.filter(|&m| complete && m > milli(target_weight)).unwrap_or(milli(target_weight));
     let achieved = complete && performance.iter().all(|s| milli(s.weight) >= base && s.reps >= rep_max);
     let next_weight = (if achieved { base + milli(increment) } else { base }) as f64 / 10_000.0;
     let reason = if achieved {
@@ -60,7 +67,7 @@ mod tests {
     fn run(target: f64, rep_max: i64, sets: usize, increment: f64, performance: &[(f64, i64)]) -> ProgressionDecision {
         let performance: Vec<PerformanceSet> =
             performance.iter().map(|&(weight, reps)| PerformanceSet { weight, reps }).collect();
-        double_progression("bench", target, rep_max, sets, increment, &performance)
+        double_progression("bench", target, 8, rep_max, sets, increment, &performance)
     }
 
     #[test]
@@ -80,13 +87,16 @@ mod tests {
     }
 
     #[test]
-    fn heavier_sets_raise_the_baseline() {
-        // Below rep max: hold at the lightest set, not the old target.
-        assert_eq!(run(40.0, 12, 2, 2.5, &[(50.0, 8), (55.0, 8)]).next_weight, 50.0);
-        // At rep max: progress from there.
-        assert_eq!(run(40.0, 12, 2, 2.5, &[(50.0, 12), (55.0, 12)]).next_weight, 52.5);
-        // One set below target is not the owner moving up.
-        assert_eq!(run(40.0, 12, 2, 2.5, &[(35.0, 12), (55.0, 12)]).next_weight, 40.0);
+    fn the_heaviest_managed_set_becomes_the_baseline() {
+        // 2026-11-13: machine row 50 then 55 three sessions running, and the card kept offering 50.
+        assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 8), (55.0, 8)]).next_weight, 55.0);
+        // Two reps short of 8 still counts; four short is too heavy.
+        assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 10), (55.0, 6)]).next_weight, 55.0);
+        assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 10), (55.0, 4)]).next_weight, 50.0);
+        assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 8), (55.0, 8), (55.0, 8)]).next_weight, 55.0);
+        // Progress only once every set is at the new weight and at rep max.
+        assert_eq!(run(50.0, 12, 2, 2.5, &[(50.0, 12), (55.0, 12)]).next_weight, 55.0);
+        assert_eq!(run(55.0, 12, 2, 2.5, &[(55.0, 12), (55.0, 12)]).next_weight, 57.5);
     }
 
     #[test]

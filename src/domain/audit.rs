@@ -51,8 +51,15 @@ fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDec
     }
     let required = exercise.config_json.get("working_sets").and_then(Value::as_u64).unwrap_or(0) as usize;
     let increment = exercise.config_json.get("increment").and_then(Value::as_f64).unwrap_or(2.5);
-    let mut decision =
-        double_progression(&exercise.exercise_id, exercise.target_weight, exercise.rep_max, required, increment, &sets);
+    let mut decision = double_progression(
+        &exercise.exercise_id,
+        exercise.target_weight,
+        exercise.rep_min,
+        exercise.rep_max,
+        required,
+        increment,
+        &sets,
+    );
     if exercise.target_weight == 0.0 && !working.is_empty() {
         // Unknown starting weight: the heaviest working set becomes the baseline target.
         decision.next_weight = working.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
