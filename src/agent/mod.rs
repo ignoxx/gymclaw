@@ -4,6 +4,7 @@
 //! Tools are `tools::all()` plus `reply`, the turn's final answer. Each tool call runs in its own DB
 //! transaction on the blocking pool; errors go back to
 //! the model as `Error::to_json()`. Coach views a tool produced are rendered after the commit.
+pub mod backfill;
 pub mod context;
 pub mod failure;
 pub mod media;

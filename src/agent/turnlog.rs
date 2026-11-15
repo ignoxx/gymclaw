@@ -254,6 +254,9 @@ pub fn changes(session: &mut Session) -> Result<Option<Value>> {
 /// transaction. A row changed since (by a later turn or a tap) aborts it all: rewind later runs first.
 /// Returns how many tool calls were undone.
 pub fn rewind(conn: &mut Connection, events: &[Value], run: &str) -> Result<usize> {
+    if !events.iter().any(|e| e["run"] == run) {
+        crate::bail!("RUN_NOT_FOUND", "run {run} is not in the turn log");
+    }
     let inverses: Vec<Vec<u8>> = events
         .iter()
         .filter(|e| e["ev"] == "tool" && e["run"] == run)

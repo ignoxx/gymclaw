@@ -69,6 +69,31 @@ enum Command {
         #[arg(long, env = "GYMCLAW_PROVIDER")]
         provider: Option<String>,
     },
+    /// Undo one agent turn's tool calls on a database copy, from the inverse changesets in the turn
+    /// log (`run_end.run`). Rewind later turns first; a row changed since aborts without writing.
+    Rewind {
+        run: String,
+        /// The database copy to rewind; never the bot's own.
+        #[arg(long, env = "GYMCLAW_DB")]
+        db: PathBuf,
+        /// A local copy of the turn log (`scripts/pull-turns`).
+        #[arg(long, env = "GYMCLAW_TURN_LOG_DIR")]
+        turns: PathBuf,
+    },
+    /// Index every past agent turn with outcome labels, as JSONL: exact captures by reference, older
+    /// turns rebuilt from the turn log, chat and mutations (`source: backfill` + fidelity). Read-only;
+    /// run it on copies (docs/turns.md).
+    Backfill {
+        #[arg(long, env = "GYMCLAW_DB")]
+        db: PathBuf,
+        #[arg(long, env = "GYMCLAW_TURN_LOG_DIR")]
+        turns: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// A clone of this repo: each backfilled turn gets the commit that served it (merge time).
+        #[arg(long)]
+        git: Option<PathBuf>,
+    },
     /// Serve the read-only dashboard.
     Dashboard {
         #[arg(long, default_value = "127.0.0.1:8766")]
@@ -222,6 +247,18 @@ async fn main() -> ExitCode {
                 .map(Some)
         }
         Command::Replay { db, key, at, model, provider } => replay(db, &key, &at, model, provider).await.map(Some),
+        Command::Rewind { run, db, turns } => gymclaw::agent::turnlog::read(&turns).and_then(|events| {
+            let undone = gymclaw::agent::turnlog::rewind(&mut db::open(&db)?, &events, &run)?;
+            Ok(Some(json!({"ok": true, "run": run, "tool_calls_undone": undone})))
+        }),
+        Command::Backfill { db, turns, out, git } => (|| {
+            use gymclaw::agent::{backfill, turnlog};
+            let releases = git.as_deref().map(backfill::releases).transpose()?.unwrap_or_default();
+            let records = backfill::build(&db::open_readonly(&db)?, &turnlog::read(&turns)?, &releases)?;
+            backfill::write(&out, &records)?;
+            let count = |source: &str| records.iter().filter(|r| r["source"] == source).count();
+            Ok(Some(json!({"ok": true, "out": out, "captured": count("capture"), "backfilled": count("backfill")})))
+        })(),
         Command::Dashboard { addr, allowed_host } => {
             gymclaw::web::dashboard(Config::paths().1, addr, allowed_host).await.map(|_| None)
         }
