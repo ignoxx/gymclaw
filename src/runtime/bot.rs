@@ -4,6 +4,8 @@
 //! - `btn:<id>` taps, `handled: false` sets and everything else go to the agent. Turns are serialized;
 //!   messages that arrive during a turn are collected into the next one.
 //! - `/status` answers without the model. There is no `/new`: the window is the last messages, always current.
+//! - Voice notes are transcribed, shown back, then routed exactly like typed text.
+//! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -20,7 +22,7 @@ use crate::domain::coach;
 use crate::domain::view::Button;
 use crate::error::Result;
 use crate::telegram::coach::{Coach, Tapped};
-use crate::telegram::{CallbackQuery, Media, Message, Telegram, Update};
+use crate::telegram::{Audio, CallbackQuery, Media, Message, MessageReaction, Telegram, Update};
 use crate::time::Ts;
 
 /// Cheap pre-check so ordinary chat never pays for a coach lookup. Reps alone ("13 reps") only log on
@@ -150,6 +152,12 @@ impl Bot {
             }
             return;
         }
+        if let Some(reaction) = update.message_reaction {
+            if reaction.chat.id == self.owner && reaction.user.as_ref().is_some_and(|u| u.id == self.owner) {
+                self.reaction(reaction).await;
+            }
+            return;
+        }
         let Some(message) = update.message else { return };
         if message.chat.kind != "private"
             || message.chat.id != self.owner
@@ -192,7 +200,14 @@ impl Bot {
     }
 
     async fn message(&self, message: Message) {
-        let text = message.body().unwrap_or("").to_string();
+        let voice = message.voice.as_ref().or(message.audio.as_ref());
+        let text = match voice {
+            Some(audio) => match self.transcribe(message.message_id, audio).await {
+                Some(text) => text,
+                None => return,
+            },
+            None => message.body().unwrap_or("").to_string(),
+        };
         let images = self.media(&message).await;
         if images.is_empty() {
             match route(&text) {
@@ -211,14 +226,69 @@ impl Bot {
         if message.photo.is_none() && message.document.is_some() && images.is_empty() {
             text.push_str("\n[a file that isn't an image; it wasn't saved]");
         }
-        self.to_agent(
-            message.message_id,
-            format!("tg-{}", message.message_id),
-            text.trim().to_string(),
-            images,
-            json!({}),
-        )
+        let meta = if voice.is_some() { json!({"kind": "voice"}) } else { json!({}) };
+        self.to_agent(message.message_id, format!("tg-{}", message.message_id), text.trim().to_string(), images, meta)
+            .await;
+    }
+
+    /// Transcribe a voice note and show the owner what was heard, so a mis-hear is visible before it
+    /// is acted on. None (after telling the owner) when it can't be read.
+    async fn transcribe(&self, message_id: i64, audio: &Audio) -> Option<String> {
+        let started = Instant::now();
+        let _ = self.tg.react(self.owner, message_id, Some(ACK)).await;
+        let model = &self.agent.audio_model;
+        let heard = match crate::agent::openrouter::audio_format(audio.mime_type.as_deref()) {
+            None => Err(crate::error::Error::domain("AUDIO_FORMAT", "not an audio format models take")),
+            Some(format) => match self.tg.download(&audio.file_id).await {
+                Ok(bytes) => crate::agent::openrouter::transcribe(&*self.agent.model, model, &bytes, format).await,
+                Err(e) => Err(e),
+            },
+        };
+        self.log.log(json!({"ev": "voice", "msg": message_id, "model": model, "seconds": audio.duration,
+            "ms": started.elapsed().as_millis() as u64, "ok": heard.is_ok(),
+            "error": heard.as_ref().err().map(|e| scrub(&e.to_string(), 500)),
+            "text": heard.as_ref().ok().map(|t| scrub(t, 4000))}));
+        match heard {
+            Ok(text) => {
+                // 👀 stays: the coach's 👍 or the agent's reply replaces it. The echo isn't stored: the
+                // owner's message row holds the transcript.
+                if let Err(e) = self.tg.send(self.owner, &format!("🎙 “{text}”"), None, &vec![], None).await {
+                    tracing::warn!("transcript not shown: {e}");
+                }
+                Some(text)
+            }
+            Err(e) => {
+                let _ = self.tg.react(self.owner, message_id, None).await;
+                tracing::warn!("voice note not transcribed: {} {e}", e.code());
+                self.send_bot(
+                    &format!("🎙 Couldn't make out that voice note ({}). Could you type it?", e.code()),
+                    "voice_failed",
+                )
+                .await;
+                None
+            }
+        }
+    }
+
+    /// The owner's reaction on one of the bot's messages labels the turn that sent it (👍 good,
+    /// 👎 bad) in the turn log, for finding bad turns offline. The agent never sees it.
+    async fn reaction(&self, reaction: MessageReaction) {
+        let message_id = reaction.message_id;
+        let sent = blocking(self.db(), move |db| {
+            ChatMessage::first(db, "WHERE telegram_message_id = ?1 AND role != 'owner' ORDER BY id DESC", [message_id])
+        })
         .await;
+        let Ok(Some(sent)) = sent else { return };
+        let emoji: Vec<String> = reaction.new_reaction.into_iter().filter_map(|r| r.emoji).collect();
+        let label = if emoji.iter().any(|e| e == "👎") {
+            Some("bad")
+        } else if emoji.iter().any(|e| e == "👍") {
+            Some("good")
+        } else {
+            None
+        };
+        self.log.log(json!({"ev": "label", "source": "reaction", "run": sent.meta_json.get("run"),
+            "kind": sent.meta_json.get("kind"), "msg": message_id, "emoji": emoji, "label": label}));
     }
 
     /// Download the largest photo size or an image document.
@@ -695,6 +765,7 @@ mod tests {
                 model,
                 chat_model: "fixture".into(),
                 vision_model: "fixture".into(),
+                audio_model: "audio".into(),
                 coach: None,
                 log: TurnLog::default(),
                 clock: Arc::new(Ts::now),
@@ -821,6 +892,86 @@ mod tests {
         let fresh = crate::domain::events::wake_batch(&db, Ts::now()).unwrap().unwrap();
         assert_ne!(fresh.id, frozen.id);
         assert_eq!(fresh.payload_json["events"].as_array().unwrap().len(), 1);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Hears every voice note as the same words and keeps the request it got.
+    struct Ears(std::sync::Mutex<Vec<Value>>);
+
+    #[async_trait::async_trait]
+    impl crate::agent::ChatModel for Ears {
+        async fn complete(
+            &self,
+            _: &str,
+            messages: &[Value],
+            _: &[Value],
+            _: bool,
+        ) -> Result<crate::agent::ModelReply> {
+            *self.0.lock().unwrap() = messages.to_vec();
+            Ok(crate::agent::ModelReply {
+                message: json!({"content": " move tomorrow's workout to the evening\n"}),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A voice note is shown back as heard, then reaches the agent exactly like typed text.
+    #[tokio::test]
+    async fn voice_note_is_shown_then_handled_as_text() {
+        let ears = Arc::new(Ears(std::sync::Mutex::new(vec![])));
+        let (bot, db, dir, tg) = fixture(ears.clone());
+        let update = json!({"update_id": 1, "message": {"message_id": 9, "from": {"id": 42}, "chat": {"id": 42, "type": "private"},
+            "voice": {"file_id": "f", "file_unique_id": "u", "duration": 3, "mime_type": "audio/ogg"}}});
+        bot.handle(serde_json::from_value(update).unwrap()).await;
+        let sent = ears.0.lock().unwrap().clone();
+        assert_eq!(sent[1]["content"][0]["input_audio"]["format"], "ogg");
+        assert!(tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Send(t, _) if t == "🎙 “move tomorrow's workout to the evening”")));
+        let owner = ChatMessage::first(&db, "WHERE role = 'owner'", []).unwrap().unwrap();
+        assert_eq!(
+            (owner.text.as_str(), owner.meta_json["kind"].as_str()),
+            ("move tomorrow's workout to the evening", Some("voice"))
+        );
+        assert_eq!(bot.inbox.lock().await.len(), 1);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 👍/👎 on a reply labels the turn that sent it; reactions on the owner's own messages don't.
+    #[tokio::test]
+    async fn reaction_labels_the_turn_that_sent_the_message() {
+        let (mut bot, db, dir, _) = fixture(Arc::new(Chatty(std::sync::atomic::AtomicUsize::new(0))));
+        let turns = dir.join("turns");
+        bot.log = TurnLog::new(Some(turns.clone()));
+        for (role, id, meta) in
+            [(ChatRole::Assistant, 20, json!({"kind": "reply", "run": "r1"})), (ChatRole::Owner, 21, json!({}))]
+        {
+            ChatMessage {
+                id: None,
+                at: Ts::now(),
+                role,
+                text: "x".into(),
+                telegram_message_id: Some(id),
+                meta_json: Json(meta),
+            }
+            .insert(&db)
+            .unwrap();
+        }
+        for message in [20, 21] {
+            let update = json!({"update_id": 2, "message_reaction": {"chat": {"id": 42, "type": "private"}, "message_id": message,
+                "user": {"id": 42}, "date": 0, "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👎"}]}});
+            bot.handle(serde_json::from_value(update).unwrap()).await;
+        }
+        let mut labels = vec![];
+        for _ in 0..100 {
+            labels = crate::agent::turnlog::read(&turns).unwrap_or_default();
+            if !labels.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(labels.len(), 1);
+        assert_eq!((labels[0]["run"].as_str(), labels[0]["label"].as_str()), (Some("r1"), Some("bad")));
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

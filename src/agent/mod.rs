@@ -142,6 +142,8 @@ pub struct Agent {
     pub model: Arc<dyn ChatModel>,
     pub chat_model: String,
     pub vision_model: String,
+    /// Transcribes voice notes (`openrouter::transcribe`).
+    pub audio_model: String,
     pub coach: Option<Arc<Coach>>,
     pub log: TurnLog,
     /// Time source (tests pin it).
@@ -672,6 +674,7 @@ mod tests {
             model: script.clone(),
             chat_model: "m".into(),
             vision_model: "v".into(),
+            audio_model: "a".into(),
             coach: None,
             log: TurnLog::default(),
             clock: Arc::new(move || now),

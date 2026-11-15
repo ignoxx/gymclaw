@@ -109,3 +109,39 @@ impl ChatModel for OpenRouter {
         })
     }
 }
+
+/// What the transcriber is told. Sets come out in a form the coach's parser reads ("10 reps at 80").
+const TRANSCRIBE: &str = "Transcribe this voice note from a gym app user, word for word, in the language spoken. \
+Write numbers as digits. If it is only a logged set like \"ten at eighty\" or \"ten reps, eighty kilos\", write it as \
+\"10 reps at 80\". Output only the transcript; if nothing is said, output nothing.";
+
+/// Audio format name for OpenRouter's `input_audio` from a Telegram MIME type (voice notes are
+/// `audio/ogg`, Opus). None = not a format models take.
+pub fn audio_format(mime: Option<&str>) -> Option<&'static str> {
+    match mime.unwrap_or("audio/ogg") {
+        "audio/ogg" | "audio/opus" => Some("ogg"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => Some("m4a"),
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        "audio/aac" => Some("aac"),
+        "audio/flac" => Some("flac"),
+        _ => None,
+    }
+}
+
+/// Transcribe a voice note with an audio-input model (`GYMCLAW_MODEL_AUDIO`), sent as-is: no
+/// re-encoding. Empty speech is an error, so silence never reaches the agent.
+pub async fn transcribe(chat: &dyn ChatModel, model: &str, audio: &[u8], format: &str) -> Result<String> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(audio);
+    let messages = [
+        json!({"role": "system", "content": TRANSCRIBE}),
+        json!({"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": data, "format": format}}]}),
+    ];
+    let reply = chat.complete(model, &messages, &[], false).await?;
+    let text = reply.message["content"].as_str().unwrap_or_default().trim().to_string();
+    if text.is_empty() {
+        crate::bail!("NOTHING_HEARD", "no speech in the voice note");
+    }
+    Ok(text)
+}

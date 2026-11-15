@@ -137,6 +137,7 @@ pub async fn serve(config: Config) -> Result<()> {
         model,
         chat_model: config.model.clone(),
         vision_model: config.model_vision.clone(),
+        audio_model: config.model_audio.clone(),
         coach: Some(coach.clone()),
         log: log.clone(),
         clock: Arc::new(Ts::now),

@@ -95,7 +95,9 @@ fn copy(value: &Value, cap: Option<usize>, depth: usize) -> Value {
         ),
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), if SECRET_KEY.is_match(k) { json!("[redacted]") } else { copy(v, cap, depth + 1) }))
+                .map(|(k, v)| {
+                    (k.clone(), if SECRET_KEY.is_match(k) { json!("[redacted]") } else { copy(v, cap, depth + 1) })
+                })
                 .collect::<Map<_, _>>(),
         ),
         other => other.clone(),
@@ -261,10 +263,8 @@ pub fn rewind(conn: &mut Connection, events: &[Value], run: &str) -> Result<usiz
         .map_err(|e| Error::domain("INVALID_LOG", format!("inverse changeset: {e}")))?;
     let tx = conn.transaction()?;
     for inverse in inverses.iter().rev() {
-        tx.apply_strm(&mut inverse.as_slice(), None::<fn(&str) -> bool>, |_, _| {
-            ConflictAction::SQLITE_CHANGESET_ABORT
-        })
-        .map_err(|e| Error::domain("REWIND_CONFLICT", format!("a row changed after run {run}: {e}")))?;
+        tx.apply_strm(&mut inverse.as_slice(), None::<fn(&str) -> bool>, |_, _| ConflictAction::SQLITE_CHANGESET_ABORT)
+            .map_err(|e| Error::domain("REWIND_CONFLICT", format!("a row changed after run {run}: {e}")))?;
     }
     tx.commit()?;
     Ok(inverses.len())

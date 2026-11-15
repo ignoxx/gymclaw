@@ -162,6 +162,7 @@ async fn replay(db_path: PathBuf, key: &str, at: &str, model: String, provider: 
         data_dir,
         model: Arc::new(Tap(OpenRouter::new(key, provider)?)),
         vision_model: model.clone(),
+        audio_model: model.clone(),
         chat_model: model,
         coach: None,
         log: TurnLog::default(),
