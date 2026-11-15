@@ -52,7 +52,7 @@ pub fn entry(item: &Item) -> Entry {
         name: item.name.clone(),
         equipment: item.equipment.clone(),
         primary_muscle: item.primary_muscle.clone(),
-        svg_url: format!("/illustrations/{}.svg", item.slug),
+        svg_url: svg_url(&item.slug),
         telegram_png: crate::config::assets_dir().join(&item.slug).join("frame-1.png").to_string_lossy().into(),
     }
 }
@@ -202,6 +202,23 @@ pub fn similar(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<Strin
         ranked.into_iter().filter(|o| !picked.contains(o)).take(limit.saturating_sub(picked.len())).collect();
     picked.extend(rest);
     picked
+}
+
+/// Short content hash of each picture, read once.
+static VERSIONS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    use sha2::{Digest, Sha256};
+    catalog()
+        .keys()
+        .filter_map(|slug| {
+            Some((slug.clone(), hex::encode(&Sha256::digest(std::fs::read(svg_path(slug)?).ok()?)[..6])))
+        })
+        .collect()
+});
+
+/// Dashboard URL of a picture. It carries the picture's content hash, so the dashboard can cache it for
+/// good: a redrawn picture gets a new URL.
+pub fn svg_url(slug: &str) -> String {
+    format!("/illustrations/{slug}.svg?v={}", VERSIONS.get(slug).map_or("", String::as_str))
 }
 
 /// Dashboard SVG route → file.
