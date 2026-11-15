@@ -650,7 +650,7 @@ function renderHistory(history) {
       const row = el('div', 'set-row');
       const name = el('span', 'set-name', exercise.name);
       if (workout.prs.includes(exercise.name)) name.append(el('em', 'tag pr', 'PR'));
-      row.append(name, el('span', 'set-list', exercise.sets.map(s => s.seconds ? duration(s.seconds) : `${s.reps}×${s.weight}`).join('   ')));
+      row.append(name, el('span', 'set-list', exercise.sets.map(s => s.text || (s.seconds ? duration(s.seconds) : `${s.reps}×${s.weight}`)).join('   ')));
       table.append(row);
     }
     item.append(summary, table);
@@ -739,10 +739,12 @@ let detailOf = null;
 // A timed set's length: '25 min', '45 s', '1 min 30 s'.
 const duration = seconds => [[Math.floor(seconds / 3600), 'h'], [Math.floor(seconds % 3600 / 60), 'min'], [seconds % 60, 's']]
   .filter(([n]) => n).map(([n, unit]) => `${n} ${unit}`).join(' ') || '0 s';
-const setText = set => set.seconds ? duration(set.seconds) : set.weight ? `${set.reps} × ${kgs(set.weight)}` : `${set.reps} reps`;
+const setText = set => set.text ? set.text : set.seconds ? duration(set.seconds) : set.weight ? `${set.reps} × ${kgs(set.weight)}` : `${set.reps} reps`;
 const repRange = e => e.rep_min === e.rep_max ? e.rep_min : `${e.rep_min}–${e.rep_max}`;
 // Heaviest set; more reps break a tie. Timed: the longest.
-const bestSet = sets => sets.reduce((a, b) => (b.weight > a.weight || (b.weight === a.weight && (b.reps > a.reps || (b.seconds || 0) > (a.seconds || 0))) ? b : a));
+/* Heaviest set; `rank` is the weight with better up (less help on an assisted machine). */
+const rank = s => s.rank ?? s.weight;
+const bestSet = sets => sets.reduce((a, b) => (rank(b) > rank(a) || (rank(b) === rank(a) && (b.reps > a.reps || (b.seconds || 0) > (a.seconds || 0))) ? b : a));
 const muscleRank = muscle => { const i = MUSCLES.indexOf(muscle); return i < 0 ? MUSCLES.length : i; };
 
 /* Every exercise ever logged, from History (newest workout first), with its sessions newest first. */

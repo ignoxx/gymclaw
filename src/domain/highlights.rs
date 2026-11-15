@@ -1,13 +1,15 @@
 //! What stood out in a finished workout: records, lifts that went up, volume and pace against the
 //! last session of the same workout. The wrap-up card and the Sunday recap both read it, so they never
 //! disagree. "Earlier" always means logged before the workout started, so a recap computed days later
-//! sees the same records the card showed.
+//! sees the same records the card showed. On an assisted machine less help is the better set, and its
+//! counterweight never counts as volume.
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 
 use crate::db::Connection;
 use crate::db::models::{SetLog, WorkoutExercise, WorkoutSession};
 use crate::domain::calendar::week_of;
+use crate::domain::templates::{Measure, SetKind};
 use crate::domain::workout;
 use crate::error::Result;
 use crate::time::Ts;
@@ -31,6 +33,8 @@ pub struct Lift {
     pub weight: f64,
     pub reps: i64,
     pub change: Change,
+    /// How the set reads ("+10 kg", "20 kg assist", "/side").
+    pub kind: SetKind,
 }
 
 impl Lift {
@@ -44,11 +48,13 @@ pub struct Highlights {
     pub name: String,
     pub started_at: Ts,
     pub minutes: i64,
-    /// Working sets of reps; timed sets are in `timed`.
+    /// Working sets of reps; time and distance are in `timed` and `distances`.
     pub sets: usize,
     /// Time per timed exercise (bike, plank) in seconds, in workout order.
     pub timed: Vec<(String, i64)>,
-    /// Kilograms moved in working sets (weight × reps).
+    /// Distance per distance exercise (rower, carry) in meters, in workout order.
+    pub distances: Vec<(String, f64)>,
+    /// Kilograms moved in working sets (weight × reps), without assisted machines' counterweight.
     pub volume: f64,
     /// Minutes and volume of the previous session of the same workout.
     pub last: Option<(i64, f64)>,
@@ -56,16 +62,15 @@ pub struct Highlights {
     pub lifts: Vec<Lift>,
 }
 
-fn working(db: &Connection, workout_id: &str) -> Result<Vec<SetLog>> {
-    SetLog::select(
-        db,
-        "WHERE set_type = 'WORKING' AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1) ORDER BY logged_at",
+/// Kilograms moved in a workout's working sets. Time and distance sets have no reps, so they add
+/// nothing; an assisted machine's weight is help, not load.
+fn volume(db: &Connection, workout_id: &str) -> Result<f64> {
+    Ok(db.query_row(
+        "SELECT coalesce(sum(s.weight * s.reps), 0) FROM set_log s JOIN workout_exercise e ON e.id = s.workout_exercise_id \
+         WHERE e.workout_session_id = ?1 AND s.set_type = 'WORKING' AND coalesce(json_extract(e.config_json, '$.load'), '') != 'assisted'",
         [workout_id],
-    )
-}
-
-fn volume(sets: &[SetLog]) -> f64 {
-    sets.iter().map(|s| s.weight * s.reps as f64).sum()
+        |r| r.get(0),
+    )?)
 }
 
 /// Heaviest set, more reps breaking ties.
@@ -102,40 +107,64 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
     };
     let Some(start) = session.started_at else { crate::bail!("WORKOUT_NOT_STARTED", "Workout has no start time") };
     let name = session.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
-    let (mut lifts, mut timed) = (Vec::new(), Vec::new());
+    let (mut lifts, mut timed, mut distances, mut sets) = (Vec::new(), Vec::new(), Vec::new(), 0);
     for row in WorkoutExercise::select(db, "WHERE workout_session_id = ?1 ORDER BY position", [workout_id])? {
-        let sets = SetLog::select(db, "WHERE set_type = 'WORKING' AND workout_exercise_id = ?1", [&row.id])?;
-        let seconds: i64 = sets.iter().filter_map(|s| s.seconds).sum();
+        let logged = SetLog::select(db, "WHERE set_type = 'WORKING' AND workout_exercise_id = ?1", [&row.id])?;
+        let seconds: i64 = logged.iter().filter_map(|s| s.seconds).sum();
         if seconds > 0 {
             timed.push((workout::name(&row).to_string(), seconds));
         }
-        let Some(best) = top(sets.iter().filter(|s| s.seconds.is_none())) else { continue };
-        let earlier = SetLog::select(
+        let meters: f64 = logged.iter().filter_map(|s| s.meters).sum();
+        if meters > 0.0 {
+            distances.push((workout::name(&row).to_string(), meters));
+        }
+        let reps_sets = |sets: Vec<SetLog>| -> Vec<SetLog> {
+            sets.into_iter().filter(|s| s.seconds.is_none() && s.meters.is_none()).collect()
+        };
+        let logged = reps_sets(logged);
+        sets += logged.len();
+        if workout::measure(&row) != Measure::Reps {
+            continue;
+        }
+        // Compared on signed weights, so less help on an assisted machine ranks as heavier.
+        let set_kind = workout::kind(&row);
+        let signed = |sets: Vec<SetLog>| -> Vec<SetLog> {
+            sets.into_iter().map(|s| SetLog { weight: set_kind.signed(s.weight), ..s }).collect()
+        };
+        let logged = signed(logged);
+        let Some(best) = top(logged.iter()) else { continue };
+        let earlier = signed(reps_sets(SetLog::select(
             db,
-            "WHERE set_type = 'WORKING' AND seconds IS NULL AND logged_at < ?1 AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE exercise_id = ?2 AND workout_session_id != ?3) ORDER BY logged_at",
+            "WHERE set_type = 'WORKING' AND logged_at < ?1 AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE exercise_id = ?2 AND workout_session_id != ?3) ORDER BY logged_at",
             (start, &row.exercise_id, workout_id),
-        )?;
+        )?));
         if let Some(change) = change(best, &earlier) {
-            lifts.push(Lift { name: workout::name(&row).to_string(), weight: best.weight, reps: best.reps, change });
+            let change = match change {
+                Change::WeightRecord(was) => Change::WeightRecord(set_kind.signed(was)),
+                Change::Heavier(was) => Change::Heavier(set_kind.signed(was)),
+                reps => reps,
+            };
+            let (name, weight) = (workout::name(&row).to_string(), set_kind.signed(best.weight));
+            lifts.push(Lift { name, weight, reps: best.reps, change, kind: set_kind });
         }
     }
-    let sets = working(db, workout_id)?;
     let previous = WorkoutSession::first(
         db,
         "WHERE status = 'PLAN_UPDATED' AND id != ?1 AND completed_at < ?2 AND json_extract(template_snapshot, '$.name') = ?3 ORDER BY completed_at DESC",
         (workout_id, start, &name),
     )?;
     let last = match previous {
-        Some(p) => Some((p.actual_duration_seconds.unwrap_or(0).div_euclid(60), volume(&working(db, &p.id)?))),
+        Some(p) => Some((p.actual_duration_seconds.unwrap_or(0).div_euclid(60), volume(db, &p.id)?)),
         None => None,
     };
     Ok(Highlights {
         name,
         started_at: start,
         minutes: session.actual_duration_seconds.unwrap_or(0).div_euclid(60),
-        sets: sets.iter().filter(|s| s.seconds.is_none()).count(),
+        sets,
         timed,
-        volume: volume(&sets),
+        distances,
+        volume: volume(db, workout_id)?,
         last,
         lifts,
     })
@@ -153,7 +182,7 @@ pub fn finished_in(db: &Connection, week: Date, tz: &TimeZone) -> Result<Vec<Wor
 pub fn total_volume(db: &Connection, workouts: &[WorkoutSession]) -> Result<f64> {
     let mut total = 0.0;
     for w in workouts {
-        total += volume(&working(db, &w.id)?);
+        total += volume(db, &w.id)?;
     }
     Ok(total)
 }
@@ -175,6 +204,7 @@ mod tests {
             rest_started_at: None,
             rest_due_at: None,
             seconds: None,
+            meters: None,
         }
     }
 

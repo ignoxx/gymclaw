@@ -13,7 +13,7 @@ use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
 use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, primary_muscle, search, similar, timed};
-use crate::domain::templates::{ExerciseSpec, Measure, get_template, pick, remember_swap};
+use crate::domain::templates::{ExerciseSpec, Measure, default_load, get_template, pick, remember_swap};
 use crate::domain::workout::{
     active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logs, make_exercise,
     measure, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
@@ -39,7 +39,7 @@ pub fn find_exercise(db: &Connection, workout_id: &str, exercise_id: Option<&str
 
 /// Template spec stored on a workout exercise (its config without workout-only keys).
 pub fn spec_of(row: &WorkoutExercise) -> Result<ExerciseSpec> {
-    const FIELDS: [&str; 18] = [
+    const FIELDS: [&str; 22] = [
         "id",
         "name",
         "role",
@@ -58,6 +58,10 @@ pub fn spec_of(row: &WorkoutExercise) -> Result<ExerciseSpec> {
         "substitutes",
         "measure",
         "minutes",
+        "meters",
+        "load",
+        "per_side",
+        "group",
     ];
     let fields: serde_json::Map<String, Value> = row
         .config_json
@@ -219,7 +223,10 @@ fn replacement_spec(
         priority: 0,
         requires_completed: vec![],
         substitutes: vec![],
-        // role, primary, increment, warm-up from the original.
+        // A catalog exercise's own load; per side is unknown, so off.
+        load: default_load(substitute_id),
+        per_side: false,
+        // role, primary, increment, warm-up, measure and superset group from the original.
         ..spec_of(original)?
     })
 }
@@ -494,7 +501,7 @@ fn resolve(
         "id": item.slug, "name": item.name, "role": base("role").unwrap_or(json!("accessory")), "guide_id": item.slug,
         "working_sets": sets, "rep_min": base("rep_min").unwrap_or(json!(8)),
         "rep_max": base("rep_max").unwrap_or(json!(12)), "target_weight": 0, "increment": base("increment").unwrap_or(json!(2.5)),
-        "measure": if is_timed { Measure::Time } else { Measure::Reps },
+        "measure": if is_timed { Measure::Time } else { Measure::Reps }, "load": default_load(&item.slug),
         "minutes": if is_timed && from_timed { base("minutes") } else { None },
     });
     Ok((None, serde_json::from_value(spec)?))
@@ -700,7 +707,7 @@ mod tests {
     }
 
     fn set(weight: f64, reps: i64) -> SetInput {
-        SetInput { weight, reps, set_type: SetType::Working, rir: None, seconds: None }
+        SetInput { weight, reps, set_type: SetType::Working, rir: None, seconds: None, meters: None }
     }
 
     fn bench_done(db: &Connection) -> String {

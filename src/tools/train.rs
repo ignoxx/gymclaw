@@ -55,7 +55,7 @@ pub enum WorkoutAction {
     /// No args: today's planned session. template_id/planned_session_id only to start something else.
     /// Replaces a running workout with nothing logged, on its session.
     Start,
-    /// `text` like "10x40" (10 reps at 40 kg) or "25 min" logs a set; with `workout_id` and `which`, into that finished workout.
+    /// `text` like "10x40" (10 reps at 40 kg), "25 min" or "2 km" logs a set; with `workout_id` and `which`, into that finished workout.
     Log,
     /// Resend the current card.
     Card,
@@ -178,7 +178,7 @@ impl Tool for Workout {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
                     crate::bail!(
                         "NOT_LOGGED",
-                        "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps) or a time on a timed exercise (25 min). Check status, then ask the owner."
+                        "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps) or a time or distance on an exercise done for one (25 min, 2 km). Check status, then ask the owner."
                     );
                 }
                 view
@@ -257,16 +257,17 @@ pub struct SetCorrect {
     pub weight: Option<f64>,
     pub reps: Option<i64>,
     pub minutes: Option<f64>,
+    pub meters: Option<f64>,
 }
 
 impl Tool for SetCorrect {
     const NAME: &'static str = "set_correct";
-    const DESCRIPTION: &'static str = "Fix a logged set's weight, reps or minutes when the owner says it was logged wrong, during or after the workout. \
+    const DESCRIPTION: &'static str = "Fix a logged set's weight, reps, minutes or meters when the owner says it was logged wrong, during or after the workout. \
         Find the set with sql_query on set_log. Recomputes that exercise's next weight if this workout set it.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let seconds = self.minutes.map(|m| (m * 60.0).round() as i64);
-        audit::correct_set(cx.db, &self.set_id, self.weight, self.reps, seconds, cx.now, &cx.request_id)
+        audit::correct_set(cx.db, &self.set_id, self.weight, self.reps, seconds, self.meters, cx.now, &cx.request_id)
     }
 }
 
@@ -325,8 +326,10 @@ pub struct TemplateEditExercise {
     pub template_id: String,
     /// The exercise: ID, guide_id or name.
     pub exercise: String,
-    /// Fields to change, e.g. {"target_weight":85,"working_sets":4,"rep_min":6,"rep_max":8} or
-    /// {"measure":"time","minutes":25}. A new target_weight also resets the learned next weight.
+    /// Fields to change, e.g. {"target_weight":85,"working_sets":4,"rep_min":6,"rep_max":8},
+    /// {"measure":"time","minutes":25}, {"measure":"distance","meters":2000}, {"rest_seconds":150} (null:
+    /// the default rest), {"load":"assisted"}, {"per_side":true}, {"group":"A"} (same group: superset).
+    /// A new target_weight also resets the learned next weight.
     #[serde(default)]
     pub changes: Map<String, Value>,
     /// 0-based new place in the order.
@@ -335,7 +338,7 @@ pub struct TemplateEditExercise {
 
 impl Tool for TemplateEditExercise {
     const NAME: &'static str = "template_edit_exercise";
-    const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, time, rest, or its place in the order. \
+    const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, time, distance, rest, superset group, or its place in the order. \
         History and next weight follow the exercise id: to rename or fix the picture, keep the id.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {

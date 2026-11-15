@@ -862,13 +862,7 @@ mod tests {
                 .unwrap()
                 .to_string();
             for (n, reps) in [8, 8].iter().enumerate() {
-                let set = crate::domain::set_parser::SetInput {
-                    weight,
-                    reps: *reps,
-                    set_type: SetType::Working,
-                    rir: None,
-                    seconds: None,
-                };
+                let set = crate::domain::set_parser::SetInput::reps(weight, *reps, SetType::Working);
                 crate::domain::workout::log_set(&db, &id, &set, at.mins(5 + n as i64 * 5), &format!("{key}-{n}"))
                     .unwrap();
             }

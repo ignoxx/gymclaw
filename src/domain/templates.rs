@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
 use crate::domain::illustrations::{catalog, search, timed};
+use crate::domain::workout::{format_distance, format_time, g};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -20,6 +21,97 @@ pub enum Measure {
     Reps,
     // Timed (bike, rower, treadmill, plank): each working set is `minutes` long and logged as a time.
     Time,
+    // Distance (rower, carry, sled): each working set is `meters` long and logged as a distance.
+    Distance,
+}
+
+impl Measure {
+    /// How a set of this measure is typed, for error messages.
+    pub fn example(self) -> &'static str {
+        match self {
+            Measure::Reps => "reps × weight",
+            Measure::Time => "a time, e.g. 25 min",
+            Measure::Distance => "a distance, e.g. 2 km",
+        }
+    }
+}
+
+// What the logged weight of a reps exercise is (plain comments, as for `Measure`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Load {
+    // The weight lifted (bar, stack, dumbbells).
+    #[default]
+    External,
+    // Added to bodyweight (dip belt, weighted vest): shown "+10 kg".
+    Added,
+    // Counterweight that helps (assisted pull-up machine): less is progress.
+    Assisted,
+}
+
+/// How an exercise's sets read: its load and whether reps count per side. Every place that shows a set
+/// or target (coach card, summary, recap, dashboard) formats through this, so they never disagree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SetKind {
+    pub load: Load,
+    pub per_side: bool,
+}
+
+impl SetKind {
+    /// A weight as a number with its sign: "80", "+10" (added), "20" (assistance).
+    pub fn number(self, weight: f64) -> String {
+        let number = g(weight);
+        if self.load == Load::Added { format!("+{number}") } else { number }
+    }
+
+    /// The unit after `number`: "kg", or "kg assist" for a counterweight.
+    pub fn unit(self) -> &'static str {
+        if self.load == Load::Assisted { "kg assist" } else { "kg" }
+    }
+
+    /// "80 kg", "+10 kg", "20 kg assist".
+    pub fn weight(self, weight: f64) -> String {
+        format!("{} {}", self.number(weight), self.unit())
+    }
+
+    /// Reps (or a range like "8–10"), with "/side" when counted per side.
+    pub fn reps(self, reps: &str) -> String {
+        if self.per_side { format!("{reps}/side") } else { reps.to_string() }
+    }
+
+    /// A target the way the owner says it, reps first: "8–10 × 80 kg", "8/side × +10 kg"; no weight
+    /// (bodyweight, unknown) shows reps only: "12–15 reps", "8/side".
+    pub fn target(self, rep_min: i64, rep_max: i64, weight: f64) -> String {
+        let range = if rep_min == rep_max { rep_min.to_string() } else { format!("{rep_min}–{rep_max}") };
+        match (weight != 0.0, self.per_side) {
+            (true, _) => format!("{} × {}", self.reps(&range), self.weight(weight)),
+            (false, true) => self.reps(&range),
+            (false, false) => format!("{range} reps"),
+        }
+    }
+
+    /// A logged set: "10 × 40 kg", "12 reps", "25 min", "2 km". Its fields say what it measured.
+    pub fn set(self, weight: f64, reps: i64, seconds: Option<i64>, meters: Option<f64>) -> String {
+        match (seconds, meters) {
+            (Some(seconds), _) => self.reps(&format_time(seconds)),
+            (None, Some(meters)) => format_distance(meters),
+            (None, None) => self.target(reps, reps, weight),
+        }
+    }
+
+    /// The weight with "better" pointing up: an assisted set with less help ranks higher.
+    pub fn signed(self, weight: f64) -> f64 {
+        if self.load == Load::Assisted { -weight } else { weight }
+    }
+}
+
+/// Catalog exercises done on an assisted machine (or with a band): their weight is help, not load.
+pub fn default_load(slug: &str) -> Load {
+    if slug.contains("assisted") { Load::Assisted } else { Load::External }
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -41,6 +133,7 @@ pub struct ExerciseSpec {
     pub target_weight: f64,
     #[serde(default = "d2_5")]
     pub increment: f64,
+    /// Seconds of rest after each set of this exercise; omit (or null) for the owner's default rest.
     #[serde(default)]
     pub rest_seconds: Option<i64>,
     #[serde(default)]
@@ -57,6 +150,20 @@ pub struct ExerciseSpec {
     pub measure: Measure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minutes: Option<f64>,
+    /// Distance per working set when measure is "distance".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meters: Option<f64>,
+    /// "added": the weight is added to bodyweight (weighted pull-up); "assisted": the weight is the
+    /// machine's help, so less is progress.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub load: Load,
+    /// Reps count per side (single-arm row, split squat).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub per_side: bool,
+    /// Superset or circuit: exercises with the same group are done back to back in plan order, with
+    /// rest after each round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 fn d3() -> i64 {
@@ -110,9 +217,9 @@ fn identifier(value: &str) -> bool {
 impl ExerciseSpec {
     fn validate(&self) -> Result<()> {
         if ![&self.id, &self.name, &self.role].iter().all(|v| identifier(v))
-            || self.requires_completed.iter().chain(&self.substitutes).any(|v| !identifier(v))
+            || self.requires_completed.iter().chain(&self.substitutes).chain(&self.group).any(|v| !identifier(v))
         {
-            return invalid("IDs, names and roles are 1–100 characters");
+            return invalid("IDs, names, roles and groups are 1–100 characters");
         }
         if let Some(guide) = &self.guide_id
             && !catalog().contains_key(guide)
@@ -138,13 +245,18 @@ impl ExerciseSpec {
         if self.rep_min > self.rep_max {
             return invalid("Rep minimum exceeds maximum");
         }
-        match (self.measure, self.minutes) {
-            (Measure::Time, Some(m)) if m.is_finite() && m > 0.0 => {}
-            (Measure::Time, _) => return invalid(&format!("{} is timed: pass minutes (per set) > 0", self.name)),
-            (Measure::Reps, Some(_)) => {
-                return invalid(&format!("{}: minutes is only for measure \"time\"", self.name));
+        // Each block measure has its own per-set target, and only that one.
+        let targets = [
+            (Measure::Time, self.minutes, "minutes", "time", "timed"),
+            (Measure::Distance, self.meters, "meters", "distance", "done for distance"),
+        ];
+        for (measure, value, field, label, done) in targets {
+            match (self.measure == measure, value) {
+                (true, Some(v)) if v.is_finite() && v > 0.0 => {}
+                (true, _) => return invalid(&format!("{} is {done}: pass {field} (per set) > 0", self.name)),
+                (false, Some(_)) => return invalid(&format!("{}: {field} is only for measure \"{label}\"", self.name)),
+                (false, None) => {}
             }
-            (Measure::Reps, None) => {}
         }
         Ok(())
     }
@@ -152,6 +264,10 @@ impl ExerciseSpec {
     /// Length of one working set of a timed exercise.
     pub fn set_seconds(&self) -> Option<i64> {
         self.minutes.filter(|_| self.measure == Measure::Time).map(|m| (m * 60.0).round() as i64)
+    }
+
+    pub fn kind(&self) -> SetKind {
+        SetKind { load: self.load, per_side: self.per_side }
     }
 }
 
@@ -303,6 +419,7 @@ pub fn remember_swap(
         priority: original.priority,
         requires_completed: original.requires_completed.clone(),
         substitutes: vec![original_id.into()],
+        group: original.group.clone(),
         ..replacement.clone()
     };
     let mut alternatives: Vec<ExerciseSpec> =
@@ -404,6 +521,9 @@ pub fn edit_exercise(
                 spec["measure"] = serde_json::json!(Measure::Time);
                 spec["working_sets"] = serde_json::json!(1);
             }
+            if default_load(&item.slug) == Load::Assisted {
+                spec["load"] = serde_json::json!(Load::Assisted);
+            }
             spec.as_object_mut().unwrap().extend(changes.clone());
             // Exercises are told apart by id; the guide_id only picks the picture, so two machine
             // variants can share one.
@@ -434,9 +554,13 @@ pub fn edit_exercise(
             let Some(i) = find(rows)? else { return not_found() };
             let row = rows[i].as_object_mut().unwrap();
             row.extend(changes.clone());
-            if row.get("measure") == Some(&serde_json::json!(Measure::Reps)) && !changes.contains_key("minutes") {
-                // Back to reps: the time target goes with the time measure.
-                row.remove("minutes");
+            // A new measure drops the other measure's target (back to reps: the time goes with it).
+            if let Some(measure) = changes.get("measure") {
+                for (field, owner) in [("minutes", Measure::Time), ("meters", Measure::Distance)] {
+                    if *measure != serde_json::json!(owner) && !changes.contains_key(field) {
+                        row.remove(field);
+                    }
+                }
             }
             let id = rows[i]["id"].as_str().unwrap_or_default().to_string();
             if let Some(at) = position {

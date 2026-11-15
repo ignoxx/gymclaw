@@ -8,13 +8,12 @@ use crate::db::models::{
 };
 use crate::db::{Connection, new_id};
 use crate::domain::core::{emit, mutate};
-use crate::domain::illustrations::bodyweight;
 use crate::domain::progression::{PerformanceSet, ProgressionDecision, double_progression};
-use crate::domain::set_parser::{SetInput, parse_duration, parse_set};
-use crate::domain::templates::Measure;
-use crate::domain::templates::pick;
+use crate::domain::set_parser::{SetInput, parse_block, parse_set};
+use crate::domain::templates::{Load, Measure, pick};
 use crate::domain::workout::{
-    self, cancel_rest, exercises, guide_id, load_workout, logs, measure, name, set_measure, transition, unresolved,
+    self, cancel_rest, exercises, guide_id, kind, load_workout, logs, measure, name, reps_alone, set_measure,
+    transition, unresolved,
 };
 use crate::error::Result;
 use crate::time::Ts;
@@ -35,34 +34,47 @@ pub fn get_audit(db: &Connection, workout_id: &str) -> Result<Value> {
 }
 
 /// Next-weight decision for one exercise from its logged working sets, which it also returns.
+/// Assisted machines progress downwards: double progression runs on the negated counterweight, and
+/// once no help is left, moving to the unassisted version is the agent's call.
 fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDecision, Vec<SetLog>)> {
     let working = logs(db, &exercise.id, Some(SetType::Working))?;
-    let sets: Vec<PerformanceSet> = working.iter().map(|s| PerformanceSet { weight: s.weight, reps: s.reps }).collect();
-    if measure(exercise) == Measure::Time {
-        // A ride or a plank has no weight to progress; the agent adjusts the time target.
+    let set_kind = kind(exercise);
+    let sets: Vec<PerformanceSet> =
+        working.iter().map(|s| PerformanceSet { weight: set_kind.signed(s.weight), reps: s.reps }).collect();
+    let measured = measure(exercise);
+    if measured != Measure::Reps {
+        // A ride, a plank or a carry has no weight to progress; the agent adjusts the time or distance target.
         let decision = ProgressionDecision {
             exercise_id: exercise.exercise_id.clone(),
             previous_weight: exercise.target_weight,
             next_weight: exercise.target_weight,
             progressed: false,
-            reason: "timed",
+            reason: if measured == Measure::Time { "timed" } else { "distance" },
         };
         return Ok((decision, working));
     }
     let required = exercise.config_json.get("working_sets").and_then(Value::as_u64).unwrap_or(0) as usize;
     let increment = exercise.config_json.get("increment").and_then(Value::as_f64).unwrap_or(2.5);
+    let target = set_kind.signed(exercise.target_weight);
     let mut decision = double_progression(
         &exercise.exercise_id,
-        exercise.target_weight,
+        target,
         exercise.rep_min,
         exercise.rep_max,
         required,
         increment,
         &sets,
     );
-    if exercise.target_weight == 0.0 && !working.is_empty() {
-        // Unknown starting weight: the heaviest working set becomes the baseline target.
-        decision.next_weight = working.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
+    decision.previous_weight = exercise.target_weight;
+    // Back from signed; an assisted target stops at no help (0).
+    decision.next_weight = set_kind.signed(decision.next_weight).max(0.0);
+    if set_kind.load == Load::Assisted && exercise.target_weight == 0.0 && decision.progressed {
+        decision.progressed = false;
+        decision.reason = "no_assistance_left";
+    } else if exercise.target_weight == 0.0 && !working.is_empty() {
+        // Unknown starting weight: the best working set (heaviest, or least help) becomes the baseline.
+        let best = sets.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
+        decision.next_weight = set_kind.signed(best).max(0.0);
         decision.progressed = false;
         decision.reason = "baseline_from_first_session";
     }
@@ -82,32 +94,49 @@ fn refresh_progression(db: &Connection, exercise: &WorkoutExercise, now: Ts) -> 
     Ok(Some(progression.next_weight))
 }
 
-/// Fix a logged set's weight and/or reps, or a timed set's length, during or after its workout. When
-/// the finished workout set this exercise's next weight, that weight is recomputed from the corrected sets.
+/// The values a set is corrected with: (weight/reps, seconds, meters) given.
+fn fixed_by(reps: bool, seconds: bool, meters: bool) -> &'static str {
+    match (reps, seconds, meters) {
+        (_, true, false) => "minutes",
+        (_, false, true) => "meters",
+        _ => "weight and/or reps",
+    }
+}
+
+/// Fix a logged set's weight and/or reps, or a timed set's length, or a distance, during or after its
+/// workout. When the finished workout set this exercise's next weight, that weight is recomputed from the
+/// corrected sets.
+#[allow(clippy::too_many_arguments)]
 pub fn correct_set(
     db: &Connection,
     set_id: &str,
     weight: Option<f64>,
     reps: Option<i64>,
     seconds: Option<i64>,
+    meters: Option<f64>,
     now: Ts,
     request_id: &str,
 ) -> Result<Value> {
-    let intent = json!({"set_id": set_id, "weight": weight, "reps": reps, "seconds": seconds});
+    let mut intent = json!({"set_id": set_id, "weight": weight, "reps": reps, "seconds": seconds});
+    if meters.is_some() {
+        intent["meters"] = json!(meters);
+    }
     mutate(db, "set.corrected", request_id, intent, now, || {
-        if weight.is_none() && reps.is_none() && seconds.is_none() {
-            crate::bail!("ARGUMENT_REQUIRED", "Pass weight and/or reps, or minutes for a timed set");
+        let given = [weight.is_some() || reps.is_some(), seconds.is_some(), meters.is_some()];
+        if given.iter().all(|g| !g) {
+            crate::bail!("ARGUMENT_REQUIRED", "Pass weight and/or reps, or minutes or meters for a time or distance");
         }
         let Some(mut set) = SetLog::get(db, set_id)? else { crate::bail!("SET_NOT_FOUND", "No logged set {set_id}") };
-        if set.seconds.is_some() != seconds.is_some() || (seconds.is_some() && (weight.is_some() || reps.is_some())) {
-            let how = if set.seconds.is_some() { "minutes" } else { "weight and/or reps" };
+        let how = fixed_by(true, set.seconds.is_some(), set.meters.is_some());
+        if given.iter().filter(|g| **g).count() > 1 || fixed_by(given[0], given[1], given[2]) != how {
             crate::bail!("INVALID_SET", "Set {set_id} is fixed with {how}");
         }
-        let before = json!({"weight": set.weight, "reps": set.reps, "seconds": set.seconds});
+        let before = json!({"weight": set.weight, "reps": set.reps, "seconds": set.seconds, "meters": set.meters});
         set.weight = weight.unwrap_or(set.weight);
         set.reps = reps.unwrap_or(set.reps);
         set.seconds = seconds.or(set.seconds);
-        SetInput { weight: set.weight, reps: set.reps, set_type: set.set_type, rir: None, seconds: set.seconds }
+        set.meters = meters.or(set.meters);
+        SetInput { seconds: set.seconds, meters: set.meters, ..SetInput::reps(set.weight, set.reps, set.set_type) }
             .validate()?;
         set.update(db)?;
         let Some(exercise) = WorkoutExercise::get(db, &set.workout_exercise_id)? else {
@@ -115,15 +144,15 @@ pub fn correct_set(
         };
         let next_weight = refresh_progression(db, &exercise, now)?;
         Ok(
-            json!({"set_id": set.id, "exercise": name(&exercise), "before": before, "after": {"weight": set.weight, "reps": set.reps, "seconds": set.seconds}, "next_weight": next_weight}),
+            json!({"set_id": set.id, "exercise": name(&exercise), "before": before, "after": {"weight": set.weight, "reps": set.reps, "seconds": set.seconds, "meters": set.meters}, "next_weight": next_weight}),
         )
     })
 }
 
 /// A set the owner did but never logged, added to a finished workout ("I cycled 25 min", "I did one more
 /// bench set"). `which` is the exercise's id, guide_id or name in that workout; `text` is a set as typed
-/// in the workout ("25 min", "10x40"). A skipped exercise counts as done, and the first set decides
-/// reps or time. Logged at the workout's finish so history keeps its order.
+/// in the workout ("25 min", "2 km", "10x40"). A skipped exercise counts as done, and the first set decides
+/// reps, time or distance. Logged at the workout's finish so history keeps its order.
 pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: Ts, request_id: &str) -> Result<Value> {
     let intent = json!({"workout_id": workout_id, "which": which, "text": text});
     mutate(db, "set.added", request_id, intent, now, || {
@@ -140,19 +169,18 @@ pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: 
             crate::bail!("EXERCISE_NOT_FOUND", "'{which}' isn't in that workout ({})", names.join(", "));
         };
         let mut row = rows[index].clone();
-        let value = match parse_duration(text) {
-            Some(seconds) => SetInput::timed(seconds),
-            None => parse_set(text, SetType::Working, Some(row.target_weight), bodyweight(guide_id(&row)))?,
+        let value = match parse_block(text, measure(&row)) {
+            Some(value) => value,
+            None => parse_set(text, SetType::Working, Some(row.target_weight), reps_alone(&row))?,
         };
         value.validate()?;
         let working = logs(db, &row.id, Some(SetType::Working))?;
-        let timed = value.seconds.is_some();
-        if timed != (measure(&row) == Measure::Time) {
+        if value.measure() != measure(&row) {
             if !working.is_empty() {
-                let how = if timed { "reps × weight" } else { "a time, e.g. 25 min" };
+                let how = measure(&row).example();
                 crate::bail!("INVALID_SET", "{} is logged as {how} in that workout", name(&row));
             }
-            set_measure(db, &mut row, timed)?;
+            set_measure(db, &mut row, value.measure())?;
         }
         let set = SetLog {
             id: new_id(),
@@ -166,6 +194,7 @@ pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: 
             rest_started_at: None,
             rest_due_at: None,
             seconds: value.seconds,
+            meters: value.meters,
         };
         set.insert(db)?;
         let was = row.status;
@@ -177,7 +206,7 @@ pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: 
         let next_weight = refresh_progression(db, &row, now)?;
         Ok(
             json!({"workout_id": workout.id, "exercise": name(&row), "set_id": set.id, "weight": set.weight, "reps": set.reps,
-            "seconds": set.seconds, "status_before": was, "status": row.status, "next_weight": next_weight}),
+            "seconds": set.seconds, "meters": set.meters, "status_before": was, "status": row.status, "next_weight": next_weight}),
         )
     })
 }
@@ -246,7 +275,7 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
             performance.push(json!({
                 "id": exercise.id, "exercise_id": exercise.exercise_id, "name": name(exercise), "status": exercise.status,
                 "planned_sets": exercise.planned_working_sets, "completed_sets": working.len(),
-                "sets": working.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds})).collect::<Vec<_>>(),
+                "sets": working.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds, "meters": s.meters})).collect::<Vec<_>>(),
                 "substituted_from": exercise.substituted_from_exercise_id, "reason": exercise.deferred_reason,
             }));
         }

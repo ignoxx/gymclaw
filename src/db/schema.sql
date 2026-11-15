@@ -1,4 +1,4 @@
--- Generated from a fresh `gymclaw migrate` (user_version 6); don't edit. When a migration
+-- Generated from a fresh `gymclaw migrate` (user_version 7); don't edit. When a migration
 -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
 
 CREATE TABLE agent_button (
@@ -310,10 +310,11 @@ CREATE TABLE "set_log" (
 	rest_started_at DATETIME,
 	rest_due_at DATETIME,
 	seconds INTEGER,
+	meters DOUBLE,
 	PRIMARY KEY (id),
 	CONSTRAINT ck_set_log_legacy CHECK (set_type IN ('WARMUP','WORKING')),
 	CONSTRAINT uq_exercise_set UNIQUE (workout_exercise_id, set_type, set_number),
-	CONSTRAINT ck_set_values CHECK (weight >= 0 AND set_number > 0 AND reps >= 0 AND (reps > 0 OR seconds > 0)),
+	CONSTRAINT ck_set_values CHECK (weight >= 0 AND set_number > 0 AND reps >= 0 AND (reps > 0 OR seconds > 0 OR meters > 0)),
 	FOREIGN KEY(workout_exercise_id) REFERENCES workout_exercise (id)
 );
 

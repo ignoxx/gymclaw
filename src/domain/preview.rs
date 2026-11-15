@@ -14,9 +14,9 @@ use crate::db::Connection;
 use crate::db::models::{PlannedSession, SetLog};
 use crate::domain::illustrations::for_exercise;
 use crate::domain::profile::get_profile;
-use crate::domain::templates::get_template;
+use crate::domain::templates::{Measure, get_template};
 use crate::domain::view::{Card, CardKind};
-use crate::domain::workout::{format_time, g};
+use crate::domain::workout::{format_distance, format_time};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -56,8 +56,16 @@ pub fn plan_lines(db: &Connection, session: &PlannedSession) -> Result<Vec<Strin
             lines.push(format!("{}. {} · {plan}{last}", index + 1, spec.name));
             continue;
         }
-        let last = last.map(|l| format!(" · last {} × {} kg", l.reps, g(l.weight))).unwrap_or_default();
-        lines.push(format!("{}. {} · {count} sets of {reps}{last}", index + 1, spec.name));
+        let last = last
+            .map(|l| format!(" · last {}", spec.kind().set(l.weight, l.reps, l.seconds, l.meters)))
+            .unwrap_or_default();
+        let reps = spec.kind().reps(&reps);
+        let plan = match spec.meters.filter(|_| spec.measure == Measure::Distance) {
+            Some(meters) if count == 1 => format_distance(meters),
+            Some(meters) => format!("{count} × {}", format_distance(meters)),
+            None => format!("{count} sets of {reps}"),
+        };
+        lines.push(format!("{}. {} · {plan}{last}", index + 1, spec.name));
     }
     Ok(lines)
 }

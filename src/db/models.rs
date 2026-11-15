@@ -185,6 +185,8 @@ table!(SetLog = "set_log" {
     rest_due_at: Option<Ts>,
     /// A timed set (bike, plank): its length, with reps 0. None for reps × weight.
     seconds: Option<i64>,
+    /// A distance set (rower, carry), with reps 0.
+    meters: Option<f64>,
 });
 
 table!(WorkoutTemplate = "workout_template" {

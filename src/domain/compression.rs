@@ -27,9 +27,14 @@ pub fn compress_template(template: &Template, profile: &Profile, budget_seconds:
             _ => 0,
         };
         for (index, spec) in kept.iter().enumerate() {
-            let rest = profile.rest_seconds;
             let sets = counts[spec.id.as_str()];
-            seconds += sets * spec.set_seconds().unwrap_or(template.set_duration_seconds) + (sets - 1).max(0) * rest;
+            seconds += sets * spec.set_seconds().unwrap_or(template.set_duration_seconds);
+            // As `workout::estimate_finish`: in a superset only the round's last exercise rests.
+            if spec.group.is_some() && kept[index + 1..].iter().any(|o| o.group == spec.group) {
+                continue;
+            }
+            let rest = spec.rest_seconds.unwrap_or(profile.rest_seconds);
+            seconds += (sets - 1).max(0) * rest;
             if index < kept.len() - 1 {
                 seconds += rest + template.transition_seconds;
             }

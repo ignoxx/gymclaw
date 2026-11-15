@@ -87,7 +87,11 @@ model never has to. Timestamps without an offset are the owner's local time.
   value in `agent_button`; a tap is fed to the agent as the owner's text.
 - Formatting is the Markdown subset in `telegram::markdown` (bold, italic, strike, code, `> ` and
   collapsed `>> ` quotes). Records get a confetti effect, a week on target a 🔥 one.
-- Typed sets (`10x40`, `13 reps`) → coach first; unparsed text and failed validations → agent
+- A set is reps × weight, a time or a distance (the exercise's `measure`). Weight can be `added` to
+  bodyweight or `assisted` (counterweight: less is progress), reps can be `per_side`, and exercises
+  sharing a `group` run as a superset: no rest until the round is done. Rest is the owner's one
+  default unless the exercise sets `rest_seconds`.
+- Typed sets (`10x40`, `+10x8`, `8/side`, `2 km`, `25 min`) → coach first; unparsed text and failed validations → agent
   with error context. Failed button operations also fall back to the agent with the card context.
 - Coach card: one live card per exercise with image, target and quick buttons, edited in place;
   the rest countdown edits every 5 s.
