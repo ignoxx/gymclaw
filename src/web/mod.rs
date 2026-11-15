@@ -164,12 +164,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
     if let Some(slug) = path.strip_prefix("/illustrations/").and_then(|p| p.strip_suffix(".svg")) {
         return match crate::domain::illustrations::svg_path(slug).map(std::fs::read) {
             Some(Ok(bytes)) => {
-                // Picture URLs carry a content hash (`illustrations::svg_url`), so a copy never goes stale.
-                // Without this, every dashboard redraw downloaded every picture again.
+                // Without a cache, every dashboard redraw (each 10 s poll that changed the state) downloaded
+                // every picture again. A redrawn picture shows within a day.
                 let mut response = reply(StatusCode::OK, bytes, "image/svg+xml");
                 response
                     .headers_mut()
-                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400"));
                 response
             }
             _ => error(StatusCode::NOT_FOUND),
@@ -246,11 +246,8 @@ mod tests {
                 .unwrap()
                 .contains("frame-ancestors https://web.telegram.org")
         );
-        let picture = crate::domain::illustrations::svg_url("bench-press");
-        assert!(picture.starts_with("/illustrations/bench-press.svg?v="), "{picture}");
-        let picture = get(&app, Method::GET, &picture, "gym.example").await;
-        assert_eq!(picture.status(), StatusCode::OK);
-        assert!(picture.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+        let picture = get(&app, Method::GET, "/illustrations/bench-press.svg", "gym.example").await;
+        assert_eq!(picture.headers()[header::CACHE_CONTROL], "private, max-age=86400");
         assert_eq!(index.headers()[header::CACHE_CONTROL], "no-store");
         for path in ["/../README.md", "/data/private.sqlite", "/unknown", "/illustrations/../../README.svg"] {
             assert_eq!(get(&app, Method::GET, path, "gym.example").await.status(), StatusCode::NOT_FOUND, "{path}");

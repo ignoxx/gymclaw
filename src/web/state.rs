@@ -133,7 +133,7 @@ pub fn catalog() -> Vec<Value> {
         .values()
         .map(|i| {
             json!({"guide_id": i.slug, "name": i.name, "equipment": i.equipment, "muscle": i.primary_muscle,
-        "svg_url": illustrations::svg_url(&i.slug)})
+        "svg_url": format!("/illustrations/{}.svg", i.slug)})
         })
         .collect()
 }
