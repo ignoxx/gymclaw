@@ -163,7 +163,15 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
     }
     if let Some(slug) = path.strip_prefix("/illustrations/").and_then(|p| p.strip_suffix(".svg")) {
         return match crate::domain::illustrations::svg_path(slug).map(std::fs::read) {
-            Some(Ok(bytes)) => reply(StatusCode::OK, bytes, "image/svg+xml"),
+            Some(Ok(bytes)) => {
+                // Without a cache, every dashboard redraw (each 10 s poll that changed the state) downloaded
+                // every picture again. A redrawn picture shows within a day.
+                let mut response = reply(StatusCode::OK, bytes, "image/svg+xml");
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400"));
+                response
+            }
             _ => error(StatusCode::NOT_FOUND),
         };
     }
@@ -238,6 +246,9 @@ mod tests {
                 .unwrap()
                 .contains("frame-ancestors https://web.telegram.org")
         );
+        let picture = get(&app, Method::GET, "/illustrations/bench-press.svg", "gym.example").await;
+        assert_eq!(picture.headers()[header::CACHE_CONTROL], "private, max-age=86400");
+        assert_eq!(index.headers()[header::CACHE_CONTROL], "no-store");
         for path in ["/../README.md", "/data/private.sqlite", "/unknown", "/illustrations/../../README.svg"] {
             assert_eq!(get(&app, Method::GET, path, "gym.example").await.status(), StatusCode::NOT_FOUND, "{path}");
         }
