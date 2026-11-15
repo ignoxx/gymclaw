@@ -83,6 +83,12 @@ impl ChatModel for OpenRouter {
             .cloned()
             .ok_or_else(|| Error::domain("MODEL_ERROR", "upstream returned no choices"))?;
         let usage = &parsed["usage"];
+        // The request minus what the trajectory already stores (messages, tool specs).
+        let mut settings = request;
+        if let Some(map) = settings.as_object_mut() {
+            map.remove("messages");
+            map.remove("tools");
+        }
         let cached = usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0);
         Ok(ModelReply {
             message: choice["message"].clone(),
@@ -94,6 +100,8 @@ impl ChatModel for OpenRouter {
                 cache_read: Some(cached),
             },
             provider: parsed["provider"].as_str().map(String::from),
+            generation_id: parsed["id"].as_str().map(String::from),
+            settings,
             ms: started.elapsed().as_millis(),
             ttfb_ms,
             req_bytes,

@@ -13,8 +13,8 @@ pub fn tools() -> Vec<ToolDef> {
     vec![def::<SqlQuery>(), def::<NoteAdd>(), def::<NoteEdit>(), def::<NoteDelete>()]
 }
 
-/// Tables holding OAuth tokens and the private feed URL stay outside model access.
-const SECRET_TABLES: [&str; 2] = ["calendar_credential", "personal_calendar_state"];
+/// Tables holding OAuth tokens and the private feed URL stay outside model access and turn-log changesets.
+pub const SECRET_TABLES: [&str; 2] = ["calendar_credential", "personal_calendar_state"];
 const MAX_ROWS: usize = 200;
 
 /// Read-only pragmas the model may use to inspect the schema.

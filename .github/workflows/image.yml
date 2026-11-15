@@ -38,6 +38,8 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ github.sha }}
           # Lets ops tooling tell which commit a :main container runs.
           labels: org.opencontainers.image.revision=${{ github.sha }}
+          # Stamped on every agent turn in the turn log.
+          build-args: GYMCLAW_COMMIT=${{ github.sha }}
           # mode=max keeps the cargo-chef dependency layer, so source-only pushes skip compiling deps.
           cache-from: type=gha
           cache-to: type=gha,mode=max
