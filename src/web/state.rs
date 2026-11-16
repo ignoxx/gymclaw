@@ -118,7 +118,7 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
         for spec in &template.exercises {
             let next = ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight);
             exercises.push(json!({"id": spec.id, "name": spec.name, "guide_id": spec.guide_id, "svg_url": svg(&spec.name, spec.guide_id.as_deref()),
-                "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
+                "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()).or(spec.muscle.clone()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
                 "time": spec.set_seconds().map(workout::format_time), "target": spec.kind().target(spec.rep_min, spec.rep_max, next)}));
         }
@@ -278,9 +278,7 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             let guide = present(row.config_json["guide_id"].as_str())
                 .or_else(|| present(guides.get(&row.exercise_id).and_then(|g| g.as_deref())))
                 .unwrap_or(&row.exercise_id);
-            // An id that isn't a catalog slug falls back to an exact catalog name for its picture.
-            let muscle = illustrations::primary_muscle(Some(guide))
-                .or_else(|| illustrations::search(&name, None, None, 1).first().map(|e| e.primary_muscle.clone()));
+            let muscle = illustrations::primary_muscle(Some(guide)).or_else(|| workout::muscle(&row));
             exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, illustrations::catalog().contains_key(guide).then_some(guide)),
                 "lifted": lifted, "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds, "meters": s.meters,
                     "text": kind.set(s.weight, s.reps, s.seconds, s.meters), "rank": kind.signed(s.weight)})).collect::<Vec<_>>()}));

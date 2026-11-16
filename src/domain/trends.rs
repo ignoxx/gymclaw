@@ -11,7 +11,6 @@ use jiff::tz::TimeZone;
 use crate::db::Connection;
 use crate::db::models::{SetLog, WorkoutExercise, WorkoutSession};
 use crate::domain::calendar::week_of;
-use crate::domain::illustrations;
 use crate::domain::progression::{PerformanceSet, ProgressionDecision};
 use crate::domain::templates::Load;
 use crate::domain::workout::{self, g};
@@ -113,13 +112,8 @@ impl Outing {
     }
 }
 
-/// The catalog's primary muscle for a logged exercise; ids that aren't catalog slugs fall back to the
-/// closest catalog name (as the dashboard does).
 fn muscle(row: &WorkoutExercise) -> String {
-    illustrations::primary_muscle(workout::guide_id(row))
-        .or_else(|| illustrations::primary_muscle(Some(&row.exercise_id)))
-        .or_else(|| illustrations::search(workout::name(row), None, None, 1).first().map(|e| e.primary_muscle.clone()))
-        .unwrap_or_else(|| "Other".into())
+    workout::muscle(row).unwrap_or_else(|| "Other".into())
 }
 
 /// Every finished outing with reps sets of weight lifted (of `exercise_id`, or all), oldest first. An

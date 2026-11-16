@@ -179,6 +179,15 @@ pub fn guide_id(exercise: &WorkoutExercise) -> Option<&str> {
     config_str(exercise, "guide_id")
 }
 
+/// The muscle a logged exercise trains: its picture's, else the one the agent named, else (older
+/// rows) a catalog slug id or an exact catalog name. Never a fuzzy guess: a bare "Bench" isn't triceps.
+pub fn muscle(exercise: &WorkoutExercise) -> Option<String> {
+    primary_muscle(guide_id(exercise))
+        .or_else(|| config_str(exercise, "muscle").map(Into::into))
+        .or_else(|| primary_muscle(Some(&exercise.exercise_id)))
+        .or_else(|| crate::domain::illustrations::matching(name(exercise)).map(|e| e.primary_muscle))
+}
+
 /// A typed `config_json` field (an `ExerciseSpec` field the workout copied); missing or older rows get the default.
 fn field<T: DeserializeOwned + Default>(exercise: &WorkoutExercise, key: &str) -> T {
     exercise.config_json.get(key).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
@@ -295,8 +304,7 @@ pub fn choose_next(db: &Connection, workout: &mut WorkoutSession, now: Ts, prefe
     let rows = exercises(db, &workout.id)?;
     let ready: Vec<&WorkoutExercise> =
         rows.iter().filter(|e| e.status == ExerciseStatus::Pending && compatible(e, &rows)).collect();
-    let same =
-        ready.iter().find(|e| prefer_muscle.is_some() && primary_muscle(guide_id(e)).as_deref() == prefer_muscle);
+    let same = ready.iter().find(|e| prefer_muscle.is_some() && muscle(e).as_deref() == prefer_muscle);
     if let Some(next) = same.or(ready.first()) {
         let mut next = (*next).clone();
         next.status = ExerciseStatus::Active;
@@ -551,7 +559,7 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
             id: active.id.clone(),
             exercise_id: active.exercise_id.clone(),
             name: name(active).to_string(),
-            primary_muscle: primary_muscle(guide),
+            primary_muscle: muscle(active),
             new_exercise: logs(db, &active.id, None)?.is_empty(),
             last_set: last.map(|l| LastSet { weight: l.weight, reps: l.reps, seconds: l.seconds, meters: l.meters }),
             set_type: if is_warmup { SetType::Warmup } else { SetType::Working },
@@ -1056,6 +1064,25 @@ pub(crate) mod tests {
 
     pub fn spec(value: Value) -> ExerciseSpec {
         serde_json::from_value(value).unwrap()
+    }
+
+    /// A logged exercise's muscle comes from its picture or the agent's `muscle`, never a fuzzy name guess.
+    #[test]
+    fn muscle_is_named_not_guessed() {
+        let db = db();
+        db.execute_batch(
+            "INSERT INTO workout_session (id, status, waited_for_equipment_count) VALUES ('w', 'PLAN_UPDATED', 0);",
+        )
+        .unwrap();
+        let muscle_of = |id: &str, name: &str, muscle_field: Option<&str>| {
+            let spec = spec(
+                serde_json::json!({"id": id, "name": name, "role": "accessory", "target_weight": 0, "muscle": muscle_field}),
+            );
+            muscle(&make_exercise(&db, "w", &spec, 0, false, None).unwrap())
+        };
+        assert_eq!(muscle_of("bench", "Bench", None), None);
+        assert_eq!(muscle_of("flat", "Bench", Some("Chest")).as_deref(), Some("Chest"));
+        assert_eq!(muscle_of("row", "Seated Cable Row", None).as_deref(), Some("Back"));
     }
 
     fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {

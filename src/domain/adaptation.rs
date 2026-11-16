@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
-use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, primary_muscle, search, similar, timed};
+use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, search, similar, timed};
 use crate::domain::templates::{ExerciseSpec, Measure, default_load, get_template, pick, remember_swap};
 use crate::domain::workout::{
     active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logs, make_exercise,
-    measure, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
+    measure, muscle, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -113,7 +113,7 @@ pub fn machine_busy(
                 cancel_rest(db, workout_id, now)?;
                 transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
                 // Stay on the same muscle group while the machine is taken.
-                choose_next(db, &mut workout, now, primary_muscle(guide_id(&exercise)).as_deref())?;
+                choose_next(db, &mut workout, now, muscle(&exercise).as_deref())?;
             }
             let mut result = touch(db, &mut workout, now)?;
             result["deferred_exercise_id"] = json!(exercise.id);
@@ -203,7 +203,9 @@ fn replacement_spec(
         return Ok(spec);
     }
     let item = catalog().get(substitute_id);
-    let muscle = for_exercise(name(original), guide_id(original)).map(|p| p.primary_muscle);
+    // Without a picture or a named muscle, the stand-in picture's muscle.
+    let muscle =
+        muscle(original).or_else(|| for_exercise(name(original), guide_id(original)).map(|p| p.primary_muscle));
     let Some(item) = item.filter(|i| muscle.as_deref() == Some(i.primary_muscle.as_str())) else {
         crate::bail!(
             "INVALID_SUBSTITUTION",

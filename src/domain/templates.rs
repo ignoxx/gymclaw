@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
-use crate::domain::illustrations::{catalog, search, timed};
+use crate::domain::illustrations::{catalog, muscles, search, timed};
 use crate::domain::workout::{format_distance, format_time, g};
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -124,6 +124,10 @@ pub struct ExerciseSpec {
     pub role: String,
     #[serde(default)]
     pub guide_id: Option<String>,
+    /// The muscle it trains when there's no guide_id (with one, the catalog's muscle counts): a
+    /// catalog muscle, set by the agent, so weekly sets per muscle and swaps don't guess from the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muscle: Option<String>,
     #[serde(default)]
     pub primary: bool,
     #[serde(default = "d3")]
@@ -227,6 +231,14 @@ impl ExerciseSpec {
             && !catalog().contains_key(guide)
         {
             return invalid(&format!("guide_id must match Workout Guide catalog: {guide}"));
+        }
+        if let Some(muscle) = &self.muscle
+            && !muscles().contains(muscle.as_str())
+        {
+            return invalid(&format!(
+                "muscle must be one of: {}",
+                muscles().into_iter().collect::<Vec<_>>().join(", ")
+            ));
         }
         if self.working_sets <= 0
             || self.rep_min <= 0
@@ -368,7 +380,7 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
         .collect();
     (!missing.is_empty()).then(|| {
         format!(
-            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template_edit_exercise (keep id and name).",
+            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template_edit_exercise (keep id and name); otherwise set its muscle.",
             missing.join("; ")
         )
     })
@@ -527,8 +539,9 @@ pub fn edit_exercise(
                     }
                     spec
                 }
-                // The owner's own exercise, kept under their name without a picture (#101).
-                None if changes.contains_key("id") => {
+                // The owner's own exercise, kept under their name without a picture (#101); the agent
+                // names its muscle, since nothing else knows it.
+                None if changes.contains_key("id") && changes.contains_key("muscle") => {
                     serde_json::json!({"name": exercise.trim(), "role": "accessory", "target_weight": 0})
                 }
                 None => {
@@ -539,7 +552,7 @@ pub fn edit_exercise(
                     let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
                     crate::bail!(
                         "EXERCISE_UNKNOWN",
-                        "No exact match for '{exercise}'. Pass one guide_id: {options}; or, to keep the owner's name without a picture, pass fields.id"
+                        "No exact match for '{exercise}'. Pass one guide_id: {options}; or, to keep the owner's name without a picture, pass fields.id and fields.muscle"
                     );
                 }
             };
@@ -708,10 +721,18 @@ mod tests {
         // No catalog match: an error with the closest matches, or the owner's name kept without a picture.
         let unknown = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
         assert_eq!(unknown.code(), "EXERCISE_UNKNOWN");
-        let own = object(json!({"id": "zottman"}));
+        let unnamed = object(json!({"id": "zottman"}));
+        let unnamed = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&unnamed), None).unwrap_err();
+        assert!(unnamed.to_string().contains("fields.muscle"), "{unnamed}");
+        let wrong = object(json!({"id": "zottman", "muscle": "Forearm-ish"}));
+        assert!(edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&wrong), None).is_err());
+        let own = object(json!({"id": "zottman", "muscle": "Biceps"}));
         let kept = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&own), None).unwrap();
         let zottman = kept["exercises"].as_array().unwrap().last().unwrap();
-        assert_eq!((zottman["name"].as_str(), zottman.get("guide_id")), (Some("Zottman curl"), Some(&Value::Null)));
+        assert_eq!(
+            (zottman["name"].as_str(), zottman.get("guide_id"), zottman["muscle"].as_str()),
+            (Some("Zottman curl"), Some(&Value::Null), Some("Biceps"))
+        );
         edit_exercise(&db, "upper-a", "zottman", ExerciseEdit::Remove, None).unwrap();
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));

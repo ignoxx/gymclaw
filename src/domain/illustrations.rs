@@ -1,7 +1,7 @@
 //! Workout Guide first-pose assets and catalog search. An exercise's `guide_id` picks its picture; one
 //! without (the owner kept their own name) shows the closest catalog picture meanwhile and is on the
 //! `missing` list that `scripts/new-illustration` works through.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -83,6 +83,11 @@ pub fn matching(name: &str) -> Option<Entry> {
 
 pub fn primary_muscle(guide_id: Option<&str>) -> Option<String> {
     guide_id.and_then(|g| catalog().get(g)).map(|i| i.primary_muscle.clone())
+}
+
+/// Every catalog muscle: what an exercise without a picture may name as its `muscle`.
+pub fn muscles() -> BTreeSet<&'static str> {
+    catalog().values().map(|i| i.primary_muscle.as_str()).collect()
 }
 
 /// Reps are the whole set (dips, push-ups): no weight to log or ask for.
