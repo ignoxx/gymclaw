@@ -7,10 +7,9 @@
 //!   model). There is no `/new`: the window is the last messages, always current.
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, mpsc};
 
@@ -20,17 +19,12 @@ use crate::agent::{Agent, Outcome, TurnInput, media};
 use crate::db::Json;
 use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
+use crate::domain::set_parser::looks_like_set;
 use crate::domain::view::Button;
 use crate::error::Result;
 use crate::telegram::coach::{Coach, Tapped};
 use crate::telegram::{Audio, CallbackQuery, Media, Message, MessageReaction, Telegram, Update};
 use crate::time::Ts;
-
-/// Cheap pre-check so ordinary chat never pays for a coach lookup. Reps alone ("13 reps") only log on
-/// a bodyweight exercise; otherwise the coach returns unhandled and the agent gets the message.
-pub static SET_LIKE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*[x×*]\s*\d+(?:[.,]\d+)?\s*(?:kg|reps?)?\s*$|^\s*\d+\s*reps?\s*(?:at|@)\s*\d+(?:[.,]\d+)?\s*(?:kg)?\s*$|^\s*\d+\s*(?:reps?|[x×*])?\s*$").unwrap()
-});
 
 const ACK: &str = "👀";
 const SESSION: &str = "telegram:owner";
@@ -53,7 +47,9 @@ pub fn route(text: &str) -> Route {
     match command {
         "/status" => Route::Status,
         "/extensions" => Route::Extensions,
-        _ if SET_LIKE.is_match(text) => Route::Set,
+        // Cheap pre-check so ordinary chat never pays for a coach lookup. Reps alone ("13 reps") only
+        // log on a bodyweight exercise; otherwise the coach returns unhandled and the agent gets it.
+        _ if looks_like_set(text) => Route::Set,
         _ => Route::Agent,
     }
 }
@@ -1019,7 +1015,22 @@ mod tests {
 
     #[test]
     fn set_like_routing() {
-        for text in ["80x9", "12x40kg", "90kgx10 reps", "9 reps at 80", "22,5 × 8", "13 reps", "13x", "13"] {
+        for text in [
+            "80x9",
+            "12x40kg",
+            "90kgx10 reps",
+            "9 reps at 80",
+            "22,5 × 8",
+            "13 reps",
+            "13x",
+            "13",
+            "+10x8",
+            "8/side",
+            "25 min",
+            "1:30",
+            "2 km",
+            "40 m",
+        ] {
             assert_eq!(route(text), Route::Set, "{text}");
         }
         for text in ["how long do I rest?", "it's occupied", "80x9 then 80x10", "x"] {

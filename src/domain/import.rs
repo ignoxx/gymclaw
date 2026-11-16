@@ -20,7 +20,7 @@ use crate::domain::backfill::PastSet;
 use crate::domain::core::mutate;
 use crate::domain::illustrations::{catalog, matching, search};
 use crate::domain::profile::get_profile;
-use crate::domain::templates::{ExerciseSpec, get_template, pick, template_ids};
+use crate::domain::templates::{ExerciseSpec, Load, default_load, get_template, pick, template_ids};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -270,18 +270,43 @@ pub struct Target {
     pub id: String,
     pub name: String,
     pub guide_id: Option<String>,
+    /// How the plan exercise (or catalog entry) reads its weight and reps; imported rows keep it.
+    #[serde(skip)]
+    load: Load,
+    #[serde(skip)]
+    per_side: bool,
+    #[serde(skip)]
+    muscle: Option<String>,
 }
 
 impl Target {
     fn from_spec(spec: &ExerciseSpec) -> Target {
-        Target { id: spec.id.clone(), name: spec.name.clone(), guide_id: spec.guide_id.clone() }
+        Target {
+            id: spec.id.clone(),
+            name: spec.name.clone(),
+            guide_id: spec.guide_id.clone(),
+            load: spec.load,
+            per_side: spec.per_side,
+            muscle: spec.muscle.clone(),
+        }
+    }
+
+    fn catalog(slug: &str, name: &str) -> Target {
+        Target {
+            id: slug.into(),
+            name: name.into(),
+            guide_id: Some(slug.into()),
+            load: default_load(slug),
+            per_side: false,
+            muscle: None,
+        }
     }
 
     /// The owner's own name, kept: no picture until one is drawn.
     fn own(name: &str) -> Target {
         let slug: String = name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let id = slug.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
-        Target { id, name: name.trim().into(), guide_id: None }
+        Target { id, name: name.trim().into(), guide_id: None, load: Load::External, per_side: false, muscle: None }
     }
 }
 
@@ -310,7 +335,7 @@ fn chosen(specs: &[ExerciseSpec], to: &str) -> Result<Target> {
     }
     let key = to.trim().to_lowercase();
     match catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key)) {
-        Some(item) => Ok(Target { id: item.slug.clone(), name: item.name.clone(), guide_id: Some(item.slug.clone()) }),
+        Some(item) => Ok(Target::catalog(&item.slug, &item.name)),
         None => crate::bail!("EXERCISE_UNKNOWN", "'{to}' is neither a plan exercise nor a catalog guide_id"),
     }
 }
@@ -324,7 +349,7 @@ fn automatic(specs: &[ExerciseSpec], name: &str) -> Option<Target> {
     let entry = matching(name)?;
     let users: Vec<&ExerciseSpec> = specs.iter().filter(|s| s.guide_id.as_deref() == Some(&entry.guide_id)).collect();
     match users[..] {
-        [] => Some(Target { id: entry.guide_id.clone(), name: entry.name, guide_id: Some(entry.guide_id) }),
+        [] => Some(Target::catalog(&entry.guide_id, &entry.name)),
         [one] => Some(Target::from_spec(one)),
         _ => None,
     }
@@ -394,6 +419,11 @@ pub fn import(
     now: Ts,
     request_id: &str,
 ) -> Result<Value> {
+    // A misread date ("Mar 2" taken as next March) would land a finished workout in the future and
+    // override every newer next weight.
+    if let Some(w) = history.workouts.iter().find(|w| w.at >= now) {
+        crate::bail!("WORKOUT_NOT_PAST", "'{}' at {} hasn't happened yet; check its date", w.title, w.at);
+    }
     let specs = plan_specs(db)?;
     let mut targets: HashMap<String, Target> = HashMap::new();
     let (mut report, mut unresolved) = (vec![], vec![]);
@@ -520,11 +550,16 @@ fn write(
         let distance = working.iter().all(|s| s.meters.is_some() && s.reps == 0);
         let timed = !distance && working.iter().all(|s| s.seconds.is_some() && s.reps == 0);
         let reps = working.iter().map(|s| s.reps.max(1));
-        let top = working.iter().map(|s| s.weight).fold(0.0, f64::max);
+        // The best set: the heaviest, or on an assisted machine the least help.
+        let top = match target.load {
+            Load::Assisted => working.iter().map(|s| s.weight).fold(f64::INFINITY, f64::min),
+            _ => working.iter().map(|s| s.weight).fold(0.0, f64::max),
+        };
         let mut spec = json!({
             "id": target.id, "name": target.name, "role": "imported", "guide_id": target.guide_id,
             "working_sets": working.len(), "rep_min": reps.clone().min().unwrap_or(1), "rep_max": reps.max().unwrap_or(1),
             "target_weight": top, "measure": if distance { "distance" } else if timed { "time" } else { "reps" },
+            "load": target.load, "per_side": target.per_side, "muscle": target.muscle,
         });
         if distance {
             spec["meters"] = json!(working[0].meters);
@@ -732,6 +767,22 @@ mod tests {
             (Some(0), Some(2))
         );
         assert_eq!(SetLog::select(&db, "", []).unwrap().len(), 6);
+        let early = Ts::parse("2025-01-01T00:00:00+00:00", None).unwrap();
+        assert_eq!(import(&db, &history, &map, true, early, "r5").unwrap_err().code(), "WORKOUT_NOT_PAST");
+    }
+
+    /// An assisted machine keeps its load: the next weight is the least help, not the most.
+    #[test]
+    fn assisted_import_keeps_its_load() {
+        let db = db();
+        let csv = HEVY.lines().next().unwrap().to_string()
+            + "\n\"Pull\",\"22 Dec 2025, 08:00\",\"22 Dec 2025, 08:37\",\"\",\"Assisted Pull-up\",,\"\",0,\"normal\",40,8,,0,\n\"Pull\",\"22 Dec 2025, 08:00\",\"22 Dec 2025, 08:37\",\"\",\"Assisted Pull-up\",,\"\",1,\"normal\",30,8,,0,\n";
+        let history = parse_csv(&csv, None, &utc()).unwrap();
+        import(&db, &history, &BTreeMap::new(), false, now(), "r1").unwrap();
+        let row = WorkoutExercise::first(&db, "WHERE exercise_id = 'assisted-pull-up'", []).unwrap().unwrap();
+        assert_eq!(row.config_json["load"], "assisted");
+        let next = ExerciseProgression::get(&db, "assisted-pull-up").unwrap().unwrap().next_weight;
+        assert!((next - 30.0 * 0.45359237).abs() < 0.01, "{next}");
     }
 
     #[test]

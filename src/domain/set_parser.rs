@@ -135,6 +135,14 @@ pub fn parse_block(text: &str, measure: Measure) -> Option<SetInput> {
     distance.or_else(|| parse_duration(text).map(SetInput::timed))
 }
 
+/// Whether a whole message reads as a set in any form these parsers take (reps and weight, reps
+/// alone, a time or a distance), so it goes to the coach before the agent. Ambiguous pairs ("8x8")
+/// count: the coach asks.
+pub fn looks_like_set(text: &str) -> bool {
+    let clean = PER_SIDE.replace_all(&text.trim().to_lowercase(), "").trim().to_string();
+    [&PAIR, &AT, &REPS_ONLY].iter().any(|r| r.is_match(&clean)) || parse_block(text, Measure::Distance).is_some()
+}
+
 fn ambiguous<T>() -> Result<T> {
     crate::bail!("AMBIGUOUS_SET", "How many reps and what weight? E.g. 9x80.")
 }
