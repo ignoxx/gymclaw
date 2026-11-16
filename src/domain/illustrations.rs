@@ -295,13 +295,18 @@ pub struct Missing {
     pub stand_in: Option<String>,
 }
 
-/// Exercises without a guide_id in the saved plans and logged workouts: the work list for
-/// `scripts/new-illustration`, plan exercises first, then by logged sets. A logged exercise whose
-/// plan entry (same id) has a picture isn't missing; early workouts predate guide_ids.
+/// Exercises with no picture of their own in the saved plans and logged workouts: the work list for
+/// `scripts/new-illustration`, plan exercises first, then by logged sets. Not missing: a logged
+/// exercise whose plan entry (same id) has a picture (early workouts predate guide_ids), a name that
+/// is a catalog name in other words ("Triceps pushdown"), and the demo plan.
 pub fn missing(db: &crate::db::Connection) -> crate::error::Result<Vec<Missing>> {
     let mut pictured: HashSet<String> = catalog().keys().cloned().collect();
     let mut found: BTreeMap<String, Missing> = BTreeMap::new();
+    let named: HashSet<Vec<String>> = catalog().values().map(|i| sorted_words(&i.name)).collect();
     let mut add = |id: &str, name: &str, in_plan: bool, sets: i64| {
+        if named.contains(&sorted_words(name)) {
+            return;
+        }
         let row = found.entry(id.to_string()).or_insert_with(|| Missing {
             exercise_id: id.into(),
             name: name.into(),
@@ -312,7 +317,8 @@ pub fn missing(db: &crate::db::Connection) -> crate::error::Result<Vec<Missing>>
         row.in_plan |= in_plan;
         row.logged_sets += sets;
     };
-    for template in crate::db::models::WorkoutTemplate::select(db, "", [])? {
+    let demo = "WHERE coalesce(json_extract(definition_json, '$.source'), '') != 'demo_fixture'";
+    for template in crate::db::models::WorkoutTemplate::select(db, demo, [])? {
         let list = |k: &str| template.definition_json.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
         for spec in list("exercises").into_iter().chain(list("alternatives")) {
             let (Some(id), name) = (spec["id"].as_str(), spec["name"].as_str().unwrap_or_default()) else { continue };
@@ -345,6 +351,12 @@ pub fn missing(db: &crate::db::Connection) -> crate::error::Result<Vec<Missing>>
     let mut list: Vec<Missing> = found.into_values().collect();
     list.sort_by_key(|m| (!m.in_plan, -m.logged_sets));
     Ok(list)
+}
+
+fn sorted_words(name: &str) -> Vec<String> {
+    let mut list: Vec<String> = words(name).into_iter().collect();
+    list.sort();
+    list
 }
 
 /// Dashboard SVG route → file.
@@ -418,6 +430,8 @@ mod tests {
         // An early workout without guide_ids: its plan entry has a picture now, so it isn't missing.
         history("squat", r#"{"name": "Squat"}"#);
         history("old-press", r#"{"name": "Old Press"}"#);
+        // Named exactly like a catalog picture (word order aside): the picture is found by name.
+        history("seated-row", r#"{"name": "Cable Row Seated"}"#);
         let missing = missing(&db).unwrap();
         let rows: Vec<(&str, bool, i64)> =
             missing.iter().map(|m| (m.exercise_id.as_str(), m.in_plan, m.logged_sets)).collect();
