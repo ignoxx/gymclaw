@@ -26,11 +26,12 @@ DEST="${DEST:-gymclaw-turns}"
 umask 077
 mkdir -p "$DEST"
 
-# The bot's container: built from a gymclaw image, not the dashboard or the egress proxy.
+# The bot's container: named or built as gymclaw (Coolify names images by app ID), not the dashboard
+# or the egress proxy.
 if [ -z "${CONTAINER:-}" ]; then
   # shellcheck disable=SC2016 # expanded by awk on this side, not by the shell
   CONTAINER="$(ssh "$HOST" docker ps --format '{{.Names}}\ {{.Image}}' \
-    | awk '$2 ~ /gymclaw/ && $1 !~ /dashboard|egress/ { print $1; exit }')"
+    | awk '($1 ~ /gymclaw/ || $2 ~ /gymclaw/) && $1 !~ /dashboard|egress/ { print $1; exit }')"
 fi
 [ -n "$CONTAINER" ] || { echo "No running gymclaw container on $HOST; set CONTAINER." >&2; exit 1; }
 echo "Pulling from $HOST:$CONTAINER into $DEST"
