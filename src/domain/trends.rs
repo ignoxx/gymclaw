@@ -173,7 +173,7 @@ pub fn effort_of(db: &Connection, exercise: &WorkoutExercise, sets: &[Performanc
     Ok(effort(sets, exercise.rep_min, exercise.rep_max, exercise.target_weight, recent_best(&earlier)))
 }
 
-/// A lift's recent best, as `lift_best` reports it.
+/// A lift's best, as `lift_best` reports it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Best {
     /// Estimated 1-rep max in kg.
@@ -182,14 +182,15 @@ pub enum Best {
     Reps(i64),
 }
 
-/// A lift's recent best (last `RECENT` outings) before `until`.
-pub fn lift_best(db: &Connection, exercise_id: &str, until: Ts) -> Result<Option<Best>> {
+/// A lift's recent best (last `RECENT` outings) and all-time best before `until`.
+pub fn lift_best(db: &Connection, exercise_id: &str, until: Ts) -> Result<Option<(Best, Best)>> {
     let history = outings(db, Some(exercise_id))?;
     let before: Vec<&Outing> = history.iter().filter(|o| o.at < until).collect();
-    Ok(recent_best(&before).map(|best| match before.last() {
-        Some(latest) if latest.sets.iter().all(|s| s.weight == 0.0) => Best::Reps(best as i64),
-        _ => Best::E1rm((best * 10.0).round() / 10.0),
-    }))
+    let bodyweight = before.last().is_some_and(|latest| latest.sets.iter().all(|s| s.weight == 0.0));
+    let best =
+        |score: f64| if bodyweight { Best::Reps(score as i64) } else { Best::E1rm((score * 10.0).round() / 10.0) };
+    let ever = before.iter().map(|o| score(&o.sets)).reduce(f64::max);
+    Ok(recent_best(&before).zip(ever).map(|(recent, ever)| (best(recent), best(ever))))
 }
 
 /// What the Sunday wake says about one lift trained in the reviewed week, when anything stands out:

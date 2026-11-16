@@ -125,7 +125,8 @@ pub fn close(db: &Connection, id: &str, status: GoalStatus, now: Ts, request_id:
 /// Where a goal stands, by kind.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Current {
-    Lift(trends::Best),
+    /// Best of the last 3 outings (where the lift stands now) and all-time best.
+    Lift { recent: trends::Best, ever: trends::Best },
     /// Latest weigh-in.
     Kg(f64),
     /// Cardio minutes in the week: timed gym work plus activities.
@@ -140,7 +141,9 @@ pub fn progress(db: &Connection, goal: &Goal, week: Date, tz: &TimeZone) -> Resu
     let end = Ts(week.checked_add(jiff::Span::new().days(7))?.to_zoned(tz.clone())?.timestamp());
     Ok(match goal.kind {
         GoalKind::Lift => match &goal.exercise_id {
-            Some(exercise) => trends::lift_best(db, exercise, end)?.map(Current::Lift),
+            Some(exercise) => {
+                trends::lift_best(db, exercise, end)?.map(|(recent, ever)| Current::Lift { recent, ever })
+            }
             None => None,
         },
         GoalKind::BodyWeight => {
@@ -160,17 +163,25 @@ pub fn progress(db: &Connection, goal: &Goal, week: Date, tz: &TimeZone) -> Resu
     })
 }
 
-/// "Bench 100 kg by March: est. 1-rep max 92.5 / 100 kg". None when there's no number yet.
+/// "Bench 100 kg by March: est. 1-rep max 92.5 / 100 kg (all-time 95)". The all-time best shows
+/// only when the recent one is below it. None when there's no number yet.
 pub fn line(goal: &Goal, current: Option<Current>) -> Option<String> {
+    let ever = match current? {
+        Current::Lift { recent, ever } if ever != recent => match ever {
+            trends::Best::E1rm(kg) => format!(" (all-time {})", g(kg)),
+            trends::Best::Reps(n) => format!(" (all-time {n})"),
+        },
+        _ => String::new(),
+    };
     let (prefix, value, unit) = match current? {
-        Current::Lift(trends::Best::E1rm(kg)) => ("est. 1-rep max ", g(kg), "kg"),
-        Current::Lift(trends::Best::Reps(n)) => ("best ", n.to_string(), "reps"),
+        Current::Lift { recent: trends::Best::E1rm(kg), .. } => ("est. 1-rep max ", g(kg), "kg"),
+        Current::Lift { recent: trends::Best::Reps(n), .. } => ("best ", n.to_string(), "reps"),
         Current::Kg(kg) => ("", g(kg), "kg"),
         Current::Minutes(m) => ("", m.to_string(), "min"),
         Current::Workouts(n) => ("", n.to_string(), "workouts"),
     };
     let target = goal.target.map(|t| format!(" / {}", g(t))).unwrap_or_default();
-    Some(format!("{}: {prefix}{value}{target} {unit}", goal.text))
+    Some(format!("{}: {prefix}{value}{target} {unit}{ever}", goal.text))
 }
 
 /// A goal with its progress this week, as tools return it.
@@ -246,5 +257,13 @@ mod tests {
             ..Fields::default()
         };
         assert_eq!(set(&db, lift, now, "g2").unwrap_err().code(), "EXERCISE_NOT_FOUND");
+        // A lift goal counts where the lift stands now; a higher all-time best shows beside it.
+        let bench = Goal { text: "Bench 100".into(), target: Some(100.0), ..goal };
+        let at = |recent, ever| line(&bench, Some(Current::Lift { recent, ever })).unwrap();
+        assert_eq!(
+            at(trends::Best::E1rm(92.5), trends::Best::E1rm(95.0)),
+            "Bench 100: est. 1-rep max 92.5 / 100 kg (all-time 95)"
+        );
+        assert_eq!(at(trends::Best::E1rm(95.0), trends::Best::E1rm(95.0)), "Bench 100: est. 1-rep max 95 / 100 kg");
     }
 }
