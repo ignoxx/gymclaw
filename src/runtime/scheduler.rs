@@ -42,12 +42,18 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// Send every PENDING delivery (when the runtime is enabled).
+    /// Send every PENDING delivery (when the runtime is enabled), after closing UNKNOWN ones that no
+    /// longer apply.
     pub async fn pump(&self) {
         let recipient = self.recipient.clone();
         let pending = blocking(&self.db_path, move |db| {
-            let enabled = outbox::runtime_authority(db)?.enabled;
-            if enabled { outbox::pending(db, &recipient) } else { Ok(vec![]) }
+            if !outbox::runtime_authority(db)?.enabled {
+                return Ok(vec![]);
+            }
+            let tx = db.transaction()?;
+            outbox::settle_unknown(&tx, &recipient, Ts::now())?;
+            tx.commit()?;
+            outbox::pending(db, &recipient)
         })
         .await;
         match pending {

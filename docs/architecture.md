@@ -124,7 +124,8 @@ model never has to. Timestamps without an offset are the owner's local time.
   a fallback; the coach's live countdown normally handles them.
 - Outbox = `notification_delivery`: commit PENDING → claim SENDING → send → SENT with the Telegram
   message id; any send error → UNKNOWN, never retried automatically, because Telegram has no
-  idempotent send. The owner checks and the agent calls `delivery_resolve`.
+  idempotent send. The owner checks and the agent calls `delivery_resolve`, unless a resend would no
+  longer go out (session started or resolved, reminder expired): then it closes itself.
 - `runtime_settings` gates it all: `enabled` for sends and ticks, plus separate flags for
   calendar writes and crowd polling. The row is created by the first `runtime_resume`.
 
