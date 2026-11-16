@@ -48,6 +48,7 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .panel { background: var(--white); border: 1px solid var(--line); border-radius: 10px; padding: 22px; min-width: 0; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .section-heading > span { font-size: 11px; color: var(--muted); }
+.section-heading > span a { color: inherit; }
 .empty { color: var(--muted); font-size: 12px; margin: 18px 0 4px; }
 
 /* Week */
@@ -320,3 +321,7 @@ text.workout-mark { stroke: none; fill: #5c6b3f; font-size: 8px; font-weight: 60
   .tabs { width: 100%; }
   .tabs button { flex: 1; padding: 6px 4px; font-size: 11.5px; }
 }
+/* Memory: what the agent built (extensions) and its version history. */
+.note.ext .forget, .ext-version .forget { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.note.ext.off .note-text summary { color: var(--muted); }
+.ext-version { color: var(--muted); font-size: 11px; padding: 4px 0 0 12px; }

@@ -7,7 +7,8 @@ use serde_json::{Map, Value};
 
 use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
-use crate::domain::illustrations::{catalog, search, timed};
+use crate::domain::illustrations::{catalog, muscles, search, timed};
+use crate::domain::workout::{format_distance, format_time, g};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -20,6 +21,99 @@ pub enum Measure {
     Reps,
     // Timed (bike, rower, treadmill, plank): each working set is `minutes` long and logged as a time.
     Time,
+    // Distance (rower, carry, sled): each working set is `meters` long and logged as a distance.
+    Distance,
+}
+
+impl Measure {
+    /// How a set of this measure is typed, for error messages.
+    pub fn example(self) -> &'static str {
+        match self {
+            Measure::Reps => "reps × weight",
+            Measure::Time => "a time, e.g. 25 min",
+            Measure::Distance => "a distance, e.g. 2 km",
+        }
+    }
+}
+
+// What the logged weight of a reps exercise is (plain comments, as for `Measure`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Load {
+    // The weight lifted (bar, stack, dumbbells).
+    #[default]
+    External,
+    // Added to bodyweight (dip belt, weighted vest): shown "+10 kg".
+    Added,
+    // Counterweight that helps (assisted pull-up machine): less is progress.
+    Assisted,
+}
+
+/// How an exercise's sets read: its load and whether reps count per side. Every place that shows a set
+/// or target (coach card, summary, recap, dashboard) formats through this, so they never disagree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SetKind {
+    pub load: Load,
+    pub per_side: bool,
+}
+
+impl SetKind {
+    /// A weight as a number with its sign: "80", "+10" (added), "20" (assistance).
+    pub fn number(self, weight: f64) -> String {
+        let number = g(weight);
+        if self.load == Load::Added { format!("+{number}") } else { number }
+    }
+
+    /// The unit after `number`: "kg", or "kg assist" for a counterweight.
+    pub fn unit(self) -> &'static str {
+        if self.load == Load::Assisted { "kg assist" } else { "kg" }
+    }
+
+    /// "80 kg", "+10 kg", "20 kg assist".
+    pub fn weight(self, weight: f64) -> String {
+        format!("{} {}", self.number(weight), self.unit())
+    }
+
+    /// Reps (or a range like "8–10"), with "/side" when counted per side.
+    pub fn reps(self, reps: &str) -> String {
+        if self.per_side { format!("{reps}/side") } else { reps.to_string() }
+    }
+
+    /// A target the way the owner says it, reps first: "8–10 × 80 kg", "8/side × +10 kg"; no weight
+    /// (bodyweight, unknown) shows reps only: "12–15 reps", "8/side".
+    pub fn target(self, rep_min: i64, rep_max: i64, weight: f64) -> String {
+        let range = if rep_min == rep_max { rep_min.to_string() } else { format!("{rep_min}–{rep_max}") };
+        match (weight != 0.0, self.per_side) {
+            (true, _) => format!("{} × {}", self.reps(&range), self.weight(weight)),
+            (false, true) => self.reps(&range),
+            (false, false) => format!("{range} reps"),
+        }
+    }
+
+    /// A logged set: "10 × 40 kg", "12 reps", "25 min", "2 km", "2 km in 10 min" (an import can carry
+    /// both). Its fields say what it measured.
+    pub fn set(self, weight: f64, reps: i64, seconds: Option<i64>, meters: Option<f64>) -> String {
+        match (seconds, meters) {
+            (Some(seconds), Some(meters)) => format!("{} in {}", format_distance(meters), format_time(seconds)),
+            (Some(seconds), None) => self.reps(&format_time(seconds)),
+            (None, Some(meters)) => format_distance(meters),
+            (None, None) => self.target(reps, reps, weight),
+        }
+    }
+
+    /// The weight with "better" pointing up: an assisted set with less help ranks higher.
+    pub fn signed(self, weight: f64) -> f64 {
+        if self.load == Load::Assisted { -weight } else { weight }
+    }
+}
+
+/// Catalog exercises done on an assisted machine (or with a band): their weight is help, not load.
+pub fn default_load(slug: &str) -> Load {
+    if slug.contains("assisted") { Load::Assisted } else { Load::External }
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -30,6 +124,10 @@ pub struct ExerciseSpec {
     pub role: String,
     #[serde(default)]
     pub guide_id: Option<String>,
+    /// The muscle it trains when there's no guide_id (with one, the catalog's muscle counts): a
+    /// catalog muscle, set by the agent, so weekly sets per muscle and swaps don't guess from the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muscle: Option<String>,
     #[serde(default)]
     pub primary: bool,
     #[serde(default = "d3")]
@@ -41,6 +139,7 @@ pub struct ExerciseSpec {
     pub target_weight: f64,
     #[serde(default = "d2_5")]
     pub increment: f64,
+    /// Seconds of rest after each set of this exercise; omit (or null) for the owner's default rest.
     #[serde(default)]
     pub rest_seconds: Option<i64>,
     #[serde(default)]
@@ -57,6 +156,20 @@ pub struct ExerciseSpec {
     pub measure: Measure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minutes: Option<f64>,
+    /// Distance per working set when measure is "distance".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meters: Option<f64>,
+    /// "added": the weight is added to bodyweight (weighted pull-up); "assisted": the weight is the
+    /// machine's help, so less is progress.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub load: Load,
+    /// Reps count per side (single-arm row, split squat).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub per_side: bool,
+    /// Superset or circuit: exercises with the same group are done back to back in plan order, with
+    /// rest after each round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 fn d3() -> i64 {
@@ -110,14 +223,22 @@ fn identifier(value: &str) -> bool {
 impl ExerciseSpec {
     fn validate(&self) -> Result<()> {
         if ![&self.id, &self.name, &self.role].iter().all(|v| identifier(v))
-            || self.requires_completed.iter().chain(&self.substitutes).any(|v| !identifier(v))
+            || self.requires_completed.iter().chain(&self.substitutes).chain(&self.group).any(|v| !identifier(v))
         {
-            return invalid("IDs, names and roles are 1–100 characters");
+            return invalid("IDs, names, roles and groups are 1–100 characters");
         }
         if let Some(guide) = &self.guide_id
             && !catalog().contains_key(guide)
         {
             return invalid(&format!("guide_id must match Workout Guide catalog: {guide}"));
+        }
+        if let Some(muscle) = &self.muscle
+            && !muscles().contains(muscle.as_str())
+        {
+            return invalid(&format!(
+                "muscle must be one of: {}",
+                muscles().into_iter().collect::<Vec<_>>().join(", ")
+            ));
         }
         if self.working_sets <= 0
             || self.rep_min <= 0
@@ -138,13 +259,18 @@ impl ExerciseSpec {
         if self.rep_min > self.rep_max {
             return invalid("Rep minimum exceeds maximum");
         }
-        match (self.measure, self.minutes) {
-            (Measure::Time, Some(m)) if m.is_finite() && m > 0.0 => {}
-            (Measure::Time, _) => return invalid(&format!("{} is timed: pass minutes (per set) > 0", self.name)),
-            (Measure::Reps, Some(_)) => {
-                return invalid(&format!("{}: minutes is only for measure \"time\"", self.name));
+        // Each block measure has its own per-set target, and only that one.
+        let targets = [
+            (Measure::Time, self.minutes, "minutes", "time", "timed"),
+            (Measure::Distance, self.meters, "meters", "distance", "done for distance"),
+        ];
+        for (measure, value, field, label, done) in targets {
+            match (self.measure == measure, value) {
+                (true, Some(v)) if v.is_finite() && v > 0.0 => {}
+                (true, _) => return invalid(&format!("{} is {done}: pass {field} (per set) > 0", self.name)),
+                (false, Some(_)) => return invalid(&format!("{}: {field} is only for measure \"{label}\"", self.name)),
+                (false, None) => {}
             }
-            (Measure::Reps, None) => {}
         }
         Ok(())
     }
@@ -152,6 +278,10 @@ impl ExerciseSpec {
     /// Length of one working set of a timed exercise.
     pub fn set_seconds(&self) -> Option<i64> {
         self.minutes.filter(|_| self.measure == Measure::Time).map(|m| (m * 60.0).round() as i64)
+    }
+
+    pub fn kind(&self) -> SetKind {
+        SetKind { load: self.load, per_side: self.per_side }
     }
 }
 
@@ -234,23 +364,26 @@ impl Template {
     }
 }
 
-/// Owner templates need a catalog guide_id on every exercise, so every card has an image.
-pub fn require_illustrations(template: &Template) -> Result<()> {
-    let missing: Vec<&str> = template
+/// Warning for exercises saved without a guide_id, with their closest catalog matches. They are
+/// allowed: the card shows the closest picture meanwhile and the exercise is on the missing-pictures
+/// list. The agent asks the owner once whether one of the matches is what they meant.
+pub fn missing_pictures(template: &Template) -> Option<String> {
+    let missing: Vec<String> = template
         .exercises
         .iter()
         .chain(&template.alternatives)
         .filter(|s| s.guide_id.is_none())
-        .map(|s| s.name.as_str())
+        .map(|s| {
+            let options: Vec<String> = search(&s.name, None, None, 3).into_iter().map(|e| e.guide_id).collect();
+            format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
+        })
         .collect();
-    if !missing.is_empty() {
-        crate::bail!(
-            "ILLUSTRATION_REQUIRED",
-            "Set guide_id (closest match from catalog search) for: {}",
-            missing.join(", ")
-        );
-    }
-    Ok(())
+    (!missing.is_empty()).then(|| {
+        format!(
+            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template_edit_exercise (keep id and name); otherwise set its muscle.",
+            missing.join("; ")
+        )
+    })
 }
 
 pub fn import_template(db: &Connection, template: &Template) -> Result<Value> {
@@ -292,8 +425,30 @@ pub fn remember_swap(
 ) -> Result<bool> {
     let Ok(template) = get_template(db, template_id) else { return Ok(false) };
     let Some(index) = template.exercises.iter().position(|e| e.id == original_id) else { return Ok(false) };
+    let updated = swapped(&template, index, replacement);
+    if updated.validate().is_err() {
+        return Ok(false);
+    }
+    import_template(db, &updated)?;
+    Ok(true)
+}
+
+/// `replacement` in exercise `index`'s slot (sets, reps, rest, role, order and superset group stay the
+/// slot's), the original kept as an alternative one swap away, dependencies following the new id. A
+/// first primary lift keeps a warm-up: half the new weight on the plate steps.
+pub fn swapped(template: &Template, index: usize, replacement: &ExerciseSpec) -> Template {
     let original = template.exercises[index].clone();
+    let original_id = original.id.as_str();
+    let warmup = |r: &ExerciseSpec| {
+        r.warmup_weight.or_else(|| {
+            original
+                .warmup_weight
+                .filter(|_| r.measure == Measure::Reps)
+                .map(|_| (r.target_weight / 2.0 / r.increment).floor() * r.increment)
+        })
+    };
     let new = ExerciseSpec {
+        warmup_weight: warmup(replacement),
         role: original.role.clone(),
         primary: original.primary,
         working_sets: original.working_sets,
@@ -303,11 +458,12 @@ pub fn remember_swap(
         priority: original.priority,
         requires_completed: original.requires_completed.clone(),
         substitutes: vec![original_id.into()],
+        group: original.group.clone(),
         ..replacement.clone()
     };
     let mut alternatives: Vec<ExerciseSpec> =
         template.alternatives.iter().filter(|a| a.id != replacement.id && a.id != original_id).cloned().collect();
-    alternatives.push(ExerciseSpec { substitutes: vec![], requires_completed: vec![], ..original });
+    alternatives.push(ExerciseSpec { substitutes: vec![], requires_completed: vec![], ..original.clone() });
     let mut exercises: Vec<ExerciseSpec> = template
         .exercises
         .iter()
@@ -322,12 +478,7 @@ pub fn remember_swap(
         })
         .collect();
     exercises[index] = new;
-    let updated = Template { exercises, alternatives, ..template };
-    if updated.validate().is_err() {
-        return Ok(false);
-    }
-    import_template(db, &updated)?;
-    Ok(true)
+    Template { exercises, alternatives, ..template.clone() }
 }
 
 pub enum ExerciseEdit<'a> {
@@ -392,18 +543,36 @@ pub fn edit_exercise(
     match edit {
         ExerciseEdit::Add(changes) => {
             let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
-            let Some(item) = item else {
-                let options: Vec<String> =
-                    search(exercise, None, None, 5).iter().map(|o| format!("{} ({})", o.guide_id, o.name)).collect();
-                let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
-                crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{exercise}'. Pass one guide_id: {options}");
+            let mut spec = match item {
+                Some(item) => {
+                    let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
+                    if timed(Some(&item.slug)) {
+                        // Cardio machines and holds are done for time unless the fields say otherwise.
+                        spec["measure"] = serde_json::json!(Measure::Time);
+                        spec["working_sets"] = serde_json::json!(1);
+                    }
+                    if default_load(&item.slug) == Load::Assisted {
+                        spec["load"] = serde_json::json!(Load::Assisted);
+                    }
+                    spec
+                }
+                // The owner's own exercise, kept under their name without a picture (#101); the agent
+                // names its muscle, since nothing else knows it.
+                None if changes.contains_key("id") && changes.contains_key("muscle") => {
+                    serde_json::json!({"name": exercise.trim(), "role": "accessory", "target_weight": 0})
+                }
+                None => {
+                    let options: Vec<String> = search(exercise, None, None, 5)
+                        .iter()
+                        .map(|o| format!("{} ({})", o.guide_id, o.name))
+                        .collect();
+                    let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
+                    crate::bail!(
+                        "EXERCISE_UNKNOWN",
+                        "No exact match for '{exercise}'. Pass one guide_id: {options}; or, to keep the owner's name without a picture, pass fields.id and fields.muscle"
+                    );
+                }
             };
-            let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
-            if timed(Some(&item.slug)) {
-                // Cardio machines and holds are done for time unless the fields say otherwise.
-                spec["measure"] = serde_json::json!(Measure::Time);
-                spec["working_sets"] = serde_json::json!(1);
-            }
             spec.as_object_mut().unwrap().extend(changes.clone());
             // Exercises are told apart by id; the guide_id only picks the picture, so two machine
             // variants can share one.
@@ -434,9 +603,13 @@ pub fn edit_exercise(
             let Some(i) = find(rows)? else { return not_found() };
             let row = rows[i].as_object_mut().unwrap();
             row.extend(changes.clone());
-            if row.get("measure") == Some(&serde_json::json!(Measure::Reps)) && !changes.contains_key("minutes") {
-                // Back to reps: the time target goes with the time measure.
-                row.remove("minutes");
+            // A new measure drops the other measure's target (back to reps: the time goes with it).
+            if let Some(measure) = changes.get("measure") {
+                for (field, owner) in [("minutes", Measure::Time), ("meters", Measure::Distance)] {
+                    if *measure != serde_json::json!(owner) && !changes.contains_key(field) {
+                        row.remove(field);
+                    }
+                }
             }
             let id = rows[i]["id"].as_str().unwrap_or_default().to_string();
             if let Some(at) = position {
@@ -562,6 +735,22 @@ mod tests {
             (named["exercises"][0]["target_weight"].as_f64(), named["exercises"][5]["target_weight"].as_f64()),
             (Some(85.0), Some(60.0))
         );
+        // No catalog match: an error with the closest matches, or the owner's name kept without a picture.
+        let unknown = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
+        assert_eq!(unknown.code(), "EXERCISE_UNKNOWN");
+        let unnamed = object(json!({"id": "zottman"}));
+        let unnamed = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&unnamed), None).unwrap_err();
+        assert!(unnamed.to_string().contains("fields.muscle"), "{unnamed}");
+        let wrong = object(json!({"id": "zottman", "muscle": "Forearm-ish"}));
+        assert!(edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&wrong), None).is_err());
+        let own = object(json!({"id": "zottman", "muscle": "Biceps"}));
+        let kept = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&own), None).unwrap();
+        let zottman = kept["exercises"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            (zottman["name"].as_str(), zottman.get("guide_id"), zottman["muscle"].as_str()),
+            (Some("Zottman curl"), Some(&Value::Null), Some("Biceps"))
+        );
+        edit_exercise(&db, "upper-a", "zottman", ExerciseEdit::Remove, None).unwrap();
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));
         let missing = edit_exercise(&db, "upper-a", "squat", ExerciseEdit::Change(&Map::new()), None).unwrap_err();

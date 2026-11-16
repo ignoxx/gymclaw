@@ -4,6 +4,7 @@
 # dependencies = ["numpy", "scipy", "scikit-image", "pillow"]
 # ///
 """Draw a missing exercise picture in the Workout Guide style. Walkthrough: docs/illustrations.md.
+Which exercises need one: `gymclaw illustrations missing`.
 
   scripts/new-illustration draw <slug> "<what the picture shows>" [--like a,b,c] [-n 2]
   scripts/new-illustration clean <slug> <png>… [--like a,b,c] [--frames]

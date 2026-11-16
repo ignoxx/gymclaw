@@ -232,7 +232,7 @@ impl Telegram for Bot {
     async fn updates(&self, offset: i64, timeout_secs: u64) -> Result<Vec<Update>> {
         self.call(
             "getUpdates",
-            json!({"offset": offset, "timeout": timeout_secs, "allowed_updates": ["message", "callback_query"]}),
+            json!({"offset": offset, "timeout": timeout_secs, "allowed_updates": ["message", "callback_query", "message_reaction"]}),
         )
         .await
     }

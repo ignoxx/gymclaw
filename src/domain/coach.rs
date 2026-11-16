@@ -19,14 +19,15 @@ use crate::domain::audit;
 use crate::domain::core::mutate;
 use crate::domain::crowd::{LABELS, record_feedback};
 use crate::domain::highlights::{self, Change};
-use crate::domain::illustrations::{bodyweight, catalog, timed};
+use crate::domain::illustrations::{catalog, timed};
 use crate::domain::profile::update_profile;
-use crate::domain::set_parser::{SetInput, parse_duration, parse_set};
-use crate::domain::templates::{Measure, remember_swap};
+use crate::domain::set_parser::{SetInput, parse_block, parse_set};
+use crate::domain::templates::{Load, Measure, SetKind, remember_swap};
 use crate::domain::view::{Button, Card, CardKind, Cleanup, CoachView, Edit};
 use crate::domain::workout::{
-    self, active_workout, cut_rest, exercises, expected_weight, format_target, format_time, g, guide_id, log_set, logs,
-    measure, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved, working_count,
+    self, active_workout, cut_rest, exercises, expected_weight, format_distance, format_time, g, guide_id, kind,
+    log_set, logs, measure, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved,
+    working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -37,15 +38,6 @@ fn button(text: impl Into<String>, parts: &[&str]) -> Result<Button> {
         crate::bail!("CALLBACK_TOO_LONG", "Telegram callback data exceeds 64 bytes");
     }
     Ok(Button { text: text.into(), data })
-}
-
-fn kg(weight: f64) -> String {
-    format!("{} kg", g(weight))
-}
-
-/// A set the way the owner says it: reps first, '10 × 40 kg' ('12 reps' for bodyweight).
-fn done(reps: i64, weight: f64) -> String {
-    if weight != 0.0 { format!("{reps} × {}", kg(weight)) } else { format!("{reps} reps") }
 }
 
 fn card(text: String, buttons: Vec<Vec<Button>>) -> Card {
@@ -108,8 +100,10 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
         };
         let target = if active.measure == Measure::Time {
             active.seconds.map_or("timed".into(), format_time)
+        } else if active.measure == Measure::Distance {
+            active.meters.map_or("distance".into(), format_distance)
         } else if weight > 0.0 {
-            kg(weight)
+            active.kind().weight(weight)
         } else if active.bodyweight {
             "Bodyweight".into()
         } else {
@@ -132,9 +126,10 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     }
     let head =
         format!("**{}**{}", active.name, active.primary_muscle.as_ref().map(|m| format!(" · {m}")).unwrap_or_default());
+    let set_kind = active.kind();
     let (lines, mut buttons) = if active.set_type == SetType::Warmup {
         (
-            vec![head, format!("Warm-up · {}", format_target(active.rep_min, active.rep_max, active.target_weight))],
+            vec![head, format!("Warm-up · {}", set_kind.target(active.rep_min, active.rep_max, active.target_weight))],
             vec![
                 vec![button("✅ Warm-up done", &["warm", r])?, button("Skip warm-up", &["nowarm", r])?],
                 vec![button("🔄 Swap", &["swap", r])?],
@@ -147,31 +142,42 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
             // One tap logs the planned time; any other time is typed.
             let step = if active.working_sets > 1 { format!("{set_line} · ") } else { String::new() };
             if let Some(seconds) = active.seconds {
-                lines.push(format!("{step}⏱ {}", format_time(seconds)));
+                let time = set_kind.reps(&format_time(seconds));
+                lines.push(format!("{step}⏱ {time}"));
                 lines.push("✍️ Other time? Reply it, e.g. `30 min`".into());
-                buttons.push(vec![button(format!("✅ {}", format_time(seconds)), &["time", r, &seconds.to_string()])?]);
+                buttons.push(vec![button(format!("✅ {time}"), &["time", r, &seconds.to_string()])?]);
             } else {
                 lines.push(format!("{step}⏱ **? min**"));
                 lines.push("✍️ **Reply the time:** `25 min`".into());
             }
+        } else if active.measure == Measure::Distance {
+            // Same as a time: one tap logs the planned distance.
+            let step = if active.working_sets > 1 { format!("{set_line} · ") } else { String::new() };
+            if let Some(meters) = active.meters {
+                lines.push(format!("{step}📏 {}", format_distance(meters)));
+                lines.push("✍️ Other distance? Reply it, e.g. `2.5 km`".into());
+                let label = format!("✅ {}", format_distance(meters));
+                buttons.push(vec![button(label, &["dist", r, &g(meters)])?]);
+            } else {
+                lines.push(format!("{step}📏 **? m**"));
+                lines.push("✍️ **Reply the distance:** `2 km`".into());
+            }
         } else if let Some((weight, reps)) = next_set(db, row, active.bodyweight)? {
-            lines.push(format!("{set_line} · {}", format_target(active.rep_min, active.rep_max, weight)));
-            buttons
-                .push(vec![button(format!("✅ {}", done(reps, weight)), &["log", r, &g(weight), &reps.to_string()])?]);
+            lines.push(format!("{set_line} · {}", set_kind.target(active.rep_min, active.rep_max, weight)));
+            let label = format!("✅ {}", set_kind.set(weight, reps, None, None));
+            buttons.push(vec![button(label, &["log", r, &g(weight), &reps.to_string()])?]);
         } else {
             // Unknown weight: the gap is the headline and the reply format is impossible to miss.
             let guess = guess_set(db, row, active.rep_min)?;
             let example =
                 guess.as_ref().map_or(format!("{}x40", active.rep_min), |(w, reps, _)| format!("{reps}x{}", g(*w)));
-            let reps = format_target(active.rep_min, active.rep_max, 0.0);
-            lines.push(format!("{set_line} · {} × **? kg**", reps.trim_end_matches(" reps")));
+            let reps = set_kind.target(active.rep_min, active.rep_max, 0.0);
+            lines.push(format!("{set_line} · {} × **? {}**", reps.trim_end_matches(" reps"), set_kind.unit()));
             lines.push(format!("✍️ **Reply reps × weight:** `{example}`"));
             if let Some((weight, reps, source)) = guess {
                 lines.push(format!("💡 Guess from {source}"));
-                buttons.push(vec![button(
-                    format!("✅ {}?", done(reps, weight)),
-                    &["log", r, &g(weight), &reps.to_string()],
-                )?]);
+                let label = format!("✅ {}?", set_kind.set(weight, reps, None, None));
+                buttons.push(vec![button(label, &["log", r, &g(weight), &reps.to_string()])?]);
             }
         }
         // Swap only before the first set: once the owner is on the machine it isn't taken.
@@ -235,21 +241,36 @@ fn tonnes(kg: f64) -> String {
 }
 
 /// One exercise's working sets for the details quote: "Bench 85 kg: 8 · 8 · 7" when the weight held,
-/// else "Bench 8 × 85 · 7 × 82.5 kg"; "Dips 15 · 12 reps" for bodyweight; "Cycling 25 min" when timed.
-fn sets_line(name: &str, sets: &[Value]) -> String {
-    let times: Vec<String> = sets.iter().filter_map(|s| s["seconds"].as_i64()).map(format_time).collect();
-    if !times.is_empty() {
-        return format!("{name} {}", times.join(" · "));
+/// else "Bench 8 × 85 · 7 × 82.5 kg"; "Dips 15 · 12 reps" for bodyweight; "Cycling 25 min" when timed,
+/// "Rower 2 km" for distance. Added and assisted weights read "+10 kg" and "20 kg assist".
+fn sets_line(name: &str, set_kind: SetKind, sets: &[Value]) -> String {
+    let blocks: Vec<String> = sets
+        .iter()
+        .filter(|s| s["seconds"].is_i64() || s["meters"].is_f64())
+        .map(|s| set_kind.set(0.0, 0, s["seconds"].as_i64(), s["meters"].as_f64()))
+        .collect();
+    if !blocks.is_empty() {
+        return format!("{name} {}", blocks.join(" · "));
     }
     let pairs: Vec<(f64, i64)> =
         sets.iter().map(|s| (s["weight"].as_f64().unwrap_or(0.0), s["reps"].as_i64().unwrap_or(0))).collect();
-    let reps = |pairs: &[(f64, i64)]| pairs.iter().map(|(_, r)| r.to_string()).collect::<Vec<_>>().join(" · ");
+    let reps =
+        |pairs: &[(f64, i64)]| pairs.iter().map(|(_, r)| set_kind.reps(&r.to_string())).collect::<Vec<_>>().join(" · ");
     match pairs.first() {
-        Some((w, _)) if pairs.iter().all(|(x, _)| x == w) && *w == 0.0 => format!("{name} {} reps", reps(&pairs)),
-        Some((w, _)) if pairs.iter().all(|(x, _)| x == w) => format!("{name} {}: {}", kg(*w), reps(&pairs)),
+        Some((w, _)) if pairs.iter().all(|(x, _)| x == w) && *w == 0.0 => {
+            format!("{name} {}{}", reps(&pairs), if set_kind.per_side { "" } else { " reps" })
+        }
+        Some((w, _)) if pairs.iter().all(|(x, _)| x == w) => {
+            format!("{name} {}: {}", set_kind.weight(*w), reps(&pairs))
+        }
         _ => format!(
-            "{name} {} kg",
-            pairs.iter().map(|(w, r)| format!("{r} × {}", g(*w))).collect::<Vec<_>>().join(" · ")
+            "{name} {} {}",
+            pairs
+                .iter()
+                .map(|(w, r)| format!("{} × {}", set_kind.reps(&r.to_string()), set_kind.number(*w)))
+                .collect::<Vec<_>>()
+                .join(" · "),
+            set_kind.unit()
         ),
     }
 }
@@ -308,28 +329,46 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
     for (name, seconds) in &h.timed {
         lines.push(format!("⏱ **{name}** {}", format_time(*seconds)));
     }
+    for (name, meters) in &h.distances {
+        lines.push(format!("📏 **{name}** {}", format_distance(*meters)));
+    }
     for lift in &h.lifts {
-        let set = done(lift.reps, lift.weight);
+        let set = lift.kind.set(lift.weight, lift.reps, None, None);
+        let (heaviest, heavier) =
+            if lift.kind.load == Load::Assisted { ("least help ever", "less help") } else { ("heaviest ever", "was") };
         lines.push(match lift.change {
-            Change::WeightRecord(was) => format!("🏆 **{} {set}** · heaviest ever (was {})", lift.name, g(was)),
+            Change::WeightRecord(was) => {
+                format!("🏆 **{} {set}** · {heaviest} (was {})", lift.name, lift.kind.number(was))
+            }
             Change::RepRecord(was) if lift.weight == 0.0 => {
                 format!("🏆 **{} {set}** · most ever (was {was})", lift.name)
             }
             Change::RepRecord(was) => {
-                format!("🏆 **{} {set}** · most reps at {} kg (was {was})", lift.name, g(lift.weight))
+                format!("🏆 **{} {set}** · most reps at {} (was {was})", lift.name, lift.kind.weight(lift.weight))
             }
-            Change::Heavier(was) => format!("↑ {} {set} (was {})", lift.name, g(was)),
+            Change::Heavier(was) if lift.kind.load == Load::Assisted => {
+                format!("↑ {} {set} ({heavier}, was {})", lift.name, lift.kind.number(was))
+            }
+            Change::Heavier(was) => format!("↑ {} {set} ({heavier} {})", lift.name, lift.kind.number(was)),
             Change::MoreReps(was) => format!("↑ {} {set} (+{} reps)", lift.name, lift.reps - was),
         });
     }
     let exercises = report["exercises"].as_array().cloned().unwrap_or_default();
     let progressions = report["progressions"].as_array().cloned().unwrap_or_default();
+    // How each exercise's sets read, by its workout row.
+    let kinds: Vec<SetKind> = exercises
+        .iter()
+        .map(|e| {
+            Ok(WorkoutExercise::get(db, e["id"].as_str().unwrap_or_default())?.map(|r| kind(&r)).unwrap_or_default())
+        })
+        .collect::<Result<_>>()?;
     let targets: Vec<String> = exercises
         .iter()
         .zip(&progressions)
-        .filter(|(_, p)| p["progressed"].as_bool() == Some(true))
-        .map(|(e, p)| {
-            format!("{} {}", e["name"].as_str().unwrap_or_default(), kg(p["next_weight"].as_f64().unwrap_or(0.0)))
+        .zip(&kinds)
+        .filter(|((_, p), _)| p["progressed"].as_bool() == Some(true))
+        .map(|((e, p), k)| {
+            format!("{} {}", e["name"].as_str().unwrap_or_default(), k.weight(p["next_weight"].as_f64().unwrap_or(0.0)))
         })
         .collect();
     if !targets.is_empty() {
@@ -347,13 +386,13 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
         standing += &format!(" · next: {next}");
     }
     lines.push(standing);
-    for e in &exercises {
+    for (e, set_kind) in exercises.iter().zip(kinds) {
         let name = e["name"].as_str().unwrap_or_default();
         let sets = e["sets"].as_array().cloned().unwrap_or_default();
         if e["status"] == "SKIPPED" && sets.is_empty() {
             lines.push(format!(">> ~~{name}~~ skipped"));
         } else if !sets.is_empty() {
-            lines.push(format!(">> {}", sets_line(name, &sets)));
+            lines.push(format!(">> {}", sets_line(name, set_kind, &sets)));
         }
     }
     lines.push("How busy was the gym?".into());
@@ -431,10 +470,11 @@ pub fn card_context(db: &Connection, telegram_message_id: i64) -> Result<Option<
         let card = if meta["card"] == "finish" { "finish card" } else { "card" };
         return Ok(Some(format!("the {card} of {about}")));
     };
+    let shown = kind(&exercise);
     let sets: Vec<String> = logs(db, &exercise.id, None)?
         .iter()
         .map(|s| {
-            let set = s.seconds.map_or_else(|| done(s.reps, s.weight), format_time);
+            let set = shown.set(s.weight, s.reps, s.seconds, s.meters);
             let warmup = if s.set_type == SetType::Warmup { "warm-up " } else { "" };
             format!("{}. {warmup}{set} (set_id {})", s.set_number, s.id)
         })
@@ -452,7 +492,7 @@ fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
     Ok(vec![exercise_card(db, workout_id, now)?])
 }
 
-/// Typed text during a workout ("10x40", "25 min"). `handled: false` when it isn't a set; the agent gets it.
+/// Typed text during a workout ("10x40", "25 min", "2 km"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
     let Some(workout) =
         active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting))
@@ -460,36 +500,38 @@ pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Re
         return Ok(CoachView::default());
     };
     let active = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
-    if let Some(row) = &active {
-        // A time only counts on a timed exercise, or a catalog cardio machine still stored as reps (the
-        // first set decides): on a lift, "5 min" is talk, not a set.
-        let is_timed = measure(row) == Measure::Time;
-        let catalog_timed = timed(guide_id(row)) && working_count(db, &row.id)? == 0;
-        match parse_duration(text) {
-            Some(seconds) if is_timed || catalog_timed => {
-                log_set(db, &workout.id, &SetInput::timed(seconds), now, request_id)?;
-                return Ok(CoachView {
-                    react: Some("👍".into()),
-                    ..acked(format!("✅ {}", format_time(seconds)), after_change(db, &workout.id, now, request_id)?)
-                });
+    let set_kind = active.as_ref().map(kind).unwrap_or_default();
+    let value = match &active {
+        // A time or distance counts on an exercise done for one, or a catalog cardio machine still stored
+        // as reps; until its first set either one goes (it decides): on a lift, "5 min" is talk, not a set.
+        Some(row) => {
+            let measured = measure(row);
+            let fresh = working_count(db, &row.id)? == 0;
+            match parse_block(text, measured) {
+                Some(value) if (measured != Measure::Reps || timed(guide_id(row))) && fresh => Some(value),
+                Some(value) if value.measure() == measured => Some(value),
+                _ if measured != Measure::Reps => return Ok(CoachView::default()),
+                _ => None,
             }
-            _ if is_timed => return Ok(CoachView::default()),
-            _ => {}
         }
-    }
-    let is_bodyweight = active.as_ref().is_some_and(|a| bodyweight(guide_id(a)));
-    let parsed = expected_weight(db, &workout.id)
-        .and_then(|expected| parse_set(text, SetType::Working, expected, is_bodyweight));
-    let value = match parsed {
-        Ok(value) => value,
-        Err(Error::Domain { .. }) => return Ok(CoachView::default()),
-        Err(other) => return Err(other),
+        None => None,
+    };
+    let value = match value {
+        Some(value) => value,
+        None => {
+            let reps_alone = active.as_ref().is_some_and(workout::reps_alone);
+            let parsed = expected_weight(db, &workout.id)
+                .and_then(|expected| parse_set(text, SetType::Working, expected, reps_alone));
+            match parsed {
+                Ok(value) => value,
+                Err(Error::Domain { .. }) => return Ok(CoachView::default()),
+                Err(other) => return Err(other),
+            }
+        }
     };
     log_set(db, &workout.id, &value, now, request_id)?;
-    Ok(CoachView {
-        react: Some("👍".into()),
-        ..acked(format!("✅ {}", done(value.reps, value.weight)), after_change(db, &workout.id, now, request_id)?)
-    })
+    let ack = format!("✅ {}", set_kind.set(value.weight, value.reps, value.seconds, value.meters));
+    Ok(CoachView { react: Some("👍".into()), ..acked(ack, after_change(db, &workout.id, now, request_id)?) })
 }
 
 fn invalid(message: &str) -> Error {
@@ -532,41 +574,29 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
     let next = |ack: Option<String>| -> Result<CoachView> {
         Ok(CoachView { ack, cards: after_change(db, id, now, request_id)?, ..handled() })
     };
+    let set_kind = kind(&row);
     match action {
         "log" => {
             let weight: f64 = arg(1)?.parse().map_err(|_| invalid("Bad weight"))?;
             let reps: i64 = arg(2)?.parse().map_err(|_| invalid("Bad reps"))?;
-            log_set(
-                db,
-                id,
-                &SetInput { weight, reps, set_type: SetType::Working, rir: None, seconds: None },
-                now,
-                request_id,
-            )?;
-            next(Some(format!("✅ {}", done(reps, weight))))
+            log_set(db, id, &SetInput::reps(weight, reps, SetType::Working), now, request_id)?;
+            next(Some(format!("✅ {}", set_kind.set(weight, reps, None, None))))
         }
         "time" => {
             let seconds: i64 = arg(1)?.parse().map_err(|_| invalid("Bad seconds"))?;
             log_set(db, id, &SetInput::timed(seconds), now, request_id)?;
-            next(Some(format!("✅ {}", format_time(seconds))))
+            next(Some(format!("✅ {}", set_kind.set(0.0, 0, Some(seconds), None))))
+        }
+        "dist" => {
+            let meters: f64 = arg(1)?.parse().map_err(|_| invalid("Bad distance"))?;
+            log_set(db, id, &SetInput::distance(meters), now, request_id)?;
+            next(Some(format!("✅ {}", format_distance(meters))))
         }
         "warm" => {
             let target = workout::state(db, id, now)?
                 .active_exercise
                 .ok_or_else(|| Error::domain("NO_ACTIVE_EXERCISE", "No active exercise"))?;
-            log_set(
-                db,
-                id,
-                &SetInput {
-                    weight: target.target_weight,
-                    reps: target.rep_max,
-                    set_type: SetType::Warmup,
-                    rir: None,
-                    seconds: None,
-                },
-                now,
-                request_id,
-            )?;
+            log_set(db, id, &SetInput::reps(target.target_weight, target.rep_max, SetType::Warmup), now, request_id)?;
             next(Some("✅ Warm-up".into()))
         }
         "nowarm" => {
@@ -1094,7 +1124,8 @@ mod tests {
         handle_tap(&db, &data(&live(&db, at(110)), "⏭ Next exercise"), at(112), "cb-1").unwrap();
         handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
-        let fixed = crate::domain::audit::correct_set(&db, &set.id, Some(95.0), None, None, at(700), "fix").unwrap();
+        let fixed =
+            crate::domain::audit::correct_set(&db, &set.id, Some(95.0), None, None, None, at(700), "fix").unwrap();
         assert_eq!(
             (fixed["data"]["before"]["weight"].as_f64(), fixed["data"]["next_weight"].as_f64()),
             (Some(90.0), Some(95.0))
@@ -1208,8 +1239,82 @@ mod tests {
         }
     }
 
+    fn plan(db: &Connection, exercises: Vec<Value>) {
+        let template = Template {
+            id: "plan".into(),
+            name: "Plan".into(),
+            exercises: exercises.into_iter().map(spec).collect(),
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(db, &template).unwrap();
+        start(db, Some("plan"), None, false, at(0), "start").unwrap();
+    }
+
     #[test]
-    fn one_rest_duration_overrides_per_exercise_settings() {
+    fn a_superset_alternates_and_rests_after_the_round() {
+        let db = db();
+        plan(
+            &db,
+            vec![
+                json!({"id": "row", "name": "Cable row", "role": "row", "guide_id": "single-arm-cable-row", "working_sets": 2, "target_weight": 50, "group": "A"}),
+                json!({"id": "press", "name": "Shoulder press", "role": "press", "guide_id": "machine-shoulder-press", "working_sets": 2, "target_weight": 30, "group": "A"}),
+                json!({"id": "fly", "name": "Cable fly", "role": "fly", "guide_id": "cable-fly", "working_sets": 2, "target_weight": 20}),
+            ],
+        );
+        // Row, straight to press with no rest, then rest before the second round's row.
+        let next = handle_text(&db, "10x50", at(10), "m1").unwrap().cards.remove(0);
+        assert_eq!((next.kind, next.rest_until), (CardKind::Set, None), "{}", next.text);
+        assert!(next.text.starts_with("**Shoulder press**"), "{}", next.text);
+        let rest = handle_text(&db, "10x30", at(20), "m2").unwrap().cards.remove(0);
+        assert_eq!(rest.kind, CardKind::Rest);
+        assert!(rest.text.contains("**Cable row** set 2/2"), "{}", rest.text);
+        handle_rest_over(&db, at(200)).unwrap();
+        handle_text(&db, "10x50", at(210), "m3").unwrap();
+        // The group's last set leads to the next exercise after rest, like any finished exercise.
+        let after = handle_text(&db, "10x30", at(220), "m4").unwrap().cards.remove(0);
+        assert_eq!(after.kind, CardKind::Rest);
+        assert!(after.text.contains("**Cable fly**"), "{}", after.text);
+    }
+
+    #[test]
+    fn an_assisted_machine_progresses_to_less_help() {
+        let db = db();
+        plan(
+            &db,
+            vec![
+                json!({"id": "chin", "name": "Assisted chin-up", "role": "pull", "working_sets": 2, "rep_max": 10, "target_weight": 30, "load": "assisted"}),
+            ],
+        );
+        handle_text(&db, "10x30", at(10), "m1").unwrap();
+        handle_rest_over(&db, at(200)).unwrap();
+        // The last set finishes the workout, which sets the next target.
+        handle_text(&db, "10x30", at(210), "m2").unwrap();
+        assert_eq!(ExerciseProgression::get(&db, "chin").unwrap().unwrap().next_weight, 27.5);
+    }
+
+    /// Progressed to no help: the next workout offers 0 kg assist, not last time's help.
+    #[test]
+    fn an_assisted_machine_down_to_no_help_offers_none() {
+        let db = db();
+        plan(
+            &db,
+            vec![
+                json!({"id": "chin", "name": "Assisted chin-up", "role": "pull", "working_sets": 1, "rep_max": 10, "target_weight": 2.5, "load": "assisted"}),
+            ],
+        );
+        handle_text(&db, "10x2.5", at(10), "m1").unwrap();
+        assert_eq!(ExerciseProgression::get(&db, "chin").unwrap().unwrap().next_weight, 0.0);
+        start(&db, Some("plan"), None, false, at(4000), "again").unwrap();
+        let workout = active_workout(&db).unwrap().unwrap();
+        let chin = exercises(&db, &workout.id).unwrap().remove(0);
+        assert_eq!(crate::domain::workout::next_working_set(&db, &chin).unwrap(), Some((0.0, chin.rep_min)));
+    }
+
+    #[test]
+    fn exercise_rest_overrides_the_default_rest() {
         use crate::domain::{compression::compress_template, profile::get_profile};
         let db = db();
         push(&db);
@@ -1224,12 +1329,13 @@ mod tests {
         import_template(&db, &template).unwrap();
         let result = start(&db, Some("push"), None, false, at(2), "restart").unwrap();
         let workout = active_workout(&db).unwrap().unwrap();
-        assert!(exercises(&db, &workout.id).unwrap().iter().all(|row| row.rest_seconds == 120));
+        let rests: Vec<i64> = exercises(&db, &workout.id).unwrap().iter().map(|row| row.rest_seconds).collect();
+        assert_eq!(rests[..3], [180, 60, 120], "an override wins; no override is the owner's one rest");
         let planned = compress_template(&template, &get_profile(&db).unwrap(), 3600).unwrap();
         let eta = Ts::parse(result["data"]["eta"].as_str().unwrap(), None).unwrap();
         assert_eq!(planned["estimated_duration_seconds"].as_i64().unwrap() as f64, (eta - at(2)).as_secs_f64());
         let rest = handle_text(&db, "10x90", at(10), "m1").unwrap().cards.remove(0);
-        assert_eq!(rest.rest_until, Some(at(130)));
+        assert_eq!(rest.rest_until, Some(at(190)));
     }
 
     #[test]
@@ -1380,10 +1486,10 @@ mod tests {
         let mixed = audit::add_set(&db, &id, "cycling", "10x40", at(7201), "mixed").unwrap_err();
         assert!(mixed.to_string().contains("logged as a time"), "{mixed}");
         let set_id = fixed["set_id"].as_str().unwrap();
-        let corrected = audit::correct_set(&db, set_id, None, None, Some(1560), at(7202), "fix-time").unwrap();
+        let corrected = audit::correct_set(&db, set_id, None, None, Some(1560), None, at(7202), "fix-time").unwrap();
         assert_eq!(corrected["data"]["after"]["seconds"], 1560);
         assert_eq!(
-            audit::correct_set(&db, set_id, Some(40.0), None, None, at(7203), "kg").unwrap_err().code(),
+            audit::correct_set(&db, set_id, Some(40.0), None, None, None, at(7203), "kg").unwrap_err().code(),
             "INVALID_SET"
         );
     }

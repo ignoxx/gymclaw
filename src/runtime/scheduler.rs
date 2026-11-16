@@ -1,8 +1,8 @@
 //! In-process clocks.
 //!
 //! - Ticks: `watch` every 60 s, `weekly` Sunday ≥ 23:00 profile-local (once per week), `poll_crowd`
-//!   every 15 min when enabled, `publish` after ticks when calendar writes are enabled. Then the
-//!   outbox sends whatever the ticks queued.
+//!   every 15 min when enabled, `publish` after ticks when calendar writes are enabled, and the agent's
+//!   own triggers (`extensions::fire_due`). Then the outbox sends whatever the ticks queued.
 //! - Jobs: one loop sleeps until the next `notification_job` is due (or a wake-up after a write) and
 //!   fires it like `runtime fire`. REST jobs fire 30 s late: the coach countdown normally closes them.
 //!
@@ -16,7 +16,7 @@ use jiff::{SignedDuration, ToSpan};
 use serde_json::json;
 use tokio::sync::{Mutex, Notify};
 
-use super::{Health, blocking, outbox};
+use super::{Health, blocking, in_tx, outbox};
 use crate::db::models::{AgentEvent, JobKind, NotificationJob};
 use crate::domain::core::emit;
 use crate::domain::{profile, ticks};
@@ -117,6 +117,9 @@ impl Scheduler {
             Ok(data)
         });
         note(watch.await, "watch");
+        // The agent's own triggers queue wake events; the agent worker picks them up within a minute.
+        let triggers = in_tx(&self.db_path, |db| crate::domain::extensions::fire_due(db, Ts::now()).map(|n| json!(n)));
+        note(triggers.await, "triggers");
         // Commits per step (plan, publish, review event), so no outer transaction.
         note(blocking(&self.db_path, |db| weekly_if_due(db, Ts::now())).await, "weekly");
         // The bot sends the recap as soon as the agent's review turn ends; this covers a review that

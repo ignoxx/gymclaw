@@ -9,7 +9,8 @@ use crate::db::models::{BlockKind, OnboardingState, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
 use crate::domain::{
-    availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling, weekly,
+    activities, availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling,
+    weekly,
 };
 use crate::error::Result;
 use crate::providers::google::google_provider;
@@ -86,11 +87,14 @@ pub struct GetWeek {
 
 impl Tool for GetWeek {
     const NAME: &'static str = "get_week";
-    const DESCRIPTION: &'static str =
-        "All planned sessions of a week (any status) with times, workout and crowd forecast.";
+    const DESCRIPTION: &'static str = "All planned sessions of a week (any status) with times, workout and crowd forecast, plus training outside the gym (activities).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        get_week(cx.db, monday_of(cx, &self.day)?)
+        let week = monday_of(cx, &self.day)?;
+        let mut data = get_week(cx.db, week)?;
+        let tz = get_profile(cx.db)?.tz();
+        data["activities"] = activities::in_week(cx.db, week, &tz)?.iter().map(|o| o.data()).collect();
+        Ok(data)
     }
 }
 

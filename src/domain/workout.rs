@@ -8,8 +8,11 @@
 //! - Nothing logged never counts as trained: `finish` refuses it, `discard` deletes it and reopens its session.
 //! - A workout runs on its own snapshot of the template; editing the template doesn't change it.
 //! - Warm-ups never count toward volume or progression, and logging a working set skips a pending one.
+//! - Exercises sharing a `group` (superset, circuit) take turns: after a working set the next member still
+//!   owed a set this round is up with no rest; rest comes after the round.
 use jiff::SignedDuration;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::db::models::{
@@ -21,7 +24,7 @@ use crate::domain::core::{emit, mutate};
 use crate::domain::illustrations::{Entry, bodyweight, for_exercise, primary_muscle};
 use crate::domain::profile::get_profile;
 use crate::domain::set_parser::SetInput;
-use crate::domain::templates::{ExerciseSpec, Measure, Template, get_template};
+use crate::domain::templates::{ExerciseSpec, Load, Measure, SetKind, Template, get_template};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -176,9 +179,43 @@ pub fn guide_id(exercise: &WorkoutExercise) -> Option<&str> {
     config_str(exercise, "guide_id")
 }
 
+/// The muscle a logged exercise trains: its picture's, else the one the agent named, else (older
+/// rows) a catalog slug id or the stand-in picture's ("Shoulder press" → Machine Shoulder Press).
+pub fn muscle(exercise: &WorkoutExercise) -> Option<String> {
+    primary_muscle(guide_id(exercise))
+        .or_else(|| config_str(exercise, "muscle").map(Into::into))
+        .or_else(|| primary_muscle(Some(&exercise.exercise_id)))
+        .or_else(|| for_exercise(name(exercise), None).map(|e| e.primary_muscle))
+}
+
+/// A typed `config_json` field (an `ExerciseSpec` field the workout copied); missing or older rows get the default.
+fn field<T: DeserializeOwned + Default>(exercise: &WorkoutExercise, key: &str) -> T {
+    exercise.config_json.get(key).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
+}
+
 /// How the exercise is logged; rows from before timed exercises are reps.
 pub fn measure(exercise: &WorkoutExercise) -> Measure {
-    exercise.config_json.get("measure").and_then(|m| serde_json::from_value(m.clone()).ok()).unwrap_or_default()
+    field(exercise, "measure")
+}
+
+/// How the exercise's sets read (load, per side).
+pub fn kind(exercise: &WorkoutExercise) -> SetKind {
+    SetKind { load: field(exercise, "load"), per_side: field(exercise, "per_side") }
+}
+
+/// Reps alone make a set: a catalog bodyweight move, or weight added to bodyweight (none added is
+/// bodyweight). On an assisted machine the counterweight is the number to log.
+pub fn reps_alone(exercise: &WorkoutExercise) -> bool {
+    match kind(exercise).load {
+        Load::External => bodyweight(guide_id(exercise)),
+        Load::Added => true,
+        Load::Assisted => false,
+    }
+}
+
+/// Superset or circuit the exercise belongs to.
+pub fn group(exercise: &WorkoutExercise) -> Option<String> {
+    field(exercise, "group")
 }
 
 /// Planned length of one working set of a timed exercise.
@@ -187,15 +224,22 @@ pub fn target_seconds(exercise: &WorkoutExercise) -> Option<i64> {
     minutes.filter(|_| measure(exercise) == Measure::Time).map(|m| (m * 60.0).round() as i64)
 }
 
-/// The owner did it the other way today (rode the bike stored as 3 × 8–10): the first set decides how
-/// this workout's row is logged, and a ride is one block. The saved template doesn't change.
-pub fn set_measure(db: &Connection, exercise: &mut WorkoutExercise, timed: bool) -> Result<()> {
-    if timed {
+/// Planned distance of one working set of a distance exercise.
+pub fn target_meters(exercise: &WorkoutExercise) -> Option<f64> {
+    exercise.config_json.get("meters").and_then(Value::as_f64).filter(|_| measure(exercise) == Measure::Distance)
+}
+
+/// The owner did it the other way today (rode the bike stored as 3 × 8–10, rowed 2 km instead of 10
+/// minutes): the first set decides how this workout's row is logged, and a ride is one block. The saved
+/// template doesn't change.
+pub fn set_measure(db: &Connection, exercise: &mut WorkoutExercise, measure: Measure) -> Result<()> {
+    if measure == Measure::Time {
         exercise.planned_working_sets = 1;
     }
     if let Some(config) = exercise.config_json.as_object_mut() {
-        config.insert("measure".into(), json!(if timed { Measure::Time } else { Measure::Reps }));
+        config.insert("measure".into(), json!(measure));
         config.remove("minutes");
+        config.remove("meters");
         config.insert("warmup_required".into(), Value::Bool(false));
     }
     exercise.update(db)
@@ -260,8 +304,7 @@ pub fn choose_next(db: &Connection, workout: &mut WorkoutSession, now: Ts, prefe
     let rows = exercises(db, &workout.id)?;
     let ready: Vec<&WorkoutExercise> =
         rows.iter().filter(|e| e.status == ExerciseStatus::Pending && compatible(e, &rows)).collect();
-    let same =
-        ready.iter().find(|e| prefer_muscle.is_some() && primary_muscle(guide_id(e)).as_deref() == prefer_muscle);
+    let same = ready.iter().find(|e| prefer_muscle.is_some() && muscle(e).as_deref() == prefer_muscle);
     if let Some(next) = same.or(ready.first()) {
         let mut next = (*next).clone();
         next.status = ExerciseStatus::Active;
@@ -316,6 +359,11 @@ pub fn estimate_finish(db: &Connection, workout: &WorkoutSession, now: Ts) -> Re
         if warmup_pending(db, exercise)? {
             total += duration;
         }
+        // In a superset only the round's last exercise rests: the others' rest is their partners' sets.
+        let paired = group(exercise).is_some_and(|g| rows[index + 1..].iter().any(|o| group(o).as_ref() == Some(&g)));
+        if paired {
+            continue;
+        }
         total += (remaining - 1.0).max(0.0) * exercise.rest_seconds as f64;
         if index < rows.len() - 1 {
             total += exercise.rest_seconds as f64 + snapshot_number(workout, "transition_seconds");
@@ -342,12 +390,6 @@ pub fn g(value: f64) -> String {
     if text.contains('.') { text.trim_end_matches('0').trim_end_matches('.').to_string() } else { text }
 }
 
-/// '8–10 × 80 kg' (reps first, how the owner says it); unknown weight (0) shows reps only.
-pub fn format_target(rep_min: i64, rep_max: i64, target_weight: f64) -> String {
-    let reps = if rep_min == rep_max { rep_min.to_string() } else { format!("{rep_min}–{rep_max}") };
-    if target_weight != 0.0 { format!("{reps} × {} kg", g(target_weight)) } else { format!("{reps} reps") }
-}
-
 /// A time the way the owner says it: '25 min', '45 s', '1 min 30 s', '1 h 5 min'.
 pub fn format_time(seconds: i64) -> String {
     let (h, m, s) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
@@ -356,15 +398,36 @@ pub fn format_time(seconds: i64) -> String {
     if text.is_empty() { "0 s".into() } else { text.join(" ") }
 }
 
-/// The next timed set's length: this workout's last one, else the target, else last time's.
-pub fn next_timed_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<i64>> {
-    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop().and_then(|s| s.seconds) {
+/// A distance the way the owner says it: '40 m', '2 km', '2.5 km'.
+pub fn format_distance(meters: f64) -> String {
+    if meters < 1000.0 { format!("{} m", g(meters)) } else { format!("{} km", g(meters / 1000.0)) }
+}
+
+/// The next time or distance block (`value` picks which): this workout's last one, else the target,
+/// else last time's.
+fn next_block<T>(
+    db: &Connection,
+    exercise: &WorkoutExercise,
+    target: Option<T>,
+    value: fn(&SetLog) -> Option<T>,
+) -> Result<Option<T>> {
+    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop().and_then(|s| value(&s)) {
         return Ok(Some(own));
     }
-    if let Some(target) = target_seconds(exercise) {
-        return Ok(Some(target));
+    if target.is_some() {
+        return Ok(target);
     }
-    Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.and_then(|s| s.seconds))
+    Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.and_then(|s| value(&s)))
+}
+
+/// The next timed set's length (see `next_block`).
+pub fn next_timed_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<i64>> {
+    next_block(db, exercise, target_seconds(exercise), |s| s.seconds)
+}
+
+/// The next distance set's length (see `next_block`).
+pub fn next_distance(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<f64>> {
+    next_block(db, exercise, target_meters(exercise), |s| s.meters)
 }
 
 /// Latest working set for this exercise: this workout first, else any earlier workout.
@@ -381,7 +444,10 @@ pub fn next_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<O
     if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop() {
         return Ok(Some((own.weight, own.reps)));
     }
-    if exercise.target_weight != 0.0 {
+    // A learned assisted target of 0 is no help left, not an unknown weight.
+    let no_help =
+        kind(exercise).load == Load::Assisted && ExerciseProgression::get(db, &exercise.exercise_id)?.is_some();
+    if exercise.target_weight != 0.0 || no_help {
         return Ok(Some((exercise.target_weight, exercise.rep_min)));
     }
     Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.map(|s| (s.weight, s.reps)))
@@ -402,6 +468,8 @@ pub struct LastSet {
     pub reps: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meters: Option<f64>,
 }
 
 /// The exercise the owner should do now, as `current` reports it.
@@ -418,14 +486,32 @@ pub struct Active {
     pub set_type: SetType,
     pub set_number: i64,
     pub working_sets: i64,
+    /// Reps alone make a set: a bodyweight exercise, or one with weight added to bodyweight.
     pub bodyweight: bool,
     pub target_weight: f64,
     pub rep_min: i64,
     pub rep_max: i64,
     pub measure: Measure,
+    #[serde(skip_serializing_if = "is_external")]
+    pub load: Load,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub per_side: bool,
     /// Timed exercise: the next set's length (see `next_timed_set`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<i64>,
+    /// Distance exercise: the next set's distance (see `next_distance`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meters: Option<f64>,
+}
+
+impl Active {
+    pub fn kind(&self) -> SetKind {
+        SetKind { load: self.load, per_side: self.per_side }
+    }
+}
+
+fn is_external(load: &Load) -> bool {
+    *load == Load::External
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -470,33 +556,37 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
         let last = last_working_set(db, active)?;
         let guide = guide_id(active);
         let warmup_reps = active.config_json.get("warmup_reps").and_then(Value::as_i64).unwrap_or(8);
+        let set_kind = kind(active);
         let data = Active {
             illustration: for_exercise(name(active), guide),
             id: active.id.clone(),
             exercise_id: active.exercise_id.clone(),
             name: name(active).to_string(),
-            primary_muscle: primary_muscle(guide),
+            primary_muscle: muscle(active),
             new_exercise: logs(db, &active.id, None)?.is_empty(),
-            last_set: last.map(|l| LastSet { weight: l.weight, reps: l.reps, seconds: l.seconds }),
+            last_set: last.map(|l| LastSet { weight: l.weight, reps: l.reps, seconds: l.seconds, meters: l.meters }),
             set_type: if is_warmup { SetType::Warmup } else { SetType::Working },
             set_number: if is_warmup { 1 } else { working_count(db, &active.id)? + 1 },
             working_sets: active.planned_working_sets,
-            bodyweight: bodyweight(guide),
+            bodyweight: reps_alone(active),
             target_weight: if is_warmup { warmup_weight(active) } else { active.target_weight },
             rep_min: if is_warmup { warmup_reps } else { active.rep_min },
             rep_max: if is_warmup { warmup_reps } else { active.rep_max },
             measure: measure(active),
+            load: set_kind.load,
+            per_side: set_kind.per_side,
             seconds: if measure(active) == Measure::Time { next_timed_set(db, active)? } else { None },
+            meters: if measure(active) == Measure::Distance { next_distance(db, active)? } else { None },
         };
         let step = if is_warmup {
             "warm-up".to_string()
         } else {
             format!("set {}/{}", data.set_number, active.planned_working_sets)
         };
-        let target = match (data.measure, data.seconds) {
-            (Measure::Reps, _) => format_target(data.rep_min, data.rep_max, data.target_weight),
-            (Measure::Time, Some(seconds)) => format_time(seconds),
-            (Measure::Time, None) => "timed".into(),
+        let target = match data.measure {
+            Measure::Reps => set_kind.target(data.rep_min, data.rep_max, data.target_weight),
+            Measure::Time => data.seconds.map_or("timed".into(), |s| set_kind.reps(&format_time(s))),
+            Measure::Distance => data.meters.map_or("distance".into(), format_distance),
         };
         instruction = format!("{} · {step} · {target}", data.name);
         active_data = Some(data);
@@ -572,7 +662,7 @@ pub fn make_exercise(
         rep_min: spec.rep_min,
         rep_max: spec.rep_max,
         target_weight: progression.map_or(spec.target_weight, |p| p.next_weight),
-        rest_seconds: profile.rest_seconds,
+        rest_seconds: spec.rest_seconds.unwrap_or(profile.rest_seconds),
         substituted_from_exercise_id: None,
         deferred_reason: None,
         config_json: Json(config),
@@ -738,13 +828,12 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             crate::bail!("INVALID_TRANSITION", "Cannot log set in {}", workout.status);
         }
         let mut active = active_exercise(db, workout_id)?;
-        let timed = value.seconds.is_some();
-        if timed != (measure(&active) == Measure::Time) {
+        if value.measure() != measure(&active) {
             if working_count(db, &active.id)? > 0 {
-                let how = if timed { "reps × weight" } else { "a time, e.g. 25 min" };
+                let how = measure(&active).example();
                 crate::bail!("INVALID_SET", "{} is logged as {how} in this workout", name(&active));
             }
-            set_measure(db, &mut active, timed)?;
+            set_measure(db, &mut active, value.measure())?;
         }
         let needs_warmup = warmup_pending(db, &active)?;
         if value.set_type == SetType::Working && needs_warmup {
@@ -770,21 +859,38 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             rest_started_at: None,
             rest_due_at: None,
             seconds: value.seconds,
+            meters: value.meters,
         };
         row.insert(db)?;
         if value.set_type == SetType::Working {
-            let completed = working_count(db, &active.id)? >= active.planned_working_sets;
-            if completed {
-                active.status = ExerciseStatus::Completed;
-                active.update(db)?;
-                transition(db, &mut workout, WorkoutStatus::ExerciseComplete, now)?;
-                transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-                choose_next(db, &mut workout, now, None)?;
+            let done = working_count(db, &active.id)?;
+            let completed = done >= active.planned_working_sets;
+            let mut rest = true;
+            match group_next(db, &exercises(db, workout_id)?, &active, done)? {
+                // Superset: straight on to the partner; rest only once the round is over.
+                Some((mut next, round_over)) if next.id != active.id => {
+                    active.status = if completed { ExerciseStatus::Completed } else { ExerciseStatus::Pending };
+                    active.update(db)?;
+                    next.status = ExerciseStatus::Active;
+                    next.update(db)?;
+                    transition(db, &mut workout, WorkoutStatus::ExerciseActive, now)?;
+                    transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+                    rest = round_over;
+                }
+                _ if completed => {
+                    active.status = ExerciseStatus::Completed;
+                    active.update(db)?;
+                    transition(db, &mut workout, WorkoutStatus::ExerciseComplete, now)?;
+                    transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
+                    choose_next(db, &mut workout, now, None)?;
+                }
+                _ => {}
             }
             // Rest after every working set, also before the next exercise (with the finished one's rest
             // time). None after the last exercise, or when only deferred exercises are left.
-            if (!completed && workout.status != WorkoutStatus::WorkoutComplete)
-                || workout.status == WorkoutStatus::SetActive
+            if rest
+                && ((!completed && workout.status != WorkoutStatus::WorkoutComplete)
+                    || workout.status == WorkoutStatus::SetActive)
             {
                 let due = now + SignedDuration::from_secs(active.rest_seconds);
                 row.rest_started_at = Some(now);
@@ -816,9 +922,35 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             }
         }
         let mut result = touch(db, &mut workout, now)?;
-        result["logged_set"] = json!({"id": row.id, "weight": row.weight, "reps": row.reps, "seconds": row.seconds, "set_type": row.set_type, "set_number": row.set_number});
+        result["logged_set"] = json!({"id": row.id, "weight": row.weight, "reps": row.reps, "seconds": row.seconds, "meters": row.meters, "set_type": row.set_type, "set_number": row.set_number});
         Ok(result)
     })
+}
+
+/// After `done` logged working set number `round` in a superset or circuit, who's up: the next member (in
+/// plan order) still owed a set this round, else, with the round over (`true`), the member with the
+/// fewest sets done. None outside a group or once its sets are all done. Deferred members wait.
+fn group_next(
+    db: &Connection,
+    rows: &[WorkoutExercise],
+    done: &WorkoutExercise,
+    round: i64,
+) -> Result<Option<(WorkoutExercise, bool)>> {
+    let Some(name) = group(done) else { return Ok(None) };
+    let mut members = vec![];
+    for row in rows {
+        let open = row.id == done.id
+            || (row.status == ExerciseStatus::Pending && compatible(row, rows) && group(row).as_ref() == Some(&name));
+        let sets = if open { working_count(db, &row.id)? } else { 0 };
+        if open && sets < row.planned_working_sets {
+            members.push((row, sets));
+        }
+    }
+    let after = members.iter().find(|(row, sets)| row.position > done.position && *sets < round);
+    if let Some((row, _)) = after {
+        return Ok(Some(((*row).clone(), false)));
+    }
+    Ok(members.iter().min_by_key(|(row, sets)| (*sets, row.position)).map(|(row, _)| ((*row).clone(), true)))
 }
 
 /// A due REST job: rest is over. Mutation result envelope; `user_message_hint` is the message to send.
@@ -937,8 +1069,28 @@ pub(crate) mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    /// A logged exercise's muscle: its picture's, the agent's `muscle` over the stand-in's, else the stand-in's.
+    #[test]
+    fn muscle_is_named_not_guessed() {
+        let db = db();
+        db.execute_batch(
+            "INSERT INTO workout_session (id, status, waited_for_equipment_count) VALUES ('w', 'PLAN_UPDATED', 0);",
+        )
+        .unwrap();
+        let muscle_of = |id: &str, name: &str, muscle_field: Option<&str>| {
+            let spec = spec(
+                serde_json::json!({"id": id, "name": name, "role": "accessory", "target_weight": 0, "muscle": muscle_field}),
+            );
+            muscle(&make_exercise(&db, "w", &spec, 0, false, None).unwrap())
+        };
+        // A bare "Bench" stands in as Bench Dip; the agent's muscle wins over it.
+        assert_eq!(muscle_of("flat", "Bench", Some("Chest")).as_deref(), Some("Chest"));
+        assert_eq!(muscle_of("row", "Seated Cable Row", None).as_deref(), Some("Back"));
+        assert_eq!(muscle_of("shoulder-press", "Shoulder press", None).as_deref(), Some("Shoulders"));
+    }
+
     fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {
-        SetInput { weight, reps, set_type, rir: None, seconds: None }
+        SetInput::reps(weight, reps, set_type)
     }
 
     fn short(db: &Connection) -> String {

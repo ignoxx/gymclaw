@@ -9,10 +9,10 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{
     AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession,
-    RuntimeSettings, SetLog, SetType, UserProfile, WorkoutSession, WorkoutTemplate,
+    RuntimeSettings, SetLog, SetType, UserProfile, WorkoutExercise, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
-use crate::domain::templates::get_template;
+use crate::domain::templates::{Load, Measure, get_template};
 use crate::domain::{crowd, illustrations, preview, workout};
 use crate::error::Result;
 use crate::time::{Ts, iso};
@@ -96,7 +96,7 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         };
         exercises.push(json!({"name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
             "reps": reps, "time": spec.set_seconds().map(workout::format_time),
-            "last": last.map(|l| l.seconds.map_or_else(|| format!("{} × {} kg", l.reps, workout::g(l.weight)), workout::format_time))}));
+            "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
     Ok(
         json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": fmt(row.leave_home_at, tz, "%H:%M"),
@@ -118,9 +118,9 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
         for spec in &template.exercises {
             let next = ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight);
             exercises.push(json!({"id": spec.id, "name": spec.name, "guide_id": spec.guide_id, "svg_url": svg(&spec.name, spec.guide_id.as_deref()),
-                "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
+                "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()).or(spec.muscle.clone()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
-                "time": spec.set_seconds().map(workout::format_time)}));
+                "time": spec.set_seconds().map(workout::format_time), "target": spec.kind().target(spec.rep_min, spec.rep_max, next)}));
         }
         out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));
     }
@@ -172,8 +172,14 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     };
     Ok(
         json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
-        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| l.seconds.map_or_else(|| format!("{} × {} kg", l.reps, workout::g(l.weight)), workout::format_time)), "exercises": exercises}),
+        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| set_text(db, &l)).transpose()?, "exercises": exercises}),
     )
+}
+
+/// A logged set the way the coach shows it ("8/side × +10 kg", "2 km").
+fn set_text(db: &Connection, set: &SetLog) -> Result<String> {
+    let kind = WorkoutExercise::get(db, &set.workout_exercise_id)?.map(|e| workout::kind(&e)).unwrap_or_default();
+    Ok(kind.set(set.weight, set.reps, set.seconds, set.meters))
 }
 
 /// Wall-clock minutes since 1970-01-01 in `tz`; lets the browser slice days/weeks without timezone math.
@@ -253,23 +259,29 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             let done = workout::logs(db, &row.id, Some(SetType::Working))?;
             let Some(last) = done.last() else { continue };
             last_log = Some(last_log.map_or(last.logged_at, |l| l.max(last.logged_at)));
-            let top = done.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
+            let kind = workout::kind(&row);
+            // Only kilograms lifted chart and count: not an assisted machine's help, a time or a distance.
+            let lifted = workout::measure(&row) == Measure::Reps && kind.load != Load::Assisted;
+            let top = done.iter().map(|s| kind.signed(s.weight)).fold(f64::MIN, f64::max);
             let name = row.config_json["name"].as_str().unwrap_or_default().to_string();
-            if best.get(&row.exercise_id).is_some_and(|b| top > *b) {
-                prs.push(name.clone());
+            if workout::measure(&row) == Measure::Reps {
+                if best.get(&row.exercise_id).is_some_and(|b| top > *b) {
+                    prs.push(name.clone());
+                }
+                let entry = best.entry(row.exercise_id.clone()).or_insert(f64::MIN);
+                *entry = entry.max(top);
             }
-            let entry = best.entry(row.exercise_id.clone()).or_insert(0.0);
-            *entry = entry.max(top);
-            volume += done.iter().map(|s| s.weight * s.reps as f64).sum::<f64>();
-            sets += done.iter().filter(|s| s.seconds.is_none()).count();
+            if lifted {
+                volume += done.iter().map(|s| s.weight * s.reps as f64).sum::<f64>();
+            }
+            sets += done.iter().filter(|s| s.seconds.is_none() && s.meters.is_none()).count();
             let guide = present(row.config_json["guide_id"].as_str())
                 .or_else(|| present(guides.get(&row.exercise_id).and_then(|g| g.as_deref())))
                 .unwrap_or(&row.exercise_id);
-            // An id that isn't a catalog slug falls back to an exact catalog name for its picture.
-            let muscle = illustrations::primary_muscle(Some(guide))
-                .or_else(|| illustrations::search(&name, None, None, 1).first().map(|e| e.primary_muscle.clone()));
+            let muscle = illustrations::primary_muscle(Some(guide)).or_else(|| workout::muscle(&row));
             exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, illustrations::catalog().contains_key(guide).then_some(guide)),
-                "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds})).collect::<Vec<_>>()}));
+                "lifted": lifted, "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds, "meters": s.meters,
+                    "text": kind.set(s.weight, s.reps, s.seconds, s.meters), "rank": kind.signed(s.weight)})).collect::<Vec<_>>()}));
         }
         let started_at = w.started_at.or(w.completed_at).expect("completed workout");
         let mut seconds = w.actual_duration_seconds.unwrap_or(0);
@@ -313,8 +325,8 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
     for w in done.iter().rev() {
         for exercise in w["exercises"].as_array().into_iter().flatten() {
             let sets = exercise["sets"].as_array().cloned().unwrap_or_default();
-            if sets.iter().any(|s| s["seconds"].is_i64()) {
-                continue; // timed: no 1-rep max to chart
+            if exercise["lifted"] == false {
+                continue; // timed, distance or assisted: no 1-rep max to chart
             }
             // Best set by estimated 1-rep max, so 12 × 40 and 8 × 50 compare on one line (on a tie the first set wins).
             let key = |s: &Value| {
@@ -351,6 +363,7 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
             });
             entry.0 += sets
                 .iter()
+                .filter(|_| exercise["lifted"] != false)
                 .map(|s| s["weight"].as_f64().unwrap_or(0.0) * s["reps"].as_f64().unwrap_or(0.0))
                 .sum::<f64>();
             entry.1 += sets.len() as i64;
@@ -422,6 +435,34 @@ fn memory(db: &Connection) -> Result<Value> {
     )
 }
 
+/// What the agent built, on or off, each with its versions newest first, and the latest capability gaps.
+fn extensions(db: &Connection, tz: &TimeZone) -> Result<Value> {
+    use crate::domain::extensions::{CapabilityGap, Extension, ExtensionVersion};
+    let mut items = vec![];
+    for e in Extension::select(db, "ORDER BY enabled DESC, kind, name", [])? {
+        let versions: Vec<Value> = ExtensionVersion::select(
+            db,
+            "WHERE extension_id = ?1 ORDER BY version DESC",
+            [e.id],
+        )?
+        .into_iter()
+        .map(|v| {
+            json!({"version": v.version, "author": v.author, "enabled": v.enabled, "summary": v.spec_json.summary(),
+                "same": v.spec_json == e.spec_json, "when": fmt(v.created_at, tz, "%a %-d %b %H:%M")})
+        })
+        .collect();
+        items.push(
+            json!({"id": e.id, "kind": e.kind, "name": e.name, "enabled": e.enabled, "summary": e.spec_json.summary(),
+            "spec": e.spec_json, "versions": versions}),
+        );
+    }
+    let gaps: Vec<Value> = CapabilityGap::select(db, "ORDER BY id DESC LIMIT 20", [])?
+        .into_iter()
+        .map(|g| json!({"when": fmt(g.at, tz, "%a %-d %b %H:%M"), "source": g.source, "asked": g.asked, "tried": g.tried, "why": g.why}))
+        .collect();
+    Ok(json!({"items": items, "gaps": gaps}))
+}
+
 /// The whole dashboard state.
 pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let profile = if UserProfile::get(db, 1)?.is_some() { get_profile(db)? } else { Profile::default() };
@@ -440,7 +481,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
         "demo": false, "live_database_accessed": true, "captured_at": iso(&now.local(&TimeZone::UTC)), "timezone": profile.timezone,
         "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
-        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "plans": plans(db)?,
+        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db)?,
         "activity": events.iter().map(|e| json!({"time": fmt(e.created_at, &tz, "%H:%M"), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
     }))

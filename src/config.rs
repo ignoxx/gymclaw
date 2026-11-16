@@ -17,6 +17,8 @@ pub struct Config {
     pub model_fast: String,
     /// Model that reads photos (scale, plan screenshots).
     pub model_vision: String,
+    /// Model that transcribes voice notes; needs audio input (the chat model's default has none).
+    pub model_audio: String,
     /// OpenRouter provider pin, e.g. `inference-net/fp4`.
     pub provider: Option<String>,
     /// Dashboard hostname behind Traefik; the Telegram menu button opens it.
@@ -74,6 +76,7 @@ impl Config {
             openrouter_key: need("OPENROUTER_API_KEY")?,
             model_fast: var("GYMCLAW_MODEL_FAST").unwrap_or_else(|| model.clone()),
             model_vision: var("GYMCLAW_MODEL_VISION").unwrap_or_else(|| model.clone()),
+            model_audio: var("GYMCLAW_MODEL_AUDIO").unwrap_or_else(|| "google/gemini-3.5-flash-lite".into()),
             model,
             provider: var("GYMCLAW_PROVIDER"),
             dashboard_host: var("GYMCLAW_DASHBOARD_HOST"),

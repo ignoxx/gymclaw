@@ -4,6 +4,7 @@
 //! Tools are `tools::all()` plus `reply`, the turn's final answer. Each tool call runs in its own DB
 //! transaction on the blocking pool; errors go back to
 //! the model as `Error::to_json()`. Coach views a tool produced are rendered after the commit.
+pub mod backfill;
 pub mod context;
 pub mod failure;
 pub mod media;
@@ -21,6 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::domain::extensions::GapSource;
 use crate::error::{Error, Result};
 use crate::runtime::{blocking, in_tx};
 use crate::telegram::Media;
@@ -28,7 +30,7 @@ use crate::telegram::coach::Coach;
 use crate::time::Ts;
 use crate::tools::{self, Effect};
 use failure::{FailureState, diagnose, format_failure};
-use turnlog::{TurnLog, clean, scrub, sha};
+use turnlog::{TurnLog, clean, redact, scrub, sha};
 
 /// Tool calls per turn before the model must answer.
 pub const STEP_CAP: usize = 12;
@@ -54,6 +56,10 @@ pub struct ModelReply {
     pub finish_reason: Option<String>,
     pub usage: Usage,
     pub provider: Option<String>,
+    /// OpenRouter's generation id: `GET /api/v1/generation?id=…` gives the exact cost.
+    pub generation_id: Option<String>,
+    /// Request settings as sent (model, max_tokens, reasoning, tool_choice, provider, cache_control).
+    pub settings: Value,
     pub ms: u128,
     pub ttfb_ms: u128,
     pub req_bytes: usize,
@@ -138,6 +144,8 @@ pub struct Agent {
     pub model: Arc<dyn ChatModel>,
     pub chat_model: String,
     pub vision_model: String,
+    /// Transcribes voice notes (`openrouter::transcribe`).
+    pub audio_model: String,
     pub coach: Option<Arc<Coach>>,
     pub log: TurnLog,
     /// Time source (tests pin it).
@@ -212,22 +220,49 @@ fn clean_text(text: &str, background: bool) -> Option<String> {
     .then_some(text)
 }
 
+/// Messages for the trajectory, redacted, starting at index `from` of the request. The stable system
+/// prompt (part one of message 0) is replaced by its blob hash; the "Now" part stays inline.
+fn trajectory(messages: &[Value], from: usize, stable_blob: &str) -> Vec<Value> {
+    let mut out: Vec<Value> = messages.iter().map(redact).collect();
+    if from == 0
+        && let Some(stable) = out.first_mut().and_then(|m| m.pointer_mut("/content/0"))
+    {
+        *stable = json!({"type": "text", "blob": stable_blob});
+    }
+    out
+}
+
 /// Turn-log label: owner turns and background-event turns read differently in `prod turns`.
 fn trigger(input: &TurnInput) -> &'static str {
     if input.background { "event" } else { "user" }
 }
 
+/// What one tool call did.
+struct Ran {
+    /// The JSON the model sees.
+    value: Value,
+    ok: bool,
+    /// What it saved, one line for the history; None when it changed nothing.
+    saved: Option<String>,
+    /// Decision events it raised (IDs, for `Outcome::settles`): this turn answers them, no background
+    /// turn repeats them.
+    raised: Vec<String>,
+    /// The rows it changed, for the turn log (`turnlog::changes`).
+    changes: Option<Value>,
+}
+
 impl Agent {
-    /// Run one tool call in its own transaction. Returns the JSON the model sees, whether it succeeded,
-    /// what it saved (None when it changed nothing) and the decision events it raised (with their
-    /// IDs, for `Outcome::settles`): this turn answers them, no background turn repeats them.
-    async fn tool(&self, name: &str, args: Value, request_id: String) -> (Value, bool, Option<String>, Vec<String>) {
+    /// Run one tool call in its own transaction, recording the rows it changes.
+    async fn tool(&self, name: &str, args: Value, request_id: String) -> Ran {
         let now = (self.clock)();
         let data_dir = self.data_dir.clone();
         let name_owned = name.to_string();
         let result = blocking(&self.db_path, move |db| {
             // The transaction holds the write lock (`db::open`), so until commit only this call adds events.
             let tx = db.transaction()?;
+            // This connection is the call's own, so the recording holds exactly its writes. Best effort:
+            // logging never fails a call.
+            let mut session = turnlog::record(&tx).inspect_err(|e| tracing::warn!("changes not recorded: {e}")).ok();
             let mark = crate::domain::events::mark(&tx)?;
             let before = tx.total_changes();
             let described = context::name_sessions(&tx, &format!("{name_owned} {}", scrub(&args.to_string(), 400)))?;
@@ -253,12 +288,14 @@ impl Agent {
                     other => json!({"result": other, "raised": shown}),
                 };
             }
+            let changes = session.as_mut().and_then(|s| turnlog::changes(s).ok().flatten());
+            drop(session);
             tx.commit()?;
-            Ok((value, effects, saved, raised.into_iter().map(|e| e.id).collect()))
+            Ok((value, effects, saved, raised.into_iter().map(|e| e.id).collect(), changes))
         })
         .await;
         match result {
-            Ok((value, effects, saved, raised)) => {
+            Ok((value, effects, saved, raised, changes)) => {
                 for Effect::Coach(view) in effects {
                     if let Some(coach) = &self.coach
                         && let Err(e) = coach.apply(&view, None, None).await
@@ -266,9 +303,9 @@ impl Agent {
                         tracing::warn!("coach card from {name} not shown: {e}");
                     }
                 }
-                (value, true, saved, raised)
+                Ran { value, ok: true, saved, raised, changes }
             }
-            Err(e) => (e.to_json(), false, None, vec![]),
+            Err(e) => Ran { value: e.to_json(), ok: false, saved: None, raised: vec![], changes: None },
         }
     }
 
@@ -285,6 +322,7 @@ impl Agent {
             self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles, &mut actions),
         )
         .await;
+        let deadline = result.is_err();
         let (reply, failed, error) = match result {
             Ok(Ok(reply)) => (reply, false, None),
             Ok(Err(e)) => {
@@ -292,15 +330,24 @@ impl Agent {
                 (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
             Err(_) => {
+                self.gap(GapSource::Deadline, &run_id, state.tool_calls).await;
                 state.error = "turn deadline exceeded".into();
                 (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
         };
         let text = reply.message.as_ref().map(|m| m.text.as_str()).unwrap_or_default();
+        // Outcome labels that need no owner input: failures and steps where tools were withheld.
+        let mut flags: Vec<&str> = calls_log.iter().filter_map(|c| c["forced"].as_str()).collect();
+        if failed {
+            flags.push(if deadline { "deadline" } else { "failed" });
+        }
+        flags.sort_unstable();
+        flags.dedup();
         self.log.log(json!({
             "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": trigger(&input), "ok": !failed,
             "error": error.map(|e| scrub(&e, 500)), "diagnosis": failed.then(|| diagnose(&state)), "ms": started.elapsed().as_millis() as u64, "calls": calls_log,
             "noReply": (reply.message.is_none() && reply.react.is_none()).then_some(true), "reply": scrub(text, 4000),
+            "flags": (!flags.is_empty()).then_some(flags),
         }));
         if failed {
             settles.clear();
@@ -344,8 +391,10 @@ impl Agent {
             .find(|m| m["role"] == "user")
             .map(|m| media::text_of(&m["content"]))
             .unwrap_or_default();
+        let stable_blob = self.log.blob(&json!(stable));
         self.log.log(json!({
             "ev": "llm_input", "run": run_id, "session": "telegram:owner", "trigger": trigger(input), "provider": "openrouter", "model": model,
+            "commit": turnlog::COMMIT, "stableBlob": stable_blob, "toolsBlob": self.log.blob(&json!(specs)),
             "history": history_len, "historyChars": history_chars, "systemChars": system.chars().count(), "systemSha": sha(&system),
             "tools": specs.len(), "toolsChars": Value::Array(specs.clone()).to_string().len(), "images": (images > 0).then_some(images),
             "chars": prompt.chars().count(), "prompt": scrub(&prompt, 4000),
@@ -357,15 +406,21 @@ impl Agent {
         let mut seen: HashMap<String, (u32, Option<String>, Option<Value>)> = HashMap::new();
         // Set once the model loops on one call: the next turn must answer in text.
         let mut looping = false;
+        // Messages already in the trajectory: each step logs only what was added since.
+        let mut logged = 0usize;
         loop {
             let force_text = steps >= STEP_CAP || looping;
+            let forced = force_text.then_some(if steps >= STEP_CAP { "step_cap" } else { "breaker" });
             state.observed_input = true;
             let call_started = Instant::now();
+            let sent = trajectory(&messages[logged..], logged, &stable_blob);
+            let from = std::mem::replace(&mut logged, messages.len());
             let reply = match self.model.complete(model, &messages, &specs, force_text).await {
                 Ok(r) => r,
                 Err(e) => {
                     self.log.log(json!({"ev": "model_call", "run": run_id, "call": calls_log.len(), "provider": "openrouter", "model": model,
-                        "ms": call_started.elapsed().as_millis() as u64, "outcome": "error", "error": scrub(&e.to_string(), 500)}));
+                        "ms": call_started.elapsed().as_millis() as u64, "outcome": "error", "error": scrub(&e.to_string(), 500),
+                        "from": from, "messages": sent, "forced": forced}));
                     return Err(e);
                 }
             };
@@ -374,7 +429,9 @@ impl Agent {
             state.reasoning = reply.usage.reasoning;
             let tool_calls = reply.message["tool_calls"].as_array().cloned().unwrap_or_default();
             self.log.log(json!({"ev": "model_call", "run": run_id, "call": calls_log.len(), "provider": reply.provider, "model": model,
-                "ms": reply.ms as u64, "ttfbMs": reply.ttfb_ms as u64, "outcome": "completed", "reqBytes": reply.req_bytes, "resBytes": reply.res_bytes}));
+                "ms": reply.ms as u64, "ttfbMs": reply.ttfb_ms as u64, "outcome": "completed", "reqBytes": reply.req_bytes, "resBytes": reply.res_bytes,
+                "from": from, "messages": sent, "settings": reply.settings, "forced": forced,
+                "message": redact(&reply.message), "generationId": reply.generation_id}));
             let usage = json!({"input": reply.usage.input, "output": reply.usage.output, "reasoning": reply.usage.reasoning, "cacheRead": reply.usage.cache_read});
             self.log.log(
                 json!({"ev": "llm_output", "run": run_id, "model": model, "usage": usage, "stop": reply.finish_reason}),
@@ -382,10 +439,19 @@ impl Agent {
             let mut call = usage.clone();
             call["stop"] = json!(reply.finish_reason);
             call["toolCalls"] = json!(tool_calls.len());
+            call["forced"] = json!(forced);
             calls_log.push(call);
 
             let content = reply.message["content"].as_str();
             if tool_calls.is_empty() || force_text {
+                if force_text {
+                    self.gap(
+                        if looping { GapSource::RepeatedCall } else { GapSource::StepCap },
+                        run_id,
+                        state.tool_calls,
+                    )
+                    .await;
+                }
                 if reply.finish_reason.as_deref() == Some("length") && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("OUTPUT_LIMIT", "model stopped at the output limit");
                 }
@@ -415,6 +481,7 @@ impl Agent {
                 let args: std::result::Result<Value, _> =
                     if raw.trim().is_empty() { Ok(json!({})) } else { serde_json::from_str(raw) };
                 let started = Instant::now();
+                let mut changed = None;
                 let (mut result, ok) = match (name.as_str(), args) {
                     (_, Err(e)) => (
                         tools::guide(&name, Error::domain("INVALID_JSON", format!("arguments are not JSON: {e}")))
@@ -459,11 +526,12 @@ impl Agent {
                             steps += 1;
                             index += 1;
                             state.tool_calls += 1;
-                            let (result, ok, saved, raised) =
+                            let Ran { value: result, ok, saved, raised, changes } =
                                 self.tool(&name, args, format!("{}-{index}", input.key)).await;
                             settles.extend(raised);
                             let wrote = saved.is_some();
                             actions.extend(saved);
+                            changed = changes;
                             if let Some(entry) = seen.get_mut(&key) {
                                 if ok {
                                     entry.2 = Some(result.clone());
@@ -489,6 +557,7 @@ impl Agent {
                     &result,
                     ok,
                     started,
+                    changed,
                 );
                 messages.push(json!({"role": "tool", "tool_call_id": id, "content": cut(result.to_string())}));
             }
@@ -501,6 +570,18 @@ impl Agent {
                 });
                 return Ok(reply);
             }
+        }
+    }
+
+    /// Logs a capability gap for a turn that ran out of room (step cap, deadline, repeated call), for
+    /// review. Never fails the turn.
+    async fn gap(&self, source: GapSource, run_id: &str, calls: usize) {
+        let (run, now) = (run_id.to_string(), (self.clock)());
+        let logged =
+            blocking(&self.db_path, move |db| crate::domain::extensions::log_turn_gap(db, source, &run, calls, now))
+                .await;
+        if let Err(e) = logged {
+            tracing::warn!("capability gap not logged: {e}");
         }
     }
 
@@ -540,7 +621,17 @@ impl Agent {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn log_tool(&self, run: &str, call: &str, name: &str, args: &Value, result: &Value, ok: bool, started: Instant) {
+    fn log_tool(
+        &self,
+        run: &str,
+        call: &str,
+        name: &str,
+        args: &Value,
+        result: &Value,
+        ok: bool,
+        started: Instant,
+        changes: Option<Value>,
+    ) {
         let text = result.to_string();
         let error = result
             .pointer("/error/code")
@@ -549,7 +640,7 @@ impl Agent {
         self.log.log(json!({
             "ev": "tool", "run": run, "call": call, "name": name, "ms": started.elapsed().as_millis() as u64, "ok": ok,
             "error": error.map(|e| scrub(&e, 500)), "args": clean(args, 1000, 0),
-            "result": {"chars": text.len(), "sha": sha(&text), "preview": scrub(&text, 1000)},
+            "result": {"chars": text.len(), "sha": sha(&text), "preview": scrub(&text, 1000)}, "changes": changes,
         }));
     }
 }
@@ -607,6 +698,7 @@ mod tests {
             model: script.clone(),
             chat_model: "m".into(),
             vision_model: "v".into(),
+            audio_model: "a".into(),
             coach: None,
             log: TurnLog::default(),
             clock: Arc::new(move || now),
@@ -642,6 +734,39 @@ mod tests {
         // The note is in the next turn's prompt.
         assert!(context::system(&db, Ts::now()).unwrap().0.contains("- [1] Hates lunges"));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
+    }
+
+    /// The turn log alone rebuilds the exact request of every step (stable prompt from its blob), and
+    /// records the rows each tool call changed.
+    #[tokio::test]
+    async fn turn_log_replays_the_exact_request() {
+        let (mut agent, script, dir) = scripted(vec![
+            call("note_add", json!({"kind": "owner", "text": "Hates lunges"})),
+            json!({"content": "Noted.", "reasoning": "owner preference"}),
+        ]);
+        let turns = dir.join("turns");
+        agent.log = TurnLog::new(Some(turns.clone()));
+        agent.turn(input()).await;
+        let mut events = vec![];
+        for _ in 0..100 {
+            events = turnlog::read(&turns).unwrap_or_default();
+            if events.iter().any(|e| e["ev"] == "run_end") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let steps: Vec<&Value> = events.iter().filter(|e| e["ev"] == "model_call").collect();
+        let mut rebuilt: Vec<Value> =
+            steps.iter().flat_map(|e| e["messages"].as_array().unwrap().iter().cloned()).collect();
+        let blob = steps[0]["messages"][0]["content"][0]["blob"].as_str().unwrap();
+        let stable: Value =
+            serde_json::from_str(&std::fs::read_to_string(turns.join(format!("blobs/{blob}.json"))).unwrap()).unwrap();
+        rebuilt[0]["content"][0] = json!({"type": "text", "text": stable});
+        assert_eq!(rebuilt, redact(&Value::Array(script.last.lock().unwrap().clone())).as_array().unwrap().clone());
+        assert_eq!(steps[1]["message"]["reasoning"], "owner preference");
+        let tool = events.iter().find(|e| e["ev"] == "tool").unwrap();
+        assert_eq!(tool["changes"]["rows"], json!([{"table": "agent_note", "op": "insert", "pk": [1]}]));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// "Send them as pic here": the reply carries one picture of the named exercises; a wrong id goes
@@ -733,6 +858,14 @@ mod tests {
         assert!(!outcome.failed);
         assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Couldn't do that."));
         assert_eq!(script.seen.lock().unwrap().len(), 4);
+        assert_eq!(gaps(&agent), [("repeated_call".to_string(), "remember I hate lunges".to_string())]);
+    }
+
+    /// Capability gaps the turn logged: (source, what it was answering).
+    fn gaps(agent: &Agent) -> Vec<(String, String)> {
+        let db = crate::db::open(&agent.db_path).unwrap();
+        let mut stmt = db.prepare("SELECT source, asked FROM capability_gap ORDER BY id").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
     }
 
     /// Prod 2026-10-22: a call missing required fields was repeated until STUCK. Both the error and
@@ -794,6 +927,7 @@ mod tests {
         assert!(seen.last().unwrap().1, "the last call forbids tools");
         // The script's 13th message still has tool calls; with tools forbidden its text is the answer.
         assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Working on it…"));
+        assert_eq!(gaps(&agent), [("step_cap".to_string(), "remember I hate lunges".to_string())]);
     }
 
     #[tokio::test]

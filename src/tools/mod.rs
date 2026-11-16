@@ -1,8 +1,11 @@
 //! Typed tools: one struct per tool (`#[derive(Deserialize, JsonSchema)]`), shared by the agent and the
 //! CLI (`gymclaw call <name> '<json>'`). The model can only call what is registered here.
+pub mod exercises;
+pub mod extensions;
 pub mod meta;
 pub mod ops;
 pub mod plan;
+pub mod progress;
 pub mod train;
 
 use std::path::Path;
@@ -25,6 +28,14 @@ pub struct Ctx<'a> {
     pub data_dir: &'a Path,
     /// Messages the tool wants shown (coach cards); rendered after the transaction commits.
     pub effects: Vec<Effect>,
+}
+
+impl Ctx<'_> {
+    /// A call from a background turn (an event or trigger wake, request ids `event-…`, see
+    /// `runtime::bot`). Background events are observations: no owner permission comes from them.
+    pub fn background(&self) -> bool {
+        self.request_id.starts_with("event-")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +122,18 @@ pub fn def<T: Tool>() -> ToolDef {
 }
 
 pub fn all() -> Vec<ToolDef> {
-    [plan::tools(), train::tools(), meta::tools(), ops::tools()].into_iter().flatten().collect()
+    [
+        plan::tools(),
+        train::tools(),
+        progress::tools(),
+        exercises::tools(),
+        meta::tools(),
+        ops::tools(),
+        extensions::tools(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub fn call(cx: &mut Ctx, name: &str, args: Value) -> Result<Value> {

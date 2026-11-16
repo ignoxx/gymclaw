@@ -17,12 +17,12 @@ use crate::domain::calendar::{allocation, get_week, week_of};
 use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::emit;
 use crate::domain::crowd::{CrowdModel, feel};
-use crate::domain::highlights;
 use crate::domain::profile::get_profile;
 use crate::domain::replanning::{commit_upcoming, inspect_weeks, retire_session};
 use crate::domain::scheduling::schedule_week;
 use crate::domain::templates::get_template;
 use crate::domain::workout::{format_time, g};
+use crate::domain::{activities, goals, highlights, trends};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -492,7 +492,25 @@ pub fn announce(db: &Connection, now: Ts, unpublished: bool) -> Result<Value> {
     }
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
-    let payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
+    let mut payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
+    // Trends, goals and activities ride on this one wake instead of the standing context; empty ones stay out.
+    let activities: Vec<String> = [previous, next_week]
+        .iter()
+        .map(|week| activities::in_week(db, *week, &tz))
+        .collect::<Result<Vec<_>>>()?
+        .iter()
+        .flatten()
+        .map(|o| o.line(&tz))
+        .collect();
+    for (key, value) in [
+        ("trends", json!(trends::weekly(db, previous, &tz)?)),
+        ("goals", json!(goals::review(db, previous, &tz)?)),
+        ("activities", json!(activities)),
+    ] {
+        if value.as_array().is_some_and(|a| !a.is_empty()) {
+            payload[key] = value;
+        }
+    }
     let mut event = emit(db, "planning.weekly_briefing", now, payload)?;
     event.correlation_id = Some(key);
     event.update(db)?;
@@ -536,7 +554,10 @@ const WEEKLY_REVIEW: &str = "Weekly briefing. Right after this turn the owner ge
     Reply with no fields when you have nothing to add. It is also your weekly review: compare recent_sessions with your \
     notes and save learned notes on patterns that held for at least two weeks (when the owner really trains, which slots \
     they miss or move). Keep all notes, owner and learned, consistent: merge duplicates, rewrite or delete any that a \
-    newer note contradicts. Mention a learning only when it changes next week's plan.";
+    newer note contradicts. Mention a learning only when it changes next week's plan. \
+    Lift trends, goals with your current block, and activities outside the gym come with this event when there \
+    are any: plan next week around them (a deload where a lift stalls and grinds, lighter legs after a long run) \
+    and keep each goal's block current (goal update).";
 
 /// Weeks of sessions the Sunday review looks back on.
 const REVIEW_WEEKS: i64 = 4;
@@ -652,8 +673,9 @@ fn days_line(db: &Connection, week_start: Date, workouts: &[WorkoutSession], tz:
 }
 
 /// Sunday Telegram message, sent by code before the agent's take on it. Last week: workouts by day,
-/// time and volume trained, timed work (bike, plank), records, new targets, body weight (the only place GymClaw asks for a
-/// weigh-in). Then next week's sessions. 🔥 effect when the week hit its target.
+/// time and volume trained, timed work (bike, plank), records, new targets, activities outside the gym,
+/// progress toward each goal, body weight (the only place GymClaw asks for a weigh-in). Then next week's
+/// sessions. 🔥 effect when the week hit its target.
 pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> Result<(String, Option<&'static str>)> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
@@ -722,6 +744,18 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
     let targets = new_targets(db, previous, &tz)?;
     if !targets.is_empty() {
         lines.push(format!("🎯 New targets: {}", targets.join(", ")));
+    }
+    let outside: Vec<String> = activities::in_week(db, previous, &tz)?
+        .iter()
+        .map(|o| format!("{} {} {} min", o.activity.kind, o.at.local(&tz).strftime("%a"), o.activity.minutes))
+        .collect();
+    if !outside.is_empty() {
+        lines.push(format!("🏃 {}", outside.join(" · ")));
+    }
+    for goal in goals::active(db)? {
+        if let Some(line) = goals::line(&goal, goals::progress(db, &goal, previous, &tz)?) {
+            lines.push(format!("🏁 {line}"));
+        }
     }
     if let Some(weight) = crate::domain::body::briefing_line(db, now)? {
         lines.push(weight);
@@ -964,13 +998,7 @@ mod tests {
                 .unwrap()
                 .to_string();
             for (n, reps) in [8, 8].iter().enumerate() {
-                let set = crate::domain::set_parser::SetInput {
-                    weight,
-                    reps: *reps,
-                    set_type: SetType::Working,
-                    rir: None,
-                    seconds: None,
-                };
+                let set = crate::domain::set_parser::SetInput::reps(weight, *reps, SetType::Working);
                 crate::domain::workout::log_set(&db, &id, &set, at.mins(5 + n as i64 * 5), &format!("{key}-{n}"))
                     .unwrap();
             }

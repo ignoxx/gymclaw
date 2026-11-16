@@ -4,6 +4,14 @@ The catalog (`assets/workout-guide/`) is [Workout Guide](https://github.com/bryl
 302 exercises in one line-art style. When an exercise is missing, `scripts/new-illustration` draws
 it in that style, so nobody can tell which pictures were added. Example: `horizontal-leg-press`.
 
+## Which exercises need one
+
+An exercise may be saved without a picture (`guide_id`), e.g. when the owner keeps the name from
+another app. Its card and the dashboard show the closest catalog picture meanwhile
+(`illustrations::closest`: the best match that shares a movement word, else none).
+`gymclaw illustrations missing` lists these exercises, plan exercises first, then by logged sets,
+with the stand-in each shows. Work through that list; nothing is drawn at runtime.
+
 ## How the original art was made
 
 - 76 first poses are tracings of [Everkinetic](https://github.com/everkinetic/data). The rest were
@@ -47,6 +55,7 @@ Work files go to `target/illustrations/<slug>/`.
    `assets/workout-guide/NOTICE.md`.
 6. **Use it**: after deploy, point the plan's exercise at it with `template_edit_exercise`
    (`changes: {"guide_id": "<slug>"}`). Keep the exercise id: history and the next weight follow it.
+   It then drops off `gymclaw illustrations missing`.
 
 ## What we learned
 

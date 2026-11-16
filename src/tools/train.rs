@@ -11,7 +11,7 @@ use crate::domain::illustrations::search;
 use crate::domain::onboarding::{self, Update};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{
-    ExerciseEdit, Template, edit_exercise, get_template, import_template, orphaned_history, require_illustrations,
+    ExerciseEdit, Template, edit_exercise, get_template, import_template, missing_pictures, orphaned_history,
 };
 use crate::domain::view::CoachView;
 use crate::domain::{audit, workout};
@@ -55,7 +55,7 @@ pub enum WorkoutAction {
     /// No args: today's planned session. template_id/planned_session_id only to start something else.
     /// Replaces a running workout with nothing logged, on its session.
     Start,
-    /// `text` like "10x40" (10 reps at 40 kg) or "25 min" logs a set; with `workout_id` and `which`, into that finished workout.
+    /// `text` like "10x40" (10 reps at 40 kg), "25 min" or "2 km" logs a set; with `workout_id` and `which`, into that finished workout.
     Log,
     /// Resend the current card.
     Card,
@@ -180,7 +180,7 @@ impl Tool for Workout {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
                     crate::bail!(
                         "NOT_LOGGED",
-                        "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps) or a time on a timed exercise (25 min). Check status, then ask the owner."
+                        "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps) or a time or distance on an exercise done for one (25 min, 2 km). Check status, then ask the owner."
                     );
                 }
                 view
@@ -259,17 +259,27 @@ pub struct SetCorrect {
     pub weight: Option<f64>,
     pub reps: Option<i64>,
     pub minutes: Option<f64>,
+    pub meters: Option<f64>,
 }
 
 impl Tool for SetCorrect {
     const NAME: &'static str = "set_correct";
-    const DESCRIPTION: &'static str = "Fix a logged set's weight, reps or minutes when the owner says it was logged wrong, during or after the workout. \
+    const DESCRIPTION: &'static str = "Fix a logged set's weight, reps, minutes or meters when the owner says it was logged wrong, during or after the workout. \
         Find the set with sql_query on set_log. Recomputes that exercise's next weight if this workout set it, \
         and updates the finished workout's summary card in the chat.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let seconds = self.minutes.map(|m| (m * 60.0).round() as i64);
-        let result = audit::correct_set(cx.db, &self.set_id, self.weight, self.reps, seconds, cx.now, &cx.request_id)?;
+        let result = audit::correct_set(
+            cx.db,
+            &self.set_id,
+            self.weight,
+            self.reps,
+            seconds,
+            self.meters,
+            cx.now,
+            &cx.request_id,
+        )?;
         // A replayed result from before workout_id was returned has none: nothing to refresh.
         let Some(workout_id) = result["data"]["workout_id"].as_str().map(String::from) else { return Ok(result) };
         refresh_finish_card(cx, &workout_id, result)
@@ -306,7 +316,8 @@ impl Tool for TemplateGet {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TemplateImport {
-    /// The whole plan. Every exercise needs a guide_id from catalog_search; the first primary exercise needs warmup_weight.
+    /// The whole plan. guide_id: the catalog_search match's picture (keep the owner's name); if none, omit it and set muscle.
+    /// The first primary exercise needs warmup_weight.
     pub template: Template,
 }
 
@@ -315,9 +326,11 @@ impl Tool for TemplateImport {
     const DESCRIPTION: &'static str = "Save a whole workout plan (new, or replacing one with the same id). For small changes use template_edit_exercise.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        require_illustrations(&self.template)?;
         let before = get_template(cx.db, &self.template.id).ok();
-        let result = import_template(cx.db, &self.template)?;
+        let mut result = import_template(cx.db, &self.template)?;
+        if let Some(warning) = missing_pictures(&self.template) {
+            result["pictures"] = json!(warning);
+        }
         warn_orphans(cx, before, &self.template.id, result)
     }
 }
@@ -343,8 +356,10 @@ pub struct TemplateEditExercise {
     pub template_id: String,
     /// The exercise: ID, guide_id or name.
     pub exercise: String,
-    /// Fields to change, e.g. {"target_weight":85,"working_sets":4,"rep_min":6,"rep_max":8} or
-    /// {"measure":"time","minutes":25}. A new target_weight also resets the learned next weight.
+    /// Fields to change, e.g. {"target_weight":85,"working_sets":4,"rep_min":6,"rep_max":8},
+    /// {"measure":"time","minutes":25}, {"measure":"distance","meters":2000}, {"rest_seconds":150} (null:
+    /// the default rest), {"load":"assisted"}, {"per_side":true}, {"group":"A"} (same group: superset).
+    /// A new target_weight also resets the learned next weight.
     #[serde(default)]
     pub changes: Map<String, Value>,
     /// 0-based new place in the order.
@@ -353,7 +368,7 @@ pub struct TemplateEditExercise {
 
 impl Tool for TemplateEditExercise {
     const NAME: &'static str = "template_edit_exercise";
-    const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, time, rest, or its place in the order. \
+    const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, time, distance, rest, superset group, or its place in the order. \
         History and next weight follow the exercise id: to rename or fix the picture, keep the id.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
@@ -374,7 +389,8 @@ impl Tool for TemplateEditExercise {
 #[serde(deny_unknown_fields)]
 pub struct TemplateAddExercise {
     pub template_id: String,
-    /// Catalog guide_id or exact catalog name (see catalog_search).
+    /// Catalog guide_id or exact catalog name (see catalog_search). With no catalog match, a fields.id
+    /// and fields.muscle (a catalog muscle) keep it as the owner's own exercise, without a picture.
     pub exercise: String,
     /// Fields overriding the defaults, e.g. {"working_sets":3,"rep_min":10,"rep_max":12,"target_weight":20}.
     /// A variant of an exercise already in the plan needs its own "id", "name" and, when known,
@@ -431,7 +447,7 @@ pub struct CatalogSearch {
 
 impl Tool for CatalogSearch {
     const NAME: &'static str = "catalog_search";
-    const DESCRIPTION: &'static str = "Find illustrated exercises (guide_id, name, equipment, muscle). Plans and swaps only use catalog pictures; when unsure which one the owner means, show the candidates with reply exercises.";
+    const DESCRIPTION: &'static str = "Find illustrated exercises (guide_id, name, equipment, muscle). When unsure which one the owner means, show the candidates with reply exercises.";
 
     fn run(self, _cx: &mut Ctx) -> Result<Value> {
         let results = search(&self.query, self.muscle.as_deref(), self.equipment.as_deref(), self.limit.unwrap_or(8));

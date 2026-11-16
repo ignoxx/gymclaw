@@ -137,7 +137,7 @@ impl Tool for RuntimeResume {
     const DESCRIPTION: &'static str = "Turn reminders, briefings and planning ticks back on (or grant calendar writes / crowd polling). Needs the owner's explicit request.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        if !self.owner_asked {
+        if !self.owner_asked || cx.background() {
             crate::bail!("RUNTIME_NOT_APPROVED", "Resuming needs the owner's explicit request; ask them first");
         }
         let mut settings = match RuntimeSettings::get(cx.db, 1)? {

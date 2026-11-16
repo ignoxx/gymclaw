@@ -1,8 +1,9 @@
 //! Dashboard (`gymclaw dashboard`).
 //!
-//! Serves the frontend in `web/` (embedded), exercise SVGs and `/api/state`, a fresh snapshot from a
-//! read-only connection per request. The only writes are the agent's notes (`POST /api/note_*`), so
-//! the owner can edit what it remembers. Only the allowed Host (or loopback) gets an answer, so DNS
+//! Serves the frontend in `web/` (embedded), exercise SVGs, `/api/state` (a fresh snapshot from a
+//! read-only connection per request) and `/export.csv` (every logged set, `import::export_csv`). The
+//! only writes are `DASHBOARD_TOOLS` (`POST /api/<tool>`), so the owner can edit what the agent
+//! remembers and built, and plan targets. Only the allowed Host (or loopback) gets an answer, so DNS
 //! rebinding can't read it, and writes need a same-origin JSON request.
 pub mod state;
 
@@ -30,9 +31,10 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
     ("/fonts/DM-Sans.ttf", include_bytes!("../../web/fonts/DM-Sans.ttf"), "font/ttf"),
 ];
 
-/// Tools the dashboard may call: note edits (Memory) and plan targets (Exercises). They run exactly
-/// as the agent's calls do, with the same validation.
-const DASHBOARD_TOOLS: [&str; 4] = ["note_add", "note_edit", "note_delete", "template_edit_exercise"];
+/// Tools the dashboard may call: note edits and turning the agent's extensions off, on or back
+/// (Memory), and plan targets (Exercises). They run exactly as the agent's calls do, with the same
+/// validation; extension changes are recorded as the owner's.
+const DASHBOARD_TOOLS: [&str; 5] = ["note_add", "note_edit", "note_delete", "extension_edit", "template_edit_exercise"];
 /// The only exercise fields the dashboard may change. An id, name or picture change would cut an
 /// exercise off from its history, so those stay with the agent.
 const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];
@@ -156,6 +158,22 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
                 tracing::warn!("dashboard state panicked: {e}");
                 error(StatusCode::SERVICE_UNAVAILABLE)
             }
+        };
+    }
+    if path == "/export.csv" {
+        let db_path = app.db_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::domain::import::export_csv(&crate::db::open_readonly(&db_path)?)
+        })
+        .await;
+        return match result {
+            Ok(Ok(csv)) => {
+                let mut response = reply(StatusCode::OK, csv.into_bytes(), "text/csv");
+                let name = HeaderValue::from_static("attachment; filename=\"gymclaw-sets.csv\"");
+                response.headers_mut().insert(header::CONTENT_DISPOSITION, name);
+                response
+            }
+            _ => error(StatusCode::SERVICE_UNAVAILABLE),
         };
     }
     if path == "/api/catalog" {

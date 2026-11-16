@@ -1,4 +1,4 @@
-//! Photos and image documents for the vision model.
+//! Photos and image documents for the vision model; CSV documents for the history import.
 //!
 //! Originals are saved under `data/media/` (EXIF intact, so tools can read the capture date for
 //! scale backfill); the model gets a JPEG/PNG data URL.
@@ -39,6 +39,22 @@ pub async fn save(data_dir: &Path, unique_id: &str, bytes: &[u8]) -> Result<Opti
     let path: PathBuf = dir.join(format!("{safe}.{ext}"));
     tokio::fs::write(&path, bytes).await?;
     Ok(Some(Media { path, mime: mime.into() }))
+}
+
+/// A CSV document: another app's workout export.
+pub fn is_csv(doc: &crate::telegram::Document) -> bool {
+    doc.file_name.as_deref().is_some_and(|n| n.to_lowercase().ends_with(".csv"))
+        || doc.mime_type.as_deref().is_some_and(|m| m == "text/csv" || m == "text/comma-separated-values")
+}
+
+/// Save an inbound CSV as `data/imports/<unique id>.csv`.
+pub async fn save_import(data_dir: &Path, unique_id: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let dir = data_dir.join("imports");
+    tokio::fs::create_dir_all(&dir).await?;
+    let safe: String = unique_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    let path = dir.join(format!("{safe}.csv"));
+    tokio::fs::write(&path, bytes).await?;
+    Ok(path)
 }
 
 /// Bytes the vision model can read: JPEG/PNG/WebP/GIF as is. HEIC is not shown; the model gets a

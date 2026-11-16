@@ -28,18 +28,19 @@ pub struct PastSet {
     /// kg; 0 or omitted for bodyweight.
     #[serde(default)]
     pub weight: f64,
-    // A timed set instead of reps. Plain comment: every doc line here goes into the model's prompt.
+    // A timed or distance set instead of reps. Plain comment: every doc line here goes into the model's prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minutes: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meters: Option<f64>,
 }
 
 impl PastSet {
     fn value(&self) -> SetInput {
-        match self.minutes {
-            Some(minutes) => SetInput::timed((minutes * 60.0).round() as i64),
-            None => {
-                SetInput { weight: self.weight, reps: self.reps, set_type: SetType::Working, rir: None, seconds: None }
-            }
+        match (self.minutes, self.meters) {
+            (Some(minutes), _) => SetInput::timed((minutes * 60.0).round() as i64),
+            (None, Some(meters)) => SetInput::distance(meters),
+            (None, None) => SetInput::reps(self.weight, self.reps, SetType::Working),
         }
     }
 }
@@ -58,7 +59,7 @@ pub fn log_past(
     if sets.iter().any(|s| s.exercise.is_empty() || s.value().validate().is_err()) {
         return Err(Error::domain(
             "INVALID_INPUT",
-            "Each set needs an exercise and reps > 0 with weight ≥ 0, or minutes",
+            "Each set needs an exercise and reps > 0 with weight ≥ 0, or minutes, or meters",
         ));
     }
     let intent = json!({"at": at, "template_id": template_id, "sets": sets});
@@ -144,7 +145,13 @@ mod tests {
         )
         .unwrap();
         // The owner did face pulls instead of the pec deck, and tells us the next day.
-        let set = |exercise: &str, reps, weight| PastSet { exercise: exercise.into(), reps, weight, minutes: None };
+        let set = |exercise: &str, reps, weight| PastSet {
+            exercise: exercise.into(),
+            reps,
+            weight,
+            minutes: None,
+            meters: None,
+        };
         let sets = [set("bench", 10, 80.0), set("bench", 10, 80.0), set("bench", 10, 80.0), set("face-pull", 15, 20.0)];
         let logged = log_past(&db, &sets, at(0), Some("upper"), at(86400), "tg-9-past").unwrap();
         assert_eq!(logged["data"]["sets"], 4);

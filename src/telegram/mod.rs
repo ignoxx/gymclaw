@@ -64,6 +64,32 @@ pub struct Update {
     pub update_id: i64,
     pub message: Option<Message>,
     pub callback_query: Option<CallbackQuery>,
+    pub message_reaction: Option<MessageReaction>,
+}
+
+/// The owner changed their reactions on a message: `new_reaction` is the full set now.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MessageReaction {
+    pub chat: Chat,
+    pub message_id: i64,
+    pub user: Option<User>,
+    #[serde(default)]
+    pub new_reaction: Vec<Reaction>,
+}
+
+/// One reaction; only emoji ones carry `emoji` (custom emoji and paid stars don't).
+#[derive(Clone, Debug, Deserialize)]
+pub struct Reaction {
+    pub emoji: Option<String>,
+}
+
+/// A voice note or an audio file.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Audio {
+    pub file_id: String,
+    #[serde(default)]
+    pub duration: i64,
+    pub mime_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -105,6 +131,8 @@ pub struct Message {
     pub caption: Option<String>,
     pub photo: Option<Vec<PhotoSize>>,
     pub document: Option<Document>,
+    pub voice: Option<Audio>,
+    pub audio: Option<Audio>,
     /// The message this one replies to (Telegram "Reply"), as Telegram has it now.
     pub reply_to_message: Option<Box<Message>>,
 }

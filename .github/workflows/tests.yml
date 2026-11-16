@@ -33,7 +33,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-      - run: shellcheck -S warning deploy/*.sh deploy/egress/*.sh scripts/connect-personal-calendar scripts/render-illustrations scripts/shot .githooks/pre-commit
+      - run: shellcheck -S warning deploy/*.sh deploy/egress/*.sh scripts/connect-personal-calendar scripts/pull-turns scripts/render-illustrations scripts/shot .githooks/pre-commit
 
   secrets:
     runs-on: ubuntu-24.04

@@ -52,7 +52,7 @@
       <section class="panel weight"><div class="section-heading"><h2>Body weight</h2><span class="legend" id="weight-legend"><span class="key">7-day average</span><span class="key weigh-in">Weigh-in</span></span></div><div class="chart" id="weight-chart"></div></section>
     </div>
     <div class="tab" id="tab-history" hidden>
-      <section class="panel"><div class="section-heading"><h2>Workouts</h2><span id="history-count"></span></div><div id="history"></div></section>
+      <section class="panel"><div class="section-heading"><h2>Workouts</h2><span><span id="history-count"></span> · <a href="/export.csv" download>Export CSV</a></span></div><div id="history"></div></section>
     </div>
     <div class="tab" id="tab-exercises" hidden>
       <div class="ex-bar">
@@ -67,6 +67,8 @@
       <div class="grid-2">
         <section class="panel"><div class="section-heading"><h2>About you</h2><span>Read before every reply · <span class="usage" data-kind="owner"></span></span></div><ul class="notes" data-kind="owner"></ul></section>
         <section class="panel"><div class="section-heading"><h2>Learned</h2><span>Patterns it noticed in your training · <span class="usage" data-kind="learned"></span></span></div><ul class="notes" data-kind="learned"></ul></section>
+        <section class="panel"><div class="section-heading"><h2>Built by the agent</h2><span>Playbooks, logs and triggers · every change can be undone</span></div><ul class="notes" id="extensions"></ul></section>
+        <section class="panel"><div class="section-heading"><h2>Couldn't do</h2><span>Requests no tool covered, for review</span></div><ul class="notes" id="gaps"></ul></section>
       </div>
     </div>
     <div class="tooltip" id="tooltip" role="status" hidden></div>

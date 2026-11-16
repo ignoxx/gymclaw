@@ -21,6 +21,8 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY web ./web
+# Baked into the binary and stamped on every agent turn (turn log `llm_input.commit`); CI passes the SHA.
+ARG GYMCLAW_COMMIT=dev
 RUN cargo build --release --locked && cp target/release/gymclaw /usr/local/bin/gymclaw
 
 FROM debian:bookworm-slim

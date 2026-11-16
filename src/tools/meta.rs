@@ -13,8 +13,8 @@ pub fn tools() -> Vec<ToolDef> {
     vec![def::<SqlQuery>(), def::<NoteAdd>(), def::<NoteEdit>(), def::<NoteDelete>()]
 }
 
-/// Tables holding OAuth tokens and the private feed URL stay outside model access.
-const SECRET_TABLES: [&str; 2] = ["calendar_credential", "personal_calendar_state"];
+/// Tables holding OAuth tokens and the private feed URL stay outside model access and turn-log changesets.
+pub const SECRET_TABLES: [&str; 2] = ["calendar_credential", "personal_calendar_state"];
 const MAX_ROWS: usize = 200;
 
 /// Read-only pragmas the model may use to inspect the schema.
@@ -47,7 +47,7 @@ pub struct SqlQuery {
 
 impl Tool for SqlQuery {
     const NAME: &'static str = "sql_query";
-    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. The schema is in your instructions (\"Database\"); JOIN on *_id. Timestamps are stored as naive UTC text (compare against UTC in WHERE) but come back in the owner's local time with offset. JSON text columns. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
+    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. The schema is in your instructions (\"Database\"); JOIN on *_id. Timestamps are stored as naive UTC text (compare against UTC in WHERE) but come back in the owner's local time with offset. JSON text columns. The lift_history view has each exercise of each finished workout with its reps per set and best estimated 1-rep max (e1rm): how a lift is going. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         // File-backed tools use an OS read-only handle. Tests/ephemeral databases get an
@@ -102,12 +102,12 @@ impl Tool for SqlQuery {
     }
 }
 
-/// The model-visible schema, one `table(col, …)` line per table, read live so it always matches
+/// The model-visible schema, one `table(col, …)` line per table and view, read live so it always matches
 /// the migrated DB. Goes into the system prompt and into failed-query errors.
 pub fn schema(db: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = db.prepare(
         "SELECT m.name, group_concat(p.name, ', ') FROM sqlite_master m JOIN pragma_table_info(m.name) p
-         WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND m.name != 'alembic_version' GROUP BY m.name ORDER BY m.name",
+         WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%' AND m.name != 'alembic_version' GROUP BY m.name ORDER BY m.name",
     )?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
