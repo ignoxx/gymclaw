@@ -180,12 +180,12 @@ pub fn guide_id(exercise: &WorkoutExercise) -> Option<&str> {
 }
 
 /// The muscle a logged exercise trains: its picture's, else the one the agent named, else (older
-/// rows) a catalog slug id or an exact catalog name. Never a fuzzy guess: a bare "Bench" isn't triceps.
+/// rows) a catalog slug id or the stand-in picture's ("Shoulder press" → Machine Shoulder Press).
 pub fn muscle(exercise: &WorkoutExercise) -> Option<String> {
     primary_muscle(guide_id(exercise))
         .or_else(|| config_str(exercise, "muscle").map(Into::into))
         .or_else(|| primary_muscle(Some(&exercise.exercise_id)))
-        .or_else(|| crate::domain::illustrations::matching(name(exercise)).map(|e| e.primary_muscle))
+        .or_else(|| for_exercise(name(exercise), None).map(|e| e.primary_muscle))
 }
 
 /// A typed `config_json` field (an `ExerciseSpec` field the workout copied); missing or older rows get the default.
@@ -1066,7 +1066,7 @@ pub(crate) mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    /// A logged exercise's muscle comes from its picture or the agent's `muscle`, never a fuzzy name guess.
+    /// A logged exercise's muscle: its picture's, the agent's `muscle` over the stand-in's, else the stand-in's.
     #[test]
     fn muscle_is_named_not_guessed() {
         let db = db();
@@ -1080,9 +1080,10 @@ pub(crate) mod tests {
             );
             muscle(&make_exercise(&db, "w", &spec, 0, false, None).unwrap())
         };
-        assert_eq!(muscle_of("bench", "Bench", None), None);
+        // A bare "Bench" stands in as Bench Dip; the agent's muscle wins over it.
         assert_eq!(muscle_of("flat", "Bench", Some("Chest")).as_deref(), Some("Chest"));
         assert_eq!(muscle_of("row", "Seated Cable Row", None).as_deref(), Some("Back"));
+        assert_eq!(muscle_of("shoulder-press", "Shoulder press", None).as_deref(), Some("Shoulders"));
     }
 
     fn set(weight: f64, reps: i64, set_type: SetType) -> SetInput {

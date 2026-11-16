@@ -203,9 +203,7 @@ fn replacement_spec(
         return Ok(spec);
     }
     let item = catalog().get(substitute_id);
-    // Without a picture or a named muscle, the stand-in picture's muscle.
-    let muscle =
-        muscle(original).or_else(|| for_exercise(name(original), guide_id(original)).map(|p| p.primary_muscle));
+    let muscle = muscle(original);
     let Some(item) = item.filter(|i| muscle.as_deref() == Some(i.primary_muscle.as_str())) else {
         crate::bail!(
             "INVALID_SUBSTITUTION",
