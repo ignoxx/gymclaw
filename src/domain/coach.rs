@@ -1144,6 +1144,24 @@ mod tests {
         assert_eq!(ExerciseProgression::get(&db, "chin").unwrap().unwrap().next_weight, 27.5);
     }
 
+    /// Progressed to no help: the next workout offers 0 kg assist, not last time's help.
+    #[test]
+    fn an_assisted_machine_down_to_no_help_offers_none() {
+        let db = db();
+        plan(
+            &db,
+            vec![
+                json!({"id": "chin", "name": "Assisted chin-up", "role": "pull", "working_sets": 1, "rep_max": 10, "target_weight": 2.5, "load": "assisted"}),
+            ],
+        );
+        handle_text(&db, "10x2.5", at(10), "m1").unwrap();
+        assert_eq!(ExerciseProgression::get(&db, "chin").unwrap().unwrap().next_weight, 0.0);
+        start(&db, Some("plan"), None, false, at(4000), "again").unwrap();
+        let workout = active_workout(&db).unwrap().unwrap();
+        let chin = exercises(&db, &workout.id).unwrap().remove(0);
+        assert_eq!(crate::domain::workout::next_working_set(&db, &chin).unwrap(), Some((0.0, chin.rep_min)));
+    }
+
     #[test]
     fn exercise_rest_overrides_the_default_rest() {
         use crate::domain::{compression::compress_template, profile::get_profile};

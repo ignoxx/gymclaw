@@ -425,8 +425,30 @@ pub fn remember_swap(
 ) -> Result<bool> {
     let Ok(template) = get_template(db, template_id) else { return Ok(false) };
     let Some(index) = template.exercises.iter().position(|e| e.id == original_id) else { return Ok(false) };
+    let updated = swapped(&template, index, replacement);
+    if updated.validate().is_err() {
+        return Ok(false);
+    }
+    import_template(db, &updated)?;
+    Ok(true)
+}
+
+/// `replacement` in exercise `index`'s slot (sets, reps, rest, role, order and superset group stay the
+/// slot's), the original kept as an alternative one swap away, dependencies following the new id. A
+/// first primary lift keeps a warm-up: half the new weight on the plate steps.
+pub fn swapped(template: &Template, index: usize, replacement: &ExerciseSpec) -> Template {
     let original = template.exercises[index].clone();
+    let original_id = original.id.as_str();
+    let warmup = |r: &ExerciseSpec| {
+        r.warmup_weight.or_else(|| {
+            original
+                .warmup_weight
+                .filter(|_| r.measure == Measure::Reps)
+                .map(|_| (r.target_weight / 2.0 / r.increment).floor() * r.increment)
+        })
+    };
     let new = ExerciseSpec {
+        warmup_weight: warmup(replacement),
         role: original.role.clone(),
         primary: original.primary,
         working_sets: original.working_sets,
@@ -441,7 +463,7 @@ pub fn remember_swap(
     };
     let mut alternatives: Vec<ExerciseSpec> =
         template.alternatives.iter().filter(|a| a.id != replacement.id && a.id != original_id).cloned().collect();
-    alternatives.push(ExerciseSpec { substitutes: vec![], requires_completed: vec![], ..original });
+    alternatives.push(ExerciseSpec { substitutes: vec![], requires_completed: vec![], ..original.clone() });
     let mut exercises: Vec<ExerciseSpec> = template
         .exercises
         .iter()
@@ -456,12 +478,7 @@ pub fn remember_swap(
         })
         .collect();
     exercises[index] = new;
-    let updated = Template { exercises, alternatives, ..template };
-    if updated.validate().is_err() {
-        return Ok(false);
-    }
-    import_template(db, &updated)?;
-    Ok(true)
+    Template { exercises, alternatives, ..template.clone() }
 }
 
 pub enum ExerciseEdit<'a> {

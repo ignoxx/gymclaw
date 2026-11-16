@@ -200,9 +200,10 @@ fn lift_line(history: &[&Outing]) -> Option<String> {
     let latest = history.last()?;
     let scores: Vec<f64> = history.iter().map(|o| score(&o.sets)).collect();
     let n = scores.len();
+    // Flat against the sessions just before, not an old peak: climbing back after a break isn't a stall.
     let stalled = n > RECENT
         && scores[n - RECENT..].iter().copied().fold(f64::MIN, f64::max)
-            <= scores[..n - RECENT].iter().copied().fold(f64::MIN, f64::max);
+            <= scores[n.saturating_sub(2 * RECENT)..n - RECENT].iter().copied().fold(f64::MIN, f64::max);
     let efforts: Vec<Option<Effort>> =
         (0..n).map(|i| history[i].effort(recent_best(&history[i.saturating_sub(RECENT)..i]))).collect();
     let easy = efforts.iter().rev().take_while(|e| **e == Some(Effort::Easy)).count();
@@ -363,6 +364,17 @@ mod tests {
             line(&stalled).unwrap(),
             "Bench: est. 1-rep max 106.7→106.7→106.7→106.7, stalled; last 80 kg × 10/8/6 on 8–10, grinding"
         );
+        // Climbing back after a break isn't a stall, even below an old peak.
+        let back = [
+            outing(0, 100.0, &[10, 9, 8]),
+            outing(30, 70.0, &[10, 9, 8]),
+            outing(33, 72.5, &[10, 9, 8]),
+            outing(36, 75.0, &[10, 9, 8]),
+            outing(39, 77.5, &[10, 9, 8]),
+            outing(42, 80.0, &[10, 9, 8]),
+            outing(45, 82.5, &[10, 9, 8]),
+        ];
+        assert_eq!(line(&back), None);
         let easy = [outing(0, 60.0, &[12, 12, 12]), outing(3, 60.0, &[12, 12, 11])];
         assert_eq!(line(&easy).unwrap(), "Bench: 2 easy sessions in a row; last 60 kg × 12/12/11 on 8–10");
     }

@@ -444,7 +444,10 @@ pub fn next_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<O
     if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop() {
         return Ok(Some((own.weight, own.reps)));
     }
-    if exercise.target_weight != 0.0 {
+    // A learned assisted target of 0 is no help left, not an unknown weight.
+    let no_help =
+        kind(exercise).load == Load::Assisted && ExerciseProgression::get(db, &exercise.exercise_id)?.is_some();
+    if exercise.target_weight != 0.0 || no_help {
         return Ok(Some((exercise.target_weight, exercise.rep_min)));
     }
     Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.map(|s| (s.weight, s.reps)))

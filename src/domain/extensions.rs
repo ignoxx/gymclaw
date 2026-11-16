@@ -399,7 +399,7 @@ pub fn prompt(db: &Connection) -> Result<Option<String>> {
 
 /// Raises an `extension.trigger` wake for every enabled trigger whose slot has come: at most one per
 /// trigger and slot (a local day or week, or one finished workout), none for a slot more than `GRACE`
-/// ago or before the trigger existed, and at most `DAILY_FIRES` per local day. Returns how many fired.
+/// ago or before its latest save, and at most `DAILY_FIRES` per local day. Returns how many fired.
 pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
     let tz = crate::domain::profile::get_profile(db)?.tz();
     let local = now.local(&tz);
@@ -414,7 +414,8 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
         let Spec::Trigger { when, instruction } = &*trigger.spec_json else { continue };
         // (slot key, extra payload) of each slot that is due now.
         let mut due: Vec<(String, Value)> = vec![];
-        let since = trigger.created_at.max(now - GRACE);
+        // A slot that passed before the latest save (a time moved earlier, switched back on) waits for next time.
+        let since = trigger.updated_at.max(now - GRACE);
         let slot = when.slot()?;
         match slot {
             Slot::Daily(at) | Slot::Weekly(_, at) => {

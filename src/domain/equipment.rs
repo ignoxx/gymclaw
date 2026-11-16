@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::db::models::{ExerciseProgression, GymLocation};
 use crate::db::{Connection, Json};
 use crate::domain::illustrations::{Item, catalog, closest, fitting, needs, timed};
-use crate::domain::templates::{ExerciseSpec, Measure, Template, pick};
+use crate::domain::templates::{ExerciseSpec, Measure, Template, default_load, pick, swapped};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -101,9 +101,8 @@ pub fn rebuild(
         .chain(&template.alternatives)
         .flat_map(|s| [s.id.clone(), s.name.to_lowercase()].into_iter().chain(s.guide_id.clone()))
         .collect();
-    let (mut exercises, mut alternatives, mut report) = (vec![], template.alternatives.clone(), vec![]);
-    let mut renamed: Vec<(String, String)> = vec![];
-    for (spec, choice) in template.exercises.iter().zip(chosen) {
+    let (mut swaps, mut report) = (vec![], vec![]);
+    for (index, (spec, choice)) in template.exercises.iter().zip(chosen).enumerate() {
         let guide = spec.guide_id.clone().or_else(|| closest(&spec.name).map(|e| e.guide_id));
         let item = guide.as_deref().and_then(|g| catalog().get(g));
         let pictured = |s: &ExerciseSpec| s.guide_id.as_deref().and_then(|g| catalog().get(g));
@@ -137,39 +136,15 @@ pub fn rebuild(
                 _ => None,
             };
             report.push(json!({"exercise": spec.name, "keep": true, "note": note}));
-            exercises.push(spec.clone());
             continue;
         };
         let to = pictured(&new).expect("replacements are catalog exercises");
         used.extend([new.id.clone(), new.name.to_lowercase(), to.slug.clone()]);
         report.push(json!({"exercise": spec.name, "to": {"id": new.id, "name": new.name, "equipment": to.equipment},
             "target_weight": new.target_weight, "other_options": others}));
-        renamed.push((spec.id.clone(), new.id.clone()));
-        alternatives.retain(|a| a.id != spec.id && a.id != new.id);
-        alternatives.push(ExerciseSpec { substitutes: vec![], requires_completed: vec![], ..spec.clone() });
-        // The replacement takes the slot: sets, reps, rest, role and order stay the original's.
-        exercises.push(ExerciseSpec {
-            role: spec.role.clone(),
-            primary: spec.primary,
-            working_sets: spec.working_sets,
-            rep_min: spec.rep_min,
-            rep_max: spec.rep_max,
-            rest_seconds: spec.rest_seconds,
-            priority: spec.priority,
-            requires_completed: spec.requires_completed.clone(),
-            substitutes: vec![spec.id.clone()],
-            ..new
-        });
+        swaps.push((index, new));
     }
-    // Dependencies follow the swapped ids.
-    for spec in &mut exercises {
-        for required in &mut spec.requires_completed {
-            if let Some((_, new)) = renamed.iter().find(|(old, _)| old == required) {
-                *required = new.clone();
-            }
-        }
-    }
-    let rebuilt = Template { exercises, alternatives, ..template.clone() };
+    let rebuilt = swaps.iter().fold(template.clone(), |t, (index, new)| swapped(&t, *index, new));
     rebuilt.validate()?;
     Ok((rebuilt, report))
 }
@@ -183,14 +158,15 @@ fn catalog_spec(db: &Connection, original: &ExerciseSpec, to: &Item) -> Result<E
         id: to.slug.clone(),
         name: to.name.clone(),
         guide_id: Some(to.slug.clone()),
+        muscle: None,
         target_weight: target,
-        // Half the working weight on the plate steps, if the original had a warm-up.
-        warmup_weight: original
-            .warmup_weight
-            .filter(|_| !is_timed)
-            .map(|_| (target / 2.0 / original.increment).floor() * original.increment),
+        // `swapped` gives it a warm-up if the slot had one.
+        warmup_weight: None,
         measure: if is_timed { Measure::Time } else { Measure::Reps },
         minutes: if is_timed { original.minutes.or(Some(10.0)) } else { None },
+        meters: None,
+        load: default_load(&to.slug),
+        per_side: false,
         ..original.clone()
     })
 }
@@ -199,6 +175,7 @@ fn catalog_spec(db: &Connection, original: &ExerciseSpec, to: &Item) -> Result<E
 mod tests {
     use super::*;
     use crate::db::test::db;
+    use crate::domain::templates::Load;
 
     fn template() -> Template {
         serde_json::from_str(include_str!("testdata/template.json")).unwrap()
@@ -229,6 +206,25 @@ mod tests {
         );
         assert!(rebuilt.spec("bench").is_some(), "the barbell bench is an alternative now");
         assert_eq!(report[3]["keep"], true);
+    }
+
+    /// A saved alternative in the first primary slot gets a warm-up, and a catalog replacement reads
+    /// its weight its own way, not the original's (assist, per side).
+    #[test]
+    fn replacements_fit_their_slot() {
+        let db = db();
+        let mut template = template();
+        let mut db_bench = template.exercises[0].clone();
+        (db_bench.id, db_bench.name, db_bench.guide_id) =
+            ("db-bench".into(), "DB Bench".into(), Some("dumbbell-bench-press".into()));
+        (db_bench.warmup_weight, db_bench.primary, db_bench.target_weight) = (None, false, 24.0);
+        template.alternatives.push(db_bench);
+        template.exercises[0].substitutes = vec!["db-bench".into()];
+        (template.exercises[1].load, template.exercises[1].per_side) = (Load::Assisted, true);
+        let (rebuilt, _) = rebuild(&db, &template, &dumbbells(), &BTreeMap::new()).unwrap();
+        let (bench, row) = (&rebuilt.exercises[0], &rebuilt.exercises[1]);
+        assert_eq!((bench.id.as_str(), bench.primary, bench.warmup_weight), ("db-bench", true, Some(10.0)));
+        assert_eq!((row.load, row.per_side), (Load::External, false));
     }
 
     #[test]
