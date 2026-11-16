@@ -5,7 +5,7 @@
 //!   messages that arrive during a turn are collected into the next one.
 //! - `/status` answers without the model, `/extensions` lists and turns off what the agent built (no
 //!   model). There is no `/new`: the window is the last messages, always current.
-//! - Voice notes are transcribed, shown back, then routed exactly like typed text.
+//! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -240,8 +240,9 @@ impl Bot {
             .await;
     }
 
-    /// Transcribe a voice note and show the owner what was heard, so a mis-hear is visible before it
-    /// is acted on. None (after telling the owner) when it can't be read.
+    /// Transcribe a voice note. Not echoed to the chat: the owner's message row holds the transcript for
+    /// the agent, and the coach's 👍 or the agent's reply shows a mis-hear. None (after telling the
+    /// owner) when it can't be read.
     async fn transcribe(&self, message_id: i64, audio: &Audio) -> Option<String> {
         let started = Instant::now();
         let _ = self.tg.react(self.owner, message_id, Some(ACK)).await;
@@ -258,14 +259,8 @@ impl Bot {
             "error": heard.as_ref().err().map(|e| scrub(&e.to_string(), 500)),
             "text": heard.as_ref().ok().map(|t| scrub(t, 4000))}));
         match heard {
-            Ok(text) => {
-                // 👀 stays: the coach's 👍 or the agent's reply replaces it. The echo isn't stored: the
-                // owner's message row holds the transcript.
-                if let Err(e) = self.tg.send(self.owner, &format!("🎙 “{text}”"), None, &vec![], None).await {
-                    tracing::warn!("transcript not shown: {e}");
-                }
-                Some(text)
-            }
+            // 👀 stays: the coach's 👍 or the agent's reply replaces it.
+            Ok(text) => Some(text),
             Err(e) => {
                 let _ = self.tg.react(self.owner, message_id, None).await;
                 tracing::warn!("voice note not transcribed: {} {e}", e.code());
@@ -958,9 +953,9 @@ mod tests {
         }
     }
 
-    /// A voice note is shown back as heard, then reaches the agent exactly like typed text.
+    /// A voice note reaches the agent exactly like typed text, without an echo in the chat.
     #[tokio::test]
-    async fn voice_note_is_shown_then_handled_as_text() {
+    async fn voice_note_is_handled_as_text() {
         let ears = Arc::new(Ears(std::sync::Mutex::new(vec![])));
         let (bot, db, dir, tg) = fixture(ears.clone());
         let update = json!({"update_id": 1, "message": {"message_id": 9, "from": {"id": 42}, "chat": {"id": 42, "type": "private"},
@@ -968,7 +963,11 @@ mod tests {
         bot.handle(serde_json::from_value(update).unwrap()).await;
         let sent = ears.0.lock().unwrap().clone();
         assert_eq!(sent[1]["content"][0]["input_audio"]["format"], "ogg");
-        assert!(tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Send(t, _) if t == "🎙 “move tomorrow's workout to the evening”")));
+        assert!(
+            !tg.calls()
+                .iter()
+                .any(|c| matches!(c, crate::telegram::coach::tests::Call::Send(t, _) if t.starts_with("🎙")))
+        );
         let owner = ChatMessage::first(&db, "WHERE role = 'owner'", []).unwrap().unwrap();
         assert_eq!(
             (owner.text.as_str(), owner.meta_json["kind"].as_str()),

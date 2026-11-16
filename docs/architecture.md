@@ -137,8 +137,8 @@ model never has to. Timestamps without an offset are the owner's local time.
   scale backfill. A CSV document (a Strong or Hevy export) is saved to `data/imports/` and the agent
   gets its path plus a summary (`domain::import::summary`: workouts, dates, each exercise name and
   its match) to import with `history_import`.
-- Voice notes and audio files → `GYMCLAW_MODEL_AUDIO` (Telegram's OGG/Opus sent as is), shown back
-  as "🎙 “…”", then routed exactly like typed text (set parser first). Adds the transcription call,
+- Voice notes and audio files → `GYMCLAW_MODEL_AUDIO` (Telegram's OGG/Opus sent as is), then routed
+  exactly like typed text (set parser first); the transcript is the owner's message, not echoed. Adds the transcription call,
   typically 1–3 s, before the coach or the agent sees it.
 - `/status` shows runtime health and `/extensions` lists and switches the agent's extensions, both
   without the model; there is no `/new`, the chat window is always the latest messages. Startup sets the
