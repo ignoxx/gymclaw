@@ -74,19 +74,12 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 pub const WAKE: [&str; 5] =
     ["planning.attention", "planning.replan_required", "workout.missed", "planning.weekly_briefing", "workout.stale"];
 
-/// The weekly review waits while the Sunday recap is still queued or sending: the agent's take follows
-/// the recap, whether it went out or not.
+/// Unhandled wake events, oldest first. The weekly review wakes at once; the Sunday recap waits for it
+/// (`weekly::release_recap`).
 pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
-    let recap_queued: bool = db.query_row(
-        "SELECT EXISTS (SELECT 1 FROM notification_delivery WHERE status IN ('PENDING', 'SENDING') AND agent_event_id IN (SELECT id FROM agent_event WHERE type = 'planning.weekly_recap'))",
-        [],
-        |r| r.get(0),
-    )?;
     Ok(pending(db, false)?
         .into_iter()
-        .filter(|e| {
-            e["type"].as_str().is_some_and(|t| WAKE.contains(&t) && !(recap_queued && t == "planning.weekly_briefing"))
-        })
+        .filter(|e| e["type"].as_str().is_some_and(|t| WAKE.contains(&t)))
         .take(20)
         .collect())
 }

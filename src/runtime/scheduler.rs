@@ -117,15 +117,18 @@ impl Scheduler {
             Ok(data)
         });
         note(watch.await, "watch");
+        // Commits per step (plan, publish, review event), so no outer transaction.
+        note(blocking(&self.db_path, |db| weekly_if_due(db, Ts::now())).await, "weekly");
+        // The bot sends the recap as soon as the agent's review turn ends; this covers a review that
+        // never ran. `pump` sends it after the ticks.
         let r = recipient.clone();
-        // Commits per step (plan, publish, recap), so no outer transaction.
-        let weekly = blocking(&self.db_path, move |db| weekly_if_due(db, &r, Ts::now())).await;
-        let ran = weekly.as_ref().is_ok_and(|data| data["due"] != false);
-        note(weekly, "weekly");
-        if ran {
-            // The recap goes out now, before the agent wakes to add its take on the week.
-            self.pump().await;
-        }
+        let recap = blocking(&self.db_path, move |db| {
+            let tx = db.unchecked_transaction()?;
+            let queued = crate::domain::weekly::release_recap(&tx, &r, Ts::now(), false)?;
+            tx.commit()?;
+            Ok(json!(queued))
+        });
+        note(recap.await, "recap");
         if authority.crowd_polling_enabled && last_crowd.is_none_or(|t| t.elapsed() >= CROWD_EVERY) {
             *last_crowd = Some(Instant::now());
             let poll = blocking(&self.db_path, |db| {
@@ -217,8 +220,8 @@ pub fn fire_at(job: &NotificationJob) -> Ts {
 
 /// Run `ticks::weekly` once per week, on Sunday from 23:00 profile-local (late, so a Sunday evening
 /// workout makes the recap; a restart before midnight still catches up), publish calendar writes, then
-/// queue the recap and the agent's weekly review (`weekly::announce`).
-pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Result<serde_json::Value> {
+/// wake the agent for its weekly review (`weekly::announce`); the recap follows it (`weekly::release_recap`).
+pub fn weekly_if_due(db: &crate::db::Connection, now: Ts) -> Result<serde_json::Value> {
     let tz = profile::get_profile(db)?.tz();
     let local = now.local(&tz);
     if local.weekday() != jiff::civil::Weekday::Sunday || local.hour() < 23 {
@@ -246,7 +249,7 @@ pub fn weekly_if_due(db: &crate::db::Connection, recipient: &str, now: Ts) -> Re
         };
     let tx = db.unchecked_transaction()?;
     data["published"] = json!(published);
-    data["announced"] = crate::domain::weekly::announce(&tx, recipient, now, writes && !published)?;
+    data["announced"] = crate::domain::weekly::announce(&tx, now, writes && !published)?;
     emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
     Ok(data)
@@ -261,12 +264,12 @@ mod tests {
         let db = crate::db::test::db();
         // Saturday 20:00 and Sunday 22:59 Berlin: not yet (ticks::weekly isn't even called).
         for at in ["2026-10-17T18:00:00Z", "2026-10-18T20:59:00Z"] {
-            assert_eq!(weekly_if_due(&db, "42", Ts::parse(at, None).unwrap()).unwrap(), json!({"due": false}));
+            assert_eq!(weekly_if_due(&db, Ts::parse(at, None).unwrap()).unwrap(), json!({"due": false}));
         }
         // Already ran for the week starting Monday 19 Oct: not again.
         emit(&db, "runtime.weekly_ran", Ts::now(), json!({"week_start": "2026-10-19"})).unwrap();
         assert_eq!(
-            weekly_if_due(&db, "42", Ts::parse("2026-10-18T21:30:00Z", None).unwrap()).unwrap(),
+            weekly_if_due(&db, Ts::parse("2026-10-18T21:30:00Z", None).unwrap()).unwrap(),
             json!({"due": false})
         );
     }

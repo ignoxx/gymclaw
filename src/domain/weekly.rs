@@ -480,39 +480,63 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     )
 }
 
-/// After the Sunday run and the calendar publish: queue the recap for the owner, then the agent's weekly
-/// review, once per week. The review waits until the recap is out (`events::wake_pending`), so the
-/// agent's take on the week arrives after it. `unpublished`: calendar writes are on but next week
-/// didn't reach the calendar.
-pub fn announce(db: &Connection, recipient: &str, now: Ts, unpublished: bool) -> Result<Value> {
+/// After the Sunday run and the calendar publish: wake the agent for its weekly review, once per week.
+/// The recap waits for that review (`release_recap`), so the owner sees the plan as the agent left it.
+/// `unpublished`: calendar writes are on but next week didn't reach the calendar.
+pub fn announce(db: &Connection, now: Ts, unpublished: bool) -> Result<Value> {
     let tz = get_profile(db)?.tz();
     let next_week = week_of(now, &tz).checked_add(days(7))?;
     let key = format!("weekly-brief:{next_week}");
     if let Some(event) = AgentEvent::first(db, "WHERE correlation_id = ?1", [&key])? {
         return Ok(json!({"event_id": event.id}));
     }
-    let (message, effect) = recap(db, next_week, now, unpublished)?;
-    let source =
-        emit(db, "planning.weekly_recap", now, json!({"week_start": next_week.to_string(), "effect": effect}))?;
-    crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient, &[])?;
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
     let payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
     let mut event = emit(db, "planning.weekly_briefing", now, payload)?;
     event.correlation_id = Some(key);
     event.update(db)?;
-    Ok(json!({"event_id": event.id, "recap": message}))
+    Ok(json!({"event_id": event.id}))
+}
+
+/// How long the recap waits for the agent's review when no review turn runs (agent down, owner
+/// mid-conversation): longer than a turn's deadline plus the quiet period before a background wake.
+const RECAP_HOLD: jiff::SignedDuration = jiff::SignedDuration::from_mins(30);
+
+/// Queue the latest week's recap, rendered from the plan as it stands now, once per week. `reviewed`:
+/// the agent's weekly-review turn just ended (well or not), so it goes now and the agent's take
+/// follows it; otherwise it goes once the review is settled or `RECAP_HOLD` has passed. Returns the
+/// delivery to send.
+pub fn release_recap(db: &Connection, recipient: &str, now: Ts, reviewed: bool) -> Result<Option<String>> {
+    let Some(briefing) =
+        AgentEvent::first(db, "WHERE type = 'planning.weekly_briefing' ORDER BY created_at DESC, rowid DESC", [])?
+    else {
+        return Ok(None);
+    };
+    let Some(week) = briefing.payload_json["week_start"].as_str() else { return Ok(None) };
+    let queued =
+        AgentEvent::first(db, "WHERE type = 'planning.weekly_recap' AND payload_json ->> 'week_start' = ?1", [week])?;
+    let due = reviewed || briefing.handled_at.is_some() || now - briefing.created_at >= RECAP_HOLD;
+    if queued.is_some() || !due {
+        return Ok(None);
+    }
+    let unpublished = briefing.payload_json["calendar_published"] == false;
+    let (message, effect) = recap(db, week.parse()?, now, unpublished)?;
+    let source = emit(db, "planning.weekly_recap", now, json!({"week_start": week, "effect": effect}))?;
+    let delivery = crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient, &[])?;
+    Ok(delivery["id"].as_str().map(String::from))
 }
 
 /// How the agent answers the weekly briefing. It rides on the event, so the guidance costs context once a
 /// week instead of on every call.
-const WEEKLY_REVIEW: &str = "Weekly briefing. The recap the owner just got (in your context) already shows last week and \
-    next week's plan. Your take on it, up to five short lines: how the week really went (patterns and effort, not the recap's \
-    numbers), what next week asks of the owner, and anything in the plan that looks off (a clash, a slot they usually miss). \
-    Fix what you can and say what you changed; ask only what is the owner's call. Reply with no fields when you have nothing \
-    to add. It is also your weekly review: compare recent_sessions with your notes, then save, revise or delete learned notes \
-    on patterns that held for at least two weeks (when the owner really trains, which slots they miss or move). Mention a \
-    learning only when it changes next week's plan.";
+const WEEKLY_REVIEW: &str = "Weekly briefing. Right after this turn the owner gets the recap: last week's numbers and \
+    next week's sessions as you leave them. First fix what looks off in next week's plan (a clash, a slot they usually \
+    miss). Then your take, sent after the recap, up to five short lines: how the week really went (patterns and effort, \
+    not the recap's numbers), what next week asks of the owner, and what you changed. Ask only what is the owner's call. \
+    Reply with no fields when you have nothing to add. It is also your weekly review: compare recent_sessions with your \
+    notes and save learned notes on patterns that held for at least two weeks (when the owner really trains, which slots \
+    they miss or move). Keep all notes, owner and learned, consistent: merge duplicates, rewrite or delete any that a \
+    newer note contradicts. Mention a learning only when it changes next week's plan.";
 
 /// Weeks of sessions the Sunday review looks back on.
 const REVIEW_WEEKS: i64 = 4;
@@ -828,7 +852,7 @@ mod tests {
         second.status = SessionStatus::Cancelled;
         second.update(&db).unwrap();
         weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap();
-        let next = announce(&db, "123", sunday(7 * 24 * 60), false).unwrap();
+        let next = announce(&db, sunday(7 * 24 * 60), false).unwrap();
         let event = AgentEvent::get(&db, next["event_id"].as_str().unwrap()).unwrap().unwrap();
         let recent: Vec<String> = serde_json::from_value(event.payload_json["recent_sessions"].clone()).unwrap();
         // Last week's two remaining slots; the cancelled one and next week's plan are left out.
@@ -844,30 +868,64 @@ mod tests {
         assert_eq!(result["plan"]["sessions"].as_array().unwrap().len(), 3);
         assert_eq!(result["audit"]["completed_workouts"], 0);
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
-        let first = announce(&db, "123", sunday(0), false).unwrap();
-        let text = first["recap"].as_str().unwrap();
-        assert!(
-            text.starts_with("📅 **Your week · Oct 5–11**\n**0/3 workouts**\n")
-                && text.contains("\n🗓 **Next week · Oct 12–18**\nMon "),
-            "{text}"
-        );
+        let first = announce(&db, sunday(0), false).unwrap();
         weekly_plan(&db, "short", sunday(1)).unwrap();
-        assert_eq!(announce(&db, "123", sunday(1), false).unwrap()["event_id"], first["event_id"]);
+        assert_eq!(announce(&db, sunday(1), false).unwrap()["event_id"], first["event_id"]);
         assert_eq!(sessions(&db).len(), 3);
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
         assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'planning.weekly_briefing'"), 1);
-        assert_eq!(count(&db, "SELECT count(*) FROM notification_delivery WHERE message LIKE '📅%'"), 1);
-        // The agent's take waits for the recap to go out (or fail), never ahead of it.
-        let wakes = |db: &Connection| {
+    }
+
+    /// On 2026-11-15 the recap went out first and the agent's review then moved a session, so the
+    /// owner saw a plan and its correction. The review wakes at once; the recap waits for it.
+    #[test]
+    fn recap_waits_for_the_review_and_shows_its_edits() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        announce(&db, sunday(0), false).unwrap();
+        let briefings = |db: &Connection| {
             crate::domain::events::wake_pending(db)
                 .unwrap()
                 .iter()
                 .filter(|e| e["type"] == "planning.weekly_briefing")
                 .count()
         };
-        assert_eq!(wakes(&db), 0);
-        db.execute("UPDATE notification_delivery SET status = 'UNKNOWN' WHERE message LIKE '📅%'", []).unwrap();
-        assert_eq!(wakes(&db), 1);
+        assert_eq!(briefings(&db), 1);
+        assert_eq!(release_recap(&db, "123", sunday(1), false).unwrap(), None);
+        let draft = recap(&db, Date::constant(2026, 10, 12), sunday(2), false).unwrap().0;
+        // The review moves Monday's session to Tuesday, then its turn ends.
+        let mut moved = sessions(&db).remove(0);
+        moved.planned_start_at = moved.planned_start_at + jiff::SignedDuration::from_hours(24);
+        moved.planned_end_at = moved.planned_end_at + jiff::SignedDuration::from_hours(24);
+        moved.update(&db).unwrap();
+        let id = release_recap(&db, "123", sunday(2), true).unwrap().unwrap();
+        let text = NotificationDelivery::get(&db, &id).unwrap().unwrap().message;
+        assert!(
+            text.starts_with("📅 **Your week · Oct 5–11**\n**0/3 workouts**\n")
+                && text.contains("\n🗓 **Next week · Oct 12–18**\nTue "),
+            "{text}"
+        );
+        assert_ne!(text, draft);
+        assert_eq!(release_recap(&db, "123", sunday(3), true).unwrap(), None);
+        assert_eq!(count(&db, "SELECT count(*) FROM notification_delivery WHERE message LIKE '📅%'"), 1);
+    }
+
+    /// No review turn ran (agent down, owner chatting): the recap still goes out once the briefing is
+    /// settled elsewhere or the hold is over.
+    #[test]
+    fn recap_goes_out_without_a_review_turn() {
+        for settled in [true, false] {
+            let db = db();
+            weekly_plan(&db, "short", sunday(0)).unwrap();
+            let event = announce(&db, sunday(0), false).unwrap()["event_id"].as_str().unwrap().to_string();
+            assert_eq!(release_recap(&db, "123", sunday(29), false).unwrap(), None);
+            if settled {
+                crate::domain::events::ack(&db, &event, sunday(29)).unwrap();
+                assert!(release_recap(&db, "123", sunday(29), false).unwrap().is_some());
+            } else {
+                assert!(release_recap(&db, "123", sunday(30), false).unwrap().is_some());
+            }
+        }
     }
 
     #[test]
@@ -983,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn new_arrival_label_wakes_agent_and_keeps_saved_slots() {
+    fn new_arrival_label_keeps_saved_slots_and_wakes_nothing() {
         let db = db();
         let changes = json!({"weekly_min_sessions": 1, "weekly_target_sessions": 1, "weekly_max_sessions": 1, "weekdays_allowed": [2],
             "earliest_workout_start": "19:00", "latest_workout_finish": "22:00"});
@@ -999,10 +1057,10 @@ mod tests {
         let mut updated = PlannedSession::get(&db, id).unwrap().unwrap();
         assert_eq!(updated.planned_start_at.0.strftime("%H").to_string(), "17"); // Saved time stays; the agent decides.
         assert!(result["changed"].as_array().unwrap().is_empty() && updated.status == SessionStatus::Tentative);
-        assert!(!crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty()); // The owner already answered.
         updated.user_locked = true;
         updated.save(&db).unwrap();
-        let event = emit(&db, "planning.replan_required", sunday(0), json!({"reason": "crowd_feedback"})).unwrap();
+        let event = emit(&db, "planning.replan_required", sunday(0), json!({"reason": "workout_completed"})).unwrap();
         rolling_plan(&db, "short", sunday(3)).unwrap();
         assert_eq!(PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at, updated.planned_start_at);
         assert!(AgentEvent::get(&db, &event.id).unwrap().unwrap().handled_at.is_none());
