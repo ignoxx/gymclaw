@@ -285,6 +285,48 @@ pub fn detect_stale_workouts(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// Close STARTED slots whose window is over and that no unfinished workout keeps open. A workout
+/// that ran without the slot (started from chat while the slot was set STARTED by hand) is linked and
+/// the slot completed, so it counts once; with no workout of its template that day, the slot was missed.
+pub fn close_started_slots(db: &Connection, now: Ts) -> Result<Vec<String>> {
+    let tz = get_profile(db)?.tz();
+    let mut closed = Vec::new();
+    for mut plan in
+        PlannedSession::select(db, "WHERE status = 'STARTED' AND planned_end_at < ?1 ORDER BY rowid", [now])?
+    {
+        let day = plan.planned_start_at.local(&tz).date();
+        // Its own workouts first, then same-template ones that day that no slot claims.
+        let workouts: Vec<WorkoutSession> = WorkoutSession::select(
+            db,
+            "WHERE planned_session_id = ?1 OR (planned_session_id IS NULL AND template_id = ?2)
+             ORDER BY planned_session_id IS NULL, started_at",
+            (&plan.id, &plan.workout_template_id),
+        )?
+        .into_iter()
+        .filter(|w| w.planned_session_id.is_some() || w.started_at.is_some_and(|s| s.local(&tz).date() == day))
+        .collect();
+        // Still running (stale ones are flagged to the agent): finishing it settles the slot.
+        if workouts.iter().any(|w| w.completed_at.is_none()) {
+            continue;
+        }
+        match workouts.into_iter().next() {
+            Some(mut workout) => {
+                workout.planned_session_id = Some(plan.id.clone());
+                workout.update(db)?;
+                plan.status = SessionStatus::Completed;
+                plan.update(db)?;
+                emit(db, "workout.linked", now, json!({"session_id": plan.id, "workout_id": workout.id}))?;
+            }
+            None => {
+                retire_session(db, &mut plan, SessionStatus::Missed, now)?;
+                emit(db, "workout.missed", now, json!({"session_id": plan.id, "reason": "started_without_workout"}))?;
+            }
+        }
+        closed.push(plan.id);
+    }
+    Ok(closed)
+}
+
 /// Worth a calendar edit: first data, a different feel, or ≥3 people and ≥25% change.
 fn significant(old: Option<&Value>, new: Option<&Value>) -> bool {
     let Some(new) = new.filter(|n| n.as_object().is_some_and(|o| !o.is_empty())) else { return false };
@@ -367,8 +409,9 @@ fn session_ids(data: &Value) -> Vec<String> {
     data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)).collect()
 }
 
-/// Deterministic upkeep: mark elapsed slots missed, inspect conflicts, draft the current week when it
-/// is empty, rotate defaults, refresh unlocked plan snapshots/crowd, and reconcile reminder jobs.
+/// Deterministic upkeep: mark elapsed slots missed, close elapsed STARTED slots, inspect conflicts,
+/// draft the current week when it is empty, rotate defaults, refresh unlocked plan snapshots/crowd, and
+/// reconcile reminder jobs.
 /// Next week is planned only by the Sunday run (`weekly_plan`); if that run never happened, the
 /// current week is drafted here once it starts.
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
@@ -377,6 +420,7 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let current_week = week_of(now, &tz);
     let next_week = current_week.checked_add(days(7))?;
     let missed = mark_missed(db, now)?;
+    let closed = close_started_slots(db, now)?;
     let repaired = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
@@ -394,7 +438,7 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let plans = refresh_plans(db, now)?;
     let crowd = refresh_crowd(db, now)?;
     commit_upcoming(db, now)?;
-    let mut result = json!({"missed": missed, "created": created, "rotation": rotation, "crowd": crowd, "stale_workouts": stale, "refreshed_plans": plans});
+    let mut result = json!({"missed": missed, "closed_started": closed, "created": created, "rotation": rotation, "crowd": crowd, "stale_workouts": stale, "refreshed_plans": plans});
     result.as_object_mut().expect("object").extend(repaired.as_object().cloned().unwrap_or_default());
     Ok(result)
 }
@@ -1192,5 +1236,32 @@ mod tests {
         start(&db, Some("short"), None, false, first.planned_start_at, "unlinked").unwrap();
         assert_eq!(PlannedSession::get(&db, &first.id).unwrap().unwrap().status, SessionStatus::Committed);
         assert!(no_show_nudges(&db, first.planned_start_at.mins(31)).unwrap().is_empty());
+    }
+
+    /// 2026-11-13: the agent created Friday's slot as STARTED, then started the workout without it. The
+    /// slot stayed STARTED forever and the recap showed the workout twice.
+    #[test]
+    fn elapsed_started_slot_links_that_days_workout_or_is_missed() {
+        let db = db();
+        let friday = ts("2026-11-13T10:00:00Z");
+        let thursday = row(&db, "2026-11-09", Some("short"), SessionStatus::Started, friday.mins(-24 * 60), 60);
+        let slot = row(&db, "2026-11-09", Some("short"), SessionStatus::Started, friday, 60);
+        let workout = start(&db, Some("short"), None, false, friday.mins(5), "unlinked").unwrap()["data"]["workout_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Running past the slot's end: the slot waits for it.
+        assert_eq!(close_started_slots(&db, friday.mins(61)).unwrap(), vec![thursday.id.clone()]);
+        assert_eq!(PlannedSession::get(&db, &thursday.id).unwrap().unwrap().status, SessionStatus::Missed);
+        assert_eq!(PlannedSession::get(&db, &slot.id).unwrap().unwrap().status, SessionStatus::Started);
+        db.execute(
+            "UPDATE workout_session SET status = 'PLAN_UPDATED', completed_at = ?1 WHERE id = ?2",
+            (friday.mins(70), &workout),
+        )
+        .unwrap();
+        assert_eq!(close_started_slots(&db, friday.mins(71)).unwrap(), vec![slot.id.clone()]);
+        assert_eq!(PlannedSession::get(&db, &slot.id).unwrap().unwrap().status, SessionStatus::Completed);
+        let linked = WorkoutSession::get(&db, &workout).unwrap().unwrap().planned_session_id;
+        assert_eq!(linked.as_deref(), Some(slot.id.as_str()));
     }
 }
