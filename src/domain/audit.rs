@@ -149,7 +149,7 @@ pub fn correct_set(
         };
         let next_weight = refresh_progression(db, &exercise, now)?;
         Ok(
-            json!({"set_id": set.id, "exercise": name(&exercise), "before": before, "after": {"weight": set.weight, "reps": set.reps, "seconds": set.seconds, "meters": set.meters}, "next_weight": next_weight}),
+            json!({"set_id": set.id, "workout_id": exercise.workout_session_id, "exercise": name(&exercise), "before": before, "after": {"weight": set.weight, "reps": set.reps, "seconds": set.seconds, "meters": set.meters}, "next_weight": next_weight}),
         )
     })
 }
@@ -216,6 +216,28 @@ pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: 
     })
 }
 
+/// One exercise in a finished workout's report: status and working sets.
+fn performed(exercise: &WorkoutExercise, working: &[SetLog]) -> Value {
+    json!({
+        "id": exercise.id, "exercise_id": exercise.exercise_id, "name": name(exercise), "status": exercise.status,
+        "planned_sets": exercise.planned_working_sets, "completed_sets": working.len(),
+        "sets": working.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds, "meters": s.meters})).collect::<Vec<_>>(),
+        "substituted_from": exercise.substituted_from_exercise_id, "reason": exercise.deferred_reason,
+    })
+}
+
+/// A finished workout's exercises and next-weight decisions from its sets as they are now (after
+/// corrections), in `finish`'s result envelope: what its finish card is re-rendered from.
+pub fn report(db: &Connection, workout_id: &str) -> Result<Value> {
+    let (mut performance, mut progressions) = (vec![], vec![]);
+    for exercise in exercises(db, workout_id)? {
+        let (decision, working) = decide(db, &exercise)?;
+        progressions.push(serde_json::to_value(&decision)?);
+        performance.push(performed(&exercise, &working));
+    }
+    Ok(json!({"data": {"workout_id": workout_id, "exercises": performance, "progressions": progressions}}))
+}
+
 /// Finish a WORKOUT_COMPLETE workout: progression, PLAN_UPDATED. Mutation result envelope.
 /// A workout with nothing logged can't finish (it would count as trained): the agent logs what the owner
 /// did, or discards it (`workout::discard`).
@@ -277,12 +299,7 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
             }
             progressed += decision.progressed as usize;
             progressions.push(serde_json::to_value(&decision)?);
-            performance.push(json!({
-                "id": exercise.id, "exercise_id": exercise.exercise_id, "name": name(exercise), "status": exercise.status,
-                "planned_sets": exercise.planned_working_sets, "completed_sets": working.len(),
-                "sets": working.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds, "meters": s.meters})).collect::<Vec<_>>(),
-                "substituted_from": exercise.substituted_from_exercise_id, "reason": exercise.deferred_reason,
-            }));
+            performance.push(performed(exercise, &working));
         }
         if let Some(id) = &workout.planned_session_id
             && let Some(mut planned) = PlannedSession::get(db, id)?

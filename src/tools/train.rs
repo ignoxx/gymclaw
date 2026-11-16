@@ -163,14 +163,16 @@ impl Tool for Workout {
             }
             WorkoutAction::Preview => coach::preview(db, now, self.planned_session_id.as_deref(), cx.data_dir)?,
             WorkoutAction::Log if self.workout_id.is_some() => {
-                return audit::add_set(
+                let workout_id = self.workout_id.as_deref().unwrap_or_default();
+                let result = audit::add_set(
                     db,
-                    self.workout_id.as_deref().unwrap_or_default(),
+                    workout_id,
                     self.which.as_deref().unwrap_or_default(),
                     self.text.as_deref().unwrap_or_default(),
                     now,
                     &rid,
-                );
+                )?;
+                return refresh_finish_card(cx, workout_id, result);
             }
             WorkoutAction::Log => {
                 let view = coach::handle_text(db, self.text.as_deref().unwrap_or_default(), now, &rid)?;
@@ -263,12 +265,37 @@ pub struct SetCorrect {
 impl Tool for SetCorrect {
     const NAME: &'static str = "set_correct";
     const DESCRIPTION: &'static str = "Fix a logged set's weight, reps, minutes or meters when the owner says it was logged wrong, during or after the workout. \
-        Find the set with sql_query on set_log. Recomputes that exercise's next weight if this workout set it.";
+        Find the set with sql_query on set_log. Recomputes that exercise's next weight if this workout set it, \
+        and updates the finished workout's summary card in the chat.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let seconds = self.minutes.map(|m| (m * 60.0).round() as i64);
-        audit::correct_set(cx.db, &self.set_id, self.weight, self.reps, seconds, self.meters, cx.now, &cx.request_id)
+        let result = audit::correct_set(
+            cx.db,
+            &self.set_id,
+            self.weight,
+            self.reps,
+            seconds,
+            self.meters,
+            cx.now,
+            &cx.request_id,
+        )?;
+        // A replayed result from before workout_id was returned has none: nothing to refresh.
+        let Some(workout_id) = result["data"]["workout_id"].as_str().map(String::from) else { return Ok(result) };
+        refresh_finish_card(cx, &workout_id, result)
     }
+}
+
+/// After a finished workout's sets changed: its finish card in the chat is edited to match (after the
+/// commit; a gone message is skipped). The result says so, so the agent doesn't offer to resend it.
+fn refresh_finish_card(cx: &mut Ctx, workout_id: &str, mut result: Value) -> Result<Value> {
+    let edits = coach::finish_card_edits(cx.db, workout_id, cx.now)?;
+    if edits.is_empty() {
+        return Ok(result);
+    }
+    result["finish_card"] = json!("updated in the chat");
+    cx.effects.push(Effect::Coach(CoachView { handled: true, keep: true, edits, ..CoachView::default() }));
+    Ok(result)
 }
 
 #[derive(Deserialize, JsonSchema)]

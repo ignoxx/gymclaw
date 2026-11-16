@@ -11,7 +11,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{ExerciseStatus, PlannedSession, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
+use crate::db::models::{
+    ChatMessage, ExerciseStatus, PlannedSession, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus,
+};
 use crate::domain::adaptation::{self, spec_of};
 use crate::domain::audit;
 use crate::domain::core::mutate;
@@ -21,7 +23,7 @@ use crate::domain::illustrations::{catalog, timed};
 use crate::domain::profile::update_profile;
 use crate::domain::set_parser::{SetInput, parse_block, parse_set};
 use crate::domain::templates::{Load, Measure, SetKind, remember_swap};
-use crate::domain::view::{Button, Card, CardKind, Cleanup, CoachView};
+use crate::domain::view::{Button, Card, CardKind, Cleanup, CoachView, Edit};
 use crate::domain::workout::{
     self, active_workout, cut_rest, exercises, expected_weight, format_distance, format_time, g, guide_id, kind,
     log_set, logs, measure, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved,
@@ -39,7 +41,7 @@ fn button(text: impl Into<String>, parts: &[&str]) -> Result<Button> {
 }
 
 fn card(text: String, buttons: Vec<Vec<Button>>) -> Card {
-    Card { text, photo: None, buttons, rest_until: None, kind: CardKind::Set, effect: None }
+    Card { text, buttons, ..Card::default() }
 }
 
 fn reference(id: &str) -> &str {
@@ -118,6 +120,8 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
             rest_until: Some(rest.due_at),
             kind: CardKind::Rest,
             effect: None,
+            workout_id: Some(workout_id.into()),
+            exercise_id: Some(active.id.clone()),
         });
     }
     let head =
@@ -193,6 +197,8 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
         rest_until: None,
         kind: CardKind::Set,
         effect: None,
+        workout_id: Some(workout_id.into()),
+        exercise_id: Some(active.id.clone()),
     })
 }
 
@@ -394,7 +400,87 @@ fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
     let buttons =
         LABELS.iter().map(|(value, label)| button(*label, &["crowd", value, &r])).collect::<Result<Vec<_>>>()?;
     let effect = h.lifts.iter().any(|l| l.record()).then(|| crate::telegram::EFFECT_CONFETTI.to_string());
-    Ok(Card { effect, ..card(lines.join("\n"), vec![buttons]) })
+    Ok(Card {
+        effect,
+        kind: CardKind::Finish,
+        workout_id: Some(workout_id.to_string()),
+        ..card(lines.join("\n"), vec![buttons])
+    })
+}
+
+/// The ack a crowd answer leaves under the finish card.
+fn crowd_ack(rating: &str) -> String {
+    let label = LABELS.iter().find(|(value, _)| value.eq_ignore_ascii_case(rating)).map_or(rating, |(_, label)| label);
+    format!("Saved: {label}. Thanks.")
+}
+
+/// A finished workout's finish card, re-rendered from its sets as they are now, as an edit of the
+/// message it went out as (empty while it runs, or when no finish card was recorded for it). The
+/// stored chat text follows, so the agent's view of the chat never shows the old sets.
+/// Called after anything changes a finished workout's sets: `set_correct`, a set added later, relabel.
+pub fn finish_card_edits(db: &Connection, workout_id: &str, now: Ts) -> Result<Vec<Edit>> {
+    let workout = workout::load_workout(db, workout_id, None)?;
+    if workout.status != WorkoutStatus::PlanUpdated {
+        return Ok(vec![]);
+    }
+    let Some(mut sent) = ChatMessage::first(
+        db,
+        "WHERE meta_json ->> 'card' = 'finish' AND meta_json ->> 'workout_id' = ?1
+         AND telegram_message_id IS NOT NULL AND meta_json ->> 'removed' IS NULL ORDER BY id DESC",
+        [workout_id],
+    )?
+    else {
+        return Ok(vec![]);
+    };
+    // As of the finish, so "next:" and the week count read as they did then.
+    let mut card = summary_card(db, &audit::report(db, workout_id)?, workout.completed_at.unwrap_or(now))?;
+    card.effect = None;
+    if let Some(rating) = &workout.crowd_feedback {
+        // Answered already: the card looks the way the answer left it.
+        card.text = format!("{}\n{}", card.text, crowd_ack(rating));
+        card.buttons = vec![];
+    }
+    sent.text = card.text.clone();
+    sent.update(db)?;
+    Ok(vec![Edit { message_id: sent.telegram_message_id.expect("checked in the query"), card }])
+}
+
+/// For an owner's Telegram reply: what the coach card they replied to is about, e.g. "the **Dips**
+/// card of workout 3f2a… (Push, Mon 16 Nov); its sets now: 1. 8 × 8 kg (set_id …)". None when the
+/// message isn't a recorded card linked to a workout.
+pub fn card_context(db: &Connection, telegram_message_id: i64) -> Result<Option<String>> {
+    let Some(sent) = ChatMessage::first(
+        db,
+        "WHERE telegram_message_id = ?1 AND role != 'owner' ORDER BY id DESC",
+        [telegram_message_id],
+    )?
+    else {
+        return Ok(None);
+    };
+    let meta = &sent.meta_json.0;
+    let Some(workout) = meta["workout_id"].as_str().map(|id| WorkoutSession::get(db, id)).transpose()?.flatten() else {
+        return Ok(None);
+    };
+    let tz = crate::domain::profile::get_profile(db)?.tz();
+    let when = workout.started_at.map(|t| format!(", {}", t.local(&tz).strftime("%a %-d %b"))).unwrap_or_default();
+    let about =
+        format!("workout {} ({}{when})", workout.id, workout.template_snapshot["name"].as_str().unwrap_or("Workout"));
+    let exercise = meta["exercise_id"].as_str().map(|id| WorkoutExercise::get(db, id)).transpose()?.flatten();
+    let Some(exercise) = exercise else {
+        let card = if meta["card"] == "finish" { "finish card" } else { "card" };
+        return Ok(Some(format!("the {card} of {about}")));
+    };
+    let shown = kind(&exercise);
+    let sets: Vec<String> = logs(db, &exercise.id, None)?
+        .iter()
+        .map(|s| {
+            let set = shown.set(s.weight, s.reps, s.seconds, s.meters);
+            let warmup = if s.set_type == SetType::Warmup { "warm-up " } else { "" };
+            format!("{}. {warmup}{set} (set_id {})", s.set_number, s.id)
+        })
+        .collect();
+    let sets = if sets.is_empty() { "none logged".to_string() } else { sets.join(", ") };
+    Ok(Some(format!("the **{}** card of {about}; its sets now: {sets}", name(&exercise))))
 }
 
 /// Next card, or finish + summary once every exercise is resolved.
@@ -464,8 +550,7 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
             return Ok(acked("⌛ Old button.", vec![]));
         };
         record_feedback(db, &workout.id, rating, now, request_id)?;
-        let label = LABELS.iter().find(|(value, _)| *value == rating).map_or(rating, |(_, label)| label);
-        return Ok(acked(format!("Saved: {label}. Thanks."), vec![]));
+        return Ok(acked(crowd_ack(rating), vec![]));
     }
     if action == "begin" {
         return begin(db, args.first().copied().unwrap_or_default(), now, request_id);
@@ -605,9 +690,8 @@ fn swap_cards(db: &Connection, workout_id: &str, row: &WorkoutExercise) -> Resul
                 ),
                 photo: o.illustration.map(|i| i.telegram_png),
                 buttons: vec![vec![button(label, &["sub", r, &o.substitute_id])?]],
-                rest_until: None,
                 kind: CardKind::Option,
-                effect: None,
+                ..Card::default()
             })
         })
         .collect()
@@ -711,12 +795,10 @@ pub fn relabel(
     let Some(workout) = workout else { crate::bail!("NO_WORKOUT", "No workout to correct") };
     let result = adaptation::relabel(db, &workout.id, exercise, which, now, request_id)?;
     let ack = format!("✏️ Saved as {}.", result["data"]["name"].as_str().unwrap_or(exercise));
-    let cards = if workout.status != WorkoutStatus::PlanUpdated {
-        after_change(db, &workout.id, now, request_id)?
-    } else {
-        vec![]
-    };
-    Ok(acked(ack, cards))
+    if workout.status != WorkoutStatus::PlanUpdated {
+        return Ok(acked(ack, after_change(db, &workout.id, now, request_id)?));
+    }
+    Ok(CoachView { edits: finish_card_edits(db, &workout.id, now)?, ..acked(ack, vec![]) })
 }
 
 /// Agent-initiated action: 'card', 'swap', 'later', 'next', 'end' on the current exercise;
@@ -1049,6 +1131,75 @@ mod tests {
             (Some(90.0), Some(95.0))
         );
         assert_eq!(ExerciseProgression::get(&db, "incline").unwrap().unwrap().next_weight, 95.0);
+    }
+
+    /// The card as the runtime records it once Telegram gave it `message_id`.
+    fn sent(db: &Connection, card: &Card, message_id: i64) {
+        ChatMessage {
+            id: None,
+            at: at(0),
+            role: crate::db::models::ChatRole::Bot,
+            text: card.text.clone(),
+            telegram_message_id: Some(message_id),
+            meta_json: crate::db::Json(card.meta()),
+        }
+        .insert(db)
+        .unwrap();
+    }
+
+    /// 2026-11-16: the owner fixed a dips set the agent corrected, then asked for the cards already sent
+    /// to match; the finish card kept the typo.
+    #[test]
+    fn corrected_set_rewrites_the_finish_card_it_went_out_as() {
+        let db = db();
+        push(&db);
+        handle_text(&db, "8x90", at(10), "m1").unwrap();
+        handle_rest_over(&db, at(101)).unwrap();
+        let workout_id = active_workout(&db).unwrap().unwrap().id;
+        assert!(finish_card_edits(&db, &workout_id, at(105)).unwrap().is_empty(), "nothing to edit while it runs");
+        handle_tap(&db, &data(&live(&db, at(110)), "⏭ Next exercise"), at(112), "cb-1").unwrap();
+        let summary = handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap().cards.remove(0);
+        assert!(summary.text.contains("\n>> Machine incline press 90 kg: 8\n"), "{}", summary.text);
+        sent(&db, &summary, 500);
+        let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
+        // The agent only calls set_correct; the card edit comes with it.
+        let mut cx = crate::tools::Ctx {
+            db: &db,
+            now: at(700),
+            request_id: "fix".into(),
+            data_dir: Path::new("/tmp"),
+            effects: vec![],
+        };
+        let fixed = crate::tools::call(&mut cx, "set_correct", json!({"set_id": set.id, "reps": 12})).unwrap();
+        assert_eq!(fixed["finish_card"], "updated in the chat");
+        let [crate::tools::Effect::Coach(CoachView { edits, .. })] = &cx.effects[..] else {
+            panic!("{:?}", cx.effects)
+        };
+        let [Edit { message_id: 500, card }] = &edits[..] else { panic!("{edits:?}") };
+        assert!(card.text.contains("\n>> Machine incline press 90 kg: 12\n"), "{}", card.text);
+        assert_eq!(card.buttons, summary.buttons, "crowd question still open");
+        let stored = ChatMessage::first(&db, "WHERE telegram_message_id = 500", []).unwrap().unwrap();
+        assert_eq!(stored.text, card.text, "the agent's view of the chat shows the corrected sets");
+
+        // Answered since: the card keeps the answer and has no buttons, as the tap left it.
+        db.execute("UPDATE workout_session SET crowd_feedback = 'BUSY'", []).unwrap();
+        let card = finish_card_edits(&db, &workout_id, at(710)).unwrap().remove(0).card;
+        assert!(card.text.ends_with("How busy was the gym?\nSaved: Busy. Thanks."), "{}", card.text);
+        assert!(card.buttons.is_empty());
+    }
+
+    #[test]
+    fn replied_card_names_its_exercise_and_sets() {
+        let db = db();
+        push(&db);
+        let card = live(&db, at(0));
+        sent(&db, &card, 400);
+        handle_text(&db, "8x90", at(10), "m1").unwrap();
+        let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
+        let context = card_context(&db, 400).unwrap().unwrap();
+        assert!(context.starts_with("the **Machine incline press** card of workout "), "{context}");
+        assert!(context.ends_with(&format!("its sets now: 1. 8 × 90 kg (set_id {})", set.id)), "{context}");
+        assert_eq!(card_context(&db, 401).unwrap(), None, "not a recorded card");
     }
 
     #[test]

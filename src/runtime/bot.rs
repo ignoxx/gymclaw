@@ -27,6 +27,8 @@ use crate::telegram::{Audio, CallbackQuery, Media, Message, MessageReaction, Tel
 use crate::time::Ts;
 
 const ACK: &str = "👀";
+/// Longest quote of a replied-to message the agent gets (chars); finish cards are long.
+const QUOTED_CHARS: usize = 1500;
 const SESSION: &str = "telegram:owner";
 
 #[derive(Debug, PartialEq)]
@@ -65,7 +67,12 @@ struct Inbound {
 
 enum Fast {
     Tap(Box<CallbackQuery>),
-    Text { message_id: i64, text: String },
+    /// `reply`: the message it replies to, for the agent if the coach hands it over.
+    Text {
+        message_id: i64,
+        text: String,
+        reply: Option<Box<Message>>,
+    },
 }
 
 pub struct Bot {
@@ -111,7 +118,7 @@ impl Bot {
             while let Some(job) = lane.recv().await {
                 match job {
                     Fast::Tap(q) => worker.tap(*q).await,
-                    Fast::Text { message_id, text } => worker.set_text(message_id, text).await,
+                    Fast::Text { message_id, text, reply } => worker.set_text(message_id, text, reply).await,
                 }
             }
         });
@@ -215,7 +222,9 @@ impl Bot {
                 Route::Status => return self.send_status().await,
                 Route::Extensions => return self.extensions(&text).await,
                 Route::Set => {
-                    let _ = self.fast.send(Fast::Text { message_id: message.message_id, text });
+                    // A typed set stays on the fast lane even as a reply; only a fallback needs the context.
+                    let reply = message.reply_to_message;
+                    let _ = self.fast.send(Fast::Text { message_id: message.message_id, text, reply });
                     return;
                 }
                 Route::Agent => {}
@@ -232,6 +241,7 @@ impl Bot {
             text.push_str("\n[a file that isn't an image; it wasn't saved]");
         }
         let meta = if voice.is_some() { json!({"kind": "voice"}) } else { json!({}) };
+        let text = self.with_reply(text, message.reply_to_message.as_deref()).await;
         self.to_agent(message.message_id, format!("tg-{}", message.message_id), text.trim().to_string(), images, meta)
             .await;
     }
@@ -289,6 +299,27 @@ impl Bot {
         };
         self.log.log(json!({"ev": "label", "source": "reaction", "run": sent.meta_json.get("run"),
             "kind": sent.meta_json.get("kind"), "msg": message_id, "emoji": emoji, "label": label}));
+    }
+
+    /// The owner's text plus what it replies to, as a bracketed line like the other context: the quoted
+    /// text and, for a coach card, the workout and sets behind it (`coach::card_context`). The agent
+    /// otherwise can't see what "that set" points at (2026-11-16: "dont u see the message i replied to?").
+    async fn with_reply(&self, text: String, quoted: Option<&Message>) -> String {
+        let Some(quoted) = quoted else { return text };
+        let id = quoted.message_id;
+        let context = blocking(self.db(), move |db| coach::card_context(db, id)).await.unwrap_or_else(|e| {
+            tracing::warn!("reply context lookup failed: {e}");
+            None
+        });
+        let who = if quoted.from.as_ref().is_some_and(|f| f.id == self.owner) { "their own" } else { "a bot" };
+        let body = quoted.body().map(|b| b.replace('\n', " / ")).unwrap_or_default();
+        let body = match body.char_indices().nth(QUOTED_CHARS) {
+            Some((end, _)) => format!("{}…", &body[..end]),
+            None if body.is_empty() && quoted.photo.is_some() => "(a photo)".into(),
+            None => body,
+        };
+        let context = context.map(|c| format!("; it is {c}")).unwrap_or_default();
+        format!("{text}\n[replying to {who} message: \"{body}\"{context}]").trim().to_string()
     }
 
     /// Download the largest photo size or an image document.
@@ -446,7 +477,7 @@ impl Bot {
             "ok": error.is_none(), "error": error, "ms": started.elapsed().as_millis() as u64}));
     }
 
-    async fn set_text(&self, message_id: i64, text: String) {
+    async fn set_text(&self, message_id: i64, text: String, reply: Option<Box<Message>>) {
         let started = Instant::now();
         let request_id = format!("tg-msg:{message_id}");
         let input = text.clone();
@@ -478,6 +509,7 @@ impl Bot {
                     Err(e) => format!("{text}\n[Coach fallback: {}: {e}]", e.code()),
                     _ => text,
                 };
+                let text = self.with_reply(text, reply.as_deref()).await;
                 self.to_agent(message_id, format!("tg-{message_id}"), text, vec![], json!({"kind": "coach_fallback"}))
                     .await;
             }
@@ -499,7 +531,7 @@ impl Bot {
                 if batch.is_empty() {
                     break;
                 }
-                self.turn(batch).await;
+                self.turn(batch, false).await;
             }
             if let Err(e) = self.event_turn().await {
                 tracing::warn!("agent event wake: {} {e}", e.code());
@@ -562,7 +594,8 @@ impl Bot {
             .insert(db)
         })
         .await?;
-        if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }]).await {
+        let review = events.as_array().into_iter().flatten().any(|e| e["type"] == "planning.weekly_briefing");
+        if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }], review).await {
             in_tx(self.db(), move |db| {
                 for id in ids {
                     crate::domain::events::ack(db, &id, Ts::now())?;
@@ -575,7 +608,10 @@ impl Bot {
         Ok(())
     }
 
-    async fn turn(&self, batch: Vec<Inbound>) -> bool {
+    /// One agent turn and its reply. `review`: the batch holds the weekly review, so the Sunday recap
+    /// goes out between the turn and its reply, showing the plan as the turn left it, whether or not
+    /// the turn succeeded.
+    async fn turn(&self, batch: Vec<Inbound>, review: bool) -> bool {
         let typing = {
             let tg = self.tg.clone();
             let chat = self.owner;
@@ -591,6 +627,9 @@ impl Bot {
         let background = batch.iter().all(|b| b.message_id == 0);
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
         typing.abort();
+        if review {
+            self.send_recap().await;
+        }
         // The owner wrote while a background turn ran: their turn speaks instead, and sees the same
         // events as open issues. Nothing is settled, so the batch retries if they stay open.
         if background && !self.inbox.lock().await.is_empty() {
@@ -616,6 +655,21 @@ impl Bot {
             .is_ok();
         self.wake.notify_one();
         settled
+    }
+
+    /// Queue and send this week's recap (`weekly::release_recap`). A failed send stays in the outbox.
+    async fn send_recap(&self) {
+        let recipient = self.owner.to_string();
+        let queued =
+            in_tx(self.db(), move |db| crate::domain::weekly::release_recap(db, &recipient, Ts::now(), true)).await;
+        let sent = match queued {
+            Ok(Some(id)) => super::outbox::deliver(self.db(), self.tg.as_ref(), &id, Ts::now()).await.map(drop),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = sent {
+            tracing::warn!("weekly recap: {} {e}", e.code());
+        }
     }
 
     /// Send the turn's one outcome and clear the 👀 acks. False when the owner may not have got it.
@@ -851,7 +905,7 @@ mod tests {
         assert!(sessions[0].user_locked);
         // Stale coach buttons and unparsed sets must enter the same agent inbox with context.
         bot.tap(serde_json::from_value(json!({"id": "stale", "from": {"id": 42}, "data": "gc:next:missing", "message": {"message_id": 5, "chat": {"id": 42, "type": "private"}, "text": "Bench card"}})).unwrap()).await;
-        bot.set_text(6, "10x40".into()).await;
+        bot.set_text(6, "10x40".into(), None).await;
         assert_eq!(bot.inbox.lock().await.len(), 2);
         let fallback =
             ChatMessage::select(&db, "WHERE meta_json ->> 'kind' = 'coach_fallback' ORDER BY id", []).unwrap();
@@ -870,6 +924,30 @@ mod tests {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(crate::agent::ModelReply { message: json!({"content": "Which one drops?"}), ..Default::default() })
         }
+    }
+
+    /// The owner gets the recap after the review turn, then the agent's take; never the take first.
+    #[tokio::test]
+    async fn weekly_recap_goes_out_between_the_review_turn_and_its_take() {
+        let model = Arc::new(Chatty(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, tg) = fixture(model.clone());
+        enable_runtime(&db);
+        crate::domain::weekly::weekly_plan(&db, "fixture", Ts::now()).unwrap();
+        crate::domain::weekly::announce(&db, Ts::now(), false).unwrap();
+        bot.event_turn().await.unwrap();
+        let sent: Vec<String> = tg
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                crate::telegram::coach::tests::Call::Send(text, _) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].starts_with("📅") && sent[1] == "Which one drops?", "{sent:?}");
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// One voice: mid-conversation, a background event waits for the owner's next turn, which sees
@@ -892,7 +970,7 @@ mod tests {
 
         // Their turn sees it and settles it; no background turn follows.
         let batch = std::mem::take(&mut *bot.inbox.lock().await);
-        assert!(bot.turn(batch).await);
+        assert!(bot.turn(batch, false).await);
         assert_eq!(calls(), 1);
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
 
@@ -1009,6 +1087,54 @@ mod tests {
         }
         assert_eq!(labels.len(), 1);
         assert_eq!((labels[0]["run"].as_str(), labels[0]["label"].as_str()), (Some("r1"), Some("bad")));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 2026-11-16: the owner replied to a dips card "update that set, i did 12 reps but typed 8"; the
+    /// agent asked "Which exercise was it?". The reply now carries the card, its workout and set ids.
+    #[tokio::test]
+    async fn reply_to_a_card_reaches_the_agent_with_its_sets_and_typed_sets_stay_fast() {
+        let (bot, db, dir, _) = fixture(Arc::new(Chatty(std::sync::atomic::AtomicUsize::new(0))));
+        crate::domain::workout::start(&db, Some("fixture"), None, false, Ts::now(), "start").unwrap();
+        let workout = crate::domain::workout::active_workout(&db).unwrap().unwrap();
+        let card = coach::exercise_card(&db, &workout.id, Ts::now()).unwrap();
+        ChatMessage {
+            id: None,
+            at: Ts::now(),
+            role: ChatRole::Bot,
+            text: card.text.clone(),
+            telegram_message_id: Some(300),
+            meta_json: Json(card.meta()),
+        }
+        .insert(&db)
+        .unwrap();
+        coach::handle_text(&db, "8x40", Ts::now(), "m1").unwrap();
+        let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
+        let message = |id: i64, text: &str| -> Message {
+            serde_json::from_value(json!({"message_id": id, "from": {"id": 42}, "chat": {"id": 42, "type": "private"}, "text": text,
+                "reply_to_message": {"message_id": 300, "from": {"id": 7}, "chat": {"id": 42, "type": "private"}, "text": "Bench\nSet 1/3 · 8–10 × ? kg"}}))
+            .unwrap()
+        };
+
+        bot.message(message(9, "12x40")).await;
+        assert!(bot.inbox.lock().await.is_empty(), "a typed set goes to the coach, reply or not");
+
+        bot.message(message(10, "possible to update that set, i did 12 reps")).await;
+        let stored = ChatMessage::first(&db, "WHERE telegram_message_id = 10", []).unwrap().unwrap();
+        assert_eq!(
+            stored.text,
+            format!(
+                "possible to update that set, i did 12 reps\n[replying to a bot message: \"Bench / Set 1/3 · 8–10 × ? kg\"; it is the **Bench** card of workout {} (Fixture, {}); its sets now: 1. 8 × 40 kg (set_id {})]",
+                workout.id,
+                workout
+                    .started_at
+                    .unwrap()
+                    .local(&crate::domain::profile::get_profile(&db).unwrap().tz())
+                    .strftime("%a %-d %b"),
+                set.id
+            )
+        );
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

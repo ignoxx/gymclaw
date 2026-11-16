@@ -132,7 +132,11 @@ model never has to. Timestamps without an offset are the owner's local time.
 - Typed sets (`10x40`, `+10x8`, `8/side`, `2 km`, `25 min`) → coach first; unparsed text and failed validations → agent
   with error context. Failed button operations also fall back to the agent with the card context.
 - Coach card: one live card per exercise with image, target and quick buttons, edited in place;
-  the rest countdown edits every 5 s.
+  the rest countdown edits every 5 s. Each sent card's `chat_message` meta names its card kind,
+  workout and exercise. When a finished workout's sets change (`set_correct`, a set added later,
+  relabel), its finish card is re-rendered and edited in place.
+- A Telegram reply reaches the agent with a `[replying to …]` line: the quoted text and, for a coach
+  card, its workout and the exercise's sets with their ids. Typed sets stay on the coach's fast lane.
 - Photos/documents in (HEIC included, via libheif ≥ 1.17) → vision model; EXIF capture date for
   scale backfill. A CSV document (a Strong or Hevy export) is saved to `data/imports/` and the agent
   gets its path plus a summary (`domain::import::summary`: workouts, dates, each exercise name and
@@ -162,8 +166,9 @@ model never has to. Timestamps without an offset are the owner's local time.
   (Start, plus Skip/Move handed to the agent). Conflicts, missed slots, stale workouts
   and week rollover create durable decision events rather than automatic replans. The two fixed
   messages are numbers only: the workout summary card and the Sunday recap (`weekly::recap`), both
-  built on `domain::highlights`. The agent adds its take after the recap only; the summary card is
-  the whole wrap-up.
+  built on `domain::highlights`. The recap waits for the agent's weekly review turn (which may move
+  sessions) and shows the plan it left; the agent's take follows it. The summary card is the whole
+  wrap-up.
   The bot checks this inbox every minute in its serialized agent worker, gated by runtime authority;
   successful turns acknowledge events and failed turns remain pending. Unchanged conflicts dedupe
   across restarts and acknowledgement. Default drafts for empty weeks, rotation of unlocked
@@ -175,7 +180,8 @@ model never has to. Timestamps without an offset are the owner's local time.
   a fallback; the coach's live countdown normally handles them.
 - Outbox = `notification_delivery`: commit PENDING → claim SENDING → send → SENT with the Telegram
   message id; any send error → UNKNOWN, never retried automatically, because Telegram has no
-  idempotent send. The owner checks and the agent calls `delivery_resolve`.
+  idempotent send. The owner checks and the agent calls `delivery_resolve`, unless a resend would no
+  longer go out (session started or resolved, reminder expired): then it closes itself.
 - `runtime_settings` gates it all: `enabled` for sends and ticks, plus separate flags for
   calendar writes and crowd polling. The row is created by the first `runtime_resume`.
 

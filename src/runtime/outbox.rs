@@ -3,6 +3,7 @@
 //! PENDING → claim SENDING (committed, no network under the write lock) → send → SENT with the
 //! Telegram message id. Any send error → UNKNOWN plus a `notifications.delivery_unknown` event,
 //! never retried automatically: Telegram has no idempotent send, so the owner checks and resolves.
+//! Once a resend would no longer go out (`settle_unknown`), it closes itself without asking.
 use std::path::Path;
 
 use jiff::SignedDuration;
@@ -281,6 +282,67 @@ pub fn pending(db: &Connection, recipient: &str) -> Result<Vec<String>> {
     .collect())
 }
 
+/// Why a delivery (of `job`, if it has one) would no longer go out: the check `claim` makes before a send.
+fn delivery_stale_reason(
+    db: &Connection,
+    row: &NotificationDelivery,
+    job: Option<&NotificationJob>,
+    now: Ts,
+) -> Result<Option<&'static str>> {
+    match job {
+        Some(job) => stale_reason(db, job, now, Some(row)),
+        None => event_stale_reason(db, row, now),
+    }
+}
+
+/// Cancel a delivery that no longer applies and close what it left open: its source event and any
+/// unanswered "did it arrive?" question.
+fn suppress(db: &Connection, row: &mut NotificationDelivery, reason: &str, now: Ts) -> Result<()> {
+    row.status = DeliveryStatus::Cancelled;
+    row.handled_at = Some(now);
+    row.update(db)?;
+    if let Some(event_id) = &row.agent_event_id
+        && let Some(mut event) = AgentEvent::get(db, event_id)?
+    {
+        event.handled_at = Some(now);
+        event.update(db)?;
+    }
+    close_unknown_question(db, &row.id, now)?;
+    emit(db, "notifications.delivery_suppressed", now, json!({"delivery_id": row.id, "reason": reason}))?;
+    Ok(())
+}
+
+/// Acknowledge the `notifications.delivery_unknown` event of a delivery.
+fn close_unknown_question(db: &Connection, delivery_id: &str, now: Ts) -> Result<()> {
+    db.execute(
+        "UPDATE agent_event SET handled_at = ?1 WHERE type = 'notifications.delivery_unknown' AND handled_at IS NULL AND payload_json ->> 'delivery_id' = ?2",
+        rusqlite::params![now, delivery_id],
+    )?;
+    Ok(())
+}
+
+/// Close UNKNOWN deliveries that a resend would no longer deliver (the session started or was
+/// resolved, the reminder expired, the message is too old): asking the owner whether a "Gym soon" from
+/// days ago arrived only confuses. A delivery that is still timely stays UNKNOWN for the owner to check.
+pub fn settle_unknown(db: &Connection, recipient: &str, now: Ts) -> Result<Vec<String>> {
+    let mut settled = Vec::new();
+    for mut row in NotificationDelivery::select(
+        db,
+        "WHERE status = 'UNKNOWN' AND runtime_profile = ?1 AND recipient = ?2 ORDER BY created_at, id",
+        [PROFILE, recipient],
+    )? {
+        let job = match &row.notification_job_id {
+            Some(id) => NotificationJob::get(db, id)?,
+            None => None,
+        };
+        if let Some(reason) = delivery_stale_reason(db, &row, job.as_ref(), now)? {
+            suppress(db, &mut row, reason, now)?;
+            settled.push(row.id);
+        }
+    }
+    Ok(settled)
+}
+
 enum Claim {
     Done(Value),
     Send { chat: i64, message: String, buttons: Vec<Vec<Button>>, session: Option<String>, recap: Option<Recap> },
@@ -313,21 +375,8 @@ fn claim(db: &mut Connection, delivery_id: &str, now: Ts) -> Result<Claim> {
         Some(id) => NotificationJob::get(&tx, id)?,
         None => None,
     };
-    let reason = match &job {
-        Some(job) => stale_reason(&tx, job, now, Some(&row))?,
-        None => event_stale_reason(&tx, &row, now)?,
-    };
-    if let Some(reason) = reason {
-        row.status = DeliveryStatus::Cancelled;
-        row.handled_at = Some(now);
-        row.update(&tx)?;
-        if let Some(event_id) = &row.agent_event_id
-            && let Some(mut event) = AgentEvent::get(&tx, event_id)?
-        {
-            event.handled_at = Some(now);
-            event.update(&tx)?;
-        }
-        emit(&tx, "notifications.delivery_suppressed", now, json!({"delivery_id": row.id, "reason": reason}))?;
+    if let Some(reason) = delivery_stale_reason(&tx, &row, job.as_ref(), now)? {
+        suppress(&tx, &mut row, reason, now)?;
         tx.commit()?;
         return Ok(Claim::Done(delivery_data(&row)));
     }
@@ -501,7 +550,8 @@ pub async fn settle_session_messages(db_path: &Path, tg: &dyn Telegram, chat: i6
     Ok(())
 }
 
-/// The owner's answer about an ambiguous delivery: `sent` closes it, `not-sent` queues it again.
+/// The owner's answer about an ambiguous delivery: `sent` closes it, `not-sent` queues it again (the
+/// claim still drops it if it no longer applies).
 pub fn resolve_delivery(db: &Connection, delivery_id: &str, sent: bool, now: Ts) -> Result<Value> {
     let Some(mut row) = NotificationDelivery::get(db, delivery_id)? else {
         crate::bail!("DELIVERY_NOT_FOUND", "Unknown notification delivery")
@@ -513,10 +563,7 @@ pub fn resolve_delivery(db: &Connection, delivery_id: &str, sent: bool, now: Ts)
     row.handled_at = Some(now);
     row.update(db)?;
     // The owner answered the open question either way; left open it sat in the agent's open issues.
-    db.execute(
-        "UPDATE agent_event SET handled_at = ?1 WHERE type = 'notifications.delivery_unknown' AND handled_at IS NULL AND payload_json ->> 'delivery_id' = ?2",
-        rusqlite::params![now, row.id],
-    )?;
+    close_unknown_question(db, &row.id, now)?;
     if sent {
         acknowledge_delivery_events(db, &row, now)?;
     }
@@ -818,6 +865,27 @@ mod tests {
         settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
         settle_session_messages(&path, tg.as_ref(), 42, now()).await.unwrap();
         assert_eq!(&tg.calls()[5..], &[Call::Buttons(102, vec![])]);
+    }
+
+    /// 2026-11-13: a "Gym soon" hit a send error and stayed UNKNOWN; two days later the agent asked the
+    /// owner whether it arrived. Once the session has started, the question closes itself.
+    #[tokio::test]
+    async fn unknown_reminder_closes_itself_once_it_no_longer_applies() {
+        let (path, db) = crate::db::test::file();
+        let (mut plan, id) = planned_job(&db, JobKind::GetReady, "Gym soon.");
+        let tg = Arc::new(FakeTelegram { fail_send: true, ..Arc::into_inner(FakeTelegram::new()).unwrap() });
+        deliver(&path, tg.as_ref(), &id, now()).await.unwrap_err();
+        let open_question = |db: &Connection| {
+            AgentEvent::first(db, "WHERE type = 'notifications.delivery_unknown' AND handled_at IS NULL", []).unwrap()
+        };
+        // Still timely: the owner is asked.
+        assert!(settle_unknown(&db, "42", now().mins(5)).unwrap().is_empty());
+        assert!(open_question(&db).is_some());
+        plan.status = SessionStatus::Started;
+        plan.update(&db).unwrap();
+        assert_eq!(settle_unknown(&db, "42", now().mins(5)).unwrap(), vec![id.clone()]);
+        assert_eq!(NotificationDelivery::get(&db, &id).unwrap().unwrap().status, DeliveryStatus::Cancelled);
+        assert!(open_question(&db).is_none());
     }
 
     #[tokio::test]

@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::json;
 use tokio::sync::{Mutex, Notify};
 
 use crate::agent::openrouter::OpenRouter;
@@ -17,6 +16,7 @@ use crate::config::Config;
 use crate::db::models::{ChatMessage, ChatRole};
 use crate::db::{Connection, Json};
 use crate::domain::coach;
+use crate::domain::view::Card;
 use crate::error::{Error, Result};
 use crate::telegram::Telegram;
 use crate::telegram::client::Bot as TelegramBot;
@@ -109,8 +109,8 @@ pub async fn serve(config: Config) -> Result<()> {
     // Cards the owner sees go into the chat history, so the agent knows what's on screen.
     let record: Record = {
         let db_path = db_path.clone();
-        Arc::new(move |text: &str, message_id: i64| {
-            let (db_path, text) = (db_path.clone(), text.to_string());
+        Arc::new(move |card: &Card, text: &str, message_id: i64| {
+            let (db_path, text, meta) = (db_path.clone(), text.to_string(), card.meta());
             tokio::spawn(async move {
                 let saved = blocking(&db_path, move |db| {
                     ChatMessage {
@@ -119,7 +119,7 @@ pub async fn serve(config: Config) -> Result<()> {
                         role: ChatRole::Bot,
                         text,
                         telegram_message_id: Some(message_id),
-                        meta_json: Json(json!({"kind": "coach"})),
+                        meta_json: Json(meta),
                     }
                     .insert(db)
                 })

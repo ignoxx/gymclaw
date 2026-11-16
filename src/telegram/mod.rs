@@ -133,6 +133,8 @@ pub struct Message {
     pub document: Option<Document>,
     pub voice: Option<Audio>,
     pub audio: Option<Audio>,
+    /// The message this one replies to (Telegram "Reply"), as Telegram has it now.
+    pub reply_to_message: Option<Box<Message>>,
 }
 
 impl Message {

@@ -393,7 +393,8 @@ pub fn source_health(db: &Connection, now: Ts) -> Result<Value> {
     Ok(json!({"sources": sources}))
 }
 
-/// How busy it felt after a workout. Mutation result envelope.
+/// How busy it felt after a workout. Mutation result envelope. It only feeds the crowd model and never
+/// wakes the agent: the owner just answered the finish card, and a wake asked them again.
 pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts, request_id: &str) -> Result<Value> {
     let rating = rating.to_uppercase();
     let Some(normalized) = rating_score(&rating) else {
@@ -491,7 +492,6 @@ pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts,
                 .insert(db)?,
             }
         }
-        emit(db, "planning.replan_required", now, json!({"reason": "crowd_feedback", "workout_id": workout_id}))?;
         Ok(
             json!({"feedback_id": feedback.id, "workout_id": workout_id, "rating": rating, "normalized_score": normalized, "observed_at": at,
             "paired_sources": paired, "demo": demo, "instruction": "Crowd feedback saved. Future slot estimates now use this visit."}),
@@ -669,6 +669,7 @@ mod tests {
         let workout = visit(&db, now(0));
         poll(&db, &provider(100), Some(now(30))).unwrap(); // A later poll is not evidence at arrival.
         let original = record_feedback(&db, &workout, "BUSY", now(60), "arrival").unwrap();
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
         assert_eq!(record_feedback(&db, &workout, "BUSY", now(120), "arrival").unwrap(), original);
         let label = CrowdFeedback::first(&db, "", []).unwrap().unwrap();
         assert_eq!(label.observed_at, now(0));
