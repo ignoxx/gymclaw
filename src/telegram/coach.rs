@@ -22,8 +22,8 @@ pub const TICK: Duration = Duration::from_secs(5);
 pub type Clock = Arc<dyn Fn() -> Ts + Send + Sync>;
 /// Called when a countdown reaches zero: `coach::handle_rest_over`, None on failure.
 pub type RestOver = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<CoachView>> + Send>> + Send + Sync>;
-/// Called with the text and message id of every card sent (for `chat_message`).
-pub type Record = Arc<dyn Fn(&str, i64) + Send + Sync>;
+/// Called with every card sent, the text it went out with and its message id (for `chat_message`).
+pub type Record = Arc<dyn Fn(&Card, &str, i64) + Send + Sync>;
 
 /// "⏱ 1:25 until Bench set 2/2" for rest cards; other cards as they are.
 pub fn with_rest(card: &Card, now: Ts) -> String {
@@ -113,7 +113,7 @@ impl Coach {
             .send(self.chat, caption, card.photo.as_deref().map(Path::new), keyboard(card), card.effect.as_deref())
             .await?;
         if let Some(record) = &self.record {
-            record(text, id);
+            record(card, text, id);
         }
         Ok(id)
     }
@@ -198,6 +198,13 @@ impl Coach {
         let now = self.now();
         if let (Some(message), Some(emoji)) = (inbound, &view.react) {
             self.quietly(self.tg.react(self.chat, message, Some(emoji)).await).await;
+        }
+        for edit in &view.edits {
+            // Old messages can be gone or unchanged; the change behind the edit is saved either way.
+            let card = &edit.card;
+            let result =
+                self.tg.edit(self.chat, edit.message_id, &card.text, &card.buttons, card.photo.is_some()).await;
+            self.quietly(result).await;
         }
         if view.standalone {
             // Previews etc. are their own messages; the live workout card stays as it is.
@@ -563,7 +570,7 @@ pub mod tests {
         let recorded = Arc::new(StdMutex::new(vec![]));
         let record: Record = {
             let recorded = recorded.clone();
-            Arc::new(move |text: &str, _| recorded.lock().unwrap().push(text.to_string()))
+            Arc::new(move |_: &Card, text: &str, _| recorded.lock().unwrap().push(text.to_string()))
         };
         let coach = Coach::new(tg.clone(), 1, clock(), None, Some(record));
         coach.apply(&view(vec![card("Bench · set 1")]), None, None).await.unwrap();
@@ -590,6 +597,24 @@ pub mod tests {
         assert_eq!(*fired.lock().unwrap(), 0);
         assert_eq!(tg.calls().iter().filter(|c| matches!(c, Call::Send(..))).count(), 1);
         assert_eq!(coach.shown().await.0, None);
+    }
+
+    /// A corrected finish card is edited in place; one the owner deleted fails quietly and the live
+    /// workout card stays.
+    #[tokio::test(start_paused = true)]
+    async fn edits_of_old_cards_leave_the_live_card_and_survive_a_gone_message() {
+        let tg = Arc::new(FakeTelegram { gone: true, ..Arc::into_inner(FakeTelegram::new()).unwrap() });
+        let coach = Coach::new(tg.clone(), 1, clock(), None, None);
+        coach.apply(&view(vec![card("Bench · set 1")]), None, None).await.unwrap();
+        let fixed = Card { kind: CardKind::Finish, ..card("🏁 Push done\n>> Dips 12 reps") };
+        let edit = CoachView {
+            keep: true,
+            edits: vec![crate::domain::view::Edit { message_id: 42, card: fixed.clone() }],
+            ..view(vec![])
+        };
+        coach.apply(&edit, None, None).await.unwrap();
+        assert_eq!(tg.calls().last(), Some(&Call::Edit(42, fixed.text, fixed.buttons, false)));
+        assert_eq!(coach.shown().await.0.unwrap(), "Bench · set 1");
     }
 
     #[tokio::test(start_paused = true)]
