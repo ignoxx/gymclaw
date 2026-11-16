@@ -105,6 +105,8 @@ pub struct Message {
     pub caption: Option<String>,
     pub photo: Option<Vec<PhotoSize>>,
     pub document: Option<Document>,
+    /// The message this one replies to (Telegram "Reply"), as Telegram has it now.
+    pub reply_to_message: Option<Box<Message>>,
 }
 
 impl Message {

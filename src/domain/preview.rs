@@ -93,7 +93,7 @@ pub fn session_preview(db: &Connection, now: Ts, planned_session_id: Option<&str
         .collect();
     let photo = if items.is_empty() { None } else { Some(render_grid(&items, &data_dir.join("previews"))?) };
     let kind = if photo.is_some() { CardKind::Preview } else { CardKind::Other };
-    Ok(Card { text: lines.join("\n"), photo, buttons: vec![], rest_until: None, kind, effect: None })
+    Ok(Card { text: lines.join("\n"), photo, kind, ..Card::default() })
 }
 
 /// Escapes non-ASCII as `\uXXXX`, so stored keys and fingerprints keep their exact text.

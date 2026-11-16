@@ -1,5 +1,6 @@
 //! What the coach shows in Telegram. Produced by the training domain, rendered by `telegram::coach`.
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::time::Ts;
 
@@ -21,6 +22,8 @@ pub enum CardKind {
     Option,
     /// Session overview image. The photo goes out alone; `text` is for chat history and the agent.
     Preview,
+    /// A finished workout's summary; edited in place when its sets change afterwards.
+    Finish,
     #[serde(other)]
     Other,
 }
@@ -36,6 +39,33 @@ pub struct Card {
     pub kind: CardKind,
     /// Animated Telegram effect played when the card arrives (`telegram::EFFECT_*`).
     pub effect: Option<String>,
+    /// The workout this card is about (set, rest and finish cards).
+    pub workout_id: Option<String>,
+    /// The `workout_exercise` this card is about (set and rest cards).
+    pub exercise_id: Option<String>,
+}
+
+impl Card {
+    /// `chat_message.meta_json` once the card is sent: its kind and the workout/exercise it is about,
+    /// so a reply to it or a later correction finds the rows behind the Telegram message.
+    pub fn meta(&self) -> Value {
+        let mut meta = json!({"kind": "coach", "card": self.kind});
+        if let Some(id) = &self.workout_id {
+            meta["workout_id"] = json!(id);
+        }
+        if let Some(id) = &self.exercise_id {
+            meta["exercise_id"] = json!(id);
+        }
+        meta
+    }
+}
+
+/// An already-sent card shown anew in place (its workout's sets changed). Old messages can be gone;
+/// a failed edit is logged and skipped.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Edit {
+    pub message_id: i64,
+    pub card: Card,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,4 +104,7 @@ pub struct CoachView {
     pub rest_over: bool,
     /// Swap menu: the live card's buttons become these, `cards` are the options below it.
     pub live_buttons: Option<Vec<Vec<Button>>>,
+    /// Earlier messages to re-render, before anything else; the live card is left as it is.
+    #[serde(default)]
+    pub edits: Vec<Edit>,
 }

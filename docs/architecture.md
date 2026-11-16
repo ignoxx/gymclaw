@@ -90,7 +90,11 @@ model never has to. Timestamps without an offset are the owner's local time.
 - Typed sets (`10x40`, `13 reps`) → coach first; unparsed text and failed validations → agent
   with error context. Failed button operations also fall back to the agent with the card context.
 - Coach card: one live card per exercise with image, target and quick buttons, edited in place;
-  the rest countdown edits every 5 s.
+  the rest countdown edits every 5 s. Each sent card's `chat_message` meta names its card kind,
+  workout and exercise. When a finished workout's sets change (`set_correct`, a set added later,
+  relabel), its finish card is re-rendered and edited in place.
+- A Telegram reply reaches the agent with a `[replying to …]` line: the quoted text and, for a coach
+  card, its workout and the exercise's sets with their ids. Typed sets stay on the coach's fast lane.
 - Photos/documents in (HEIC included, via libheif ≥ 1.17) → vision model; EXIF capture date for
   scale backfill.
 - `/status` shows runtime health without the model; there is no `/new`, the chat window is always the latest messages. Startup sets the
