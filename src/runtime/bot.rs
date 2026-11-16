@@ -397,7 +397,7 @@ impl Bot {
                 if batch.is_empty() {
                     break;
                 }
-                self.turn(batch).await;
+                self.turn(batch, false).await;
             }
             if let Err(e) = self.event_turn().await {
                 tracing::warn!("agent event wake: {} {e}", e.code());
@@ -459,7 +459,8 @@ impl Bot {
             .insert(db)
         })
         .await?;
-        if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }]).await {
+        let review = events.as_array().into_iter().flatten().any(|e| e["type"] == "planning.weekly_briefing");
+        if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }], review).await {
             in_tx(self.db(), move |db| {
                 for id in ids {
                     crate::domain::events::ack(db, &id, Ts::now())?;
@@ -472,7 +473,10 @@ impl Bot {
         Ok(())
     }
 
-    async fn turn(&self, batch: Vec<Inbound>) -> bool {
+    /// One agent turn and its reply. `review`: the batch holds the weekly review, so the Sunday recap
+    /// goes out between the turn and its reply, showing the plan as the turn left it, whether or not
+    /// the turn succeeded.
+    async fn turn(&self, batch: Vec<Inbound>, review: bool) -> bool {
         let typing = {
             let tg = self.tg.clone();
             let chat = self.owner;
@@ -488,6 +492,9 @@ impl Bot {
         let background = batch.iter().all(|b| b.message_id == 0);
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
         typing.abort();
+        if review {
+            self.send_recap().await;
+        }
         // The owner wrote while a background turn ran: their turn speaks instead, and sees the same
         // events as open issues. Nothing is settled, so the batch retries if they stay open.
         if background && !self.inbox.lock().await.is_empty() {
@@ -513,6 +520,21 @@ impl Bot {
             .is_ok();
         self.wake.notify_one();
         settled
+    }
+
+    /// Queue and send this week's recap (`weekly::release_recap`). A failed send stays in the outbox.
+    async fn send_recap(&self) {
+        let recipient = self.owner.to_string();
+        let queued =
+            in_tx(self.db(), move |db| crate::domain::weekly::release_recap(db, &recipient, Ts::now(), true)).await;
+        let sent = match queued {
+            Ok(Some(id)) => super::outbox::deliver(self.db(), self.tg.as_ref(), &id, Ts::now()).await.map(drop),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = sent {
+            tracing::warn!("weekly recap: {} {e}", e.code());
+        }
     }
 
     /// Send the turn's one outcome and clear the 👀 acks. False when the owner may not have got it.
@@ -768,6 +790,30 @@ mod tests {
         }
     }
 
+    /// The owner gets the recap after the review turn, then the agent's take; never the take first.
+    #[tokio::test]
+    async fn weekly_recap_goes_out_between_the_review_turn_and_its_take() {
+        let model = Arc::new(Chatty(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, tg) = fixture(model.clone());
+        enable_runtime(&db);
+        crate::domain::weekly::weekly_plan(&db, "fixture", Ts::now()).unwrap();
+        crate::domain::weekly::announce(&db, Ts::now(), false).unwrap();
+        bot.event_turn().await.unwrap();
+        let sent: Vec<String> = tg
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                crate::telegram::coach::tests::Call::Send(text, _) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].starts_with("📅") && sent[1] == "Which one drops?", "{sent:?}");
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// One voice: mid-conversation, a background event waits for the owner's next turn, which sees
     /// it as an open issue and settles it; nothing asks the owner a second time.
     #[tokio::test]
@@ -788,7 +834,7 @@ mod tests {
 
         // Their turn sees it and settles it; no background turn follows.
         let batch = std::mem::take(&mut *bot.inbox.lock().await);
-        assert!(bot.turn(batch).await);
+        assert!(bot.turn(batch, false).await);
         assert_eq!(calls(), 1);
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
 

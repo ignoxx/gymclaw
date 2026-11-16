@@ -111,8 +111,9 @@ model never has to. Timestamps without an offset are the owner's local time.
   (Start, plus Skip/Move handed to the agent). Conflicts, missed slots, stale workouts
   and week rollover create durable decision events rather than automatic replans. The two fixed
   messages are numbers only: the workout summary card and the Sunday recap (`weekly::recap`), both
-  built on `domain::highlights`. The agent adds its take after the recap only; the summary card is
-  the whole wrap-up.
+  built on `domain::highlights`. The recap waits for the agent's weekly review turn (which may move
+  sessions) and shows the plan it left; the agent's take follows it. The summary card is the whole
+  wrap-up.
   The bot checks this inbox every minute in its serialized agent worker, gated by runtime authority;
   successful turns acknowledge events and failed turns remain pending. Unchanged conflicts dedupe
   across restarts and acknowledgement. Default drafts for empty weeks, rotation of unlocked
