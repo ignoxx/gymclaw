@@ -261,7 +261,7 @@ mod tests {
             out["data"]["logged"].as_array().unwrap().iter().map(|e| e["measured_at"].as_str().unwrap()).collect();
         assert_eq!(times, ["2026-09-28T05:05:00+00:00", "2026-10-05T05:40:00+00:00", "2026-09-27T06:00:00+00:00"]);
         // 7 days up to the Oct 5 weigh-in: 82.4. The 7 days before: (83.0 + 83.4) / 2.
-        assert_eq!(out["user_message_hint"], "3 weigh-ins logged · -0.8 kg vs the week before");
+        assert_eq!(out["data"]["instruction"], "3 weigh-ins logged · -0.8 kg vs the week before");
         let again = log(&db, &entries, now(), "tg-2").unwrap();
         assert_eq!(
             (again["data"]["logged"].as_array().unwrap().len(), again["data"]["duplicates"].as_array().unwrap().len()),

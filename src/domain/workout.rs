@@ -849,9 +849,9 @@ fn group_next(
     Ok(members.iter().min_by_key(|(row, sets)| (*sets, row.position)).map(|(row, _)| ((*row).clone(), true)))
 }
 
-/// A due REST job: rest is over. Mutation result envelope; `user_message_hint` is the message to send.
+/// A due REST job: rest is over. `user_message_hint` is the fallback ping the outbox sends.
 pub fn rest_complete(db: &Connection, job_id: &str, now: Ts, request_id: &str) -> Result<Value> {
-    mutate(db, "workout.rest_completed", request_id, json!({"job_id": job_id}), now, || {
+    let mut result = mutate(db, "workout.rest_completed", request_id, json!({"job_id": job_id}), now, || {
         let mut job = match NotificationJob::get(db, job_id)? {
             Some(job) if job.kind == JobKind::Rest => job,
             _ => crate::bail!("JOB_NOT_FOUND", "Unknown rest job"),
@@ -873,7 +873,9 @@ pub fn rest_complete(db: &Connection, job_id: &str, now: Ts, request_id: &str) -
         result["instruction"] =
             Value::String(format!("⏱ Rest over · {}", result["instruction"].as_str().unwrap_or_default()));
         Ok(result)
-    })
+    })?;
+    result["user_message_hint"] = result["data"]["instruction"].clone();
+    Ok(result)
 }
 
 pub fn skip_warmup(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Value> {
