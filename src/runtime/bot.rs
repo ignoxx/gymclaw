@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use super::{blocking, in_tx};
 use crate::agent::turnlog::{TurnLog, scrub};
 use crate::agent::{Agent, Outcome, TurnInput, media};
-use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
+use crate::db::models::{AgentButton, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
 use crate::domain::set_parser::looks_like_set;
 use crate::domain::view::Button;
@@ -569,26 +569,26 @@ impl Bot {
         let Some(batch) = batch else {
             return Ok(());
         };
-        // A frozen batch may outlive its events: an owner turn settled them meanwhile.
-        let (tz, handled) = blocking(self.db(), |db| {
-            let handled: Vec<String> =
-                AgentEvent::select(db, "WHERE handled_at IS NOT NULL", [])?.into_iter().map(|e| e.id).collect();
-            Ok((crate::domain::profile::get_profile(db)?.tz(), handled))
+        let mut events = batch.payload_json["events"].clone();
+        let ids: Vec<String> =
+            events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
+        let frozen = json!(ids).to_string();
+        let (tz, settled) = blocking(self.db(), move |db| {
+            let settled: i64 = db.query_row(
+                "SELECT count(*) FROM agent_event WHERE handled_at IS NOT NULL AND id IN (SELECT value FROM json_each(?1))",
+                [frozen],
+                |r| r.get(0),
+            )?;
+            Ok((crate::domain::profile::get_profile(db)?.tz(), settled > 0))
         })
         .await?;
-        let mut events = batch.payload_json["events"].clone();
-        if let Some(list) = events.as_array_mut() {
-            list.retain(|e| e["id"].as_str().is_none_or(|id| !handled.iter().any(|h| h == id)));
-        }
-        // Settled events leave the batch; the rest go out in a fresh batch on the next tick, since a
-        // retry under this batch's request IDs with different intents would hit IDEMPOTENCY_CONFLICT.
-        let frozen = batch.payload_json["events"].as_array().map_or(0, Vec::len);
-        if events.as_array().map_or(0, Vec::len) != frozen {
+        // A frozen batch may outlive its events: an owner turn settled some meanwhile. The batch is
+        // retired and the rest go out in a fresh batch on the next tick, since a retry under this
+        // batch's request IDs with different intents would hit IDEMPOTENCY_CONFLICT.
+        if settled {
             return in_tx(self.db(), move |db| crate::domain::events::ack(db, &batch.id, Ts::now()).map(drop)).await;
         }
         crate::time::localize(&mut events, &tz);
-        let ids: Vec<String> =
-            events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
         // `tools::Ctx::background` recognises this prefix.
         let key = format!("event-{}", batch.id);
         let text = format!(
