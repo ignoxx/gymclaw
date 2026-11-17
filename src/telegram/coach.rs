@@ -428,9 +428,7 @@ pub mod tests {
     }
 
     fn next_card(text: &'static str) -> RestOver {
-        Arc::new(move || {
-            Box::pin(async move { Some(CoachView { delete: true, ..view(vec![card(text)]) }) })
-        })
+        Arc::new(move || Box::pin(async move { Some(CoachView { delete: true, ..view(vec![card(text)]) }) }))
     }
 
     async fn sleep_ms(ms: u64) {
@@ -533,11 +531,7 @@ pub mod tests {
         );
         coach.apply(&swap, Some(&tap(100)), None).await.unwrap();
         coach
-            .apply(
-                &CoachView { delete: true, ..view(vec![card("Option A · set 1")]) },
-                Some(&tap(104)),
-                None,
-            )
+            .apply(&CoachView { delete: true, ..view(vec![card("Option A · set 1")]) }, Some(&tap(104)), None)
             .await
             .unwrap();
         let removed: Vec<i64> =
