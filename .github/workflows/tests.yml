@@ -1,6 +1,6 @@
 name: Tests
 
-# Feature branches run once, via their PR. main runs again after a merge.
+# Feature branches run once, via their PR. main runs again after a merge; a pass deploys (image.yml).
 on:
   push:
     branches: [main]
@@ -33,7 +33,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-      - run: shellcheck -S warning deploy/*.sh deploy/egress/*.sh scripts/connect-personal-calendar scripts/pull-turns scripts/render-illustrations scripts/shot .githooks/pre-commit
+      # Every shell script: deploy, the egress proxy, the hooks and the bash scripts in scripts/.
+      - run: shellcheck -S warning deploy/*.sh deploy/egress/*.sh .githooks/* $(grep -lx '#!/usr/bin/env bash' scripts/*)
 
   secrets:
     runs-on: ubuntu-24.04
