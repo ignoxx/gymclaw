@@ -6,19 +6,13 @@ google-client*.json
 client_secret*.json
 *.db*
 *.sqlite*
-# Private runtime identity/config and exports; publish templates only.
+# Private runtime state (DB, crowd config, media, turn logs, backups); publish templates only.
 data/*
 !data/.gitkeep
-config/gymclaw-crowd-read-policy.yaml
+# Unused by code, but private files of this name still sit in old checkouts.
+config/gymclaw-*-policy.yaml
 *.log
 *.jsonl
-*.bundle
 *.bak
-backups/
-snapshots/
-exports/
-
-node_modules/
-config/gymclaw-personal-calendar-policy.yaml
 /target
 .claude
