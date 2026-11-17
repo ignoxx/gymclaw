@@ -22,7 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::domain::extensions::GapSource;
+use crate::domain::extensions::{GapSource, Lesson, REFLECT_AFTER};
 use crate::error::{Error, Result};
 use crate::runtime::{blocking, in_tx};
 use crate::telegram::Media;
@@ -343,6 +343,7 @@ impl Agent {
         }
         flags.sort_unstable();
         flags.dedup();
+        let forced = flags.iter().copied().find(|f| matches!(*f, "step_cap" | "breaker" | "deadline"));
         self.log.log(json!({
             "ev": "run_end", "run": run_id, "session": "telegram:owner", "trigger": trigger(&input), "ok": !failed,
             "error": error.map(|e| scrub(&e, 500)), "diagnosis": failed.then(|| diagnose(&state)), "ms": started.elapsed().as_millis() as u64, "calls": calls_log,
@@ -351,6 +352,19 @@ impl Agent {
         }));
         if failed {
             settles.clear();
+        }
+        // A hard owner turn is worth a playbook; background turns (wakes, reflections) aren't.
+        if !input.background && (state.tool_calls >= REFLECT_AFTER || forced.is_some()) {
+            let (run, calls, tools, forced, now) =
+                (run_id.clone(), state.tool_calls, state.ran.clone(), forced.map(String::from), (self.clock)());
+            let raised = blocking(&self.db_path, move |db| {
+                let lesson = Lesson::Hard { calls, forced: forced.as_deref(), tools: &tools };
+                crate::domain::extensions::reflect(db, &run, lesson, now)
+            })
+            .await;
+            if let Err(e) = raised {
+                tracing::warn!("reflection not raised: {e}");
+            }
         }
         Outcome { reply, failed, run_id, settles, actions }
     }
@@ -528,6 +542,7 @@ impl Agent {
                             state.tool_calls += 1;
                             let Ran { value: result, ok, saved, raised, changes } =
                                 self.tool(&name, args, format!("{}-{index}", input.key)).await;
+                            state.ran.push(if ok { name.clone() } else { format!("{name} (failed)") });
                             settles.extend(raised);
                             let wrote = saved.is_some();
                             actions.extend(saved);
@@ -928,6 +943,11 @@ mod tests {
         // The script's 13th message still has tool calls; with tools forbidden its text is the answer.
         assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Working on it…"));
         assert_eq!(gaps(&agent), [("step_cap".to_string(), "remember I hate lunges".to_string())]);
+        // It also wakes the agent later to save the steps as a playbook.
+        let db = crate::db::open(&agent.db_path).unwrap();
+        let woken = crate::domain::events::wake_pending(&db).unwrap();
+        assert_eq!(woken[0]["payload"]["forced"], "step_cap");
+        assert_eq!(woken[0]["payload"]["tools"].as_array().unwrap().len(), STEP_CAP);
     }
 
     #[tokio::test]

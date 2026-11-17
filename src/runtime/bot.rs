@@ -19,6 +19,7 @@ use crate::agent::{Agent, Outcome, TurnInput, media};
 use crate::db::Json;
 use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
+use crate::domain::extensions::Lesson;
 use crate::domain::set_parser::looks_like_set;
 use crate::domain::view::Button;
 use crate::error::Result;
@@ -281,7 +282,8 @@ impl Bot {
     }
 
     /// The owner's reaction on one of the bot's messages labels the turn that sent it (👍 good,
-    /// 👎 bad) in the turn log, for finding bad turns offline. The agent never sees it.
+    /// 👎 bad) in the turn log, for finding bad turns offline. A 👎 on an agent reply also wakes the
+    /// agent to find and fix what was wrong (`extensions::reflect`).
     async fn reaction(&self, reaction: MessageReaction) {
         let message_id = reaction.message_id;
         let sent = blocking(self.db(), move |db| {
@@ -299,6 +301,25 @@ impl Bot {
         };
         self.log.log(json!({"ev": "label", "source": "reaction", "run": sent.meta_json.get("run"),
             "kind": sent.meta_json.get("kind"), "msg": message_id, "emoji": emoji, "label": label}));
+        if label == Some("bad") && sent.role == ChatRole::Assistant {
+            let run = sent.meta_json["run"].as_str().unwrap_or_default().to_string();
+            let saved: Vec<String> = sent.meta_json["actions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect();
+            let raised = blocking(self.db(), move |db| {
+                let lesson = Lesson::Disliked { id: sent.id.unwrap_or_default(), reply: &sent.text, saved: &saved };
+                crate::domain::extensions::reflect(db, &run, lesson, Ts::now())
+            })
+            .await;
+            match raised {
+                Ok(true) => self.wake.notify_one(),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("reflection not raised: {e}"),
+            }
+        }
     }
 
     /// The owner's text plus what it replies to, as a bracketed line like the other context: the quoted

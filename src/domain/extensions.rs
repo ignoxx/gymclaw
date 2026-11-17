@@ -4,9 +4,11 @@
 //! - playbook: steps for a request that keeps coming back ("swap day"); name and one line in every
 //!   prompt, the steps read on demand with `sql_query`;
 //! - collection: its own log (creatine, shoulder pain) as `agent_data` rows;
-//! - trigger: a daily/weekly local time or a finished workout that wakes the agent with an instruction,
-//!   through the same decision-event path as every other background wake (`extension.trigger`). A
-//!   trigger runs no logic of its own: the agent decides, and may stay silent.
+//! - trigger: a daily/weekly local time, one local date and time, a set time before each planned
+//!   session, or a finished workout, that wakes the agent with an instruction, through the same
+//!   decision-event path as every other background wake (`extension.trigger`). A trigger runs no logic
+//!   of its own: the agent decides, and may stay silent. A one-off trigger turns itself off once its
+//!   time has passed.
 //!
 //! Every change appends an `extension_version` row and can be restored. The owner lists and turns off
 //! anything with `/extensions` or on the dashboard. Requests no tool covers go to `capability_gap`
@@ -14,12 +16,12 @@
 use std::fmt::Write;
 
 use jiff::SignedDuration;
-use jiff::civil::{Time, Weekday};
+use jiff::civil::{Date, DateTime, Time, Weekday};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::db::models::{AgentEvent, WorkoutSession};
+use crate::db::models::{AgentEvent, PlannedSession, WorkoutSession, WorkoutTemplate};
 use crate::db::{Connection, Json};
 use crate::error::Result;
 use crate::time::Ts;
@@ -67,12 +69,21 @@ pub enum Spec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct When {
     pub on: Repeat,
-    /// Local "HH:MM"; daily and weekly.
+    /// Local "HH:MM"; daily, weekly and once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
     /// Weekly only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub day: Option<Day>,
+    /// Once only: the local date, "YYYY-MM-DD".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// Before_session only: minutes before the session starts (1–1440).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<i64>,
+    /// Before_session only: just sessions of this workout (template id); every session when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workout: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -80,25 +91,43 @@ pub struct When {
 pub enum Repeat {
     Daily,
     Weekly,
+    /// One local date and time ("remind me tomorrow at 9"); turns itself off afterwards.
+    Once,
+    /// `minutes` before each planned session (or each of one `workout`).
+    BeforeSession,
     /// Once after each finished workout.
     WorkoutFinished,
 }
 
 /// A validated `When`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Slot {
     Daily(Time),
     Weekly(Weekday, Time),
+    Once(DateTime),
+    BeforeSession { minutes: i64, workout: Option<String> },
     WorkoutFinished,
 }
 
 impl When {
+    fn new(on: Repeat) -> Self {
+        When { on, at: None, day: None, date: None, minutes: None, workout: None }
+    }
+
     pub fn daily(at: &str) -> Self {
-        When { on: Repeat::Daily, at: Some(at.into()), day: None }
+        When { at: Some(at.into()), ..When::new(Repeat::Daily) }
+    }
+
+    pub fn once(date: &str, at: &str) -> Self {
+        When { date: Some(date.into()), at: Some(at.into()), ..When::new(Repeat::Once) }
+    }
+
+    pub fn before_session(minutes: i64, workout: Option<&str>) -> Self {
+        When { minutes: Some(minutes), workout: workout.map(String::from), ..When::new(Repeat::BeforeSession) }
     }
 
     pub fn workout_finished() -> Self {
-        When { on: Repeat::WorkoutFinished, at: None, day: None }
+        When::new(Repeat::WorkoutFinished)
     }
 
     /// Refuses a schedule that is missing its time or day.
@@ -112,6 +141,19 @@ impl When {
             Repeat::Weekly => match self.day {
                 Some(day) => Slot::Weekly(day.weekday(), at()?),
                 None => crate::bail!("INVALID_EXTENSION", "A weekly trigger needs `day` (mon…sun)"),
+            },
+            Repeat::Once => {
+                let Some(date) = &self.date else {
+                    crate::bail!("INVALID_EXTENSION", "A once trigger needs `date` (local YYYY-MM-DD) and `at`")
+                };
+                let Ok(date) = date.trim().parse::<Date>() else {
+                    crate::bail!("INVALID_EXTENSION", "Trigger date must be local YYYY-MM-DD, got {date:?}")
+                };
+                Slot::Once(date.to_datetime(at()?))
+            }
+            Repeat::BeforeSession => match self.minutes {
+                Some(minutes @ 1..=1440) => Slot::BeforeSession { minutes, workout: self.workout.clone() },
+                _ => crate::bail!("INVALID_EXTENSION", "A before_session trigger needs `minutes` (1–1440)"),
             },
             Repeat::WorkoutFinished => Slot::WorkoutFinished,
         })
@@ -162,6 +204,12 @@ impl Spec {
                 let when = match when.on {
                     Repeat::Daily => format!("daily {at}"),
                     Repeat::Weekly => format!("{} {at}", when.day.map_or("?".into(), |d| format!("{d:?}"))),
+                    Repeat::Once => format!("once {} {at}", when.date.as_deref().unwrap_or("?")),
+                    Repeat::BeforeSession => format!(
+                        "{} min before each {} session",
+                        when.minutes.unwrap_or_default(),
+                        when.workout.as_deref().unwrap_or("planned")
+                    ),
                     Repeat::WorkoutFinished => "after each workout".into(),
                 };
                 format!("{when}: {}", short(instruction, 120))
@@ -261,6 +309,23 @@ pub fn save(db: &Connection, name: &str, spec: Spec, author: Author, now: Ts) ->
         crate::bail!("INVALID_EXTENSION", "Name must be 1–40 characters");
     }
     spec.check()?;
+    if let Spec::Trigger { when, .. } = &spec {
+        match when.slot()? {
+            Slot::Once(at) => {
+                let tz = crate::domain::profile::get_profile(db)?.tz();
+                if Ts(at.to_zoned(tz)?.timestamp()) <= now {
+                    crate::bail!("INVALID_EXTENSION", "{at} has passed (owner-local); pick a later date or time");
+                }
+            }
+            Slot::BeforeSession { workout: Some(id), .. } if WorkoutTemplate::get(db, id.as_str())?.is_none() => {
+                crate::bail!(
+                    "INVALID_EXTENSION",
+                    "No workout template {id:?}; pass a template id or leave `workout` out"
+                )
+            }
+            _ => {}
+        }
+    }
     let kind = spec.kind();
     let mut ext = match Extension::first(db, "WHERE kind = ?1 AND name = ?2", (kind, name))? {
         Some(ext) if *ext.spec_json == spec => return Ok(ext),
@@ -416,16 +481,40 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
         let mut due: Vec<(String, Value)> = vec![];
         // A slot that passed before the latest save (a time moved earlier, switched back on) waits for next time.
         let since = trigger.updated_at.max(now - GRACE);
+        // A one-off whose time has passed, fired or missed: it turns off after this tick.
+        let mut spent = false;
         let slot = when.slot()?;
-        match slot {
+        match &slot {
             Slot::Daily(at) | Slot::Weekly(_, at) => {
                 let day_ok = match slot {
                     Slot::Weekly(day, _) => local.weekday() == day,
                     _ => true,
                 };
-                let slot = Ts(local.date().to_datetime(at).to_zoned(tz.clone())?.timestamp());
+                let slot = Ts(local.date().to_datetime(*at).to_zoned(tz.clone())?.timestamp());
                 if day_ok && since <= slot && slot <= now {
                     due.push((local.date().to_string(), json!({})));
+                }
+            }
+            Slot::Once(at) => {
+                let slot = Ts(at.to_zoned(tz.clone())?.timestamp());
+                if since <= slot && slot <= now {
+                    due.push((at.to_string(), json!({})));
+                }
+                spent = slot <= now;
+            }
+            Slot::BeforeSession { minutes, workout } => {
+                let lead = SignedDuration::from_mins(*minutes);
+                for s in PlannedSession::select(
+                    db,
+                    "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 AND planned_start_at <= ?2 ORDER BY planned_start_at",
+                    [since + lead, now + lead],
+                )? {
+                    if workout.as_ref().is_some_and(|w| s.workout_template_id.as_ref() != Some(w)) {
+                        continue;
+                    }
+                    // Keyed by start too: a session moved later fires again before its new time.
+                    let key = format!("{}@{}", s.id, s.planned_start_at.0.as_second());
+                    due.push((key, json!({"session_id": s.id, "starts_at": s.planned_start_at})));
                 }
             }
             Slot::WorkoutFinished => {
@@ -455,6 +544,9 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
             event.update(db)?;
             fired_today += 1;
             fired += 1;
+        }
+        if spent {
+            set_enabled(db, trigger.id(), false, Author::Agent, now)?;
         }
     }
     Ok(fired)
@@ -500,6 +592,64 @@ pub fn log_turn_gap(db: &Connection, source: GapSource, run_id: &str, calls: usi
         GapSource::Agent => "logged by the agent",
     };
     log_gap(db, source, &asked, &format!("{calls} tool calls (turn log run {run_id})"), why, Some(run_id), now)
+}
+
+/// The wake that asks the agent to learn from one of its turns (`reflect`).
+pub const REFLECT_EVENT: &str = "agent.reflect";
+/// Tool calls from which an owner turn counts as hard enough to be worth a playbook.
+pub const REFLECT_AFTER: usize = 6;
+/// Reflection wakes per 24 h: each is a model turn, and most hard turns teach nothing new.
+const REFLECTS_PER_DAY: i64 = 3;
+
+/// Why a turn is worth learning from.
+pub enum Lesson<'a> {
+    /// It took many tool calls or ran out of room; `tools` are the calls it made, in order.
+    Hard { calls: usize, forced: Option<&'a str>, tools: &'a [String] },
+    /// The owner reacted 👎 to its reply (`chat_message` row `id`), which saved `saved`.
+    Disliked { id: i64, reply: &'a str, saved: &'a [String] },
+}
+
+/// Wakes the agent, once the chat is quiet, to turn a hard or disliked turn into a playbook or note,
+/// so the same request goes right next time. Hermes-style self-written skills, through the same
+/// extension layer. At most `REFLECTS_PER_DAY`; returns whether it raised one.
+pub fn reflect(db: &Connection, run_id: &str, lesson: Lesson, now: Ts) -> Result<bool> {
+    let recent: i64 = db.query_row(
+        "SELECT count(*) FROM agent_event WHERE type = 'agent.reflect' AND created_at > ?1",
+        [now - SignedDuration::from_hours(24)],
+        |r| r.get(0),
+    )?;
+    if recent >= REFLECTS_PER_DAY {
+        return Ok(false);
+    }
+    // What the owner asked: before the disliked reply, or the latest message for a turn that just ended.
+    let before = match lesson {
+        Lesson::Disliked { id, .. } => id,
+        Lesson::Hard { .. } => i64::MAX,
+    };
+    let asked: String = db
+        .query_row(
+            "SELECT text FROM chat_message WHERE role = 'owner' AND id < ?1 ORDER BY id DESC LIMIT 1",
+            [before],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+    let payload = match lesson {
+        Lesson::Hard { calls, forced, tools } => json!({
+            "run_id": run_id, "asked": short(&asked, 500), "calls": calls, "forced": forced, "tools": tools,
+            "instruction": "That turn took many tool calls. If the owner is likely to ask this again, save or update a playbook \
+                with the steps that worked (extension_save), so next time it takes a few. If a missing fact sent you the long \
+                way, save a learned note instead. If neither would help, do nothing. Don't message the owner about this.",
+        }),
+        Lesson::Disliked { reply, saved, .. } => json!({
+            "run_id": run_id, "asked": short(&asked, 500), "reply": short(reply, 1000), "saved": saved,
+            "instruction": "The owner reacted 👎 to this reply. Work out what was wrong from the chat and what it saved. If \
+                something is still wrong, fix it and tell the owner in one line what you corrected. Then save a learned note, or \
+                fix the playbook you followed, so it won't happen again.",
+        }),
+    };
+    let before = crate::domain::events::mark(db)?;
+    crate::domain::events::request(db, REFLECT_EVENT, payload, now)?;
+    Ok(crate::domain::events::mark(db)? > before)
 }
 
 /// `/extensions`: everything the agent built, on or off, and how to turn one off. No model.
@@ -551,6 +701,7 @@ pub fn owner_switch(db: &Connection, args: &str, now: Ts) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::{ChatMessage, ChatRole};
     use crate::tools::Ctx;
 
     fn at(text: &str) -> Ts {
@@ -677,6 +828,105 @@ mod tests {
         }
         assert_eq!(fire_due(&db, at("2026-11-15T11:00:00Z")).unwrap() as i64, DAILY_FIRES - 1);
         assert_eq!(wakes(&db).len() as i64, DAILY_FIRES);
+    }
+
+    /// "Remind me tomorrow at 9": one wake at that local time, then the trigger turns itself off and
+    /// leaves the prompt. A time already past is refused rather than silently never firing.
+    #[test]
+    fn once_triggers_fire_once_then_turn_off() {
+        let db = crate::db::test::db();
+        let now = at("2026-11-15T09:00:00Z");
+        let chalk = |date: &str| Spec::Trigger {
+            when: When::once(date, "09:00"),
+            instruction: "Remind them to buy chalk".into(),
+        };
+        assert_eq!(
+            save(&db, "chalk", chalk("2026-11-15"), Author::Agent, now).unwrap_err().code(),
+            "INVALID_EXTENSION"
+        );
+        let id = save(&db, "chalk", chalk("2026-11-16"), Author::Agent, now).unwrap().id.unwrap();
+        assert!(prompt(&db).unwrap().unwrap().contains("chalk: once 2026-11-16 09:00: Remind"));
+        assert_eq!(fire_due(&db, at("2026-11-16T07:59:00Z")).unwrap(), 0);
+        assert_eq!(fire_due(&db, at("2026-11-16T08:00:30Z")).unwrap(), 1);
+        assert!(!get(&db, id).unwrap().enabled && prompt(&db).unwrap().is_none());
+        assert_eq!(fire_due(&db, at("2026-11-16T08:01:00Z")).unwrap(), 0);
+        // Missed while the bot was down: off without a stale wake.
+        let late = save(&db, "chalk2", chalk("2026-11-17"), Author::Agent, now).unwrap().id.unwrap();
+        assert_eq!(fire_due(&db, at("2026-11-17T12:00:00Z")).unwrap(), 0);
+        assert!(!get(&db, late).unwrap().enabled);
+        assert_eq!(wakes(&db).len(), 1);
+    }
+
+    /// "Before leg day, remind me to bring the belt": one wake per session of that workout, the set
+    /// minutes before it starts; a session moved later wakes it again before its new time.
+    #[test]
+    fn before_session_triggers_follow_the_planned_sessions() {
+        let db = crate::db::test::with_short_template();
+        let now = at("2026-11-15T09:00:00Z");
+        let belt = |workout: &str| Spec::Trigger {
+            when: When::before_session(60, Some(workout)),
+            instruction: "Remind them to bring the belt".into(),
+        };
+        assert_eq!(save(&db, "belt", belt("legs"), Author::Agent, now).unwrap_err().code(), "INVALID_EXTENSION");
+        save(&db, "belt", belt("short"), Author::Agent, now).unwrap();
+        let session = |template: &str, start: &str| {
+            let mut s = PlannedSession::new("2026-11-16".into(), Some(template.into()), false);
+            s.planned_start_at = at(start);
+            s.insert(&db).unwrap();
+            s
+        };
+        // Monday 12:00 and 18:00 local (UTC+1); the 18:00 one is another workout.
+        let mut monday = session("short", "2026-11-16T11:00:00Z");
+        session("other", "2026-11-16T17:00:00Z");
+        assert_eq!(fire_due(&db, at("2026-11-16T09:59:00Z")).unwrap(), 0);
+        assert_eq!(fire_due(&db, at("2026-11-16T10:00:30Z")).unwrap(), 1);
+        assert_eq!(fire_due(&db, at("2026-11-16T10:05:00Z")).unwrap(), 0);
+        assert_eq!(wakes(&db)[0]["payload"]["session_id"], monday.id);
+        monday.planned_start_at = at("2026-11-16T13:00:00Z");
+        monday.update(&db).unwrap();
+        assert_eq!(fire_due(&db, at("2026-11-16T12:00:30Z")).unwrap(), 1);
+        assert_eq!(fire_due(&db, at("2026-11-16T16:00:30Z")).unwrap(), 0);
+        assert!(prompt(&db).unwrap().unwrap().contains("belt: 60 min before each short session"));
+    }
+
+    /// A hard turn wakes the agent to save a playbook, but only once the chat is quiet: it is never an
+    /// open issue of an owner turn. A 👎 names what the owner asked before that reply. Capped per day.
+    #[test]
+    fn hard_and_disliked_turns_wake_a_reflection() {
+        let db = crate::db::test::db();
+        let now = at("2026-11-15T09:00:00Z");
+        let say = |role, text: &str| {
+            ChatMessage {
+                id: None,
+                at: now,
+                role,
+                text: text.into(),
+                telegram_message_id: Some(1),
+                meta_json: Json(json!({})),
+            }
+            .insert(&db)
+            .unwrap();
+            db.last_insert_rowid()
+        };
+        say(ChatRole::Owner, "swap my whole week to evenings");
+        let reply = say(ChatRole::Assistant, "Done, all evenings.");
+        say(ChatRole::Owner, "thanks");
+        let tools = ["get_week".to_string(), "session_update (failed)".into()];
+        assert!(reflect(&db, "r1", Lesson::Hard { calls: 7, forced: None, tools: &tools }, now).unwrap());
+        let saved = ["session_update …".to_string()];
+        let disliked = Lesson::Disliked { id: reply, reply: "Done, all evenings.", saved: &saved };
+        assert!(reflect(&db, "r2", disliked, now).unwrap());
+        let woken = |run: &str| {
+            let events = crate::domain::events::wake_pending(&db).unwrap();
+            events.into_iter().find(|e| e["type"] == REFLECT_EVENT && e["payload"]["run_id"] == run).unwrap()["payload"]
+                .clone()
+        };
+        assert_eq!(woken("r1")["tools"], json!(tools));
+        assert_eq!(woken("r1")["asked"], "thanks");
+        assert_eq!(woken("r2")["asked"], "swap my whole week to evenings");
+        assert!(crate::domain::events::open_issues(&db).unwrap().is_empty());
+        assert!(reflect(&db, "r3", Lesson::Hard { calls: 6, forced: None, tools: &[] }, now).unwrap());
+        assert!(!reflect(&db, "r4", Lesson::Hard { calls: 6, forced: None, tools: &[] }, now).unwrap());
     }
 
     #[test]
