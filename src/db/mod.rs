@@ -13,8 +13,12 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::Result;
 
-/// Starting schema; fresh databases start here.
+/// The schema migrations start from (the long-lived production DB began here); tests replay it.
+#[cfg(test)]
 const BASELINE: &str = include_str!("baseline.sql");
+/// The current schema: baseline plus every migration. Fresh databases are created from it directly, so
+/// tests don't replay history; `schema_snapshot_is_current` keeps it equal to the migrated result.
+const SCHEMA: &str = include_str!("schema.sql");
 /// Baseline marker: the one row of the `alembic_version` table (the name is historical). Every DB,
 /// fresh or the long-lived production one, carries exactly this value; anything else is refused.
 const BASELINE_MARKER: &str = "3d5e7f9a1b20";
@@ -83,8 +87,9 @@ fn apply(conn: &mut Connection) -> Result<()> {
     let has_baseline: bool =
         tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
     if !has_baseline {
-        tx.execute_batch(BASELINE)?;
+        tx.execute_batch(SCHEMA)?;
         tx.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [BASELINE_MARKER])?;
+        tx.execute_batch(&format!("PRAGMA user_version = {}", MIGRATIONS.len()))?;
     } else {
         let marker: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
         if marker != BASELINE_MARKER {
@@ -301,26 +306,41 @@ mod tests {
         assert!(enforced, "foreign keys are back on after migrating");
     }
 
-    /// `schema.sql` is the schema a fresh `migrate` produces, so agents can read it in one place.
-    #[test]
-    fn schema_snapshot_is_current() {
-        let mut db = Connection::open_in_memory().unwrap();
-        migrate(&mut db).unwrap();
-        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    /// Every schema object, as `schema.sql` lists them.
+    fn dump(db: &Connection) -> String {
         let mut stmt = db
-            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY tbl_name, type DESC, name")
+            .prepare(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY tbl_name, type DESC, name",
+            )
             .unwrap();
         let objects: Vec<String> =
             stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|s| s.unwrap() + ";").collect();
+        objects.join("\n\n")
+    }
+
+    /// `schema.sql` is what baseline plus every migration produces (the upgrade path), so agents can
+    /// read the schema in one place and fresh databases start from it. A stale file is rewritten.
+    #[test]
+    fn schema_snapshot_is_current() {
+        let mut upgraded = Connection::open_in_memory().unwrap();
+        upgraded.execute_batch(BASELINE).unwrap();
+        upgraded.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [BASELINE_MARKER]).unwrap();
+        migrate(&mut upgraded).unwrap();
         let actual = format!(
-            "-- Generated from a fresh `gymclaw migrate` (user_version {version}); don't edit. When a migration\n\
-             -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.\n\n{}\n",
-            objects.join("\n\n")
+            "-- Generated from baseline.sql plus every migration (user_version {}); don't edit. When a\n\
+             -- migration changes the schema, `cargo test schema_snapshot` rewrites this file: review and\n\
+             -- commit it. Fresh databases are created from this file.\n\n{}\n",
+            MIGRATIONS.len(),
+            dump(&upgraded)
         );
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db/schema.sql");
         if std::fs::read_to_string(&path).ok().as_deref() != Some(actual.as_str()) {
             std::fs::write(&path, &actual).unwrap();
             panic!("src/db/schema.sql was stale and has been regenerated; review the diff and commit it");
         }
+        let mut fresh = Connection::open_in_memory().unwrap();
+        migrate(&mut fresh).unwrap();
+        assert_eq!(dump(&fresh), dump(&upgraded), "a fresh database matches a migrated one");
     }
 }
