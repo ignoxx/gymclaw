@@ -184,7 +184,7 @@ mod tests {
         assert!(PlannedSession::select(&db, "", []).unwrap().iter().all(|s| s.status.is_open()));
         assert_eq!(pending_jobs(&db, None), 0);
         let blocked = start(&db, Some("short"), None, false, sunday(60), "blocked-start").unwrap_err();
-        assert!(blocked.to_string().contains("availability override"), "{blocked}");
+        assert_eq!(blocked.code(), "AVAILABILITY_BLOCKED");
         assert!(
             !weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap()["plan"]["sessions"].as_array().unwrap().is_empty()
         );

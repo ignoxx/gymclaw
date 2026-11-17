@@ -150,6 +150,7 @@ pub fn call(cx: &mut Ctx, name: &str, args: Value) -> Result<Value> {
 /// from argument parsing to domain rules, passes through here.
 pub fn guide(name: &str, e: Error) -> Error {
     let code = e.code().to_string();
+    // `*_UNAVAILABLE` is reserved for outside services that are down.
     let system =
         matches!(code.as_str(), "DATABASE_ERROR" | "NETWORK_ERROR" | "IO_ERROR" | "INTERNAL" | "TELEGRAM_ERROR")
             || code.ends_with("_UNAVAILABLE")
@@ -229,6 +230,9 @@ mod tests {
         // Retrying or rewriting the call can't fix a system problem, so no usage there.
         let down = guide("crowd_forecast", Error::domain("GYM_API_UNAVAILABLE", "No source")).to_string();
         assert!(down.contains("don't retry") && !down.contains("Usage"), "{down}");
+        // An owner's availability block is theirs to lift, not an outage.
+        let blocked = guide("workout", Error::domain("AVAILABILITY_BLOCKED", "Block")).to_string();
+        assert!(!blocked.contains("don't retry"), "{blocked}");
     }
 
     /// Docs drift: every backticked `src/…`, `docs/…`, `scripts/…` or `deploy/…` path and every relative
