@@ -7,7 +7,7 @@
 //!   model). There is no `/new`: the window is the last messages, always current.
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -77,14 +77,14 @@ enum Fast {
 }
 
 pub struct Bot {
-    pub owner: i64,
-    pub tg: Arc<dyn Telegram>,
-    pub coach: Arc<Coach>,
-    pub agent: Agent,
-    pub log: TurnLog,
+    owner: i64,
+    tg: Arc<dyn Telegram>,
+    coach: Arc<Coach>,
+    agent: Agent,
+    log: TurnLog,
     /// Wakes the scheduler after anything that may have changed jobs or deliveries.
-    pub wake: Arc<Notify>,
-    pub status: Arc<Mutex<super::Health>>,
+    wake: Arc<Notify>,
+    status: Arc<std::sync::Mutex<super::Health>>,
     inbox: Mutex<Vec<Inbound>>,
     inbox_ready: Notify,
     fast: mpsc::UnboundedSender<Fast>,
@@ -99,7 +99,7 @@ impl Bot {
         agent: Agent,
         log: TurnLog,
         wake: Arc<Notify>,
-        status: Arc<Mutex<super::Health>>,
+        status: Arc<std::sync::Mutex<super::Health>>,
     ) -> Arc<Bot> {
         let (fast, mut lane) = mpsc::unbounded_channel();
         let bot = Arc::new(Bot {
@@ -412,7 +412,7 @@ impl Bot {
     }
 
     async fn send_status(&self) {
-        let health = self.status.lock().await.clone();
+        let health = self.status.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let model = self.agent.chat_model.clone();
         let text = blocking(self.db(), move |db| status_text(db, &health, &model))
             .await
@@ -758,7 +758,7 @@ const QUIET: jiff::SignedDuration = jiff::SignedDuration::from_mins(5);
 /// Whether the owner wrote within `QUIET`: background events then wait for their next turn.
 fn owner_active(db: &crate::db::Connection, now: Ts) -> Result<bool> {
     let last = ChatMessage::first(db, "WHERE role = 'owner' ORDER BY id DESC", [])?;
-    Ok(last.is_some_and(|m| now.0.duration_since(m.at.0) < QUIET))
+    Ok(last.is_some_and(|m| now - m.at < QUIET))
 }
 
 /// `/status`: runtime health in a few lines, no model.
@@ -773,13 +773,7 @@ fn status_text(db: &crate::db::Connection, health: &super::Health, model: &str) 
         format!("**GymClaw** · up {}", super::uptime(health.started.elapsed())),
         format!(
             "Runtime {} · calendar writes {} · crowd polling {}",
-            if authority.enabled {
-                "on"
-            } else if authority.configured {
-                "paused"
-            } else {
-                "not set up"
-            },
+            authority.state(),
             on(authority.calendar_writes_enabled),
             on(authority.crowd_polling_enabled)
         ),
@@ -848,7 +842,7 @@ mod tests {
             coach,
             log: TurnLog::default(),
             wake: Arc::new(Notify::new()),
-            status: Arc::new(Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
+            status: Arc::new(std::sync::Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
             fast,

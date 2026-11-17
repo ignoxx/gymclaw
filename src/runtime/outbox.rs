@@ -31,6 +31,19 @@ pub struct Authority {
     pub crowd_polling_enabled: bool,
 }
 
+impl Authority {
+    /// "on", "paused" or "not set up" (no `runtime_resume` yet).
+    pub fn state(&self) -> &'static str {
+        if self.enabled {
+            "on"
+        } else if self.configured {
+            "paused"
+        } else {
+            "not set up"
+        }
+    }
+}
+
 /// The first template of the owner's confirmed split: what default drafts start from.
 fn planning_template(db: &Connection) -> Result<Option<String>> {
     Ok(OnboardingState::get(db, 1)?.and_then(|row| row.split_json.0.first().cloned()))
@@ -57,7 +70,7 @@ pub fn runtime_authority(db: &Connection) -> Result<Authority> {
 }
 
 /// Why a reminder/rest job (or its queued delivery) should no longer reach the owner.
-pub fn stale_reason(
+fn stale_reason(
     db: &Connection,
     job: &NotificationJob,
     now: Ts,

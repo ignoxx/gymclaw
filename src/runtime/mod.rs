@@ -4,10 +4,10 @@ pub mod outbox;
 pub mod scheduler;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 
 use crate::agent::openrouter::OpenRouter;
 use crate::agent::turnlog::TurnLog;

@@ -9,12 +9,12 @@
 //! Nothing runs or sends while `runtime_settings.enabled` is off.
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use jiff::{SignedDuration, ToSpan};
 use serde_json::json;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 
 use super::{Health, blocking, in_tx, outbox};
 use crate::db::models::{AgentEvent, JobKind, NotificationJob};
@@ -87,7 +87,7 @@ impl Scheduler {
             if let Err(e) = result {
                 tracing::warn!("tick: {} {e}", e.code());
             }
-            self.health.lock().await.last_tick = Some((Ts::now(), summary));
+            self.health.lock().unwrap_or_else(PoisonError::into_inner).last_tick = Some((Ts::now(), summary));
             self.pump().await;
             self.wake.notify_one();
         }
