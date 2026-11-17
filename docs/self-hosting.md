@@ -26,22 +26,32 @@ EOF
 docker compose up -d --build
 ```
 
+Every setting is an environment variable; this table is the full list, and `.env.example` mirrors it.
+
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `GYMCLAW_TELEGRAM_USER_ID` | yes | The only Telegram user the bot answers. |
 | `TELEGRAM_BOT_TOKEN` | yes | |
 | `OPENROUTER_API_KEY` | yes | |
-| `TZ` | no | Your IANA timezone. Also seeds the profile timezone on first start. Default `Europe/Berlin`. |
-| `GYMCLAW_MODEL` | no | OpenRouter model ID. Default `anthropic/claude-haiku-5.5`. |
-| `GYMCLAW_PROVIDER` | no | Pinned OpenRouter provider. Default `auto` (OpenRouter picks). |
-| `GYMCLAW_MODEL_FAST`, `GYMCLAW_MODEL_VISION` | no | Models for background triage and photos. Default: `GYMCLAW_MODEL`. |
+| `TZ` | no | Docker only: your IANA timezone; compose passes it on as `GYMCLAW_TIMEZONE`. Default `Europe/Berlin`. |
+| `GYMCLAW_TIMEZONE` | no | Seeds the profile timezone on first start; later changes go through the profile. Default `Europe/Berlin`. |
+| `GYMCLAW_MODEL` | no | OpenRouter chat model. Default `anthropic/claude-haiku-5.5`. |
+| `GYMCLAW_PROVIDER` | no | OpenRouter provider tried first (e.g. `inference-net/fp4`). Unset or `auto`: OpenRouter picks. |
+| `GYMCLAW_MODEL_VISION` | no | Reads photos (scale, plan screenshots). Default: `GYMCLAW_MODEL`. |
 | `GYMCLAW_MODEL_AUDIO` | no | Transcribes voice notes; needs audio input. Default `google/gemini-3.5-flash-lite`. Adds ~1–3 s before a spoken set is logged. |
-| `EGRESS_EXTRA_HOSTS` | no | Extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
-| `GYMCLAW_DASHBOARD_HOST` | no | Hostname for the dashboard behind Traefik. The bot's Telegram menu button opens it as a Mini App. |
+| `GOOGLE_CALENDAR_ID` | no | Read only by `calendar-auth` when `--calendar-id` isn't passed. |
+| `GYMCLAW_DASHBOARD_HOST` | no | Docker: the dashboard's hostname behind Traefik. The bot's Telegram menu button opens it as a Mini App. |
+| `EGRESS_EXTRA_HOSTS` | no | Docker: extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
+| `GYMCLAW_IMAGE_TAG` | no | Docker: image tag to run. Default `main`; a commit sha rolls back. |
+| `GYMCLAW_DATA_DIR`, `GYMCLAW_DB` | no | Data directory (default `data`) and DB (default `<data dir>/gymclaw.db`). |
+| `GYMCLAW_ASSETS_DIR`, `GYMCLAW_CROWD_CONFIG` | no | Exercise pictures (default `assets/workout-guide`) and [crowd source](crowd.md) (default `data/crowd-config.json`). |
+| `GYMCLAW_TURN_LOG_DIR` | no | Where full agent turns are logged ([turns.md](turns.md)); unset logs none. The image sets `data/turns`. |
+| `GYMCLAW_BACKUP_KEEP` | no | How many archives `backup.sh` keeps; set it on the command (`GYMCLAW_BACKUP_KEEP=30 backup.sh`). Default 14. |
+| `GYMCLAW_ALLOW_DIRECT_EGRESS` | no | `1` lets the container start with direct internet access (`docker run` only; compose never passes it). Local testing only. |
 
 The stack is three containers: GymClaw (one Rust binary: bot, agent, coach, scheduler), an egress
-proxy with a host allowlist, and the dashboard (read-only except the agent's notes and plan
-targets). Coolify steps, backups and moving hosts: [deploy/README.md](../deploy/README.md).
+proxy with a host allowlist, and the dashboard. Coolify steps, backups and moving hosts:
+[deploy/README.md](../deploy/README.md).
 
 ## First run
 
@@ -75,8 +85,7 @@ testing-mode apps after 7 days: re-run `calendar-auth` whenever GymClaw reports
 `CALENDAR_AUTH_REQUIRED`.
 
 The `calendar.events.owned` scope covers every calendar you own, so GymClaw binds its DB to the one
-ID you authorized and refuses any other. Tokens live in the SQLite DB in plain text: keep the DB
-and backups private.
+ID you authorized and refuses any other. Tokens live in the SQLite DB in plain text.
 
 ### Personal calendar (read-only)
 
@@ -128,17 +137,16 @@ Rust stable. The default `heic` feature (iPhone photos) needs system libheif ≥
 
 ```bash
 cargo build --release
-set -a; source .env; set +a   # .env is not loaded automatically
-gymclaw migrate               # create or upgrade data/gymclaw.db
-gymclaw serve                 # the bot
+set -a; source .env; set +a   # .env is not loaded automatically; set GYMCLAW_TIMEZONE there, not TZ
+target/release/gymclaw migrate   # create or upgrade data/gymclaw.db
+target/release/gymclaw serve     # the bot
 ```
 
-The DB is `GYMCLAW_DB`, default `data/gymclaw.db` under `GYMCLAW_DATA_DIR` (default `data`). The
-container entrypoint runs `migrate` on every start; `serve` does not.
+The container entrypoint runs `migrate` on every start; `serve` does not.
 
 ## Things to know
 
 - `gymclaw call <tool> '<json>'` runs any agent tool by hand, exactly as the agent would (`-` reads
   the JSON from stdin); `gymclaw tools` lists them with their schemas.
-- The DB and backups hold your Google OAuth token and chat history. Keep them private.
-- Only one instance per bot token. Two would both poll Telegram and send every reminder twice.
+- The DB and backups hold your Google OAuth token and chat history ([SECURITY.md](../SECURITY.md)).
+- Only one instance per bot token ([moving hosts](../deploy/README.md#moving-hosts)).

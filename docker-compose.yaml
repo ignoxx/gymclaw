@@ -14,9 +14,9 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?}
       # Only `gymclaw calendar-auth` reads it; afterwards the DB stays bound to that calendar.
       GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-}
-      GYMCLAW_MODEL: ${GYMCLAW_MODEL:-anthropic/claude-haiku-5.5}
-      GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-auto}
-      GYMCLAW_MODEL_FAST: ${GYMCLAW_MODEL_FAST:-}
+      # Empty means unset: defaults live in src/config.rs (list: docs/self-hosting.md).
+      GYMCLAW_MODEL: ${GYMCLAW_MODEL:-}
+      GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-}
       GYMCLAW_MODEL_VISION: ${GYMCLAW_MODEL_VISION:-}
       GYMCLAW_MODEL_AUDIO: ${GYMCLAW_MODEL_AUDIO:-}
       # Telegram menu button opens the dashboard as a Mini App; unset leaves the "/" menu.
@@ -45,8 +45,8 @@ services:
     mem_limit: 1536m
     pids_limit: 512
 
-  # Dashboard: reads the DB, writes only the agent's notes. No internet and no published port: only the reverse proxy
-  # reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
+  # Dashboard: reads the DB; its writes are DASHBOARD_TOOLS in src/web/mod.rs. No internet and no published port:
+  # only the reverse proxy reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
   dashboard:
     image: *image
     pull_policy: always

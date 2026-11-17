@@ -1,9 +1,10 @@
 //! Runtime settings from the environment. The only module that reads env vars (clippy
 //! `disallowed_methods`). In production a variable reaches the bot only if the `gymclaw` service's
-//! `environment` in docker-compose.yaml passes it.
+//! `environment` in docker-compose.yaml passes it. Unset and empty are the same. Every variable is
+//! listed in docs/self-hosting.md; keep that table in step.
 use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
@@ -13,8 +14,6 @@ pub struct Config {
     pub openrouter_key: String,
     /// Conversation model.
     pub model: String,
-    /// Cheap model for background judgment (event triage).
-    pub model_fast: String,
     /// Model that reads photos (scale, plan screenshots).
     pub model_vision: String,
     /// Model that transcribes voice notes; needs audio input (the chat model's default has none).
@@ -74,7 +73,6 @@ impl Config {
             owner_id,
             telegram_token: need("TELEGRAM_BOT_TOKEN")?,
             openrouter_key: need("OPENROUTER_API_KEY")?,
-            model_fast: var("GYMCLAW_MODEL_FAST").unwrap_or_else(|| model.clone()),
             model_vision: var("GYMCLAW_MODEL_VISION").unwrap_or_else(|| model.clone()),
             model_audio: var("GYMCLAW_MODEL_AUDIO").unwrap_or_else(|| "google/gemini-3.5-flash-lite".into()),
             model,

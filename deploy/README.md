@@ -1,17 +1,16 @@
 # Deploying GymClaw
 
 One Docker Compose stack. `gymclaw` and `dashboard` run the same image, which GitHub Actions
-([`image.yml`](../.github/workflows/image.yml)) builds on every push to `main` and pushes to
+([`image.yml`](../.github/workflows/image.yml)) builds once Tests pass on `main` and pushes to
 `ghcr.io/ignoxx/gymclaw:main` (plus a `:<commit sha>` tag). The host only pulls it.
 
 - **gymclaw**: one Rust binary (`gymclaw serve`): Telegram long polling, the agent
   (OpenRouter), the coach, the scheduler and the outbox. No ports are published.
 - **egress**: a Squid proxy that allows HTTPS `CONNECT` to an allowlist only
   (Telegram, OpenRouter, Google Calendar/OAuth, MySports, plus `EGRESS_EXTRA_HOSTS`).
-
-- **dashboard**: the web dashboard. It reads the DB through a read-only connection; its
-  only writes are edits to the agent's notes (Memory tab). No internet access and no
-  published port.
+- **dashboard**: the web dashboard. It reads the DB through a read-only connection; its only
+  writes are the tools in `DASHBOARD_TOOLS` (`src/web/mod.rs`): the agent's notes, its
+  extensions' on/off switch and plan targets. No internet access and no published port.
 
 `gymclaw` sits only on an internal network, so the proxy is its single way out. It
 refuses to start if a direct connection to the internet works. The container runs
@@ -39,9 +38,8 @@ as a non-root user with a read-only root filesystem, no capabilities and
 
    Without this, `gymclaw` would have direct internet access, and it refuses to
    start.
-3. Set the environment variables: `GYMCLAW_TELEGRAM_USER_ID`, `TELEGRAM_BOT_TOKEN`,
-   `OPENROUTER_API_KEY`, `GYMCLAW_DASHBOARD_HOST`, optionally `GYMCLAW_MODEL`, `TZ`,
-   `GYMCLAW_PROVIDER` (default `auto`) and `EGRESS_EXTRA_HOSTS` (for example the personal calendar feed host).
+3. Set the environment variables ([the list](../docs/self-hosting.md#deploy)), including
+   `GYMCLAW_DASHBOARD_HOST`.
 4. Turn off **Escape special characters in labels** (Advanced settings) so the
    dashboard's Traefik labels get `GYMCLAW_DASHBOARD_HOST` filled in.
 5. Add a scheduled task on the `gymclaw` service: `backup.sh`, daily (for example
@@ -109,7 +107,7 @@ two runtimes would send every reminder twice.
 
 Google auth travels with the DB. If it's gone (`CALENDAR_AUTH_REQUIRED`), re-run
 `docker compose exec -it gymclaw gymclaw calendar-auth --calendar-id <id>`
-([setup](../docs/self-hosting.md#first-run)).
+([setup](../docs/self-hosting.md#google-calendar)).
 
 ## Backups
 
