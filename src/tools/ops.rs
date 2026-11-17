@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Ctx, Tool, ToolDef, def};
+use super::{Ctx, Listed, Tool, ToolDef, def};
 use crate::db::models::{NotificationDelivery, NotificationJob, RuntimeSettings};
 use crate::error::Result;
 use crate::runtime::outbox;
@@ -28,14 +28,13 @@ fn settings(cx: &Ctx) -> Result<RuntimeSettings> {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct Deliveries {
-    /// Only this status (PENDING, SENDING, SENT, UNKNOWN, CANCELLED). Default: all.
+    /// Only this status; default all.
     pub status: Option<crate::db::models::DeliveryStatus>,
 }
 
 impl Tool for Deliveries {
     const NAME: &'static str = "deliveries";
-    const DESCRIPTION: &'static str = "Proactive messages (reminders, briefings, alerts) and whether they reached Telegram, newest last (at most 30). \
-        UNKNOWN/SENDING: ask the owner whether it arrived; never resend it yourself.";
+    const DESCRIPTION: &'static str = "Proactive messages (reminders, briefings, alerts) and whether they reached Telegram, newest last (at most 30).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let rows = match self.status {
@@ -67,8 +66,7 @@ pub struct DeliveryResolve {
 
 impl Tool for DeliveryResolve {
     const NAME: &'static str = "delivery_resolve";
-    const DESCRIPTION: &'static str =
-        "Settle an UNKNOWN delivery after the owner checked Telegram. Only with the owner's answer, never by guessing.";
+    const DESCRIPTION: &'static str = "Settle an UNKNOWN delivery after the owner checked Telegram.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let sent = match self.outcome.as_str() {
@@ -85,6 +83,7 @@ pub struct RuntimeStatus {}
 
 impl Tool for RuntimeStatus {
     const NAME: &'static str = "runtime_status";
+    const LISTED: Listed = Listed::Never;
     const DESCRIPTION: &'static str = "Whether reminders and briefings are on, calendar-write and crowd-polling authority, open deliveries and the next reminder.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {

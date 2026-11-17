@@ -509,7 +509,7 @@ pub struct PlanSet {
 impl Tool for PlanSet {
     const NAME: &'static str = "plan_set";
     const DESCRIPTION: &'static str = "Set the owner's training plan: in setup, and whenever the owner changes what they train or how often. \
-        You plan workouts by it; code only gives a newly drafted session a default template, never changes one afterwards.";
+        You plan workouts by it.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         onboarding::update(

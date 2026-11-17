@@ -100,8 +100,7 @@ pub struct DataAdd {
 
 impl Tool for DataAdd {
     const NAME: &'static str = "data_add";
-    const DESCRIPTION: &'static str =
-        "Log a row into one of your collections. Read rows back with sql_query on agent_data.";
+    const DESCRIPTION: &'static str = "Log a row into one of your collections.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let at = match &self.at {

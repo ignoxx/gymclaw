@@ -41,7 +41,6 @@ fn cell(value: rusqlite::types::ValueRef<'_>) -> Value {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SqlQuery {
-    /// One read-only SQLite statement. Timestamps are stored as naive UTC text; JSON columns are text.
     pub sql: String,
 }
 
@@ -143,9 +142,8 @@ pub struct NoteAdd {
 
 impl Tool for NoteAdd {
     const NAME: &'static str = "note_add";
-    const DESCRIPTION: &'static str = "Remember something for every future conversation (it goes into your instructions). If a note \
-already covers this topic, note_edit that one instead: contradicting notes mislead every later turn. Each kind has a \
-character budget, shown with the notes; when it's full, merge, shorten or delete notes first and keep what matters most.";
+    const DESCRIPTION: &'static str = "Remember something for every future conversation (it goes into your instructions). Each kind \
+has a character budget, shown with the notes; when it's full, merge, shorten or delete notes first and keep what matters most.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let note = AgentNote {

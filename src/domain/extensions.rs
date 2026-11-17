@@ -51,7 +51,7 @@ pub enum Spec {
         /// The steps in order, naming the tools to use.
         steps: Vec<String>,
     },
-    /// Your own log, e.g. creatine taken. Rows go in with data_add; read them with sql_query on agent_data.
+    /// Your own log, e.g. creatine taken. Rows go in with data_add.
     Collection {
         /// One line: what a row means and its data fields, e.g. "creatine taken; data {grams}".
         summary: String,
