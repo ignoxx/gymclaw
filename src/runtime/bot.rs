@@ -16,7 +16,6 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use super::{blocking, in_tx};
 use crate::agent::turnlog::{TurnLog, scrub};
 use crate::agent::{Agent, Outcome, TurnInput, media};
-use crate::db::Json;
 use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
 use crate::domain::set_parser::looks_like_set;
@@ -405,22 +404,7 @@ impl Bot {
         }
         self.log.log(json!({"ev": "inbound", "session": SESSION, "channel": "telegram", "msg": message_id.to_string(),
             "sentAt": Ts::now().0.as_millisecond(), "chars": text.chars().count(), "text": scrub(&text, 4000)}));
-        let stored = text.clone();
-        let saved = blocking(self.db(), move |db| {
-            ChatMessage {
-                id: None,
-                at: Ts::now(),
-                role: ChatRole::Owner,
-                text: stored,
-                telegram_message_id: (message_id != 0).then_some(message_id),
-                meta_json: Json(meta),
-            }
-            .insert(db)
-        })
-        .await;
-        if let Err(e) = saved {
-            tracing::warn!("chat history write failed: {e}");
-        }
+        self.remember(ChatRole::Owner, text, (message_id != 0).then_some(message_id), meta).await;
         self.inbox.lock().await.push(Inbound { message_id, key, images, background: false });
         self.inbox_ready.notify_one();
     }
@@ -452,11 +436,8 @@ impl Bot {
     }
 
     async fn remember(&self, role: ChatRole, text: String, message_id: Option<i64>, meta: Value) {
-        let saved = blocking(self.db(), move |db| {
-            ChatMessage { id: None, at: Ts::now(), role, text, telegram_message_id: message_id, meta_json: Json(meta) }
-                .insert(db)
-        })
-        .await;
+        let saved =
+            blocking(self.db(), move |db| ChatMessage::new(Ts::now(), role, text, message_id, meta).insert(db)).await;
         if let Err(e) = saved {
             tracing::warn!("chat history write failed: {e}");
         }
@@ -610,15 +591,8 @@ impl Bot {
             json!(events)
         );
         blocking(self.db(), move |db| {
-            ChatMessage {
-                id: None,
-                at: Ts::now(),
-                role: ChatRole::Bot,
-                text: crate::agent::context::name_sessions(db, &text)?,
-                telegram_message_id: None,
-                meta_json: Json(json!({"kind": "agent_event"})),
-            }
-            .insert(db)
+            let text = crate::agent::context::name_sessions(db, &text)?;
+            ChatMessage::new(Ts::now(), ChatRole::Bot, text, None, json!({"kind": "agent_event"})).insert(db)
         })
         .await?;
         let review = events.as_array().into_iter().flatten().any(|e| e["type"] == "planning.weekly_briefing");
@@ -1088,16 +1062,7 @@ mod tests {
         for (role, id, meta) in
             [(ChatRole::Assistant, 20, json!({"kind": "reply", "run": "r1"})), (ChatRole::Owner, 21, json!({}))]
         {
-            ChatMessage {
-                id: None,
-                at: Ts::now(),
-                role,
-                text: "x".into(),
-                telegram_message_id: Some(id),
-                meta_json: Json(meta),
-            }
-            .insert(&db)
-            .unwrap();
+            ChatMessage::new(Ts::now(), role, "x".into(), Some(id), meta).insert(&db).unwrap();
         }
         for message in [20, 21] {
             let update = json!({"update_id": 2, "message_reaction": {"chat": {"id": 42, "type": "private"}, "message_id": message,
@@ -1132,16 +1097,7 @@ mod tests {
         crate::domain::workout::start(&db, Some("fixture"), None, false, Ts::now(), "start").unwrap();
         let workout = crate::domain::workout::active_workout(&db).unwrap().unwrap();
         let card = coach::exercise_card(&db, &workout.id, Ts::now()).unwrap();
-        ChatMessage {
-            id: None,
-            at: Ts::now(),
-            role: ChatRole::Bot,
-            text: card.text.clone(),
-            telegram_message_id: Some(300),
-            meta_json: Json(card.meta()),
-        }
-        .insert(&db)
-        .unwrap();
+        ChatMessage::new(Ts::now(), ChatRole::Bot, card.text.clone(), Some(300), card.meta()).insert(&db).unwrap();
         coach::handle_text(&db, "8x40", Ts::now(), "m1").unwrap();
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
         let message = |id: i64, text: &str| -> Message {

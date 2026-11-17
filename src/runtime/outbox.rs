@@ -457,7 +457,7 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
                     None => vec![],
                 };
                 let meta = json!({"kind": "delivery", "delivery_id": id, "session_id": session, "buttons": has_buttons});
-                ChatMessage { id: None, at: now, role: ChatRole::Bot, text: row.message.clone(), telegram_message_id: Some(message_id), meta_json: Json(meta) }.insert(&tx)?;
+                ChatMessage::new(now, ChatRole::Bot, row.message.clone(), Some(message_id), meta).insert(&tx)?;
                 tx.commit()?;
                 Ok((delivery_data(&row), replaced))
             })

@@ -389,6 +389,13 @@ table!(
     created_at: Ts,
 });
 
+impl ChatMessage {
+    /// A new chat history row (SQLite assigns the id on insert).
+    pub fn new(at: Ts, role: ChatRole, text: String, telegram_message_id: Option<i64>, meta: Value) -> ChatMessage {
+        ChatMessage { id: None, at, role, text, telegram_message_id, meta_json: Json(meta) }
+    }
+}
+
 impl PlannedSession {
     /// A new, unplaced session; `replanning::place` sets its times.
     pub fn new(week_id: String, workout_template_id: Option<String>, user_locked: bool) -> PlannedSession {

@@ -13,8 +13,8 @@ use crate::agent::openrouter::OpenRouter;
 use crate::agent::turnlog::TurnLog;
 use crate::agent::{Agent, ChatModel};
 use crate::config::Config;
+use crate::db::Connection;
 use crate::db::models::{ChatMessage, ChatRole};
-use crate::db::{Connection, Json};
 use crate::domain::coach;
 use crate::domain::view::Card;
 use crate::error::{Error, Result};
@@ -107,15 +107,7 @@ pub async fn serve(config: Config) -> Result<()> {
             let (db_path, text, meta) = (db_path.clone(), text.to_string(), card.meta());
             tokio::spawn(async move {
                 let saved = blocking(&db_path, move |db| {
-                    ChatMessage {
-                        id: None,
-                        at: Ts::now(),
-                        role: ChatRole::Bot,
-                        text,
-                        telegram_message_id: Some(message_id),
-                        meta_json: Json(meta),
-                    }
-                    .insert(db)
+                    ChatMessage::new(Ts::now(), ChatRole::Bot, text, Some(message_id), meta).insert(db)
                 })
                 .await;
                 if let Err(e) = saved {
