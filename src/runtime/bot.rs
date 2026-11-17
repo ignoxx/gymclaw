@@ -58,8 +58,8 @@ pub fn route(text: &str) -> Route {
 /// An owner message waiting for the agent.
 #[derive(Clone, Debug)]
 struct Inbound {
-    /// Message that gets 👀 and, if the reply is a reaction, the reaction.
-    message_id: i64,
+    /// Message that gets 👀 and, if the reply is a reaction, the reaction. None: nothing to react to.
+    message_id: Option<i64>,
     key: String,
     images: Vec<Media>,
     /// True for background event batches; false for owner messages and reactions.
@@ -193,8 +193,8 @@ impl Bot {
         };
         let _ = self.tg.answer_callback(&q.id, None).await;
         // The choice is made: the buttons go, the owner's pick shows as their message in the history.
-        let message_id = q.message.as_ref().map(|m| m.message_id).unwrap_or_default();
-        if message_id != 0 {
+        let message_id = q.message.as_ref().map(|m| m.message_id);
+        if let Some(message_id) = message_id {
             let _ = self.tg.edit_buttons(self.owner, message_id, &vec![]).await;
         }
         self.to_agent(
@@ -243,8 +243,8 @@ impl Bot {
         }
         let meta = if voice.is_some() { json!({"kind": "voice"}) } else { json!({}) };
         let text = self.with_reply(text, message.reply_to_message.as_deref()).await;
-        self.to_agent(message.message_id, format!("tg-{}", message.message_id), text.trim().to_string(), images, meta)
-            .await;
+        let key = format!("tg-{}", message.message_id);
+        self.to_agent(Some(message.message_id), key, text.trim().to_string(), images, meta).await;
     }
 
     /// Transcribe a voice note. Not echoed to the chat: the owner's message row holds the transcript for
@@ -316,7 +316,7 @@ impl Bot {
                     sent.text.clone()
                 };
                 self.to_agent(
-                    0,
+                    None,
                     format!("tg-react:{message_id}-{}", Ts::now().0.as_millisecond()),
                     format!("[reacted 👎 to: \"{reply_preview}\"; find what was wrong, fix it if you can, and save a learned note so it won't repeat]"),
                     vec![],
@@ -398,13 +398,15 @@ impl Bot {
     }
 
     /// Queue an owner message for the agent: 👀, stored in the chat history, collected into the next turn.
-    async fn to_agent(&self, message_id: i64, key: String, text: String, images: Vec<Media>, meta: Value) {
-        if message_id != 0 {
+    async fn to_agent(&self, message_id: Option<i64>, key: String, text: String, images: Vec<Media>, meta: Value) {
+        if let Some(message_id) = message_id {
             let _ = self.tg.react(self.owner, message_id, Some(ACK)).await;
         }
-        self.log.log(json!({"ev": "inbound", "session": SESSION, "channel": "telegram", "msg": message_id.to_string(),
-            "sentAt": Ts::now().0.as_millisecond(), "chars": text.chars().count(), "text": scrub(&text, 4000)}));
-        self.remember(ChatRole::Owner, text, (message_id != 0).then_some(message_id), meta).await;
+        self.log.log(
+            json!({"ev": "inbound", "session": SESSION, "channel": "telegram", "msg": message_id.map(|m| m.to_string()),
+            "sentAt": Ts::now().0.as_millisecond(), "chars": text.chars().count(), "text": scrub(&text, 4000)}),
+        );
+        self.remember(ChatRole::Owner, text, message_id, meta).await;
         self.inbox.lock().await.push(Inbound { message_id, key, images, background: false });
         self.inbox_ready.notify_one();
     }
@@ -448,7 +450,7 @@ impl Bot {
         let started = Instant::now();
         let data = q.data.clone().unwrap_or_default();
         let action = data.split(':').nth(1).unwrap_or("").to_string();
-        let message_id = q.message.as_ref().map(|m| m.message_id).unwrap_or_default();
+        let message_id = q.message.as_ref().map(|m| m.message_id);
         let request_id = format!("tg-cb:{}", q.id);
         let result = in_tx(self.db(), move |db| coach::handle_tap(db, &data, Ts::now(), &request_id)).await;
         let cli_ms = started.elapsed().as_millis() as u64;
@@ -463,7 +465,10 @@ impl Bot {
                 Some("COACH_UNHANDLED".into())
             }
             Ok(view) => {
-                let tapped = Tapped { message_id, text: q.message.as_ref().and_then(|m| m.body().map(String::from)) };
+                let tapped = Tapped {
+                    message_id: message_id.unwrap_or_default(),
+                    text: q.message.as_ref().and_then(|m| m.body().map(String::from)),
+                };
                 if let Err(e) = self.coach.apply(&view, Some(&tapped), None).await {
                     tracing::warn!("coach render failed: {e}");
                     self.to_agent(message_id, format!("render:{}", q.id),
@@ -497,7 +502,7 @@ impl Bot {
             Ok(view) if view.handled => {
                 if let Err(e) = self.coach.apply(&view, None, Some(message_id)).await {
                     tracing::warn!("coach render failed: {e}");
-                    self.to_agent(message_id, format!("render:tg-{message_id}"),
+                    self.to_agent(Some(message_id), format!("render:tg-{message_id}"),
                         format!("Typed set {text} was saved successfully, but rendering failed ({}): {e}. Do not log it again; inspect workout status and resend the card.", e.code()),
                         vec![], json!({"kind": "coach_fallback"})).await;
                 }
@@ -518,8 +523,8 @@ impl Bot {
                     _ => text,
                 };
                 let text = self.with_reply(text, reply.as_deref()).await;
-                self.to_agent(message_id, format!("tg-{message_id}"), text, vec![], json!({"kind": "coach_fallback"}))
-                    .await;
+                let key = format!("tg-{message_id}");
+                self.to_agent(Some(message_id), key, text, vec![], json!({"kind": "coach_fallback"})).await;
             }
         }
         entry["ms"] = json!(started.elapsed().as_millis() as u64);
@@ -596,7 +601,7 @@ impl Bot {
         })
         .await?;
         let review = events.as_array().into_iter().flatten().any(|e| e["type"] == "planning.weekly_briefing");
-        if self.turn(vec![Inbound { message_id: 0, key, images: vec![], background: true }], review).await {
+        if self.turn(vec![Inbound { message_id: None, key, images: vec![], background: true }], review).await {
             in_tx(self.db(), move |db| {
                 for id in ids {
                     crate::domain::events::ack(db, &id, Ts::now())?;
@@ -636,7 +641,7 @@ impl Bot {
         if background && !self.inbox.lock().await.is_empty() {
             return false;
         }
-        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
+        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id.is_some()) {
             self.answer(&outcome, &batch).await
         } else {
             false
@@ -676,7 +681,7 @@ impl Bot {
     /// Send the turn's one outcome and clear the 👀 acks. False when the owner may not have got it.
     async fn answer(&self, outcome: &Outcome, batch: &[Inbound]) -> bool {
         let reply = &outcome.reply;
-        let target = batch.iter().rev().find(|b| b.message_id != 0).map(|b| b.message_id);
+        let target = batch.iter().rev().find_map(|b| b.message_id);
         let mut reacted = None;
         let mut delivered = true;
         if let (Some(emoji), Some(message)) = (&reply.react, target) {
@@ -698,8 +703,8 @@ impl Bot {
                 message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
             delivered &= self.send_reply(outcome, &message.text, message.photo.as_deref(), &buttons).await;
         }
-        for b in batch.iter().filter(|b| b.message_id != 0 && Some(b.message_id) != reacted) {
-            let _ = self.tg.react(self.owner, b.message_id, None).await;
+        for message in batch.iter().filter_map(|b| b.message_id).filter(|m| Some(*m) != reacted) {
+            let _ = self.tg.react(self.owner, message, None).await;
         }
         delivered
     }
@@ -964,7 +969,7 @@ mod tests {
         };
 
         // The owner just wrote: the event waits.
-        bot.to_agent(7, "tg-7".into(), "back to 3 a week".into(), vec![], json!({})).await;
+        bot.to_agent(Some(7), "tg-7".into(), "back to 3 a week".into(), vec![], json!({})).await;
         attention("Week 2026-11-02: 4 sessions saved, target 3");
         bot.event_turn().await.unwrap();
         assert_eq!(calls(), 0);
@@ -983,7 +988,12 @@ mod tests {
 
         // The owner writes while a background turn thinks: it stays silent and settles nothing.
         attention("Session y: skips a rest day");
-        bot.inbox.lock().await.push(Inbound { message_id: 8, key: "tg-8".into(), images: vec![], background: false });
+        bot.inbox.lock().await.push(Inbound {
+            message_id: Some(8),
+            key: "tg-8".into(),
+            images: vec![],
+            background: false,
+        });
         let sent = |tg: &crate::telegram::coach::tests::FakeTelegram| {
             tg.calls().iter().filter(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))).count()
         };
