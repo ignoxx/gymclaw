@@ -715,23 +715,21 @@ pub fn end_workout(db: &Connection, workout: &WorkoutSession, now: Ts, request_i
 }
 
 /// Delete a workout with nothing logged (the running one, or `workout_id`) and reopen its session. The
-/// live card is retired only when it belongs to that workout.
+/// live card is retired only when it belongs to that workout. A retry returns the first result.
 pub fn discard_workout(db: &Connection, workout_id: Option<&str>, now: Ts, request_id: &str) -> Result<CoachView> {
-    let running = active_workout(db)?;
-    let Some(id) = workout_id.map(String::from).or_else(|| running.as_ref().map(|w| w.id.clone())) else {
-        crate::bail!("NO_WORKOUT", "No workout running; pass workout_id to discard a finished one");
-    };
-    let name =
-        workout::load_workout(db, &id, None)?.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
-    mutate(db, "workout.discarded", request_id, json!({"workout_id": id}), now, || {
+    let running = active_workout(db)?.map(|w| w.id);
+    let result = mutate(db, "workout.discarded", request_id, json!({"workout_id": workout_id}), now, || {
+        let Some(id) = workout_id.map(String::from).or_else(|| running.clone()) else {
+            crate::bail!("NO_WORKOUT", "No workout running; pass workout_id to discard a finished one");
+        };
+        let name = workout::load_workout(db, &id, None)?.template_snapshot["name"].clone();
         let session = workout::discard(db, &id, now)?;
-        Ok(json!({"workout_id": id, "session": session.map(|s| json!({"id": s.id, "status": s.status}))}))
+        Ok(json!({"workout_id": id, "name": name, "session": session.map(|s| json!({"id": s.id, "status": s.status}))}))
     })?;
-    let ack = format!("🗑 {name} discarded");
-    Ok(match running {
-        Some(w) if w.id == id => CoachView { ack: Some(ack), ..handled() },
-        _ => CoachView { ack: Some(ack), keep: true, ..handled() },
-    })
+    let data = &result["data"];
+    let ack = format!("🗑 {} discarded", data["name"].as_str().unwrap_or("Workout"));
+    let keep = running.as_deref() != data["workout_id"].as_str();
+    Ok(CoachView { ack: Some(ack), keep, ..handled() })
 }
 
 /// The live countdown reached rest_until: close the rest and show the next set card.
@@ -1535,6 +1533,8 @@ mod tests {
         assert_eq!(end.code(), "NOTHING_LOGGED");
         let discarded = discard_workout(&db, None, at(3601), "discard").unwrap();
         assert_eq!(discarded.ack.as_deref(), Some("🗑 Pull discarded"));
+        // A retried tap or tool call returns the first result, not NO_WORKOUT.
+        assert_eq!(discard_workout(&db, None, at(3602), "discard").unwrap().ack, discarded.ack);
         assert!(WorkoutSession::select(&db, "", []).unwrap().is_empty());
         assert_eq!(PlannedSession::get(&db, &plan.id).unwrap().unwrap().status, SessionStatus::Missed);
         // A workout with a set keeps blocking a new start.
