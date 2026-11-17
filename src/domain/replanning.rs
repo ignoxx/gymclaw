@@ -56,15 +56,16 @@ pub fn commit_upcoming(db: &Connection, now: Ts) -> Result<()> {
     Ok(())
 }
 
-/// Inspect existing weeks without changing sessions. Conflicts and infeasibility that just appeared
-/// become durable agent events; only the agent decides whether an exception or an edit is appropriate.
-pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result<Value> {
+/// Inspect existing weeks without changing sessions → their warnings. Conflicts and infeasibility that
+/// just appeared become durable agent events; only the agent decides whether an exception or an edit is
+/// appropriate.
+pub fn inspect_weeks(db: &Connection, weeks: &BTreeSet<Date>, now: Ts) -> Result<Vec<String>> {
     inspect(db, weeks, now, true)
 }
 
 /// `wake: false` records the weeks' warnings as standing without waking the agent: the editor of
 /// those weeks already decided about them.
-fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Result<Value> {
+fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Result<Vec<String>> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let rows = PlannedSession::select(db, "ORDER BY planned_start_at, id", [])?;
@@ -112,7 +113,7 @@ fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Resu
     if wake && !fresh.is_empty() {
         crate::domain::core::emit(db, "planning.attention", now, json!({"warnings": fresh}))?;
     }
-    Ok(json!({"changed": [], "warnings": warnings}))
+    Ok(warnings)
 }
 
 /// Every warning currently standing: the newest `planning.warnings` event of each week (written when a
@@ -378,8 +379,7 @@ mod tests {
         .unwrap();
         assert_eq!(moved["data"]["warnings"], json!(["skips a rest day"]));
 
-        let repaired = inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
-        assert_eq!(repaired["changed"], json!([]));
+        inspect_weeks(&db, &BTreeSet::from([week]), now).unwrap();
         for other in &before[1..] {
             let after = PlannedSession::get(&db, &other.id).unwrap().unwrap();
             assert_eq!((after.status, after.planned_start_at), (other.status, other.planned_start_at));
@@ -403,7 +403,7 @@ mod tests {
             serde_json::from_value(attention(db).last().unwrap().payload_json.0["warnings"].clone()).unwrap()
         };
         let thursday = before[2].planned_start_at - SignedDuration::from_hours(24);
-        let all = drag(&db, &ids[2], thursday)["warnings"].as_array().unwrap().len();
+        let all = drag(&db, &ids[2], thursday).len();
         let clash = raised(&db);
         assert!(
             !clash.is_empty() && clash.len() < all && clash.iter().all(|w| w.ends_with("skips a rest day")),

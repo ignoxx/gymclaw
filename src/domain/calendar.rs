@@ -351,18 +351,14 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     state.sync_token = Some(batch.next_sync_token.clone());
     state.last_synced_at = Some(now);
     state.update(db)?;
-    let replanned =
-        if affected.is_empty() { json!({"changed": [], "warnings": []}) } else { inspect_weeks(db, &affected, now)? };
+    let warnings = if affected.is_empty() { vec![] } else { inspect_weeks(db, &affected, now)? };
     commit_upcoming(db, now)?;
-    let changes = replanned["changed"].as_array().cloned().unwrap_or_default();
-    let warnings: Vec<String> =
-        replanned["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect();
-    if !emitted.is_empty() || !changes.is_empty() || !warnings.is_empty() {
+    if !emitted.is_empty() || !warnings.is_empty() {
         let event = emit(
             db,
             "planning.replan_required",
             now,
-            json!({"reason": "calendar_changed", "handled_locally": false, "changes": changes, "warnings": warnings}),
+            json!({"reason": "calendar_changed", "handled_locally": false, "warnings": warnings}),
         )?;
         emitted.push(json!({"id": event.id, "type": event.r#type}));
     }
@@ -390,7 +386,7 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     let queued: i64 = db.query_row("SELECT count(*) FROM calendar_write WHERE status = 'PENDING'", [], |r| r.get(0))?;
     Ok(json!({
         "data": {"calendar_id": provider.calendar_id(), "source": provider.source(), "full_sync": batch.full, "events_received": batch.events.len(),
-            "changes": changes, "warnings": warnings, "weeks": affected.iter().map(Date::to_string).collect::<Vec<_>>(),
+            "warnings": warnings, "weeks": affected.iter().map(Date::to_string).collect::<Vec<_>>(),
             "calendar_writes_queued": queued, "remote_events_changed": false},
         "events": emitted,
         "user_message_hint": if parts.is_empty() { Value::Null } else { json!(parts.join(" ")) },

@@ -249,12 +249,12 @@ pub struct ProfileUpdate {
 
 impl Tool for ProfileUpdate {
     const NAME: &'static str = "profile_update";
-    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Existing sessions stay saved; `replanning.warnings` lists conflicts for you to resolve with session_update.";
+    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Existing sessions stay saved; `warnings` lists conflicts for you to resolve with session_update.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let mut data = serde_json::to_value(update_profile(cx.db, &self.changes)?)?;
         let weeks = availability::affected_weeks(cx.db, cx.now)?;
-        data["replanning"] = replanning::inspect_weeks(cx.db, &weeks, cx.now)?;
+        data["warnings"] = json!(replanning::inspect_weeks(cx.db, &weeks, cx.now)?);
         Ok(data)
     }
 }
@@ -646,8 +646,7 @@ mod tests {
         let updated =
             call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p")
                 .unwrap();
-        assert_eq!(updated["replanning"]["changed"], json!([]));
-        assert!(!updated["replanning"]["warnings"].as_array().unwrap().is_empty());
+        assert!(!updated["warnings"].as_array().unwrap().is_empty());
         for row in before {
             assert_eq!(
                 PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap().planned_start_at.iso(),

@@ -70,8 +70,7 @@ pub fn disconnect(db: &Connection, now: Ts) -> Result<Value> {
 /// Throttled; a no-op when not connected or fetched recently. Errors are recorded, not raised, unless `strict`.
 pub fn refresh(db: &Connection, now: Ts, force: bool, transport: &dyn Transport, strict: bool) -> Result<Value> {
     let quiet = |extra: Value| {
-        let mut base =
-            json!({"refreshed": false, "changes": [], "warnings": [], "events": [], "user_message_hint": null});
+        let mut base = json!({"refreshed": false, "warnings": [], "events": [], "user_message_hint": null});
         base.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
         base
     };
@@ -119,7 +118,7 @@ fn inspect_changes(db: &Connection, old: &BTreeSet<(Ts, Ts)>, new: &BTreeSet<(Ts
     // Only future changes matter; a blocker sliding out of the lookback window is not news.
     let changed: Vec<_> = old.symmetric_difference(new).filter(|(_, end)| *end > now).collect();
     if changed.is_empty() {
-        return Ok(json!({"changes": [], "warnings": [], "events": [], "user_message_hint": null}));
+        return Ok(json!({"warnings": [], "events": [], "user_message_hint": null}));
     }
     let mut weeks = BTreeSet::new();
     for &&(start, end) in &changed {
@@ -129,25 +128,20 @@ fn inspect_changes(db: &Connection, old: &BTreeSet<(Ts, Ts)>, new: &BTreeSet<(Ts
             week = week.checked_add(jiff::Span::new().days(7))?;
         }
     }
-    let replanned = inspect_weeks(db, &weeks, now)?;
+    let warnings = inspect_weeks(db, &weeks, now)?;
     commit_upcoming(db, now)?;
     let event = emit(
         db,
         "calendar.personal_blockers_changed",
         now,
-        json!({"added": new.difference(old).count(), "removed": old.difference(new).count(),
-        "changes": replanned["changed"], "warnings": replanned["warnings"]}),
+        json!({"added": new.difference(old).count(), "removed": old.difference(new).count(), "warnings": warnings}),
     )?;
-    let warnings: Vec<&str> =
-        replanned["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-    let hint = if !warnings.is_empty() {
-        json!(format!("Personal calendar changed. {}", warnings.join(" ")))
-    } else {
+    let hint = if warnings.is_empty() {
         Value::Null
+    } else {
+        json!(format!("Personal calendar changed. {}", warnings.join(" ")))
     };
-    Ok(
-        json!({"changes": replanned["changed"], "warnings": replanned["warnings"], "events": [{"id": event.id, "type": event.r#type}], "user_message_hint": hint}),
-    )
+    Ok(json!({"warnings": warnings, "events": [{"id": event.id, "type": event.r#type}], "user_message_hint": hint}))
 }
 
 #[cfg(test)]
@@ -195,7 +189,6 @@ mod tests {
 
         let result = connect(&db, "webcal://p42-caldav.icloud.com/published/2/secret", sunday, &up).unwrap();
         assert!(result["user_message_hint"].as_str().unwrap().starts_with("Personal calendar changed"));
-        assert_eq!(result["changes"], json!([]));
         // The conflict wakes the agent once, as a planning warning; the calendar change itself doesn't.
         let wake: Vec<String> = crate::domain::events::wake_pending(&db)
             .unwrap()

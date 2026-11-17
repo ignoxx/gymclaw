@@ -383,7 +383,7 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let next_week = current_week.checked_add(days(7))?;
     let missed = mark_missed(db, now)?;
     let closed = close_started_slots(db, now)?;
-    let repaired = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
+    let warnings = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
         session_ids(&schedule_week(db, current_week, now, Some(&key), Some(template_id), &[])?)
@@ -400,9 +400,8 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let plans = refresh_plans(db, now)?;
     let crowd = refresh_crowd(db, now)?;
     commit_upcoming(db, now)?;
-    let mut result = json!({"missed": missed, "closed_started": closed, "created": created, "rotation": rotation, "crowd": crowd, "stale_workouts": stale, "refreshed_plans": plans});
-    result.as_object_mut().expect("object").extend(repaired.as_object().cloned().unwrap_or_default());
-    Ok(result)
+    Ok(json!({"missed": missed, "closed_started": closed, "created": created, "rotation": rotation, "crowd": crowd,
+        "stale_workouts": stale, "refreshed_plans": plans, "warnings": warnings}))
 }
 
 /// The Sunday run: rolling plan and next week's plan. `announce` tells the owner and
@@ -1022,11 +1021,11 @@ mod tests {
         db.execute("INSERT INTO workout_session (id, status, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?3, 0, '{\"id\": \"visit\"}')",
             (&visit, ts("2026-10-07T18:00:00+00:00"), ts("2026-10-07T19:00:00+00:00"))).unwrap();
         record_feedback(&db, &visit, "EMPTY", sunday(1), "quiet-visit").unwrap();
-        let result = rolling_plan(&db, "short", sunday(2)).unwrap();
+        rolling_plan(&db, "short", sunday(2)).unwrap();
         let id = original["id"].as_str().unwrap();
         let mut updated = PlannedSession::get(&db, id).unwrap().unwrap();
         assert_eq!(updated.planned_start_at.0.strftime("%H").to_string(), "17"); // Saved time stays; the agent decides.
-        assert!(result["changed"].as_array().unwrap().is_empty() && updated.status == SessionStatus::Tentative);
+        assert_eq!(updated.status, SessionStatus::Tentative);
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty()); // The owner already answered.
         updated.user_locked = true;
         updated.save(&db).unwrap();

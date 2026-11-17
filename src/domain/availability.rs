@@ -109,14 +109,14 @@ pub fn add(
                 )?;
             }
         }
-        let repaired = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
+        let warnings = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
         let instruction = if locked.is_empty() {
             "Unavailability saved. Existing sessions kept; resolve reported conflicts with session_update."
         } else {
             "Pause saved. Reminders suppressed; manually locked calendar slots need explicit cancellation."
         };
         Ok(json!({"block_id": row.id, "kind": kind, "start": start, "end": end, "locked_conflicts": locked,
-            "replanning": repaired, "remote_events_changed": false, "instruction": instruction}))
+            "warnings": warnings, "remote_events_changed": false, "instruction": instruction}))
     })
 }
 
@@ -132,9 +132,9 @@ pub fn retract(db: &Connection, block_id: &str, now: Ts, request_id: &str) -> Re
         row.status = BlockStatus::Retracted;
         row.retracted_at = Some(now);
         row.update(db)?;
-        let repaired = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
+        let warnings = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
         commit_upcoming(db, now)?;
-        Ok(json!({"block_id": row.id, "status": row.status, "replanning": repaired, "remote_events_changed": false,
+        Ok(json!({"block_id": row.id, "status": row.status, "warnings": warnings, "remote_events_changed": false,
             "instruction": "Availability override removed. Valid future planning resumed."}))
     })
 }
@@ -179,8 +179,7 @@ mod tests {
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let end = sunday(6 * 24 * 60);
         let result = add(&db, sunday(0), end, BlockKind::Sick, sunday(0), "pause", false).unwrap();
-        assert_eq!(result["data"]["replanning"]["changed"], json!([]));
-        assert!(!result["data"]["replanning"]["warnings"].as_array().unwrap().is_empty());
+        assert!(!result["data"]["warnings"].as_array().unwrap().is_empty());
         assert!(PlannedSession::select(&db, "", []).unwrap().iter().all(|s| s.status.is_open()));
         assert_eq!(pending_jobs(&db, None), 0);
         let blocked = start(&db, Some("short"), None, false, sunday(60), "blocked-start").unwrap_err();
