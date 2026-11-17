@@ -32,12 +32,13 @@ fn classify(state: &FailureState) -> (&'static str, &'static str, bool) {
         ("RATE_LIMIT", "Provider rate limit or quota blocked response.", false)
     } else if has(&["401", "403", "unauthoriz", "authentication", "api key"]) {
         ("PROVIDER_AUTH", "Provider rejected authentication or access.", false)
-    } else if has(&["timeout", "timed out", "deadline"]) {
+    } else if has(&["step limit", "turn deadline"]) {
+        // One model request times out well inside the turn deadline, so hitting it means many steps.
+        ("STUCK", "Model kept calling tools without finishing.", true)
+    } else if has(&["timeout", "timed out"]) {
         ("TIMEOUT", "Model request exceeded time limit.", false)
     } else if has(&["connection", "upstream", "502", "503", "504"]) {
         ("UPSTREAM_ERROR", "Model provider connection failed.", false)
-    } else if has(&["step limit", "repeated the same call"]) {
-        ("STUCK", "Model kept calling tools without finishing.", true)
     } else {
         ("NO_ANSWER", "Model returned no usable answer; cause not reported.", true)
     }
@@ -112,5 +113,7 @@ mod tests {
             "⚠️ I can't reach my model right now. If it was a change, check whether it saved before sending it again."
         );
         assert!(diagnose(&state).starts_with("RATE_LIMIT:") && !diagnose(&state).contains("sk-secret"));
+        let state = FailureState { error: "turn deadline exceeded".into(), observed_input: true, ..Default::default() };
+        assert!(format_failure(&state).contains("I got stuck") && diagnose(&state).starts_with("STUCK:"));
     }
 }
