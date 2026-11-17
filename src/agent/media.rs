@@ -1,13 +1,14 @@
 //! Photos and image documents for the vision model; CSV documents for the history import.
 //!
 //! Originals are saved under `data/media/` (EXIF intact, so tools can read the capture date for
-//! scale backfill); the model gets a JPEG/PNG data URL.
+//! scale backfill); the model gets an upright JPEG at most `photo::MAX_EDGE` on its longest side.
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde_json::{Value, json};
 
 use crate::error::Result;
+use crate::providers::photo;
 use crate::telegram::Media;
 
 /// Image kind from magic bytes.
@@ -17,14 +18,7 @@ pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
         [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
-        [_, _, _, _, b'f', b't', b'y', b'p', rest @ ..]
-            if rest.starts_with(b"heic")
-                || rest.starts_with(b"heix")
-                || rest.starts_with(b"mif1")
-                || rest.starts_with(b"msf1") =>
-        {
-            Some("image/heic")
-        }
+        _ if photo::is_heif(bytes) => Some("image/heic"),
         _ => None,
     }
 }
@@ -35,8 +29,7 @@ pub async fn save(data_dir: &Path, unique_id: &str, bytes: &[u8]) -> Result<Opti
     let ext = mime.trim_start_matches("image/");
     let dir = data_dir.join("media");
     tokio::fs::create_dir_all(&dir).await?;
-    let safe: String = unique_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    let path: PathBuf = dir.join(format!("{safe}.{ext}"));
+    let path: PathBuf = dir.join(format!("{}.{ext}", safe_name(unique_id)));
     tokio::fs::write(&path, bytes).await?;
     Ok(Some(Media { path, mime: mime.into() }))
 }
@@ -51,19 +44,24 @@ pub fn is_csv(doc: &crate::telegram::Document) -> bool {
 pub async fn save_import(data_dir: &Path, unique_id: &str, bytes: &[u8]) -> Result<PathBuf> {
     let dir = data_dir.join("imports");
     tokio::fs::create_dir_all(&dir).await?;
-    let safe: String = unique_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-    let path = dir.join(format!("{safe}.csv"));
+    let path = dir.join(format!("{}.csv", safe_name(unique_id)));
     tokio::fs::write(&path, bytes).await?;
     Ok(path)
 }
 
-/// Bytes the vision model can read: JPEG/PNG/WebP/GIF as is. HEIC is not shown; the model gets a
-/// note instead (`providers::photo::to_jpeg` can decode it but isn't wired in here).
+/// Telegram's file id as a file name: only `[A-Za-z0-9_-]`.
+fn safe_name(unique_id: &str) -> String {
+    unique_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect()
+}
+
+/// Bytes the vision model can read: JPEG, PNG and HEIC as an upright, downscaled JPEG; WebP and GIF
+/// (which `photo` doesn't decode) as is. None when a JPEG/PNG/HEIC can't be decoded.
 fn viewable(media: &Media, bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
-    if media.mime == "image/heic" {
-        return None;
+    match photo::to_jpeg(&bytes, photo::MAX_EDGE) {
+        Ok(jpeg) => Some(("image/jpeg".into(), jpeg.jpeg)),
+        Err(_) if matches!(media.mime.as_str(), "image/webp" | "image/gif") => Some((media.mime.clone(), bytes)),
+        Err(_) => None,
     }
-    Some((media.mime.clone(), bytes))
 }
 
 /// Attach this turn's images to the last owner message. Returns how many the model will see.
@@ -73,7 +71,9 @@ pub async fn attach(messages: &mut [Value], images: &[Media]) -> usize {
     let mut shown = 0;
     for media in images {
         let Ok(bytes) = tokio::fs::read(&media.path).await else { continue };
-        match viewable(media, bytes) {
+        let owned = media.clone();
+        let decoded = tokio::task::spawn_blocking(move || viewable(&owned, bytes)).await.ok().flatten();
+        match decoded {
             Some((mime, bytes)) => {
                 let data = base64::engine::general_purpose::STANDARD.encode(bytes);
                 parts.push(json!({"type": "image_url", "image_url": {"url": format!("data:{mime};base64,{data}")}}));
@@ -94,5 +94,33 @@ pub fn text_of(content: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OFFSET_JPG: &[u8] = include_bytes!("../providers/testdata/photo/offset.jpg");
+
+    fn media(mime: &str) -> Media {
+        Media { path: PathBuf::new(), mime: mime.into() }
+    }
+
+    #[test]
+    fn photos_reach_the_model_upright() {
+        let (mime, jpeg) = viewable(&media("image/jpeg"), OFFSET_JPG.to_vec()).unwrap();
+        let shown = photo::to_jpeg(&jpeg, photo::MAX_EDGE).unwrap();
+        assert_eq!((mime.as_str(), shown.width, shown.height), ("image/jpeg", 48, 64));
+        assert_eq!(viewable(&media("image/gif"), b"GIF89a".to_vec()).unwrap().0, "image/gif");
+        assert!(viewable(&media("image/jpeg"), vec![0xFF, 0xD8, 0xFF, 0]).is_none());
+    }
+
+    #[cfg(feature = "heic")]
+    #[test]
+    fn heic_is_shown_as_jpeg() {
+        let heic = include_bytes!("../providers/testdata/photo/offset.heic");
+        assert_eq!(sniff(heic), Some("image/heic"));
+        assert_eq!(viewable(&media("image/heic"), heic.to_vec()).unwrap().0, "image/jpeg");
     }
 }
