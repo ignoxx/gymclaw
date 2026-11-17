@@ -9,14 +9,14 @@ use sha2::{Digest, Sha256};
 
 use crate::db::Connection;
 use crate::db::models::{
-    AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, OnboardingState, PlannedSession,
-    SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutTemplate,
+    AgentEvent, CalendarEventSnapshot, CrowdFeedback, OnboardingState, PlannedSession, SessionStatus, SetLog, SetType,
+    WorkoutExercise, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::availability::session_blocked;
 use crate::domain::calendar::{allocation, get_week, week_of};
 use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::emit;
-use crate::domain::crowd::{CrowdModel, feel};
+use crate::domain::crowd::CrowdModel;
 use crate::domain::profile::get_profile;
 use crate::domain::replanning::{commit_upcoming, inspect_weeks, retire_session};
 use crate::domain::scheduling::schedule_week;
@@ -43,10 +43,6 @@ fn median(values: &[i64]) -> Option<Value> {
     sorted.sort_unstable();
     let n = sorted.len();
     Some(if n % 2 == 1 { json!(sorted[n / 2]) } else { json!((sorted[n / 2 - 1] + sorted[n / 2]) as f64 / 2.0) })
-}
-
-fn demo(value: &Value) -> bool {
-    value.get("demo").and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// What happened in a week: completed workouts vs target, each workout's outcome, sets, durations.
@@ -78,8 +74,7 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts) -> Result<Value> {
         json!({"week_start": week_start.to_string(), "completed_workouts": completed.len(), "target_sessions": profile.weekly_target_sessions,
         "workouts": workout_outcomes(&plans, &completed, rotates),
         "working_sets": sets.iter().filter(|s| s.set_type == SetType::Working).count(), "warmup_sets": sets.iter().filter(|s| s.set_type == SetType::Warmup).count(),
-        "median_duration_seconds": median(&durations), "crowd_labels": labels.len(),
-        "demo": completed.iter().any(|w| demo(&w.template_snapshot)) || labels.iter().any(|f| demo(&f.features_json))}),
+        "median_duration_seconds": median(&durations), "crowd_labels": labels.len()}),
     )
 }
 
@@ -642,11 +637,7 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
     let plan = get_week(db, week_start)?;
     let sessions = plan["sessions"].as_array().cloned().unwrap_or_default();
     let workouts = highlights::finished_in(db, previous, &tz)?;
-    let fixture = CalendarSyncState::get(db, 1)?.is_some_and(|s| s.source == "fixture");
-    let is_demo = fixture
-        || workouts.iter().any(|w| demo(&w.template_snapshot))
-        || sessions.iter().any(|s| s["workout_plan"]["crowd_source"] == "demo_fixture");
-    let mut lines = vec![format!("📅 **Your week · {}**{}", span(previous)?, if is_demo { " · DEMO" } else { "" })];
+    let mut lines = vec![format!("📅 **Your week · {}**", span(previous)?)];
     let (done, target) = (workouts.len() as i64, profile.weekly_target_sessions);
     let hit = target > 0 && done >= target;
     let mut result = format!("{}**{done}/{target} workouts**", if hit { "✅ " } else { "" });
@@ -731,16 +722,13 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
             continue;
         }
         let start = Ts::parse(session["start"].as_str().unwrap_or_default(), None)?;
-        let finish = Ts::parse(session["expected_finish"].as_str().unwrap_or_default(), None)?;
+        let finish = Ts::parse(session["end"].as_str().unwrap_or_default(), None)?;
         let at = start.local(&tz);
         let minutes = ((finish - start).as_secs_f64() / 60.0).round_ties_even() as i64;
         let name = session["workout_plan"]["template"]["name"].as_str().unwrap_or("Workout");
         let mut parts = vec![at.strftime("%a %H:%M").to_string(), format!("**{name}**"), format!("~{minutes} min")];
-        let label = if session["confidence"].as_f64().unwrap_or(0.0) >= CROWD_MIN_CONFIDENCE {
-            feel(session["crowd"].as_f64())
-        } else {
-            None
-        };
+        let forecast = &session["workout_plan"]["crowd_forecast"];
+        let label = forecast["feel"].as_str().filter(|_| forecast["confidence"].as_f64() >= Some(CROWD_MIN_CONFIDENCE));
         if let Some(label) = label {
             let emoji = CROWD_EMOJI.iter().find(|(l, _)| *l == label).map_or("", |(_, e)| *e);
             parts.push(format!("{emoji} {label}"));
@@ -816,13 +804,8 @@ mod tests {
     ) -> PlannedSession {
         let mut session = PlannedSession::new(week.into(), template.map(String::from), false);
         session.status = status;
-        (
-            session.planned_start_at,
-            session.planned_end_at,
-            session.prep_start_at,
-            session.leave_home_at,
-            session.expected_finish_at,
-        ) = (start, start.mins(minutes), start, start, start.mins(minutes));
+        (session.planned_start_at, session.planned_end_at, session.prep_start_at, session.leave_home_at) =
+            (start, start.mins(minutes), start, start);
         session.insert(db).unwrap();
         session
     }
@@ -926,8 +909,8 @@ mod tests {
         let db = db();
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let mut rows = sessions(&db);
-        (rows[0].crowd_prediction, rows[0].crowd_confidence) = (Some(0.9), Some(0.7));
-        (rows[1].crowd_prediction, rows[1].crowd_confidence) = (Some(0.1), Some(0.3));
+        rows[0].merge_plan(json!({"crowd_forecast": {"feel": "Packed", "confidence": 0.7}}));
+        rows[1].merge_plan(json!({"crowd_forecast": {"feel": "Empty", "confidence": 0.3}}));
         rows[0].save(&db).unwrap();
         rows[1].save(&db).unwrap();
         emit(

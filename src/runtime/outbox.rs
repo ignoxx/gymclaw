@@ -697,8 +697,8 @@ mod tests {
     fn planned_job(db: &Connection, kind: JobKind, instruction: &str) -> (PlannedSession, String) {
         let mut plan = PlannedSession::new("2026-10-12".into(), None, false);
         plan.status = SessionStatus::Committed;
-        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) =
-            (now(), now().mins(60), now(), now(), now().mins(60));
+        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at) =
+            (now(), now().mins(60), now(), now());
         plan.insert(db).unwrap();
         let job = NotificationJob {
             id: new_id(),

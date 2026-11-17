@@ -268,15 +268,13 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
             if times_changed && !own_echo && !is_closed(session.status) {
                 let old_duration = session.planned_end_at - session.planned_start_at;
                 if start != session.planned_start_at {
-                    // Old-slot forecast is not evidence about the owner's newly chosen slot.
-                    session.crowd_prediction = None;
-                    session.crowd_confidence = Some(0.0);
+                    // The old slot's forecast says nothing about the new one; the next tick fills it again.
+                    session.workout_plan_json.0 = session.crowd_keys(false);
                 }
                 session.planned_start_at = start;
                 session.planned_end_at = end;
                 session.prep_start_at = start.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes));
                 session.leave_home_at = start.mins(-profile.commute_to_gym_minutes);
-                session.expected_finish_at = end;
                 session.week_id = week_of(start, &tz).to_string();
                 session.user_locked = true;
                 manual_update = true;
@@ -527,10 +525,10 @@ mod tests {
         let moved = session(&db, &ids[1]);
         assert!(moved.user_locked);
         assert_eq!(
-            (moved.planned_start_at, moved.prep_start_at, moved.leave_home_at, moved.expected_finish_at),
+            (moved.planned_start_at, moved.prep_start_at, moved.leave_home_at, moved.planned_end_at),
             (at(15, 19, 0), at(15, 18, 25), at(15, 18, 40), at(15, 20, 10))
         );
-        assert_eq!(moved.crowd_prediction, None); // Wednesday's prediction isn't Thursday evidence.
+        assert!(moved.plan("crowd_forecast").is_none()); // Wednesday's forecast isn't Thursday evidence.
         assert!(
             old_jobs.iter().all(|j| NotificationJob::get(&db, &j.id).unwrap().unwrap().status
                 == crate::db::models::JobStatus::Cancelled)
@@ -715,7 +713,6 @@ mod tests {
         for t in [&mut wed.planned_start_at, &mut wed.planned_end_at, &mut wed.prep_start_at, &mut wed.leave_home_at] {
             *t = t.mins(-15);
         }
-        wed.expected_finish_at = wed.planned_end_at;
         wed.source_revision += 1;
         wed.save(&db).unwrap();
         let write = queue_session_write(&db, &wed, now(3), false).unwrap().unwrap();

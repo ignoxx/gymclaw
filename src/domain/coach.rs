@@ -1500,8 +1500,8 @@ mod tests {
     ) -> crate::db::models::PlannedSession {
         let mut plan = crate::db::models::PlannedSession::new("2026-10-12".into(), Some(template.into()), false);
         plan.status = status;
-        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at, plan.expected_finish_at) =
-            (start, start.mins(60), start.mins(-30), start.mins(-15), start.mins(60));
+        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at) =
+            (start, start.mins(60), start.mins(-30), start.mins(-15));
         plan.insert(db).unwrap();
         plan
     }

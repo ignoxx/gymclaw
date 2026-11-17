@@ -39,3 +39,9 @@ CREATE TABLE onboarding_state_new (
 INSERT INTO onboarding_state_new SELECT id, completed_fingerprint, interview_json, split_json, plan_text FROM onboarding_state;
 DROP TABLE onboarding_state;
 ALTER TABLE onboarding_state_new RENAME TO onboarding_state;
+
+-- expected_finish_at always equalled planned_end_at; the crowd columns were set once at drafting and
+-- never refreshed, while workout_plan_json.crowd_forecast is kept current.
+ALTER TABLE planned_session DROP COLUMN expected_finish_at;
+ALTER TABLE planned_session DROP COLUMN crowd_prediction;
+ALTER TABLE planned_session DROP COLUMN crowd_confidence;

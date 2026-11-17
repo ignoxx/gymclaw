@@ -1,4 +1,4 @@
-//! Explicit in-memory demo calendar, never used as evidence of live Google behavior.
+//! In-memory `CalendarProvider` for tests.
 use serde_json::{Value, json};
 
 use super::calendar::{
@@ -8,14 +8,6 @@ use super::calendar::{
 use crate::bail;
 use crate::error::Result;
 
-/// Which provider call a test saw.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Call {
-    Create(String),
-    Update(String),
-    Delete(String),
-}
-
 /// In-memory calendar. Every write appends to `changes`; sync tokens are `fixture:<change count>`.
 pub struct FixtureCalendarProvider {
     pub calendar_id: String,
@@ -23,7 +15,6 @@ pub struct FixtureCalendarProvider {
     /// In insertion order.
     events: Vec<(String, Value)>,
     pub changes: Vec<Value>,
-    pub calls: Vec<Call>,
     pub fail_sync: bool,
     pub expire_token: bool,
 }
@@ -41,7 +32,6 @@ impl FixtureCalendarProvider {
             timezone: timezone.into(),
             events: vec![],
             changes: vec![],
-            calls: vec![],
             fail_sync: false,
             expire_token: false,
         }
@@ -138,7 +128,6 @@ impl CalendarProvider for FixtureCalendarProvider {
 
     fn create_gym_event(&mut self, body: &Value) -> Result<CalendarEvent> {
         let id = body["id"].as_str().unwrap_or_default().to_string();
-        self.calls.push(Call::Create(id.clone()));
         if let Some(existing) = self.get_event(&id)? {
             if existing.cancelled() {
                 bail!("CALENDAR_EVENT_DELETED", "Fixture event deleted");
@@ -152,7 +141,6 @@ impl CalendarProvider for FixtureCalendarProvider {
     }
 
     fn update_gym_event(&mut self, event_id: &str, body: &Value, etag: &str) -> Result<CalendarEvent> {
-        self.calls.push(Call::Update(event_id.into()));
         let event = match self.get_event(event_id)? {
             Some(event) if !event.cancelled() => event,
             _ => bail!("CALENDAR_EVENT_DELETED", "Fixture event deleted"),
@@ -171,7 +159,6 @@ impl CalendarProvider for FixtureCalendarProvider {
     }
 
     fn delete_gym_event(&mut self, event_id: &str, etag: &str, session_id: &str) -> Result<()> {
-        self.calls.push(Call::Delete(event_id.into()));
         let event = match self.get_event(event_id)? {
             Some(event) if !event.cancelled() => event,
             _ => return Ok(()),

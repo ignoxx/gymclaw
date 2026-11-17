@@ -293,11 +293,14 @@ pub fn edit_session(
         cancel_session_jobs(db, &session.id, now)?;
         session.user_locked = true;
         session.source_revision += 1;
+        if start != session.planned_start_at {
+            // The old slot's forecast says nothing about the new one; the next tick fills it again.
+            session.workout_plan_json.0 = session.crowd_keys(false);
+        }
         session.planned_start_at = start;
         session.planned_end_at = end;
         session.prep_start_at = slot.prep_start;
         session.leave_home_at = slot.leave_home;
-        session.expected_finish_at = end;
         session.week_id = week.to_string();
         session.status = status;
         allocation(db, &mut session)?;

@@ -48,24 +48,19 @@ pub trait CrowdProvider {
         SOURCE
     }
     fn provider_id(&self) -> &str;
-    /// Synthetic/imported signal, never a live request.
-    fn demo(&self) -> bool {
-        false
-    }
     fn get_reading(&self) -> Result<CrowdReading>;
 }
 
-/// Explicit synthetic/imported signal; never labeled a live request.
+/// A fixed reading, for tests.
+#[cfg(test)]
 pub struct FixtureCrowdProvider {
     pub reading: CrowdReading,
 }
 
+#[cfg(test)]
 impl CrowdProvider for FixtureCrowdProvider {
     fn provider_id(&self) -> &str {
         "fixture:GYM_API"
-    }
-    fn demo(&self) -> bool {
-        true
     }
     fn get_reading(&self) -> Result<CrowdReading> {
         Ok(self.reading)

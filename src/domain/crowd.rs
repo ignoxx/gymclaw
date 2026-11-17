@@ -128,7 +128,6 @@ pub struct CrowdModel {
 pub struct Prediction {
     pub score: Option<f64>,
     pub confidence: f64,
-    pub demo: bool,
     pub json: Value,
 }
 
@@ -191,13 +190,14 @@ impl CrowdModel {
 
     pub fn forecast(&self, at: Ts) -> Option<Value> {
         let expected = self.expected_count(at);
-        let score = self.predict(at).score;
-        if expected.is_none() && score.is_none() {
+        let prediction = self.predict(at);
+        if expected.is_none() && prediction.score.is_none() {
             return None;
         }
         let mut out = expected.unwrap_or_else(|| json!({}));
-        out["feel"] = json!(feel(score));
-        out["score"] = json!(score);
+        out["feel"] = json!(feel(prediction.score));
+        out["score"] = json!(prediction.score);
+        out["confidence"] = json!(prediction.confidence);
         Some(out)
     }
 
@@ -229,8 +229,7 @@ impl CrowdModel {
         let (score, calibration_confidence, method) = calibrated_count(raw, &self.count_pairs);
         Some(
             json!({"raw_value": raw, "score": score, "confidence": history_confidence.min(calibration_confidence), "reliability": reliability,
-            "method": method, "evidence_days": days, "signal_kind": kind, "observation_id": selected.last().map(|r| &r.id),
-            "demo": selected.iter().any(|r| r.metadata_json.get("demo").and_then(Value::as_bool).unwrap_or(false))}),
+            "method": method, "evidence_days": days, "signal_kind": kind, "observation_id": selected.last().map(|r| &r.id)}),
         )
     }
 
@@ -258,17 +257,15 @@ impl CrowdModel {
         let weight: f64 = components.iter().map(|(_, w)| w).sum();
         let score = (weight != 0.0).then(|| components.iter().map(|(v, w)| v * w).sum::<f64>() / weight);
         let confidence = if weight != 0.0 { (weight / (weight + 0.5)).min(0.85) } else { 0.0 };
-        let demo = features.values().any(|f| f["demo"].as_bool().unwrap_or(false))
-            || slot_labels.iter().any(|f| f.features_json.get("demo").and_then(Value::as_bool).unwrap_or(false));
         let instruction = if score.is_none() {
             "Crowd unknown; reported count needs arrival labels."
         } else {
             "Crowd estimate uses available signals and user labels; confidence is heuristic."
         };
         let json = json!({"at": at, "score": score, "confidence": confidence, "score_kind": "personal_perceived_crowd_proxy",
-            "label_evidence": self.labels.len(), "slot_label_evidence": slot_labels.len(), "features": features, "demo": demo,
+            "label_evidence": self.labels.len(), "slot_label_evidence": slot_labels.len(), "features": features,
             "forecast_accuracy_established": false, "instruction": instruction});
-        Prediction { score, confidence, demo, json }
+        Prediction { score, confidence, json }
     }
 }
 
@@ -342,7 +339,7 @@ pub fn poll(db: &Connection, provider: &dyn CrowdProvider, now: Option<Ts>) -> R
         Some(after) if changed => json!({"after": after, "by": now}),
         _ => Value::Null,
     };
-    let metadata = json!({"provider_id": provider.provider_id(), "metric": METRIC, "demo": provider.demo(), "retrieved_at": now,
+    let metadata = json!({"provider_id": provider.provider_id(), "metric": METRIC, "retrieved_at": now,
         "provider_timestamp": null, "freshness_known": reading.freshness_seconds.is_some(),
         "changed_since_previous": if previous_at.is_some() { json!(changed) } else { Value::Null },
         "unchanged_for_seconds": unchanged_for, "possible_change_window": window});
@@ -428,7 +425,7 @@ pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts,
             let (score, confidence, method) = calibrated_count(row.raw_value, &model.count_pairs);
             features.insert(SOURCE.into(), json!({"raw_value": row.raw_value, "observation_id": row.id, "age_seconds": (at - row.observed_at).as_secs(),
                 "prediction_before_label": score, "prediction_confidence": confidence, "method": method,
-                "provider_freshness_seconds": row.freshness_seconds, "demo": row.metadata_json.get("demo").and_then(Value::as_bool).unwrap_or(false)}));
+                "provider_freshness_seconds": row.freshness_seconds}));
             if let (Some(mut state), Some(score)) = (CrowdSourceState::get(db, SOURCE)?, score) {
                 // Prequential error only: label is never used to predict itself.
                 let quality = (1.0 - (score - normalized).abs()).max(0.1);
@@ -437,10 +434,8 @@ pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts,
                 state.update(db)?;
             }
         }
-        let demo = features.values().any(|f| f["demo"].as_bool().unwrap_or(false));
         let paired: Vec<String> = features.keys().cloned().collect();
         let mut stored = features.clone();
-        stored.insert("demo".into(), json!(demo));
         stored.insert("prediction_before_label".into(), json!(prediction.score));
         stored.insert("recorded_at".into(), json!(now));
         let feedback = CrowdFeedback {
@@ -458,7 +453,7 @@ pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts,
         workout.update(db)?;
         Ok(
             json!({"feedback_id": feedback.id, "workout_id": workout_id, "rating": rating, "normalized_score": normalized, "observed_at": at,
-            "paired_sources": paired, "demo": demo, "instruction": "Crowd feedback saved. Future slot estimates now use this visit."}),
+            "paired_sources": paired, "instruction": "Crowd feedback saved. Future slot estimates now use this visit."}),
         )
     })
 }
@@ -639,12 +634,11 @@ mod tests {
         assert_eq!(label.observed_at, now(0));
         assert_eq!(label.features_json["GYM_API"]["raw_value"], 40.0);
         assert_eq!(label.features_json["GYM_API"]["prediction_before_label"], Value::Null);
-        assert_eq!(label.features_json["demo"], true);
         assert_eq!(WorkoutSession::get(&db, &workout).unwrap().unwrap().crowd_feedback.as_deref(), Some("BUSY"));
         let prediction = CrowdModel::new(&db, now(60)).unwrap().predict(now(7 * 24 * 60));
         assert!((prediction.score.unwrap() - 2.0 / 3.0).abs() < 1e-9);
         assert!(0.0 < prediction.confidence && prediction.confidence < 0.5);
-        assert!(prediction.demo && prediction.json["forecast_accuracy_established"] == false);
+        assert!(prediction.json["forecast_accuracy_established"] == false);
         assert!(
             record_feedback(&db, &workout, "EMPTY", now(120), "different")
                 .unwrap_err()
@@ -740,8 +734,6 @@ mod tests {
             Ts::parse(plan["sessions"][0]["start"].as_str().unwrap(), None).unwrap().0.strftime("%H").to_string(),
             "18"
         );
-        assert_eq!(plan["sessions"][0]["crowd"], 0.0);
-        assert_eq!(plan["sessions"][0]["workout_plan"]["crowd_score_kind"], "personal_perceived_crowd_proxy");
     }
 
     #[test]
