@@ -15,7 +15,7 @@ with the stand-in each shows. Work through that list; nothing is drawn at runtim
 ## How the original art was made
 
 - 76 first poses are tracings of [Everkinetic](https://github.com/everkinetic/data). The rest were
-  drawn with OpenAI's image model through Codex (the author's own description), then vectorized.
+  drawn with OpenAI's image model through Codex, then vectorized.
 - Upstream's [vectorizer](https://github.com/bryllim/workout-guide/blob/aac599224bb9780305239607ef98540b7e0ce389/scripts/lib/vectorize-png.mjs): alpha mask → potrace (`alphaMax: 1`,
   `optCurve: true`, `optTolerance: 0.2`, `threshold: 128`, `turdSize: 0`, white) → svgo. One filled
   path per picture on a 512 px canvas. `new-illustration` runs the same code.

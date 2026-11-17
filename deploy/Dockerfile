@@ -30,7 +30,7 @@ RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/s
     && apt-get update && apt-get install -y --no-install-recommends ca-certificates tini curl \
     && apt-get install -y --no-install-recommends -t bookworm-backports libheif1 libheif-plugin-libde265 \
     && rm -rf /var/lib/apt/lists/*
-# uid 1000 = the old image's `node` user, so existing volumes stay writable.
+# uid 1000 owns existing volumes.
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin gymclaw
 WORKDIR /opt/gymclaw
 COPY --from=build /usr/local/bin/gymclaw /usr/local/bin/gymclaw

@@ -8,15 +8,15 @@ Read during review. Each rule is a judgement call; mechanical rules live in CI
 A bug fix names the root cause and removes it at every site that shares it, not only the one in
 the report. Search for siblings before approving.
 
-Example: PR #21 stopped dashboard pills from wrapping. The cause was class names built from data
-("Empty" → `.empty`) colliding with the page's own classes; PR #23 fixed that a day later.
+Example: a fix stopped dashboard pills from wrapping, but the cause was class names built from data
+("Empty" → `.empty`) colliding with the page's own classes, so a second fix was needed a day later.
 
 ## Owner complaints get the general capability
 
 When a change answers an owner complaint about the agent ("it couldn't move my workout"), check
 that the agent can now handle the whole kind of request, not just the example in the complaint.
-A new narrow verb per complaint is a smell. The owner complained about refusals on 2026-10-05,
-2026-10-09 and 2026-10-12; each fix added verbs, and the next request still fell through.
+A new narrow verb per complaint is a smell. The owner complained about refusals three times in a
+week; each fix added verbs, and the next request still fell through.
 
 ## The agent is the brain
 
@@ -28,8 +28,8 @@ silent rewrites; when code can't handle something, it hands it to the agent inst
 error. Training preferences belong in the agent's context, not in code: ask "would this rule be
 wrong for a different user?", and if yes, it is context.
 
-Example: on 2026-11-10 a "weekly workouts take the week's last slot" rule was built in code and
-rejected. PR #80 stores the plan in the owner's words and lets the agent decide.
+Example: a "weekly workouts take the week's last slot" rule was built in code and rejected; the
+plan is now stored in the owner's words and the agent decides.
 
 ## No valueless messages
 
@@ -37,4 +37,4 @@ Message the owner only with new, actionable information; silence is the default,
 nothing changed leaves the model asleep. Fix it at the wake or emit source; an output filter is only
 a backstop.
 
-Example: on 2026-10-26 background wakes sent the owner bare "..." messages.
+Example: background wakes once sent the owner bare "..." messages.

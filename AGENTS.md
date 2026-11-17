@@ -2,8 +2,11 @@
 
 One Rust binary: Telegram bot, agent loop, scheduler and training domain over one SQLite DB.
 
-- **Code map**: `docs/architecture.md` ("Layout"). Schema: `src/db/schema.sql` (generated; a test
-  rewrites it when a migration changes it). Self-hosting and local runs: `docs/self-hosting.md`.
+- **Code map**: `docs/architecture.md` (map, cross-module rules); per-module detail: `rg '^//!' src`.
+  Self-hosting, local runs and every env var: `docs/self-hosting.md`.
+- **New migration**: `src/db/migrations/<NNN>_<name>.sql` + `MIGRATIONS` in `src/db/mod.rs`;
+  `cargo test schema_snapshot` regenerates `src/db/schema.sql` (fresh DBs are created from it).
+- **Diagnosing a prod turn**: `docs/turns.md`.
 - The bot's system prompt is built in `src/agent/context.rs`; its tools are in `src/tools/`. Before
   proposing a fix to the bot's behaviour, read `CODING_STANDARDS.md` ("The agent is the brain",
   "Owner complaints get the general capability").
@@ -11,7 +14,7 @@ One Rust binary: Telegram bot, agent loop, scheduler and training domain over on
   `--no-default-features` to cargo. CI builds the default features.
 - **Tests** live inline in `#[cfg(test)]` modules (no `tests/` dir); shared fixtures in
   `src/db/test.rs`. CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test`, shellcheck and gitleaks.
+  `cargo test`, shellcheck and gitleaks. Test against DB copies in `/tmp`, never the production DB.
 - **Dashboard**: `cargo run -- dashboard` serves `data/gymclaw.db` on :8766 (`GYMCLAW_DB=…` for
   another copy). Debug builds read `web/` from disk, so a refresh shows edits. Verify UI changes with
   `scripts/shot <url> <out.png> [width height] [--full]`; width 390 for phone;

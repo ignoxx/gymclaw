@@ -1,17 +1,8 @@
 # Agent turns: capture, copy, query
 
 Every agent turn is logged in full when `GYMCLAW_TURN_LOG_DIR` is set (the image sets it to
-`data/turns`). The format is documented in [`src/agent/turnlog.rs`](../src/agent/turnlog.rs). In short:
-
-- `model_call` events hold each step's exact request (only the messages added since the previous
-  step), its settings and the full response: text, tool calls, reasoning and OpenRouter's
-  `generationId` for the cost. The stable system prompt and the tool specs are stored once in
-  `blobs/<sha>.json`.
-- `llm_input` stamps the run with the `commit` it was built from (CI passes `GYMCLAW_COMMIT`;
-  local builds say `dev`), the model and the prompt/tool blob hashes.
-- `tool` events list the rows each call changed, with the SQLite changeset and its inverse.
-- Outcome labels: `run_end.flags` (`failed`, `deadline`, `step_cap`, `breaker`) and `label` events
-  for the owner's 👍/👎 on a bot message.
+`data/turns`). The events and their fields are documented in
+[`src/agent/turnlog.rs`](../src/agent/turnlog.rs).
 
 The files hold full prompts (chat, notes, calendar), so they're owner-only (0600). Keep copies that
 way and never commit them.
