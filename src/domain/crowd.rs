@@ -263,8 +263,7 @@ impl CrowdModel {
             "Crowd estimate uses available signals and user labels; confidence is heuristic."
         };
         let json = json!({"at": at, "score": score, "confidence": confidence, "score_kind": "personal_perceived_crowd_proxy",
-            "label_evidence": self.labels.len(), "slot_label_evidence": slot_labels.len(), "features": features,
-            "forecast_accuracy_established": false, "instruction": instruction});
+            "label_evidence": self.labels.len(), "slot_label_evidence": slot_labels.len(), "features": features, "instruction": instruction});
         Prediction { score, confidence, json }
     }
 }
@@ -340,7 +339,7 @@ pub fn poll(db: &Connection, provider: &dyn CrowdProvider, now: Option<Ts>) -> R
         _ => Value::Null,
     };
     let metadata = json!({"provider_id": provider.provider_id(), "metric": METRIC, "retrieved_at": now,
-        "provider_timestamp": null, "freshness_known": reading.freshness_seconds.is_some(),
+        "freshness_known": reading.freshness_seconds.is_some(),
         "changed_since_previous": if previous_at.is_some() { json!(changed) } else { Value::Null },
         "unchanged_for_seconds": unchanged_for, "possible_change_window": window});
     let row = CrowdObservation {
@@ -632,7 +631,6 @@ mod tests {
         let prediction = CrowdModel::new(&db, now(60)).unwrap().predict(now(7 * 24 * 60));
         assert!((prediction.score.unwrap() - 2.0 / 3.0).abs() < 1e-9);
         assert!(0.0 < prediction.confidence && prediction.confidence < 0.5);
-        assert!(prediction.json["forecast_accuracy_established"] == false);
         assert!(
             record_feedback(&db, &workout, "EMPTY", now(120), "different")
                 .unwrap_err()

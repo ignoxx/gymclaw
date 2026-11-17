@@ -185,8 +185,7 @@ fn rule_breaks(db: &Connection, session_id: &str, slot: &Candidate, profile: &Pr
 }
 
 /// Editable session state. Status describes scheduling/history only; it never fabricates workout logs.
-#[derive(Clone, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Default, serde::Serialize)]
 pub struct SessionPatch {
     pub start: Option<Ts>,
     pub end: Option<Ts>,

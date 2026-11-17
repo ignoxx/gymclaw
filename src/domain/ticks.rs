@@ -44,14 +44,14 @@ fn watch_with(
     let authority = runtime_authority(db)?;
     // A calendar outage must not stall the rest of the tick: reminders, nudges, deliveries.
     db.execute_batch("SAVEPOINT calendar_sync")?;
-    let (_synced, calendar_error) = match sync() {
-        Ok(synced) => {
+    let calendar_error = match sync() {
+        Ok(_) => {
             db.execute_batch("RELEASE calendar_sync")?;
-            (synced, None)
+            None
         }
         Err(error) if error.code().starts_with("CALENDAR_") => {
             db.execute_batch("ROLLBACK TO calendar_sync; RELEASE calendar_sync")?;
-            (json!({"data": {"weeks": []}, "events": [], "user_message_hint": null}), Some(error.code().to_string()))
+            Some(error.code().to_string())
         }
         Err(error) => return Err(error),
     };
@@ -61,11 +61,10 @@ fn watch_with(
     {
         prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
     }
-    let _personal = personal_calendar::refresh(db, now, false, net, false)?;
-    let rolling = match &authority.template_id {
-        Some(template) => weekly::rolling_plan(db, template, now)?,
-        None => json!({}),
-    };
+    personal_calendar::refresh(db, now, false, net, false)?;
+    if let Some(template) = &authority.template_id {
+        weekly::rolling_plan(db, template, now)?;
+    }
     for (event_id, _, message) in weekly::no_show_nudges(db, now)? {
         prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
     }
@@ -74,10 +73,11 @@ fn watch_with(
     {
         prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
     }
-    Ok(json!({"calendar_error": calendar_error, "rolling": rolling, "briefed": false}))
+    Ok(json!({"calendar_error": calendar_error}))
 }
 
-/// Sunday 23:00 local: sync, draft an empty next week, audit this week and queue the agent event.
+/// Sunday 23:00 local: sync both calendars and draft next week if it is empty. The scheduler then
+/// publishes and wakes the agent for its review (`weekly::announce`).
 pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
     let authority = runtime_authority(db)?;
     let Some(template) = authority.template_id.clone() else {

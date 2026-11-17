@@ -373,8 +373,7 @@ pub struct EventsPending {
 impl Tool for EventsPending {
     const NAME: &'static str = "events_pending";
     const LISTED: Listed = Listed::Never;
-    const DESCRIPTION: &'static str =
-        "Unhandled events that need attention (unknown deliveries, blocked calendar writes, crowd source down).";
+    const DESCRIPTION: &'static str = "Open issues (the same as the Now snapshot); `all` adds handled audit records.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         Ok(json!({"events": events::pending(cx.db, self.all)?}))
@@ -414,6 +413,7 @@ pub struct CalendarSync {}
 
 impl Tool for CalendarSync {
     const NAME: &'static str = "calendar_sync";
+    const LISTED: Listed = Listed::Never;
     const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and report conflicts for your decision. Runs every minute anyway.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
