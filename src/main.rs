@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use gymclaw::agent::openrouter::OpenRouter;
 use gymclaw::agent::turnlog::TurnLog;
 use gymclaw::agent::{Agent, ChatModel, ModelReply, TurnInput};
-use gymclaw::config::Config;
+use gymclaw::config::{self, Config};
 use gymclaw::error::{Error, Result};
 use gymclaw::time::Ts;
 use gymclaw::{db, tools};
@@ -64,9 +64,11 @@ enum Command {
         /// The owner's local time to answer at (ISO 8601).
         #[arg(long)]
         at: String,
-        #[arg(long, env = "GYMCLAW_MODEL", default_value = "anthropic/claude-haiku-5.5")]
-        model: String,
-        #[arg(long, env = "GYMCLAW_PROVIDER")]
+        /// Default: GYMCLAW_MODEL, else the bot's default.
+        #[arg(long)]
+        model: Option<String>,
+        /// Default: GYMCLAW_PROVIDER.
+        #[arg(long)]
         provider: Option<String>,
     },
     /// Undo one agent turn's tool calls on a database copy, from the inverse changesets in the turn
@@ -251,7 +253,10 @@ async fn main() -> ExitCode {
                 .expect("calendar auth thread")
                 .map(Some)
         }
-        Command::Replay { db, key, at, model, provider } => replay(db, &key, &at, model, provider).await.map(Some),
+        Command::Replay { db, key, at, model, provider } => {
+            let (model, provider) = (model.unwrap_or_else(config::model), provider.or_else(config::provider));
+            replay(db, &key, &at, model, provider).await.map(Some)
+        }
         Command::Rewind { run, db, turns } => gymclaw::agent::turnlog::read(&turns).and_then(|events| {
             let undone = gymclaw::agent::turnlog::rewind(&mut db::open(&db)?, &events, &run)?;
             Ok(Some(json!({"ok": true, "run": run, "tool_calls_undone": undone})))

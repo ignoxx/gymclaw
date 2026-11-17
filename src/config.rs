@@ -31,6 +31,16 @@ fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// The chat model (`GYMCLAW_MODEL`), for `Config` and `gymclaw replay`.
+pub fn model() -> String {
+    var("GYMCLAW_MODEL").unwrap_or_else(|| "anthropic/claude-haiku-5.5".into())
+}
+
+/// The OpenRouter provider pin (`GYMCLAW_PROVIDER`), if any.
+pub fn provider() -> Option<String> {
+    var("GYMCLAW_PROVIDER")
+}
+
 /// The owner's Telegram user id, for code that runs without a full `Config` (tools, CLI).
 pub fn owner_id() -> Result<i64, String> {
     var("GYMCLAW_TELEGRAM_USER_ID")
@@ -66,7 +76,7 @@ impl Config {
         let (data_dir, db_path) = Self::paths();
         let need = |name: &str| var(name).ok_or_else(|| format!("{name} is required"));
         let owner_id = owner_id()?;
-        let model = var("GYMCLAW_MODEL").unwrap_or_else(|| "anthropic/claude-haiku-5.5".into());
+        let model = model();
         Ok(Config {
             data_dir,
             db_path,
@@ -76,7 +86,7 @@ impl Config {
             model_vision: var("GYMCLAW_MODEL_VISION").unwrap_or_else(|| model.clone()),
             model_audio: var("GYMCLAW_MODEL_AUDIO").unwrap_or_else(|| "google/gemini-3.5-flash-lite".into()),
             model,
-            provider: var("GYMCLAW_PROVIDER"),
+            provider: provider(),
             dashboard_host: var("GYMCLAW_DASHBOARD_HOST"),
             turn_log_dir: var("GYMCLAW_TURN_LOG_DIR").map(PathBuf::from),
         })
