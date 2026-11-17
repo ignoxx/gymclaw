@@ -6,8 +6,6 @@
 //! exercise ID, so old buttons stop working once the workout has moved past that exercise.
 use std::path::Path;
 
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::db::Connection;
@@ -670,7 +668,7 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
 /// One photo card per same-muscle alternative, each with a single 'Use' button.
 fn swap_cards(db: &Connection, workout_id: &str, row: &WorkoutExercise) -> Result<Vec<Card>> {
     let r = reference(&row.id);
-    let options = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?.options;
+    let options = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?;
     if options.is_empty() {
         return Ok(vec![Card {
             kind: CardKind::Option,
@@ -747,30 +745,16 @@ pub fn handle_rest_over(db: &Connection, now: Ts) -> Result<CoachView> {
     Ok(deleted(after_change(db, &workout.id, now, &request_id)?))
 }
 
-/// Agent-initiated coach actions (the `workout` tool's verbs).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+/// The `workout` tool's verbs that act on the running workout (documented on `WorkoutAction`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Resend the current card.
     Card,
-    /// Show up to 3 same-muscle alternatives as buttons (only before the first set).
     Swap,
-    /// Do the current exercise later.
     Later,
-    /// Move on to the next exercise.
     Next,
-    /// End early, save, show the summary.
     End,
-    /// The owner is doing `exercise` now.
     Switch,
-    /// `exercise` is what the owner really did (`which`: the logged one).
-    Relabel,
-    /// Seconds between sets for this workout (`remember`: also the default).
     Rest,
-}
-
-fn needed<T>(value: Option<T>, name: &str) -> Result<T> {
-    value.ok_or_else(|| Error::domain("ARGUMENT_REQUIRED", format!("Missing {name}")))
 }
 
 /// Owner says a logged exercise was really `exercise`. `workout_id` picks any past workout; default
@@ -799,31 +783,26 @@ pub fn relabel(
     Ok(CoachView { edits: finish_card_edits(db, &workout.id, now)?, ..acked(ack, vec![]) })
 }
 
-/// Agent-initiated action: 'card', 'swap', 'later', 'next', 'end' on the current exercise;
-/// 'switch' (exercise: do this one now), 'relabel' (exercise: what was really done, which: the logged one;
-/// also after the workout), 'rest' (seconds for this workout; remember: also the default from now on).
+/// Run a `workout` tool verb. The tool has already checked that Switch has `exercise` and Rest has
+/// `seconds`; `remember` makes Rest's seconds the owner's default too.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_action(
     db: &Connection,
     action: Action,
     exercise: Option<&str>,
-    which: Option<&str>,
+    _which: Option<&str>,
     seconds: Option<i64>,
     remember: bool,
     now: Ts,
     request_id: &str,
 ) -> Result<CoachView> {
-    let seconds = if action == Action::Rest { Some(needed(seconds, "seconds")?) } else { seconds };
+    let seconds = seconds.unwrap_or_default();
     if action == Action::Rest && remember {
         update_profile(db, &Map::from_iter([("rest_seconds".to_string(), json!(seconds))]))?;
     }
-    if action == Action::Relabel {
-        return relabel(db, None, needed(exercise, "exercise")?, which, now, request_id);
-    }
-    let running = active_workout(db)?;
-    let Some(workout) = running else {
+    let Some(workout) = active_workout(db)? else {
         if action == Action::Rest && remember {
-            return Ok(acked(format!("Rest is {}s from now on.", seconds.unwrap_or_default()), vec![]));
+            return Ok(acked(format!("Rest is {seconds}s from now on."), vec![]));
         }
         crate::bail!("NO_ACTIVE_WORKOUT", "No workout running; start one first");
     };
@@ -831,18 +810,17 @@ pub fn handle_action(
         Action::Card => return Ok(CoachView { cards: after_change(db, &workout.id, now, request_id)?, ..handled() }),
         Action::End => return end_workout(db, &workout, now, request_id),
         Action::Rest => {
-            set_rest(db, &workout.id, seconds.unwrap_or_default(), now, request_id)?;
+            set_rest(db, &workout.id, seconds, now, request_id)?;
             // The live card stays; the next rest uses the new time.
             return Ok(CoachView { keep: true, ..handled() });
         }
         Action::Switch => {
-            adaptation::switch_to(db, &workout.id, needed(exercise, "exercise")?, true, now, request_id)?;
+            adaptation::switch_to(db, &workout.id, exercise.unwrap_or_default(), true, now, request_id)?;
             return Ok(deleted(after_change(db, &workout.id, now, request_id)?));
         }
         Action::Swap => "swap",
         Action::Later => "later",
         Action::Next => "next",
-        Action::Relabel => unreachable!("handled above"),
     };
     let rows = exercises(db, &workout.id)?;
     let Some(row) = rows
@@ -1058,17 +1036,8 @@ mod tests {
         );
         // Unknown starting weight becomes the logged baseline for next time.
         assert_eq!(ExerciseProgression::get(&db, "incline").unwrap().unwrap().next_weight, 90.0);
-        let fixed = handle_action(
-            &db,
-            Action::Relabel,
-            Some("incline-dumbbell-press"),
-            Some("Machine incline press"),
-            None,
-            false,
-            at(700),
-            "fix",
-        )
-        .unwrap();
+        let fixed =
+            relabel(&db, None, "incline-dumbbell-press", Some("Machine incline press"), at(700), "fix").unwrap();
         assert_eq!((fixed.ack.as_deref(), fixed.cards.len()), (Some("✏️ Saved as Incline Dumbbell Press."), 0));
         assert!(ExerciseProgression::get(&db, "incline").unwrap().is_none());
         assert_eq!(ExerciseProgression::get(&db, "incline-dumbbell-press").unwrap().unwrap().next_weight, 90.0);

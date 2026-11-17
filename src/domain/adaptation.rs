@@ -6,7 +6,6 @@
 //! `relabel`), any exercise goes: the plan adapts to what they actually do.
 use std::collections::HashSet;
 
-use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::db::Connection;
@@ -86,23 +85,7 @@ pub fn machine_busy(
                 // Stay on the same muscle group while the machine is taken.
                 choose_next(db, &mut workout, muscle(&exercise).as_deref())?;
             }
-            let mut result = touch(db, &mut workout, now)?;
-            result["deferred_exercise_id"] = json!(exercise.id);
-            result["substitution_options"] = json!(substitutes(&exercise));
-            let instruction = if result["active_exercise"].is_null() {
-                format!(
-                    "{} still unresolved. Retry equipment, choose substitution, or explicitly skip.",
-                    name(&exercise)
-                )
-            } else {
-                format!(
-                    "{} deferred. {}. Retry deferred equipment later.",
-                    name(&exercise),
-                    result["instruction"].as_str().unwrap_or_default()
-                )
-            };
-            result["instruction"] = json!(instruction);
-            Ok(result)
+            touch(db, &mut workout, now)
         },
     )
 }
@@ -259,26 +242,16 @@ pub fn substitute(
         }
         let mut result = touch(db, &mut workout, now)?;
         result["replacement_exercise_id"] = json!(replacement.id);
-        result["instruction"] =
-            json!(format!("Swapped to {}. {}", spec.name, result["instruction"].as_str().unwrap_or_default()));
         Ok(result)
     })
 }
 
-#[derive(Clone, Debug, Serialize)]
 pub struct SwapOption {
     pub substitute_id: String,
     pub name: String,
     /// "workout" (swapped away earlier: back to it), "template" or "catalog".
     pub source: &'static str,
     pub illustration: Option<Entry>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Alternatives {
-    pub exercise_id: String,
-    pub name: String,
-    pub options: Vec<SwapOption>,
 }
 
 /// Read-only swap options: exercises swapped away from this slot first ("back to A"), then saved template
@@ -289,7 +262,7 @@ pub fn alternatives(
     workout_id: &str,
     exercise_id: Option<&str>,
     limit: usize,
-) -> Result<Alternatives> {
+) -> Result<Vec<SwapOption>> {
     let workout = load_workout(db, workout_id, None)?;
     let exercise = find_exercise(db, workout_id, exercise_id)?;
     let earlier = swapped_away(db, workout_id)?;
@@ -349,7 +322,7 @@ pub fn alternatives(
         }
     }
     options.truncate(limit);
-    Ok(Alternatives { exercise_id: exercise.id.clone(), name: name(&exercise).into(), options })
+    Ok(options)
 }
 
 /// Owner moves on: completes the active exercise with the sets done so far, or skips it if none.
@@ -490,9 +463,7 @@ pub fn switch_to(
         let (row, spec) = resolve(db, &workout, query, current.as_ref())?;
         let mut replaced: Option<String> = None;
         if current.as_ref().is_some_and(|c| c.exercise_id == spec.id) {
-            let mut result = touch(db, &mut workout, now)?;
-            result["replaced_exercise_id"] = Value::Null;
-            return Ok(result);
+            return touch(db, &mut workout, now);
         }
         let started = match &current {
             Some(c) => working_count(db, &c.id)? > 0,
@@ -536,9 +507,7 @@ pub fn switch_to(
         if remember && let (Some(original), Some(template_id)) = (&replaced, &workout.template_id) {
             remember_swap(db, template_id, original, &spec)?;
         }
-        let mut result = touch(db, &mut workout, now)?;
-        result["replaced_exercise_id"] = json!(replaced);
-        Ok(result)
+        touch(db, &mut workout, now)
     })
 }
 
@@ -711,10 +680,10 @@ mod tests {
         let db = db();
         let id = bench_done(&db);
         let result = machine_busy(&db, &id, None, at(60), "busy").unwrap();
-        let deferred = result["data"]["deferred_exercise_id"].as_str().unwrap().to_string();
         assert_eq!(result["data"]["active_exercise"]["exercise_id"], "raise");
-        assert_eq!(result["data"]["substitution_options"], json!(["db-fly"]));
-        assert_eq!(WorkoutExercise::get(&db, &deferred).unwrap().unwrap().status, ExerciseStatus::Deferred);
+        let fly = result["data"]["queue"].as_array().unwrap().iter().find(|q| q["exercise_id"] == "fly").unwrap();
+        assert_eq!(fly["status"], "DEFERRED");
+        let deferred = fly["id"].as_str().unwrap().to_string();
         // Finishing an exercise starts the next one without a rest timer.
         assert!(NotificationJob::first(&db, "WHERE status = 'PENDING'", []).unwrap().is_none());
         log_set(&db, &id, &set(10.0, 10), at(100), "raise").unwrap();
