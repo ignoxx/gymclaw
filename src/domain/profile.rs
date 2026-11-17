@@ -36,7 +36,6 @@ pub struct Profile {
     /// with `remember` it is saved here.
     pub rest_seconds: i64,
     pub crowd_preference_weight: f64,
-    pub calendar_preference_weight: f64,
     /// Calendar event location: calendar apps derive travel time / time-to-leave from it.
     pub gym_address: Option<String>,
 }
@@ -59,7 +58,6 @@ impl Default for Profile {
             commute_home_minutes: 20,
             rest_seconds: 90,
             crowd_preference_weight: 1.0,
-            calendar_preference_weight: 1.0,
             gym_address: None,
         }
     }
@@ -87,8 +85,8 @@ impl Profile {
         if [self.preferred_workout_minutes, self.minimum_workout_minutes, self.rest_seconds].iter().any(|v| *v <= 0) {
             return fail("Durations must be positive");
         }
-        if [self.crowd_preference_weight, self.calendar_preference_weight].iter().any(|w| !w.is_finite() || *w < 0.0) {
-            return fail("Weights must be finite and nonnegative");
+        if !self.crowd_preference_weight.is_finite() || self.crowd_preference_weight < 0.0 {
+            return fail("crowd_preference_weight must be finite and nonnegative");
         }
         if self.weekdays_allowed.iter().any(|d| !(0..=6).contains(d)) {
             return fail("Weekdays are 0 (Monday) to 6");
@@ -136,7 +134,6 @@ impl Profile {
             commute_home_minutes: row.commute_home_minutes,
             rest_seconds: row.rest_seconds,
             crowd_preference_weight: row.crowd_preference_weight,
-            calendar_preference_weight: row.calendar_preference_weight,
             gym_address: row.gym_address.clone(),
         })
     }
@@ -157,7 +154,6 @@ impl Profile {
         row.commute_home_minutes = self.commute_home_minutes;
         row.rest_seconds = self.rest_seconds;
         row.crowd_preference_weight = self.crowd_preference_weight;
-        row.calendar_preference_weight = self.calendar_preference_weight;
         row.gym_address = self.gym_address.clone();
     }
 }
@@ -186,7 +182,6 @@ pub fn get_profile(db: &Connection) -> Result<Profile> {
         commute_home_minutes: 0,
         rest_seconds: 0,
         crowd_preference_weight: 0.0,
-        calendar_preference_weight: 0.0,
         gym_address: None,
         created_at: now,
         updated_at: now,

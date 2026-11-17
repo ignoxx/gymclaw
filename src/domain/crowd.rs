@@ -348,7 +348,6 @@ pub fn poll(db: &Connection, provider: &dyn CrowdProvider, now: Option<Ts>) -> R
         observed_at: now,
         source: provider.source().into(),
         raw_value,
-        normalized_value: None,
         freshness_seconds: reading.freshness_seconds.map(|s| s as i64),
         metadata_json: Json(metadata.clone()),
     };
@@ -360,7 +359,7 @@ pub fn poll(db: &Connection, provider: &dyn CrowdProvider, now: Option<Ts>) -> R
     state.update(db)?;
     Ok(
         json!({"data": {"available": true, "observation_id": row.id, "source": row.source, "metric": METRIC, "raw_value": reading.raw_value,
-        "normalized_value": null, "retrieved_at": now, "provider_freshness_seconds": row.freshness_seconds, "metadata": metadata},
+        "retrieved_at": now, "provider_freshness_seconds": row.freshness_seconds, "metadata": metadata},
         "events": [], "user_message_hint": null}),
     )
 }
@@ -388,13 +387,12 @@ pub fn source_health(db: &Connection, now: Ts) -> Result<Value> {
 pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts, request_id: &str) -> Result<Value> {
     let rating = rating.to_uppercase();
     let Some(normalized) = rating_score(&rating) else {
-        crate::bail!("INVALID_ARGUMENTS", "Use EMPTY/FINE/BUSY/PACKED, wait count 0–100 and notes ≤1000 chars");
+        crate::bail!("INVALID_ARGUMENTS", "Use EMPTY/FINE/BUSY/PACKED");
     };
-    let intent =
-        json!({"workout_id": workout_id, "rating": rating, "observed_at": null, "waited_count": 0, "notes": null});
+    let intent = json!({"workout_id": workout_id, "rating": rating});
     mutate(db, "crowd.feedback_received", request_id, intent, now, || {
         let mut workout = crate::domain::workout::load_workout(db, workout_id, None)?;
-        let Some(at) = workout.arrived_at else {
+        let Some(at) = workout.started_at else {
             crate::bail!(
                 "INVALID_FEEDBACK_TIME",
                 "Feedback must describe this visit between arrival and completion/current time"
@@ -445,8 +443,6 @@ pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts,
             rating: rating.clone(),
             normalized_score: normalized,
             features_json: Json(Value::Object(stored)),
-            waited_for_equipment_count: 0,
-            notes: None,
         };
         feedback.insert(db)?;
         workout.crowd_feedback = Some(rating.clone());
@@ -536,8 +532,6 @@ pub fn planning_signals(db: &Connection, week_start: Date, now: Ts, step_minutes
                     start,
                     crowd: score,
                     confidence: if score.is_some() { confidence } else { 0.0 },
-                    calendar_convenience: 0.0,
-                    adherence: 0.0,
                     preferred_time: preferred,
                 });
             }
@@ -567,7 +561,7 @@ mod tests {
     fn visit(db: &Connection, at: Ts) -> String {
         let id = new_id();
         db.execute(
-            "INSERT INTO workout_session (id, status, started_at, arrived_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?2, ?3, 0, '{\"id\": \"historical-test-visit\"}')",
+            "INSERT INTO workout_session (id, status, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?3, 0, '{\"id\": \"historical-test-visit\"}')",
             (&id, at, at.mins(60)),
         )
         .unwrap();

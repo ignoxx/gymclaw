@@ -56,7 +56,7 @@ pub fn schedule_week(
     fixture_signals: &[SlotSignal],
 ) -> Result<Value> {
     let mut request = json!({"week_start": week_start.to_string(), "fixture": {"busy": [], "unavailable": [], "signals": fixture_signals,
-        "config": {"step_minutes": 15, "adherence_weight": 1.0, "preferred_time_weight": 0.4, "uncertainty_weight": 0.5, "shortened_duration_penalty": 1.0}}});
+        "config": {"step_minutes": 15, "preferred_time_weight": 0.4, "uncertainty_weight": 0.5, "shortened_duration_penalty": 1.0}}});
     if let Some(id) = template_id {
         request["template_id"] = json!(id);
     }
@@ -158,18 +158,14 @@ mod tests {
         let (start, end) = (ts("2026-10-15T19:00:00+02:00"), ts("2026-10-15T20:10:00+02:00"));
         CalendarEventSnapshot {
             calendar_event_id: "travel".into(),
-            ical_uid: None,
             etag: None,
             title: "Travel".into(),
             start_at: ts("2026-10-12T00:00:00+02:00"),
             end_at: ts("2026-10-14T00:00:00+02:00"),
             status: "confirmed".into(),
-            updated_at_remote: None,
             gymclaw_managed: false,
             gymclaw_session_id: None,
-            gymclaw_plan_revision: None,
             user_locked: false,
-            last_seen_at: start,
             raw_json: Json(json!({})),
         }
         .insert(&db)

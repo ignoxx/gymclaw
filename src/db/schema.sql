@@ -1,5 +1,6 @@
--- Generated from a fresh `gymclaw migrate` (user_version 11); don't edit. When a migration
--- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
+-- Generated from baseline.sql plus every migration (user_version 11); don't edit. When a
+-- migration changes the schema, `cargo test schema_snapshot` rewrites this file: review and
+-- commit it. Fresh databases are created from this file.
 
 CREATE TABLE activity (
 	id VARCHAR PRIMARY KEY,
@@ -94,18 +95,14 @@ CREATE TABLE calendar_credential (
 
 CREATE TABLE calendar_event_snapshot (
 	calendar_event_id VARCHAR NOT NULL, 
-	ical_uid VARCHAR, 
 	etag VARCHAR, 
 	title VARCHAR NOT NULL, 
 	start_at DATETIME NOT NULL, 
 	end_at DATETIME NOT NULL, 
 	status VARCHAR NOT NULL, 
-	updated_at_remote DATETIME, 
 	gymclaw_managed BOOLEAN NOT NULL, 
 	gymclaw_session_id VARCHAR, 
-	gymclaw_plan_revision INTEGER, 
 	user_locked BOOLEAN NOT NULL, 
-	last_seen_at DATETIME NOT NULL, 
 	raw_json JSON NOT NULL, 
 	PRIMARY KEY (calendar_event_id)
 );
@@ -166,8 +163,7 @@ CREATE TABLE crowd_feedback (
 	observed_at DATETIME NOT NULL, 
 	rating VARCHAR NOT NULL, 
 	normalized_score DOUBLE NOT NULL, 
-	waited_for_equipment_count INTEGER NOT NULL, 
-	notes VARCHAR, features_json JSON DEFAULT '{}' NOT NULL, 
+	features_json JSON DEFAULT '{}' NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(workout_session_id) REFERENCES workout_session (id)
 );
@@ -177,7 +173,6 @@ CREATE TABLE "crowd_observation" (
 	observed_at DATETIME NOT NULL, 
 	source VARCHAR NOT NULL, 
 	raw_value DOUBLE NOT NULL, 
-	normalized_value DOUBLE, 
 	freshness_seconds INTEGER, 
 	metadata_json JSON NOT NULL, 
 	PRIMARY KEY (id)
@@ -373,9 +368,7 @@ CREATE TABLE "set_log" (
 	set_type VARCHAR NOT NULL,
 	weight DOUBLE NOT NULL,
 	reps INTEGER NOT NULL,
-	rir_optional DOUBLE,
 	logged_at DATETIME NOT NULL,
-	rest_started_at DATETIME,
 	rest_due_at DATETIME,
 	seconds INTEGER,
 	meters DOUBLE,
@@ -385,8 +378,6 @@ CREATE TABLE "set_log" (
 	CONSTRAINT ck_set_values CHECK (weight >= 0 AND set_number > 0 AND reps >= 0 AND (reps > 0 OR seconds > 0 OR meters > 0)),
 	FOREIGN KEY(workout_exercise_id) REFERENCES workout_exercise (id)
 );
-
-CREATE TABLE sqlite_sequence(name,seq);
 
 CREATE TABLE user_profile (
 	id INTEGER NOT NULL, 
@@ -405,7 +396,6 @@ CREATE TABLE user_profile (
 	commute_home_minutes INTEGER NOT NULL, 
 	rest_seconds INTEGER NOT NULL, 
 	crowd_preference_weight DOUBLE NOT NULL, 
-	calendar_preference_weight DOUBLE NOT NULL, 
 	created_at DATETIME NOT NULL, 
 	updated_at DATETIME NOT NULL, gym_address VARCHAR, 
 	PRIMARY KEY (id), 
@@ -435,7 +425,6 @@ CREATE TABLE "workout_session" (
 	id VARCHAR NOT NULL, 
 	planned_session_id VARCHAR, 
 	started_at DATETIME, 
-	arrived_at DATETIME, 
 	completed_at DATETIME, 
 	status VARCHAR NOT NULL, 
 	initial_eta DATETIME, 
@@ -443,7 +432,6 @@ CREATE TABLE "workout_session" (
 	actual_duration_seconds INTEGER, 
 	crowd_feedback VARCHAR, 
 	waited_for_equipment_count INTEGER NOT NULL, 
-	notes TEXT, 
 	template_id VARCHAR, 
 	template_snapshot JSON DEFAULT '{}' NOT NULL, 
 	last_action_at DATETIME, 

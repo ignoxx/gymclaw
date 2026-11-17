@@ -62,7 +62,6 @@ table!(UserProfile = "user_profile" {
     commute_home_minutes: i64,
     rest_seconds: i64,
     crowd_preference_weight: f64,
-    calendar_preference_weight: f64,
     gym_address: Option<String>,
     created_at: Ts,
     updated_at: Ts,
@@ -90,18 +89,14 @@ table!(AvailabilityBlock = "availability_block" {
 
 table!(CalendarEventSnapshot = "calendar_event_snapshot" {
     calendar_event_id: String,
-    ical_uid: Option<String>,
     etag: Option<String>,
     title: String,
     start_at: Ts,
     end_at: Ts,
     status: String,
-    updated_at_remote: Option<Ts>,
     gymclaw_managed: bool,
     gymclaw_session_id: Option<String>,
-    gymclaw_plan_revision: Option<i64>,
     user_locked: bool,
-    last_seen_at: Ts,
     raw_json: Json<Value>,
 });
 
@@ -131,8 +126,7 @@ table!(WorkoutSession = "workout_session" {
     template_snapshot: Json<Value>,
     last_action_at: Option<Ts>,
     started_at: Option<Ts>,
-    arrived_at: Option<Ts>,
-    /// Started from the reminder's ▶️ button at the gym (not via chat), so arrived_at is a real arrival.
+    /// Started from the reminder's ▶️ button at the gym (not via chat), so started_at is a real arrival.
     started_by_button: bool,
     completed_at: Option<Ts>,
     status: WorkoutStatus,
@@ -141,7 +135,6 @@ table!(WorkoutSession = "workout_session" {
     actual_duration_seconds: Option<i64>,
     crowd_feedback: Option<String>,
     waited_for_equipment_count: i64,
-    notes: Option<String>,
 });
 
 table!(WorkoutExercise = "workout_exercise" {
@@ -167,9 +160,7 @@ table!(SetLog = "set_log" {
     set_type: SetType,
     weight: f64,
     reps: i64,
-    rir_optional: Option<f64>,
     logged_at: Ts,
-    rest_started_at: Option<Ts>,
     rest_due_at: Option<Ts>,
     /// A timed set (bike, plank): its length, with reps 0. None for reps × weight.
     seconds: Option<i64>,
@@ -282,7 +273,6 @@ table!(CrowdObservation = "crowd_observation" {
     observed_at: Ts,
     source: String,
     raw_value: f64,
-    normalized_value: Option<f64>,
     freshness_seconds: Option<i64>,
     metadata_json: Json<Value>,
 });
@@ -307,8 +297,6 @@ table!(CrowdFeedback = "crowd_feedback" {
     rating: String,
     normalized_score: f64,
     features_json: Json<Value>,
-    waited_for_equipment_count: i64,
-    notes: Option<String>,
 });
 
 table!(AgentEvent = "agent_event" {

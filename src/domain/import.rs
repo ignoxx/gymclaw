@@ -577,7 +577,6 @@ fn write(
         template_snapshot: Json(json!({"id": "imported", "name": workout.title, "exercises": specs, "source": source})),
         last_action_at: Some(end),
         started_at: Some(workout.at),
-        arrived_at: Some(workout.at),
         started_by_button: false,
         completed_at: Some(end),
         status: WorkoutStatus::PlanUpdated,
@@ -586,7 +585,6 @@ fn write(
         actual_duration_seconds: Some(length),
         crowd_feedback: None,
         waited_for_equipment_count: 0,
-        notes: Some(format!("Imported from {source}")),
     };
     session.insert(db)?;
     // Each set's time in the workout, by its place in the source.
@@ -627,9 +625,7 @@ fn write(
                 set_type: set.kind,
                 weight: set.weight,
                 reps: set.reps,
-                rir_optional: None,
                 logged_at: at,
-                rest_started_at: next.map(|_| at),
                 rest_due_at: next,
                 seconds: set.seconds.filter(|_| set.reps == 0),
                 meters: set.meters.filter(|_| set.reps == 0),

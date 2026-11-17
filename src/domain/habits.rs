@@ -34,9 +34,9 @@ pub fn evidence(db: &Connection, now: Ts, zone: &TimeZone) -> Result<Vec<Point>>
         ((local.hour() as i64 * 60 + local.minute() as i64) as f64, sign * 0.5f64.powf(age_days / HALF_LIFE_DAYS))
     };
     let mut points: Vec<Point> =
-        WorkoutSession::select(db, "WHERE started_by_button AND arrived_at >= ?1 ORDER BY rowid", [since])?
+        WorkoutSession::select(db, "WHERE started_by_button AND started_at >= ?1 ORDER BY rowid", [since])?
             .into_iter()
-            .filter_map(|w| w.arrived_at.map(|at| point(at, 1.0)))
+            .filter_map(|w| w.started_at.map(|at| point(at, 1.0)))
             .collect();
     // One owner decision per session: the slot it was planned at first is disliked, the last pick is
     // liked. A chain of moves (10:30 → 14:30 → 11:45) only counts its ends; edits that keep the time don't count.

@@ -670,7 +670,7 @@ mod tests {
     }
 
     fn set(weight: f64, reps: i64) -> SetInput {
-        SetInput { weight, reps, set_type: SetType::Working, rir: None, seconds: None, meters: None }
+        SetInput::reps(weight, reps, SetType::Working)
     }
 
     fn bench_done(db: &Connection) -> String {

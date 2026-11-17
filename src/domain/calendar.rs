@@ -150,21 +150,16 @@ pub fn persist_snapshot(
     let fresh = existing.is_none();
     let mut row = existing.unwrap_or_else(|| CalendarEventSnapshot {
         calendar_event_id: event.id.clone(),
-        ical_uid: None,
         etag: None,
         title: String::new(),
         start_at: event.start.unwrap_or(now),
         end_at: event.end.unwrap_or(now),
         status: String::new(),
-        updated_at_remote: None,
         gymclaw_managed: event.managed,
         gymclaw_session_id: None,
-        gymclaw_plan_revision: None,
         user_locked: false,
-        last_seen_at: now,
         raw_json: Json(json!({})),
     });
-    row.ical_uid = event.ical_uid.clone().or(row.ical_uid);
     row.etag = event.etag.clone();
     if !event.title.is_empty() {
         row.title = event.title.clone();
@@ -172,14 +167,11 @@ pub fn persist_snapshot(
     row.start_at = event.start.unwrap_or(row.start_at);
     row.end_at = event.end.unwrap_or(row.end_at);
     row.status = event.status.clone();
-    row.updated_at_remote = event.updated;
     if !event.cancelled() {
         row.gymclaw_managed = event.managed;
         row.gymclaw_session_id = event.session_id.clone();
-        row.gymclaw_plan_revision = event.revision;
     }
     row.user_locked |= locked;
-    row.last_seen_at = now;
     if event.cancelled() {
         let mut raw = row.raw_json.0.as_object().cloned().unwrap_or_default();
         raw.extend(event.raw.clone());
@@ -489,14 +481,7 @@ mod tests {
         let template = serde_json::from_value(json!({"id": "long", "name": "Long", "exercises": specs, "set_duration_seconds": 60, "transition_seconds": 90, "source": "demo_fixture"})).unwrap();
         import_template(&db, &template).unwrap();
         sync_calendar(&db, &mut provider, now(0)).unwrap();
-        let signal = SlotSignal {
-            start: at(14, 20, 0),
-            crowd: Some(0.0),
-            confidence: 1.0,
-            calendar_convenience: 0.0,
-            adherence: 0.0,
-            preferred_time: 0.0,
-        };
+        let signal = SlotSignal { start: at(14, 20, 0), crowd: Some(0.0), confidence: 1.0, preferred_time: 0.0 };
         let result = schedule_week(&db, Date::constant(2026, 10, 12), now(0), None, Some("long"), &[signal]).unwrap();
         commit_upcoming(&db, now(0)).unwrap();
         let ids: Vec<String> =

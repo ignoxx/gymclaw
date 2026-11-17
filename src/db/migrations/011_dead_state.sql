@@ -45,3 +45,21 @@ ALTER TABLE onboarding_state_new RENAME TO onboarding_state;
 ALTER TABLE planned_session DROP COLUMN expected_finish_at;
 ALTER TABLE planned_session DROP COLUMN crowd_prediction;
 ALTER TABLE planned_session DROP COLUMN crowd_confidence;
+
+-- Written, never read: arrived_at always equalled started_at, notes only said "Imported from …"
+-- (template_snapshot.source keeps it), rir was never given, rest_due_at is the rest that counts.
+ALTER TABLE workout_session DROP COLUMN arrived_at;
+ALTER TABLE workout_session DROP COLUMN notes;
+ALTER TABLE set_log DROP COLUMN rir_optional;
+ALTER TABLE set_log DROP COLUMN rest_started_at;
+-- Constant: no source reports a normalized value; feedback never asked for waits or notes.
+ALTER TABLE crowd_observation DROP COLUMN normalized_value;
+ALTER TABLE crowd_feedback DROP COLUMN waited_for_equipment_count;
+ALTER TABLE crowd_feedback DROP COLUMN notes;
+-- raw_json keeps the event as Google sent it; these copies were never read.
+ALTER TABLE calendar_event_snapshot DROP COLUMN ical_uid;
+ALTER TABLE calendar_event_snapshot DROP COLUMN updated_at_remote;
+ALTER TABLE calendar_event_snapshot DROP COLUMN gymclaw_plan_revision;
+ALTER TABLE calendar_event_snapshot DROP COLUMN last_seen_at;
+-- The planner had no calendar-convenience signal, so this weight always multiplied zero.
+ALTER TABLE user_profile DROP COLUMN calendar_preference_weight;

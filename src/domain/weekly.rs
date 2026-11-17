@@ -1019,7 +1019,7 @@ mod tests {
         let original = weekly_plan(&db, "short", sunday(0)).unwrap()["plan"]["sessions"][0].clone();
         assert_eq!(ts(original["start"].as_str().unwrap()).0.strftime("%H").to_string(), "17"); // 19:00 local cold start.
         let visit = new_id();
-        db.execute("INSERT INTO workout_session (id, status, arrived_at, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?2, ?3, 0, '{\"demo\": true}')",
+        db.execute("INSERT INTO workout_session (id, status, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?3, 0, '{\"id\": \"visit\"}')",
             (&visit, ts("2026-10-07T18:00:00+00:00"), ts("2026-10-07T19:00:00+00:00"))).unwrap();
         record_feedback(&db, &visit, "EMPTY", sunday(1), "quiet-visit").unwrap();
         let result = rolling_plan(&db, "short", sunday(2)).unwrap();

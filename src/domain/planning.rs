@@ -34,15 +34,12 @@ pub struct SlotSignal {
     pub start: Ts,
     pub crowd: Option<f64>,
     pub confidence: f64,
-    pub calendar_convenience: f64,
-    pub adherence: f64,
     pub preferred_time: f64,
 }
 
 #[derive(Clone, Debug)]
 pub struct PlannerConfig {
     pub step_minutes: i64,
-    pub adherence_weight: f64,
     /// Below crowd_preference_weight (default 1): habits break ties, a quiet slot still beats a busy habitual one.
     pub preferred_time_weight: f64,
     pub uncertainty_weight: f64,
@@ -53,7 +50,6 @@ impl Default for PlannerConfig {
     fn default() -> Self {
         PlannerConfig {
             step_minutes: 15,
-            adherence_weight: 1.0,
             preferred_time_weight: 0.4,
             uncertainty_weight: 0.5,
             shortened_duration_penalty: 1.0,
@@ -64,8 +60,6 @@ impl Default for PlannerConfig {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ScoreParts {
     pub crowd: f64,
-    pub calendar: f64,
-    pub adherence: f64,
     pub preferred_time: f64,
     pub uncertainty: f64,
     pub duration: f64,
@@ -73,7 +67,7 @@ pub struct ScoreParts {
 
 impl ScoreParts {
     fn total(&self) -> f64 {
-        self.crowd + self.calendar + self.adherence + self.preferred_time + self.uncertainty + self.duration
+        self.crowd + self.preferred_time + self.uncertainty + self.duration
     }
 }
 
@@ -163,14 +157,7 @@ pub fn generate_candidates(
     durations.dedup();
     let step = SignedDuration::from_mins(config.step_minutes);
     let signals: std::collections::HashMap<Ts, &SlotSignal> = inputs.signals.iter().map(|s| (s.start, s)).collect();
-    let neutral = SlotSignal {
-        start: now,
-        crowd: None,
-        confidence: 0.0,
-        calendar_convenience: 0.0,
-        adherence: 0.0,
-        preferred_time: 0.0,
-    };
+    let neutral = SlotSignal { start: now, crowd: None, confidence: 0.0, preferred_time: 0.0 };
     let mut result = Vec::new();
     for offset in 0..7 {
         let day = week_start.checked_add(jiff::Span::new().days(offset))?;
@@ -204,8 +191,6 @@ pub fn generate_candidates(
                 let confidence = if signal.crowd.is_some() { signal.confidence } else { 0.0 };
                 let parts = ScoreParts {
                     crowd: signal.crowd.map_or(0.0, |c| profile.crowd_preference_weight * (1.0 - c)),
-                    calendar: profile.calendar_preference_weight * signal.calendar_convenience,
-                    adherence: config.adherence_weight * signal.adherence,
                     preferred_time: config.preferred_time_weight * signal.preferred_time,
                     uncertainty: -config.uncertainty_weight * (1.0 - confidence),
                     duration: -config.shortened_duration_penalty
@@ -312,14 +297,7 @@ mod tests {
     }
 
     fn signal(start: Ts, crowd: f64, confidence: f64) -> SlotSignal {
-        SlotSignal {
-            start,
-            crowd: Some(crowd),
-            confidence,
-            calendar_convenience: 0.0,
-            adherence: 0.0,
-            preferred_time: 0.0,
-        }
+        SlotSignal { start, crowd: Some(crowd), confidence, preferred_time: 0.0 }
     }
 
     fn days(plan: &Plan) -> Vec<i64> {
@@ -392,7 +370,7 @@ mod tests {
 
     #[test]
     fn session_count_beats_one_great_slot() {
-        let tuesday = [SlotSignal { adherence: 1.0, ..signal(at(13, 12, 0), 0.0, 1.0) }];
+        let tuesday = [SlotSignal { preferred_time: 1.0, ..signal(at(13, 12, 0), 0.0, 1.0) }];
         assert_eq!(days(&plan(&Profile::default(), Inputs { signals: &tuesday, ..Inputs::default() })), [0, 2, 4]);
     }
 

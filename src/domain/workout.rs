@@ -738,7 +738,6 @@ pub fn start(
             template_snapshot: Json(serde_json::to_value(&template)?),
             last_action_at: Some(now),
             started_at: Some(now),
-            arrived_at: Some(now),
             started_by_button: by_button,
             completed_at: None,
             status: WorkoutStatus::ExerciseActive,
@@ -747,7 +746,6 @@ pub fn start(
             actual_duration_seconds: None,
             crowd_feedback: None,
             waited_for_equipment_count: 0,
-            notes: None,
         };
         workout.insert(db)?;
         let first_primary = template.warmup_exercise().map(|e| e.id.clone());
@@ -817,9 +815,7 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             set_type: value.set_type,
             weight: value.weight,
             reps: value.reps,
-            rir_optional: value.rir,
             logged_at: now,
-            rest_started_at: None,
             rest_due_at: None,
             seconds: value.seconds,
             meters: value.meters,
@@ -850,7 +846,6 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             // time). None after the last exercise, or when only deferred exercises are left.
             if rest && workout.status == WorkoutStatus::SetActive {
                 let due = now + SignedDuration::from_secs(active.rest_seconds);
-                row.rest_started_at = Some(now);
                 row.rest_due_at = Some(due);
                 row.update(db)?;
                 let job = NotificationJob {

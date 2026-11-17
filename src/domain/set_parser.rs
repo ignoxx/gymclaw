@@ -5,37 +5,29 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::db::models::SetType;
 use crate::domain::templates::Measure;
 use crate::error::Result;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// One set to log. Serialized into the log's retry key.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SetInput {
     pub weight: f64,
     pub reps: i64,
-    #[serde(default = "working")]
     pub set_type: SetType,
-    pub rir: Option<f64>,
     /// A timed set's length (reps 0, weight 0).
-    #[serde(default)]
     pub seconds: Option<i64>,
     /// A distance set's length (reps 0, weight 0).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub meters: Option<f64>,
-}
-
-fn working() -> SetType {
-    SetType::Working
 }
 
 impl SetInput {
     /// Reps at a weight (0 for bodyweight).
     pub fn reps(weight: f64, reps: i64, set_type: SetType) -> Self {
-        SetInput { weight, reps, set_type, rir: None, seconds: None, meters: None }
+        SetInput { weight, reps, set_type, seconds: None, meters: None }
     }
 
     /// A timed working set.
@@ -58,11 +50,7 @@ impl SetInput {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !self.weight.is_finite()
-            || self.weight < 0.0
-            || self.reps < 0
-            || self.rir.is_some_and(|r| !r.is_finite() || r < 0.0)
-        {
+        if !self.weight.is_finite() || self.weight < 0.0 || self.reps < 0 {
             crate::bail!("INVALID_SET", "Weight must be ≥ 0, reps > 0");
         }
         let block = self.reps != 0 || self.set_type != SetType::Working;
