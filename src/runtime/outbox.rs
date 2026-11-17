@@ -522,10 +522,10 @@ pub async fn settle_session_messages(db_path: &Path, tg: &dyn Telegram, chat: i6
     })
     .await?;
     for message in done {
-        // "Not modified": a tap already cleared them.
+        // A no-op edit: a tap already cleared them.
         if let Err(e) = tg.edit_buttons(chat, message, &vec![]).await
             && !crate::telegram::is_gone(&e)
-            && !e.to_string().contains("not modified")
+            && !crate::telegram::is_noop(&e)
         {
             tracing::warn!("buttons of session message {message} not cleared: {e}");
         }

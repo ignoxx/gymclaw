@@ -228,7 +228,8 @@ table!(PersonalBusyInterval = "personal_busy_interval" {
 });
 
 table!(
-    /// `enabled` and the two authorities gate the runtime.
+    /// The runtime's switches, created by the first `runtime_resume`: `enabled` gates every send and
+    /// tick, the other two calendar writes and crowd polling. `recipient` is the owner's chat id.
     RuntimeSettings = "runtime_settings" {
     id: i64,
     recipient: String,

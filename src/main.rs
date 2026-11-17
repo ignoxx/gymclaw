@@ -102,7 +102,7 @@ enum Command {
         #[command(subcommand)]
         command: IllustrationsCommand,
     },
-    /// Serve the read-only dashboard.
+    /// Serve the dashboard. Its only writes: the agent's notes, its extensions' on/off switch and plan targets.
     Dashboard {
         #[arg(long, default_value = "127.0.0.1:8766")]
         addr: SocketAddr,

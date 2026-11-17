@@ -1,8 +1,8 @@
 //! Telegram Bot API client, owner chat and the coach card renderer.
 //!
 //! `Telegram` is the small surface the runtime needs; `client::Bot` implements it over HTTPS and
-//! tests use fakes. Message text is a small Markdown subset
-//! (`**bold**`, `` `code` ``), converted to Telegram HTML by `markdown::to_html`.
+//! tests use fakes. Message text is the Markdown subset in `markdown`, converted to Telegram HTML
+//! by `markdown::to_html`.
 pub mod client;
 pub mod coach;
 pub mod markdown;
@@ -28,6 +28,11 @@ pub fn is_gone(error: &crate::error::Error) -> bool {
     ["message to edit not found", "message can't be edited", "message_id_invalid", "message to delete not found"]
         .iter()
         .any(|p| text.contains(p))
+}
+
+/// Telegram's answer to an edit that changes nothing ("message is not modified").
+pub fn is_noop(error: &crate::error::Error) -> bool {
+    error.to_string().contains("message is not modified")
 }
 
 #[async_trait]
@@ -125,8 +130,6 @@ pub struct Message {
     pub message_id: i64,
     pub from: Option<User>,
     pub chat: Chat,
-    #[serde(default)]
-    pub date: i64,
     pub text: Option<String>,
     pub caption: Option<String>,
     pub photo: Option<Vec<PhotoSize>>,
