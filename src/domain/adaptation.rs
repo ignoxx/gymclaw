@@ -37,42 +37,14 @@ pub fn find_exercise(db: &Connection, workout_id: &str, exercise_id: Option<&str
     }
 }
 
-/// Template spec stored on a workout exercise (its config without workout-only keys).
+/// Template spec stored on a workout exercise: its config minus `warmup_required`, the one key
+/// `make_exercise` and the history import add for the workout itself.
 pub fn spec_of(row: &WorkoutExercise) -> Result<ExerciseSpec> {
-    const FIELDS: [&str; 22] = [
-        "id",
-        "name",
-        "role",
-        "guide_id",
-        "primary",
-        "working_sets",
-        "rep_min",
-        "rep_max",
-        "target_weight",
-        "increment",
-        "rest_seconds",
-        "warmup_weight",
-        "warmup_reps",
-        "priority",
-        "requires_completed",
-        "substitutes",
-        "measure",
-        "minutes",
-        "meters",
-        "load",
-        "per_side",
-        "group",
-    ];
-    let fields: serde_json::Map<String, Value> = row
-        .config_json
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(k, _)| FIELDS.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    serde_json::from_value(Value::Object(fields))
-        .map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Exercise {}: {e}", row.id)))
+    let mut config = row.config_json.0.clone();
+    if let Some(fields) = config.as_object_mut() {
+        fields.remove("warmup_required");
+    }
+    serde_json::from_value(config).map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Exercise {}: {e}", row.id)))
 }
 
 fn substitutes(row: &WorkoutExercise) -> Vec<String> {
@@ -724,6 +696,21 @@ mod tests {
 
     fn progression(db: &Connection, id: &str) -> Option<f64> {
         ExerciseProgression::get(db, id).unwrap().map(|p| p.next_weight)
+    }
+
+    /// Swap-back and catalog swaps rebuild the spec from the workout row, so every spec field survives,
+    /// including the agent's muscle on an exercise without a picture.
+    #[test]
+    fn spec_round_trips_through_a_workout_exercise() {
+        let db = db();
+        let exercise = spec(
+            json!({"id": "hip-thrust-machine", "name": "Hip Thrust Machine", "role": "glutes", "muscle": "glutes", "target_weight": 60, "warmup_weight": 30, "per_side": true, "group": "a"}),
+        );
+        db.execute("INSERT INTO workout_session (id, status, waited_for_equipment_count) VALUES ('w', 'PLAN_UPDATED', 0)", [])
+            .unwrap();
+        let row = make_exercise(&db, "w", &exercise, 0, true, None).unwrap();
+        assert_eq!(row.config_json["warmup_required"], json!(true));
+        assert_eq!(spec_of(&row).unwrap(), exercise);
     }
 
     #[test]
