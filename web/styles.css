@@ -202,7 +202,7 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .tag { font-style: normal; font-size: 10px; white-space: nowrap; padding: 2px 7px; border-radius: 99px; background: #e2e6d6; }
 .tag.pr { background: var(--lime); }
 /* Crowd colours for week chips (.crowd) and history pills (.tag). */
-:is(.crowd, .tag).crowd-empty, :is(.crowd, .tag).crowd-a-few, :is(.crowd, .tag).crowd-fine { background: #e2efc9; }
+:is(.crowd, .tag).crowd-empty, :is(.crowd, .tag).crowd-a-few { background: #e2efc9; }
 :is(.crowd, .tag).crowd-busy { background: var(--busy); }
 :is(.crowd, .tag).crowd-packed { background: var(--packed); }
 .sets { padding: 0 0 14px 122px; display: flex; flex-direction: column; gap: 6px; }

@@ -15,7 +15,7 @@ use crate::domain::profile::{Profile, get_profile};
 use crate::domain::templates::{Load, Measure, get_template};
 use crate::domain::{crowd, illustrations, preview, workout};
 use crate::error::Result;
-use crate::time::{Ts, iso};
+use crate::time::Ts;
 
 const ACTIVITY: [(&str, &str); 10] = [
     ("workout.started", "Workout started"),
@@ -297,9 +297,9 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
     Ok(result)
 }
 
-/// Estimated 1-rep max (Epley), to the nearest 0.5 kg.
+/// Estimated 1-rep max (`trends::e1rm`), to the nearest 0.5 kg.
 pub fn one_rep_max(weight: f64, reps: i64) -> f64 {
-    if reps > 1 { round(weight * (1.0 + reps as f64 / 30.0) * 2.0, 0) / 2.0 } else { weight }
+    round(crate::domain::trends::e1rm(weight, reps) * 2.0, 0) / 2.0
 }
 
 fn workout_date(w: &Value) -> Date {
@@ -424,7 +424,7 @@ fn memory(db: &Connection) -> Result<Value> {
         notes
             .iter()
             .filter(|n| n.kind == kind)
-            .map(|n| json!({"id": n.id, "text": n.text, "updated_at": iso(&n.updated_at.local(&TimeZone::UTC))}))
+            .map(|n| json!({"id": n.id, "text": n.text, "updated_at": n.updated_at.iso()}))
             .collect()
     };
     let usage = |kind: NoteKind| -> Result<Value> {
@@ -478,7 +478,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let mut crowd = crowd_state(db, &tz, now, polling)?;
     crowd["sessions"] = json!(crowd_sessions(db, &tz, now)?);
     Ok(json!({
-        "demo": false, "live_database_accessed": true, "captured_at": iso(&now.local(&TimeZone::UTC)), "timezone": profile.timezone,
+        "captured_at": now.iso(), "timezone": profile.timezone,
         "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
         "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db)?,
