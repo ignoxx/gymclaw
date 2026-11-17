@@ -19,7 +19,6 @@ use crate::agent::{Agent, Outcome, TurnInput, media};
 use crate::db::Json;
 use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
-use crate::domain::extensions::Lesson;
 use crate::domain::set_parser::looks_like_set;
 use crate::domain::view::Button;
 use crate::error::Result;
@@ -282,8 +281,8 @@ impl Bot {
     }
 
     /// The owner's reaction on one of the bot's messages labels the turn that sent it (👍 good,
-    /// 👎 bad) in the turn log, for finding bad turns offline. A 👎 on an agent reply also wakes the
-    /// agent to find and fix what was wrong (`extensions::reflect`).
+    /// 👎 bad) in the turn log, for finding bad turns offline. A 👎 on the latest agent reply becomes
+    /// an owner message so the agent responds immediately (not subject to daily limits or quiet-wait).
     async fn reaction(&self, reaction: MessageReaction) {
         let message_id = reaction.message_id;
         let sent = blocking(self.db(), move |db| {
@@ -302,22 +301,27 @@ impl Bot {
         self.log.log(json!({"ev": "label", "source": "reaction", "run": sent.meta_json.get("run"),
             "kind": sent.meta_json.get("kind"), "msg": message_id, "emoji": emoji, "label": label}));
         if label == Some("bad") && sent.role == ChatRole::Assistant {
-            let run = sent.meta_json["run"].as_str().unwrap_or_default().to_string();
-            let saved: Vec<String> = sent.meta_json["actions"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|a| a.as_str().map(String::from))
-                .collect();
-            let raised = blocking(self.db(), move |db| {
-                let lesson = Lesson::Disliked { id: sent.id.unwrap_or_default(), reply: &sent.text, saved: &saved };
-                crate::domain::extensions::reflect(db, &run, lesson, Ts::now())
+            // Only the latest agent reply triggers a response; rating older messages stays silent.
+            let is_latest = blocking(self.db(), move |db| {
+                let latest = ChatMessage::first(db, "WHERE role = 'assistant' ORDER BY id DESC", []);
+                Ok::<bool, crate::error::Error>(latest.ok().flatten().is_some_and(|m| m.id == sent.id))
             })
-            .await;
-            match raised {
-                Ok(true) => self.wake.notify_one(),
-                Ok(false) => {}
-                Err(e) => tracing::warn!("reflection not raised: {e}"),
+            .await
+            .unwrap_or(false);
+            if is_latest {
+                let reply_preview = if sent.text.chars().count() > 80 {
+                    format!("{}…", sent.text.chars().take(80).collect::<String>())
+                } else {
+                    sent.text.clone()
+                };
+                self.to_agent(
+                    0,
+                    format!("tg-react:{message_id}"),
+                    format!("[reacted 👎 to: \"{reply_preview}\"]"),
+                    vec![],
+                    json!({"kind": "reaction", "emoji": "👎", "target_msg": message_id}),
+                )
+                .await;
             }
         }
     }
@@ -1098,16 +1102,22 @@ mod tests {
                 "user": {"id": 42}, "date": 0, "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👎"}]}});
             bot.handle(serde_json::from_value(update).unwrap()).await;
         }
-        let mut labels = vec![];
+        let mut all = vec![];
         for _ in 0..100 {
-            labels = crate::agent::turnlog::read(&turns).unwrap_or_default();
-            if !labels.is_empty() {
+            all = crate::agent::turnlog::read(&turns).unwrap_or_default();
+            if !all.is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let labels: Vec<_> = all.iter().filter(|e| e["ev"] == "label").collect();
         assert_eq!(labels.len(), 1);
         assert_eq!((labels[0]["run"].as_str(), labels[0]["label"].as_str()), (Some("r1"), Some("bad")));
+        // The 👎 on the latest assistant reply is also routed as a message to the agent.
+        let inbound: Vec<_> = all.iter().filter(|e| e["ev"] == "inbound").collect();
+        assert_eq!(inbound.len(), 1);
+        assert!(inbound[0]["text"].as_str().unwrap().contains("reacted 👎"));
+        assert_eq!(bot.inbox.lock().await.len(), 1, "👎 on the latest reply reaches the agent");
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }
