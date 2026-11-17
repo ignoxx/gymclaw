@@ -145,15 +145,13 @@ pub fn delivery_data(row: &NotificationDelivery) -> Value {
         "handled_at": row.handled_at, "external_message_id": row.external_message_id, "event_id": row.agent_event_id})
 }
 
-fn acknowledge_delivery_events(db: &Connection, row: &NotificationDelivery, now: Ts) -> Result<()> {
-    let Some(event_id) = &row.agent_event_id else { return Ok(()) };
-    let related = row.result_json.get("related_events").and_then(Value::as_array).cloned().unwrap_or_default();
-    let ids = std::iter::once(event_id.clone()).chain(related.iter().filter_map(|v| v.as_str().map(String::from)));
-    for id in ids {
-        if let Some(mut event) = AgentEvent::get(db, &id)? {
-            event.handled_at = Some(now);
-            event.update(db)?;
-        }
+/// Mark the event a delivery was sent for handled: the owner has it, or it no longer applies.
+fn acknowledge_delivery_event(db: &Connection, row: &NotificationDelivery, now: Ts) -> Result<()> {
+    if let Some(id) = &row.agent_event_id
+        && let Some(mut event) = AgentEvent::get(db, id)?
+    {
+        event.handled_at = Some(now);
+        event.update(db)?;
     }
     Ok(())
 }
@@ -230,7 +228,6 @@ pub fn prepare_event_message(
     message: &str,
     now: Ts,
     recipient: &str,
-    related_events: &[String],
 ) -> Result<Value> {
     let Some(source) = AgentEvent::get(db, event_id)? else {
         crate::bail!("EVENT_NOT_FOUND", "Unknown proactive message event")
@@ -251,11 +248,11 @@ pub fn prepare_event_message(
             old.status = DeliveryStatus::Cancelled;
             old.handled_at = Some(now);
             old.update(db)?;
-            acknowledge_delivery_events(db, &old, now)?;
+            acknowledge_delivery_event(db, &old, now)?;
             emit(db, "notifications.superseded", now, json!({"delivery_id": old.id, "new_event_id": event_id}))?;
         }
     }
-    let row = new_delivery(None, Some(event_id), recipient, message, json!({"related_events": related_events}), now);
+    let row = new_delivery(None, Some(event_id), recipient, message, json!({}), now);
     row.insert(db)?;
     Ok(delivery_data(&row))
 }
@@ -291,12 +288,7 @@ fn suppress(db: &Connection, row: &mut NotificationDelivery, reason: &str, now: 
     row.status = DeliveryStatus::Cancelled;
     row.handled_at = Some(now);
     row.update(db)?;
-    if let Some(event_id) = &row.agent_event_id
-        && let Some(mut event) = AgentEvent::get(db, event_id)?
-    {
-        event.handled_at = Some(now);
-        event.update(db)?;
-    }
+    acknowledge_delivery_event(db, row, now)?;
     close_unknown_question(db, &row.id, now)?;
     emit(db, "notifications.delivery_suppressed", now, json!({"delivery_id": row.id, "reason": reason}))?;
     Ok(())
@@ -457,7 +449,7 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
                 let tx = db.transaction()?;
                 tx.execute("UPDATE notification_delivery SET status = 'SENT', external_message_id = ?2 WHERE id = ?1 AND status = 'SENDING'", [&id, &message_id.to_string()])?;
                 let row = NotificationDelivery::get(&tx, &id)?.expect("claimed row");
-                acknowledge_delivery_events(&tx, &row, now)?;
+                acknowledge_delivery_event(&tx, &row, now)?;
                 emit(&tx, "notifications.sent", now, json!({"delivery_id": id, "message_id": message_id.to_string()}))?;
                 // A session keeps one message in the chat: each step replaces the one before.
                 let replaced = match &session {
@@ -552,7 +544,7 @@ pub fn resolve_delivery(db: &Connection, delivery_id: &str, sent: bool, now: Ts)
     // The owner answered the open question either way; left open it sat in the agent's open issues.
     close_unknown_question(db, &row.id, now)?;
     if sent {
-        acknowledge_delivery_events(db, &row, now)?;
+        acknowledge_delivery_event(db, &row, now)?;
     }
     let outcome = if sent { "sent" } else { "not-sent" };
     emit(
@@ -577,10 +569,7 @@ mod tests {
 
     fn briefing(db: &Connection, at: Ts) -> String {
         let event = emit(db, "calendar.update_briefing", at, json!({})).unwrap();
-        prepare_event_message(db, &event.id, "Moved Push to 14:30.", at, "42", &[]).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .into()
+        prepare_event_message(db, &event.id, "Moved Push to 14:30.", at, "42").unwrap()["id"].as_str().unwrap().into()
     }
 
     #[test]
@@ -601,10 +590,7 @@ mod tests {
         let (path, db) = crate::db::test::file();
         let recap = |at: Ts, effect: Option<&str>| {
             let event = emit(&db, "planning.weekly_recap", at, json!({"effect": effect})).unwrap();
-            prepare_event_message(&db, &event.id, "📅 Your week", at, "42", &[]).unwrap()["id"]
-                .as_str()
-                .unwrap()
-                .to_string()
+            prepare_event_message(&db, &event.id, "📅 Your week", at, "42").unwrap()["id"].as_str().unwrap().to_string()
         };
         let tg = FakeTelegram::new();
         let first = recap(now(), None);
@@ -830,7 +816,7 @@ mod tests {
             emit(&db, "planning.no_show", now(), json!({"session_id": plan.id, "start": plan.planned_start_at}))
                 .unwrap();
         let nudge =
-            prepare_event_message(&db, &event.id, "Push was planned for 12:00 and hasn't started.", now(), "42", &[])
+            prepare_event_message(&db, &event.id, "Push was planned for 12:00 and hasn't started.", now(), "42")
                 .unwrap()["id"]
                 .as_str()
                 .unwrap()
@@ -879,10 +865,7 @@ mod tests {
         let id = briefing(&db, now());
         let event = NotificationDelivery::get(&db, &id).unwrap().unwrap().agent_event_id.unwrap();
         // Retrying the prepare returns the same delivery.
-        assert_eq!(
-            prepare_event_message(&db, &event, "Moved Push to 14:30.", now(), "42", &[]).unwrap()["id"],
-            id.as_str()
-        );
+        assert_eq!(prepare_event_message(&db, &event, "Moved Push to 14:30.", now(), "42").unwrap()["id"], id.as_str());
         let tg = FakeTelegram::new();
         assert_eq!(deliver(&path, tg.as_ref(), &id, now()).await.unwrap()["status"], "SENT");
         assert!(AgentEvent::get(&db, &event).unwrap().unwrap().handled_at.is_some());

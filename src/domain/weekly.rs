@@ -415,7 +415,7 @@ pub fn release_recap(db: &Connection, recipient: &str, now: Ts, reviewed: bool) 
     let unpublished = briefing.payload_json["calendar_published"] == false;
     let (message, effect) = recap(db, week.parse()?, now, unpublished)?;
     let source = emit(db, "planning.weekly_recap", now, json!({"week_start": week, "effect": effect}))?;
-    let delivery = crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient, &[])?;
+    let delivery = crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient)?;
     Ok(delivery["id"].as_str().map(String::from))
 }
 
@@ -1133,7 +1133,7 @@ mod tests {
         let [(event_id, session_id, message)] = nudges.as_slice() else { panic!("{nudges:?}") };
         assert!(session_id == &first.id && message.ends_with("hasn't started."), "{message}");
         assert!(no_show_nudges(&db, late.mins(1)).unwrap().is_empty());
-        let delivery = prepare_event_message(&db, event_id, message, late, "123", &[]).unwrap();
+        let delivery = prepare_event_message(&db, event_id, message, late, "123").unwrap();
         edit_session(
             &db,
             Some(&first.id),
