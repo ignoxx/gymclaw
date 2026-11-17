@@ -36,6 +36,16 @@ impl Ctx<'_> {
     pub fn background(&self) -> bool {
         self.request_id.starts_with("event-")
     }
+
+    /// A time argument: owner-local unless the text has an offset.
+    pub fn local(&self, text: &str) -> Result<Ts> {
+        Ts::parse(text, Some(&crate::domain::profile::get_profile(self.db)?.tz()))
+    }
+}
+
+/// A `YYYY-MM-DD` date argument.
+pub fn date(text: &str) -> Result<jiff::civil::Date> {
+    text.trim().parse().map_err(|_| Error::domain("INVALID_DATE", format!("Not a date (YYYY-MM-DD): {text}")))
 }
 
 #[derive(Clone, Debug)]

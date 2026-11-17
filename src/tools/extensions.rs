@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use super::{Ctx, Tool, ToolDef, def};
 use crate::domain::extensions::{self as ext, Author, GapSource, Spec};
 use crate::error::Result;
-use crate::time::Ts;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
@@ -104,7 +103,7 @@ impl Tool for DataAdd {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let at = match &self.at {
-            Some(at) => Ts::parse(at, Some(&crate::domain::profile::get_profile(cx.db)?.tz()))?,
+            Some(at) => cx.local(at)?,
             None => cx.now,
         };
         let id = ext::add_data(cx.db, self.collection.trim(), at, Value::Object(self.data), cx.now)?;

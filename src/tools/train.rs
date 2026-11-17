@@ -16,7 +16,6 @@ use crate::domain::templates::{
 use crate::domain::view::CoachView;
 use crate::domain::{audit, workout};
 use crate::error::Result;
-use crate::time::Ts;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
@@ -38,11 +37,6 @@ pub fn tools() -> Vec<ToolDef> {
         def::<BodyList>(),
         def::<BodyDelete>(),
     ]
-}
-
-/// Owner-local time unless the text has an offset.
-fn local(cx: &Ctx, text: &str) -> Result<Ts> {
-    Ts::parse(text, Some(&get_profile(cx.db)?.tz()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -229,7 +223,7 @@ impl Tool for WorkoutLogPast {
         (a missed session that day counts after all). Off-plan exercises don't change the saved plan.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let at = local(cx, &self.at)?;
+        let at = cx.local(&self.at)?;
         log_past(cx.db, &self.sets, at, self.template_id.as_deref(), cx.now, &cx.request_id)
     }
 }
