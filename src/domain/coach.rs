@@ -23,7 +23,7 @@ use crate::domain::illustrations::{catalog, timed};
 use crate::domain::profile::update_profile;
 use crate::domain::set_parser::{SetInput, parse_block, parse_set};
 use crate::domain::templates::{Load, Measure, SetKind, remember_swap};
-use crate::domain::view::{Button, Card, CardKind, Cleanup, CoachView, Edit};
+use crate::domain::view::{Button, Card, CardKind, CoachView, Edit};
 use crate::domain::workout::{
     self, active_workout, cut_rest, exercises, expected_weight, format_distance, format_time, g, guide_id, kind,
     log_set, logs, measure, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved,
@@ -57,7 +57,7 @@ fn acked(ack: impl Into<String>, cards: Vec<Card>) -> CoachView {
 }
 
 fn deleted(cards: Vec<Card>) -> CoachView {
-    CoachView { cleanup: Some(Cleanup::Delete), cards, ..handled() }
+    CoachView { delete: true, cards, ..handled() }
 }
 
 /// `workout::next_working_set`, or bodyweight reps (no weight to ask for). The set card, its quick
@@ -744,7 +744,7 @@ pub fn handle_rest_over(db: &Connection, now: Ts) -> Result<CoachView> {
     }
     let request_id = format!("rest-due:{}", job.id);
     rest_complete(db, &job.id, now, &request_id)?;
-    Ok(CoachView { rest_over: true, ..deleted(after_change(db, &workout.id, now, &request_id)?) })
+    Ok(deleted(after_change(db, &workout.id, now, &request_id)?))
 }
 
 /// Agent-initiated coach actions (the `workout` tool's verbs).
@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(buttons(rest).iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["−15s", "−30s", "⏭ Skip"]);
         let skipped = handle_tap(&db, &data(rest, "⏭ Skip"), at(30), "cb-skip").unwrap();
         let card = &skipped.cards[0];
-        assert_eq!((skipped.cleanup, card.kind), (Some(Cleanup::Delete), CardKind::Set));
+        assert!(skipped.delete && card.kind == CardKind::Set);
         data(card, "✅ 12 × 90 kg");
         // Already on the machine: no Swap after the first set, not even from an older card.
         assert!(!buttons(card).iter().any(|b| b.0 == "🔄 Swap"));
@@ -964,9 +964,11 @@ mod tests {
         handle_text(&db, "10x90", at(10), "m1").unwrap();
         assert!(handle_rest_over(&db, at(50)).unwrap().cards.is_empty());
         let over = handle_rest_over(&db, at(101)).unwrap();
-        assert!(over.rest_over && over.cleanup == Some(Cleanup::Delete) && over.cards[0].kind == CardKind::Set);
+        assert!(over.delete && over.cards[0].kind == CardKind::Set);
         assert_eq!(NotificationJob::select(&db, "", []).unwrap()[0].status, JobStatus::Fired);
-        assert!(!handle_rest_over(&db, at(102)).unwrap().rest_over);
+        // Already closed: the countdown is still replaced, and the job fired once.
+        assert!(handle_rest_over(&db, at(102)).unwrap().delete);
+        assert_eq!(NotificationJob::select(&db, "", []).unwrap().len(), 1);
         let rest = handle_text(&db, "10x90", at(110), "m2").unwrap().cards.remove(0);
         // The finished exercise's rest (90 s), and the countdown says what comes next.
         assert_eq!((rest.text.as_str(), rest.rest_until), ("until next: **Shoulder press** · 25 kg", Some(at(200))));
@@ -997,7 +999,7 @@ mod tests {
         let option = handle_tap(&db, &data(&back.cards[0], "🔄 Swap"), at(9), "cb-5").unwrap().cards.remove(0);
         let sub = buttons(&option)[0].1.clone();
         let slug = sub.split(':').nth(2).unwrap().to_string();
-        assert_eq!(handle_tap(&db, &sub, at(10), "cb-6").unwrap().cleanup, Some(Cleanup::Delete));
+        assert!(handle_tap(&db, &sub, at(10), "cb-6").unwrap().delete);
         let template = get_template(&db, "push").unwrap();
         assert_eq!((template.exercises[0].id.as_str(), template.exercises[0].working_sets), (slug.as_str(), 2));
         assert_eq!(
@@ -1211,7 +1213,7 @@ mod tests {
         assert!(cut.refresh && cut.cards[0].rest_until == Some(at(40)));
         // Cutting past zero ends the rest: the next set card comes right away.
         let over = handle_tap(&db, &data(&rest, "−30s"), at(30), "cb-2").unwrap();
-        assert!(over.cleanup == Some(Cleanup::Delete) && over.cards[0].kind == CardKind::Set);
+        assert!(over.delete && over.cards[0].kind == CardKind::Set);
         let profile = crate::domain::profile::get_profile(&db).unwrap();
         assert_eq!(profile.rest_seconds, 60);
     }

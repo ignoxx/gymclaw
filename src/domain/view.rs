@@ -68,13 +68,6 @@ pub struct Edit {
     pub card: Card,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Cleanup {
-    /// Delete the live card and extras instead of retiring them with the ack.
-    Delete,
-}
-
 /// One coach step (see `telegram::coach` for how each flag renders).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoachView {
@@ -86,7 +79,9 @@ pub struct CoachView {
     pub ack: Option<String>,
     #[serde(default)]
     pub cards: Vec<Card>,
-    pub cleanup: Option<Cleanup>,
+    /// Delete the live card and extras instead of retiring them with the ack.
+    #[serde(default)]
+    pub delete: bool,
     /// Same message, new content (e.g. rest shortened).
     #[serde(default)]
     pub refresh: bool,
@@ -99,9 +94,6 @@ pub struct CoachView {
     /// Cards are their own messages (previews); the live card stays.
     #[serde(default)]
     pub standalone: bool,
-    /// The rest that was counting down is over (scheduler drops the fallback ping).
-    #[serde(default)]
-    pub rest_over: bool,
     /// Swap menu: the live card's buttons become these, `cards` are the options below it.
     pub live_buttons: Option<Vec<Vec<Button>>>,
     /// Earlier messages to re-render, before anything else; the live card is left as it is.
