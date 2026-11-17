@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::{Ctx, Listed, Tool, ToolDef, def};
-use crate::db::models::{BlockKind, OnboardingState, PlannedSession};
+use crate::db::models::{BlockKind, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
 use crate::domain::{
@@ -196,9 +196,7 @@ impl Tool for PlanWeek {
                     PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
                 let template = match &self.template_id {
                     Some(id) => Some(id.clone()),
-                    None => crate::runtime::outbox::runtime_authority(cx.db)?
-                        .template_id
-                        .or(OnboardingState::get(cx.db, 1)?.and_then(|o| o.split_json.0.first().cloned())),
+                    None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id,
                 };
                 let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, template.as_deref(), &[])?;
                 if self.template_id.is_none() {

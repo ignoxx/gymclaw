@@ -77,10 +77,6 @@ fn state(db: &Connection) -> Result<OnboardingState> {
     }
     let row = OnboardingState {
         id: 1,
-        goal: None,
-        profile_fingerprint: None,
-        template_id: None,
-        template_fingerprint: None,
         completed_fingerprint: None,
         interview_json: Json(json!({})),
         split_json: Json(vec![]),
@@ -226,9 +222,6 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                         interview.insert(key.clone(), json!(value.as_str().unwrap_or_default().trim()));
                     }
                 }
-                if let Some(goal) = answers.get("goal").and_then(Value::as_str) {
-                    row.goal = Some(goal.trim().into());
-                }
             }
             Update::ConfirmPlan { templates, plan } => {
                 if templates.is_empty() {
@@ -248,7 +241,6 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                     }
                 }
                 row.split_json = Json(templates.to_vec());
-                row.template_id = Some(templates[0].clone());
                 if let Some(plan) = plan {
                     row.plan_text = Some(plan.trim().to_string()).filter(|p| !p.is_empty());
                 }

@@ -70,10 +70,6 @@ table!(UserProfile = "user_profile" {
 
 table!(OnboardingState = "onboarding_state" {
     id: i64,
-    goal: Option<String>,
-    profile_fingerprint: Option<String>,
-    template_id: Option<String>,
-    template_fingerprint: Option<String>,
     completed_fingerprint: Option<String>,
     interview_json: Json<Value>,
     /// Ordered template IDs; planned sessions rotate through them.
@@ -218,7 +214,6 @@ table!(
     notification_job_id: Option<String>,
     agent_event_id: Option<String>,
     recipient: String,
-    runtime_profile: String,
     message: String,
     result_json: Json<Value>,
     status: DeliveryStatus,
@@ -245,15 +240,10 @@ table!(PersonalBusyInterval = "personal_busy_interval" {
 });
 
 table!(
-    /// `profile`, `project_root` and `python_path` are unused columns kept so the schema stays as is;
     /// `enabled` and the two authorities gate the runtime.
     RuntimeSettings = "runtime_settings" {
     id: i64,
-    profile: String,
     recipient: String,
-    project_root: String,
-    python_path: String,
-    template_id: Option<String>,
     enabled: bool,
     calendar_writes_enabled: bool,
     crowd_polling_enabled: bool,

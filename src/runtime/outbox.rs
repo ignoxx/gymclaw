@@ -23,9 +23,6 @@ use crate::error::{Error, Result};
 use crate::telegram::Telegram;
 use crate::time::Ts;
 
-/// `runtime_profile` of every delivery; a fixed value the column requires.
-pub const PROFILE: &str = "gymclaw";
-
 #[derive(Clone, Debug, Serialize)]
 pub struct Authority {
     pub configured: bool,
@@ -35,11 +32,8 @@ pub struct Authority {
     pub crowd_polling_enabled: bool,
 }
 
-/// Explicitly activated template, else the first template of the owner's confirmed split.
-fn planning_template(db: &Connection, settings: &RuntimeSettings) -> Result<Option<String>> {
-    if settings.template_id.is_some() {
-        return Ok(settings.template_id.clone());
-    }
+/// The first template of the owner's confirmed split: what default drafts start from.
+fn planning_template(db: &Connection) -> Result<Option<String>> {
     Ok(OnboardingState::get(db, 1)?.and_then(|row| row.split_json.0.first().cloned()))
 }
 
@@ -49,7 +43,7 @@ pub fn runtime_authority(db: &Connection) -> Result<Authority> {
         return Ok(Authority {
             configured: false,
             enabled: false,
-            template_id: None,
+            template_id: planning_template(db)?,
             calendar_writes_enabled: false,
             crowd_polling_enabled: false,
         });
@@ -57,7 +51,7 @@ pub fn runtime_authority(db: &Connection) -> Result<Authority> {
     Ok(Authority {
         configured: true,
         enabled: settings.enabled,
-        template_id: planning_template(db, &settings)?,
+        template_id: planning_template(db)?,
         calendar_writes_enabled: settings.calendar_writes_enabled,
         crowd_polling_enabled: settings.crowd_polling_enabled,
     })
@@ -177,7 +171,6 @@ fn new_delivery(
         notification_job_id: job_id.map(String::from),
         agent_event_id: event_id.map(String::from),
         recipient: recipient.into(),
-        runtime_profile: PROFILE.into(),
         message: message.into(),
         result_json: Json(result),
         status: DeliveryStatus::Pending,
@@ -193,8 +186,8 @@ pub fn prepare_notification(db: &Connection, job_id: &str, now: Ts, recipient: &
         crate::bail!("JOB_NOT_FOUND", "Unknown notification job")
     };
     if let Some(existing) = NotificationDelivery::first(db, "WHERE notification_job_id = ?1", [job_id])? {
-        if existing.recipient != recipient || existing.runtime_profile != PROFILE {
-            crate::bail!("DELIVERY_ROUTE_MISMATCH", "Stored delivery belongs to a different owner/runtime");
+        if existing.recipient != recipient {
+            crate::bail!("DELIVERY_ROUTE_MISMATCH", "Stored delivery belongs to a different owner");
         }
         return Ok(json!({"delivery_id": existing.id, "status": existing.status, "result": existing.result_json}));
     }
@@ -243,16 +236,16 @@ pub fn prepare_event_message(
         crate::bail!("EVENT_NOT_FOUND", "Unknown proactive message event")
     };
     if let Some(existing) = NotificationDelivery::first(db, "WHERE agent_event_id = ?1", [event_id])? {
-        if existing.recipient != recipient || existing.runtime_profile != PROFILE {
-            crate::bail!("DELIVERY_ROUTE_MISMATCH", "Event delivery belongs to another owner/runtime");
+        if existing.recipient != recipient {
+            crate::bail!("DELIVERY_ROUTE_MISMATCH", "Event delivery belongs to another owner");
         }
         return Ok(delivery_data(&existing));
     }
     if source.r#type == "calendar.update_briefing" {
         let older = NotificationDelivery::select(
             db,
-            "WHERE status = 'PENDING' AND runtime_profile = ?1 AND recipient = ?2 AND agent_event_id IN (SELECT id FROM agent_event WHERE type = 'calendar.update_briefing')",
-            [PROFILE, recipient],
+            "WHERE status = 'PENDING' AND recipient = ?1 AND agent_event_id IN (SELECT id FROM agent_event WHERE type = 'calendar.update_briefing')",
+            [recipient],
         )?;
         for mut old in older {
             old.status = DeliveryStatus::Cancelled;
@@ -271,8 +264,8 @@ pub fn prepare_event_message(
 pub fn pending(db: &Connection, recipient: &str) -> Result<Vec<String>> {
     Ok(NotificationDelivery::select(
         db,
-        "WHERE status = 'PENDING' AND runtime_profile = ?1 AND recipient = ?2 ORDER BY created_at, id",
-        [PROFILE, recipient],
+        "WHERE status = 'PENDING' AND recipient = ?1 ORDER BY created_at, id",
+        [recipient],
     )?
     .into_iter()
     .map(|d| d.id)
@@ -325,8 +318,8 @@ pub fn settle_unknown(db: &Connection, recipient: &str, now: Ts) -> Result<Vec<S
     let mut settled = Vec::new();
     for mut row in NotificationDelivery::select(
         db,
-        "WHERE status = 'UNKNOWN' AND runtime_profile = ?1 AND recipient = ?2 ORDER BY created_at, id",
-        [PROFILE, recipient],
+        "WHERE status = 'UNKNOWN' AND recipient = ?1 ORDER BY created_at, id",
+        [recipient],
     )? {
         let job = match &row.notification_job_id {
             Some(id) => NotificationJob::get(db, id)?,
@@ -357,13 +350,10 @@ fn claim(db: &mut Connection, delivery_id: &str, now: Ts) -> Result<Claim> {
     let Some(mut row) = NotificationDelivery::get(&tx, delivery_id)? else {
         crate::bail!("DELIVERY_NOT_FOUND", "Unknown notification delivery")
     };
-    if row.runtime_profile != PROFILE {
-        crate::bail!("DELIVERY_ROUTE_MISMATCH", "Delivery belongs to another runtime profile");
-    }
     if let Some(settings) = RuntimeSettings::get(&tx, 1)?
-        && (!settings.enabled || settings.profile != PROFILE || settings.recipient != row.recipient)
+        && (!settings.enabled || settings.recipient != row.recipient)
     {
-        crate::bail!("RUNTIME_PAUSED", "Delivery authority paused or owner/profile mismatch");
+        crate::bail!("RUNTIME_PAUSED", "Delivery authority paused or owner mismatch");
     }
     if row.status != DeliveryStatus::Pending {
         return Ok(Claim::Done(delivery_data(&row)));

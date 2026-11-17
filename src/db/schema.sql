@@ -1,4 +1,4 @@
--- Generated from a fresh `gymclaw migrate` (user_version 10); don't edit. When a migration
+-- Generated from a fresh `gymclaw migrate` (user_version 11); don't edit. When a migration
 -- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
 
 CREATE TABLE activity (
@@ -251,19 +251,6 @@ CREATE TABLE gym_location (
 	PRIMARY KEY (name)
 );
 
-CREATE TABLE learned_preference (
-	id VARCHAR NOT NULL, 
-	"key" VARCHAR NOT NULL, 
-	value_json JSON NOT NULL, 
-	confidence DOUBLE NOT NULL, 
-	evidence_count INTEGER NOT NULL, 
-	first_observed_at DATETIME NOT NULL, 
-	last_observed_at DATETIME NOT NULL, 
-	source VARCHAR NOT NULL, 
-	PRIMARY KEY (id), 
-	UNIQUE ("key")
-);
-
 CREATE VIEW lift_history AS
 SELECT w.id AS workout_id, w.started_at, e.exercise_id, e.config_json ->> 'name' AS name,
 	e.rep_min, e.rep_max, e.target_weight,
@@ -281,7 +268,6 @@ CREATE TABLE "notification_delivery" (
 	id VARCHAR NOT NULL, 
 	notification_job_id VARCHAR, 
 	recipient VARCHAR NOT NULL, 
-	runtime_profile VARCHAR NOT NULL, 
 	message TEXT NOT NULL, 
 	result_json JSON NOT NULL, 
 	status VARCHAR NOT NULL, 
@@ -306,7 +292,6 @@ CREATE TABLE "notification_job" (
 	due_at DATETIME NOT NULL, 
 	status VARCHAR NOT NULL, 
 	payload_json JSON NOT NULL, 
-	external_job_id VARCHAR, 
 	handled_at DATETIME, 
 	planned_session_id VARCHAR, 
 	PRIMARY KEY (id), 
@@ -320,16 +305,14 @@ CREATE TABLE "notification_job" (
 
 CREATE INDEX ix_notification_job_due_at ON notification_job (due_at);
 
-CREATE TABLE onboarding_state (
-	id INTEGER NOT NULL, 
-	goal VARCHAR, 
-	profile_fingerprint VARCHAR, 
-	template_id VARCHAR, 
-	template_fingerprint VARCHAR, 
-	completed_fingerprint VARCHAR, interview_json JSON DEFAULT '{}' NOT NULL, split_json JSON DEFAULT '[]' NOT NULL, plan_text TEXT, 
-	PRIMARY KEY (id), 
-	CHECK (id = 1), 
-	FOREIGN KEY(template_id) REFERENCES workout_template (id)
+CREATE TABLE "onboarding_state" (
+	id INTEGER NOT NULL,
+	completed_fingerprint VARCHAR,
+	interview_json JSON DEFAULT '{}' NOT NULL,
+	split_json JSON DEFAULT '[]' NOT NULL,
+	plan_text TEXT,
+	PRIMARY KEY (id),
+	CHECK (id = 1)
 );
 
 CREATE TABLE personal_busy_interval (
@@ -376,19 +359,14 @@ CREATE TABLE planned_session (
 
 CREATE INDEX ix_planned_session_week_id ON planned_session (week_id);
 
-CREATE TABLE runtime_settings (
-	id INTEGER NOT NULL, 
-	profile VARCHAR NOT NULL, 
-	recipient VARCHAR NOT NULL, 
-	project_root VARCHAR NOT NULL, 
-	python_path VARCHAR NOT NULL, 
-	template_id VARCHAR, 
-	enabled BOOLEAN NOT NULL, 
-	calendar_writes_enabled BOOLEAN NOT NULL, 
-	crowd_polling_enabled BOOLEAN NOT NULL, 
-	PRIMARY KEY (id), 
-	CHECK (id = 1), 
-	FOREIGN KEY(template_id) REFERENCES workout_template (id)
+CREATE TABLE "runtime_settings" (
+	id INTEGER NOT NULL,
+	recipient VARCHAR NOT NULL,
+	enabled BOOLEAN NOT NULL,
+	calendar_writes_enabled BOOLEAN NOT NULL,
+	crowd_polling_enabled BOOLEAN NOT NULL,
+	PRIMARY KEY (id),
+	CHECK (id = 1)
 );
 
 CREATE TABLE "set_log" (
