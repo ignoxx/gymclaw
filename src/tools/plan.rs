@@ -274,14 +274,11 @@ pub struct AvailabilityAdd {
     /// Last whole day (YYYY-MM-DD), inclusive, instead of `end`.
     #[serde(default)]
     pub through: Option<String>,
-    /// Also cancel sessions the owner placed themselves in that time.
-    #[serde(default)]
-    pub cancel_locked: bool,
 }
 
 impl Tool for AvailabilityAdd {
     const NAME: &'static str = "availability_add";
-    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no sessions or reminders then; conflicts are reported for your decision.";
+    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no reminders then. Sessions in that time are kept and returned as warnings; cancel or move them with session_update.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         if self.start.is_some() && self.from_date.is_some() || self.end.is_some() && self.through.is_some() {
@@ -299,7 +296,7 @@ impl Tool for AvailabilityAdd {
             (None, Some(d)) => midnight(date(d)?.tomorrow()?)?,
             (None, None) => crate::bail!("INVALID_ARGUMENTS", "Missing end or inclusive through"),
         };
-        availability::add(cx.db, start, end, self.kind, cx.now, &cx.request_id, self.cancel_locked)
+        availability::add(cx.db, start, end, self.kind, cx.now, &cx.request_id)
     }
 }
 
@@ -669,8 +666,7 @@ mod tests {
         assert_eq!((ts(first["end"].as_str().unwrap()) - ts(first["start"].as_str().unwrap())).as_hours(), 25);
         assert_eq!(call(&db, "availability_add", args, sunday(), "dst-trip").unwrap()["data"], first);
         assert_eq!(AvailabilityBlock::select(&db, "", []).unwrap().len(), 1);
-        let conflict =
-            json!({"kind": "TRAVEL", "from_date": "2026-10-25", "through": "2026-10-25", "cancel_locked": true});
+        let conflict = json!({"kind": "TRAVEL", "from_date": "2026-10-26", "through": "2026-10-26"});
         assert_eq!(
             call(&db, "availability_add", conflict, sunday(), "dst-trip").unwrap_err().code(),
             "IDEMPOTENCY_CONFLICT"
