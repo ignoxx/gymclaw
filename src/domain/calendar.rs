@@ -242,7 +242,7 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
                     now,
                     json!({"session_id": session.id, "event_id": event.id}),
                 )?;
-                emitted.push(json!({"id": log.id, "type": log.r#type}));
+                emitted.push(json!({"id": log.id, "type": log.r#type, "session_id": session.id}));
                 weeks.insert(old_week);
             }
         } else {
@@ -317,6 +317,11 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
     Ok((weeks, emitted))
 }
 
+/// An owner edit of a gym session in Google Calendar, as `reconcile_event` emits it.
+fn is_gym_edit(kind: &str) -> bool {
+    matches!(kind, "calendar.gym_event_changed" | "calendar.gym_event_resized" | "calendar.gym_event_deleted")
+}
+
 /// Pull calendar changes, reconcile owner edits, inspect affected weeks and describe conflicts. Never
 /// writes remotely; queued writes go through `apply_write`.
 pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: Ts) -> Result<Value> {
@@ -353,13 +358,15 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     state.update(db)?;
     let warnings = if affected.is_empty() { vec![] } else { inspect_weeks(db, &affected, now)? };
     commit_upcoming(db, now)?;
-    if !emitted.is_empty() || !warnings.is_empty() {
-        let event = emit(
-            db,
-            "planning.replan_required",
-            now,
-            json!({"reason": "calendar_changed", "handled_locally": false, "warnings": warnings}),
-        )?;
+    // The owner moved, resized or deleted a gym session: the agent decides what that means for the plan.
+    // Blocker changes don't wake it; the conflicts they cause arrive as `planning.attention`.
+    let edits: Vec<Value> = emitted
+        .iter()
+        .filter(|e| e["type"].as_str().is_some_and(is_gym_edit))
+        .map(|e| json!({"type": e["type"], "session_id": e["session_id"]}))
+        .collect();
+    if !edits.is_empty() {
+        let event = emit(db, "planning.replan_required", now, json!({"reason": "calendar_changed", "edits": edits}))?;
         emitted.push(json!({"id": event.id, "type": event.r#type}));
     }
     let tz = get_profile(db)?.tz();
@@ -387,7 +394,7 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     Ok(json!({
         "data": {"calendar_id": provider.calendar_id(), "source": provider.source(), "full_sync": batch.full, "events_received": batch.events.len(),
             "warnings": warnings, "weeks": affected.iter().map(Date::to_string).collect::<Vec<_>>(),
-            "calendar_writes_queued": queued, "remote_events_changed": false},
+            "calendar_writes_queued": queued},
         "events": emitted,
         "user_message_hint": if parts.is_empty() { Value::Null } else { json!(parts.join(" ")) },
     }))
@@ -523,7 +530,6 @@ mod tests {
         assert!(friday.status == SessionStatus::Tentative && !friday.user_locked);
         assert!(result["user_message_hint"].as_str().unwrap().starts_with("Long moved to Thu 19:00."));
         assert!(result["user_message_hint"].as_str().unwrap().contains("skips a rest day"));
-        assert_eq!(result["data"]["remote_events_changed"], false);
         publish(&db, &mut provider, now(4));
         let result = sync_calendar(&db, &mut provider, now(5)).unwrap();
         assert_eq!(session(&db, &ids[1]).planned_start_at, at(15, 19, 0));
@@ -626,7 +632,8 @@ mod tests {
                 .any(|w| w.as_str().unwrap().contains("overlaps a calendar event"))
         );
         let events = crate::domain::events::wake_pending(&db).unwrap();
-        assert!(!events.is_empty());
+        // The conflicts wake the agent; the new blocker itself doesn't.
+        assert!(!events.is_empty() && events.iter().all(|e| e["type"] == "planning.attention"), "{events:?}");
         let count = events.len();
         for event in events {
             crate::domain::events::ack(&db, event["id"].as_str().unwrap(), now(3)).unwrap();
