@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
-use crate::domain::illustrations::{catalog, lookup, muscles, suggestions, timed, unknown};
+use crate::domain::illustrations::{Item, catalog, lookup, muscles, suggestions, timed, unknown};
 use crate::domain::workout::{format_distance, format_time, g};
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -110,6 +110,21 @@ impl SetKind {
 /// Catalog exercises done on an assisted machine (or with a band): their weight is help, not load.
 pub fn default_load(slug: &str) -> Load {
     if slug.contains("assisted") { Load::Assisted } else { Load::External }
+}
+
+/// A catalog exercise in `original`'s slot under its own id and picture: its own load, weight unknown
+/// (0) until its history or the owner says.
+pub fn catalog_slot(original: &ExerciseSpec, item: &Item) -> ExerciseSpec {
+    ExerciseSpec {
+        id: item.slug.clone(),
+        name: item.name.clone(),
+        guide_id: Some(item.slug.clone()),
+        muscle: None,
+        target_weight: 0.0,
+        load: default_load(&item.slug),
+        per_side: false,
+        ..original.clone()
+    }
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {

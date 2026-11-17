@@ -10,6 +10,8 @@
 //! - Warm-ups never count toward volume or progression, and logging a working set skips a pending one.
 //! - Exercises sharing a `group` (superset, circuit) take turns: after a working set the next member still
 //!   owed a set this round is up with no rest; rest comes after the round.
+use std::collections::HashSet;
+
 use jiff::SignedDuration;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -81,6 +83,14 @@ pub fn working_count(db: &Connection, exercise_row_id: &str) -> Result<i64> {
 /// The running workout (anything not yet PLAN_UPDATED), latest first.
 pub fn active_workout(db: &Connection) -> Result<Option<WorkoutSession>> {
     WorkoutSession::first(db, "WHERE status != 'PLAN_UPDATED' ORDER BY started_at DESC", [])
+}
+
+/// Ids of every exercise the owner has logged a set of.
+pub fn logged_exercise_ids(db: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = db.prepare_cached(
+        "SELECT DISTINCT e.exercise_id FROM workout_exercise e JOIN set_log s ON s.workout_exercise_id = e.id",
+    )?;
+    Ok(stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Sets of any kind (warm-ups, timed) logged in a workout.

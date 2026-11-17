@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use crate::db::models::{ExerciseProgression, GymLocation};
 use crate::db::{Connection, Json};
 use crate::domain::illustrations::{Item, catalog, closest, fitting, needs, timed};
-use crate::domain::templates::{ExerciseSpec, Measure, Template, default_load, pick, swapped};
+use crate::domain::templates::{ExerciseSpec, Measure, Template, catalog_slot, pick, swapped};
+use crate::domain::workout::logged_exercise_ids;
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -90,10 +91,7 @@ pub fn rebuild(
             None => crate::bail!("EXERCISE_NOT_FOUND", "'{key}' isn't in {}", template.name),
         }
     }
-    let mut stmt = db.prepare_cached(
-        "SELECT DISTINCT e.exercise_id FROM workout_exercise e JOIN set_log s ON s.workout_exercise_id = e.id",
-    )?;
-    let history: HashSet<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let history = logged_exercise_ids(db)?;
     // Ids, names and pictures already taken: a replacement must not clash with any of them.
     let mut used: HashSet<String> = template
         .exercises
@@ -149,25 +147,18 @@ pub fn rebuild(
     Ok((rebuilt, report))
 }
 
-/// A catalog exercise in `original`'s slot, under its own id: its weight from its own history
-/// (unknown: 0, and the card asks).
+/// `templates::catalog_slot` for a saved plan: its weight from its own history (shown in the report and
+/// sizing the warm-up), timed if the catalog times it.
 fn catalog_spec(db: &Connection, original: &ExerciseSpec, to: &Item) -> Result<ExerciseSpec> {
-    let target = ExerciseProgression::get(db, &to.slug)?.map_or(0.0, |p| p.next_weight);
     let is_timed = timed(Some(&to.slug));
     Ok(ExerciseSpec {
-        id: to.slug.clone(),
-        name: to.name.clone(),
-        guide_id: Some(to.slug.clone()),
-        muscle: None,
-        target_weight: target,
+        target_weight: ExerciseProgression::get(db, &to.slug)?.map_or(0.0, |p| p.next_weight),
         // `swapped` gives it a warm-up if the slot had one.
         warmup_weight: None,
         measure: if is_timed { Measure::Time } else { Measure::Reps },
         minutes: if is_timed { original.minutes.or(Some(10.0)) } else { None },
         meters: None,
-        load: default_load(&to.slug),
-        per_side: false,
-        ..original.clone()
+        ..catalog_slot(original, to)
     })
 }
 

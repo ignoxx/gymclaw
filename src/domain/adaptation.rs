@@ -12,10 +12,10 @@ use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
 use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, lookup, similar, timed, unknown};
-use crate::domain::templates::{ExerciseSpec, Measure, default_load, get_template, pick, remember_swap};
+use crate::domain::templates::{ExerciseSpec, Measure, catalog_slot, default_load, get_template, pick, remember_swap};
 use crate::domain::workout::{
-    active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logs, make_exercise,
-    measure, muscle, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
+    active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logged_exercise_ids,
+    logs, make_exercise, measure, muscle, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -162,24 +162,17 @@ fn replacement_spec(
             "Substitute must be a template alternative or a catalog exercise for the same muscle"
         );
     };
-    let progression = ExerciseProgression::get(db, substitute_id)?;
+    // The row's sets, reps and rest; role, primary, increment, warm-up, measure and superset group
+    // from its spec. Its weight is learned progression (`make_exercise`), else unknown.
     Ok(ExerciseSpec {
-        id: substitute_id.into(),
-        name: item.name.clone(),
-        guide_id: Some(substitute_id.into()),
         working_sets: original.planned_working_sets,
         rep_min: original.rep_min,
         rep_max: original.rep_max,
-        target_weight: progression.map_or(0.0, |p| p.next_weight),
         rest_seconds: Some(original.rest_seconds),
         priority: 0,
         requires_completed: vec![],
         substitutes: vec![],
-        // A catalog exercise's own load; per side is unknown, so off.
-        load: default_load(substitute_id),
-        per_side: false,
-        // role, primary, increment, warm-up, measure and superset group from the original.
-        ..spec_of(original)?
+        ..catalog_slot(&spec_of(original)?, item)
     })
 }
 
@@ -303,10 +296,7 @@ pub fn alternatives(
         }
     }
     // Exercises the owner has logged before rank first among catalog options.
-    let mut stmt = db.prepare_cached(
-        "SELECT DISTINCT e.exercise_id FROM workout_exercise e JOIN set_log s ON s.workout_exercise_id = e.id",
-    )?;
-    let history: HashSet<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let history = logged_exercise_ids(db)?;
     let mut exclude = used.clone();
     exclude.extend(back.iter().map(|(k, _)| k.clone()));
     exclude.extend(options.iter().filter_map(|o| o.illustration.as_ref().map(|i| i.guide_id.clone())));
