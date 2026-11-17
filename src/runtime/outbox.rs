@@ -81,12 +81,9 @@ pub fn stale_reason(
             Some(id) => WorkoutSession::get(db, id)?,
             None => None,
         };
-        let Some(workout) = workout.filter(|w| {
-            !matches!(
-                w.status,
-                WorkoutStatus::WorkoutComplete | WorkoutStatus::PostAnalysis | WorkoutStatus::PlanUpdated
-            )
-        }) else {
+        let Some(workout) =
+            workout.filter(|w| !matches!(w.status, WorkoutStatus::WorkoutComplete | WorkoutStatus::PlanUpdated))
+        else {
             return Ok(Some("workout_finished"));
         };
         if let Some(delivery) = delivery {
@@ -722,7 +719,6 @@ mod tests {
             due_at: now(),
             status: JobStatus::Pending,
             payload_json: Json(json!({"revision": 1, "instruction": instruction})),
-            external_job_id: None,
             handled_at: None,
         };
         job.insert(db).unwrap();
@@ -817,7 +813,6 @@ mod tests {
             due_at: now(),
             status: JobStatus::Pending,
             payload_json: Json(json!({"revision": 1, "instruction": "Gym session begins."})),
-            external_job_id: None,
             handled_at: None,
         };
         job.insert(db).unwrap();

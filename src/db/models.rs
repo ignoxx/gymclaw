@@ -6,12 +6,15 @@ use crate::time::Ts;
 use crate::{sql_enum, table};
 
 sql_enum!(SessionStatus { Tentative = "TENTATIVE", Committed = "COMMITTED", Started = "STARTED", Completed = "COMPLETED", Cancelled = "CANCELLED", Skipped = "SKIPPED", Missed = "MISSED" });
-sql_enum!(WorkoutStatus {
-    Scheduled = "SCHEDULED", Preparing = "PREPARING", Commuting = "COMMUTING", Arrived = "ARRIVED",
-    SessionStarted = "SESSION_STARTED", ExerciseActive = "EXERCISE_ACTIVE", SetActive = "SET_ACTIVE", Resting = "RESTING",
-    ExerciseComplete = "EXERCISE_COMPLETE", NextExercise = "NEXT_EXERCISE", WorkoutComplete = "WORKOUT_COMPLETE",
-    PostAnalysis = "POST_ANALYSIS", PlanUpdated = "PLAN_UPDATED",
-});
+sql_enum!(
+    /// SET_ACTIVE: a set is up. RESTING: the rest after one runs. EXERCISE_ACTIVE: only deferred exercises
+    /// are left. WORKOUT_COMPLETE: everything is resolved, not yet finished. PLAN_UPDATED: finished, next
+    /// targets saved.
+    WorkoutStatus {
+        ExerciseActive = "EXERCISE_ACTIVE", SetActive = "SET_ACTIVE", Resting = "RESTING",
+        WorkoutComplete = "WORKOUT_COMPLETE", PlanUpdated = "PLAN_UPDATED",
+    }
+);
 sql_enum!(ExerciseStatus { Pending = "PENDING", Active = "ACTIVE", Deferred = "DEFERRED", Completed = "COMPLETED", Skipped = "SKIPPED", Substituted = "SUBSTITUTED" });
 sql_enum!(SetType { Warmup = "WARMUP", Working = "WORKING" });
 sql_enum!(JobKind { Rest = "REST", GetReady = "GET_READY", Leave = "LEAVE", SessionStart = "SESSION_START" });
@@ -77,17 +80,6 @@ table!(OnboardingState = "onboarding_state" {
     split_json: Json<Vec<String>>,
     /// The owner's plan in their words: what they train, how often, what rotates. The agent plans by it.
     plan_text: Option<String>,
-});
-
-table!(LearnedPreference = "learned_preference" {
-    id: String,
-    key: String,
-    value_json: Json<Value>,
-    confidence: f64,
-    evidence_count: i64,
-    first_observed_at: Ts,
-    last_observed_at: Ts,
-    source: String,
 });
 
 table!(AvailabilityBlock = "availability_block" {
@@ -216,7 +208,6 @@ table!(
     due_at: Ts,
     status: JobStatus,
     payload_json: Json<Value>,
-    external_job_id: Option<String>,
     handled_at: Option<Ts>,
 });
 

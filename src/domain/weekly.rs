@@ -7,11 +7,11 @@ use jiff::tz::TimeZone;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::db::Connection;
 use crate::db::models::{
-    AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, LearnedPreference, OnboardingState,
-    PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutTemplate,
+    AgentEvent, CalendarEventSnapshot, CalendarSyncState, CrowdFeedback, OnboardingState, PlannedSession,
+    SessionStatus, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutTemplate,
 };
-use crate::db::{Connection, Json, new_id};
 use crate::domain::availability::session_blocked;
 use crate::domain::calendar::{allocation, get_week, week_of};
 use crate::domain::calendar_writes::queue_session_write;
@@ -49,9 +49,8 @@ fn demo(value: &Value) -> bool {
     value.get("demo").and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// What happened in a week: completed workouts vs target, each workout's outcome, sets, durations. With
-/// `learn`, updates the typical session duration from the last 90 days.
-pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Result<Value> {
+/// What happened in a week: completed workouts vs target, each workout's outcome, sets, durations.
+pub fn audit_week(db: &Connection, week_start: Date, now: Ts) -> Result<Value> {
     crate::domain::planning::require_monday(week_start)?;
     let profile = get_profile(db)?;
     let tz = profile.tz();
@@ -75,38 +74,6 @@ pub fn audit_week(db: &Connection, week_start: Date, now: Ts, learn: bool) -> Re
         .collect();
     let rotates = OnboardingState::get(db, 1)?.is_some_and(|o| o.split_json.0.len() >= 2);
     let durations: Vec<i64> = completed.iter().filter_map(|w| w.actual_duration_seconds).collect();
-    if learn {
-        let history: Vec<i64> = workouts
-            .iter()
-            .filter(|w| w.started_at.is_some_and(|s| now - DAY * 90 <= s && s <= now))
-            .filter_map(|w| w.actual_duration_seconds)
-            .collect();
-        if history.len() >= 3 {
-            let n = history.len() as f64;
-            let confidence = (n / (n + 5.0)).min(0.9);
-            let value = json!({"median_seconds": median(&history), "demo": workouts.iter().any(|w| demo(&w.template_snapshot))});
-            match LearnedPreference::first(db, "WHERE key = 'typical_session_duration'", [])? {
-                Some(mut pref) => {
-                    pref.value_json = Json(value);
-                    pref.evidence_count = history.len() as i64;
-                    pref.confidence = confidence;
-                    pref.last_observed_at = now;
-                    pref.update(db)?;
-                }
-                None => LearnedPreference {
-                    id: new_id(),
-                    key: "typical_session_duration".into(),
-                    value_json: Json(value),
-                    confidence,
-                    evidence_count: history.len() as i64,
-                    first_observed_at: now,
-                    last_observed_at: now,
-                    source: "completed_workouts".into(),
-                }
-                .insert(db)?,
-            }
-        }
-    }
     Ok(
         json!({"week_start": week_start.to_string(), "completed_workouts": completed.len(), "target_sessions": profile.weekly_target_sessions,
         "workouts": workout_outcomes(&plans, &completed, rotates),
@@ -443,19 +410,13 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     Ok(result)
 }
 
-/// The Sunday run: rolling plan, last week's audit and next week's plan. `announce` tells the owner and
+/// The Sunday run: rolling plan and next week's plan. `announce` tells the owner and
 /// the agent once the calendar is published.
 pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     let tz = get_profile(db)?.tz();
     let current_week = week_of(now, &tz);
     let next_week = current_week.checked_add(days(7))?;
-    let previous = if now.local(&tz).date().weekday() == jiff::civil::Weekday::Sunday {
-        current_week
-    } else {
-        current_week.checked_sub(days(7))?
-    };
     let rolling = rolling_plan(db, template_id, now)?;
-    let report = audit_week(db, previous, now, true)?;
     if PlannedSession::first(db, "WHERE week_id = ?1", [next_week.to_string()])?.is_none() {
         let data = schedule_week(
             db,
@@ -475,9 +436,7 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     )? {
         queue_session_write(db, &session, now, false)?;
     }
-    Ok(
-        json!({"week_start": next_week.to_string(), "audit": report, "rolling": rolling, "plan": get_week(db, next_week)?}),
-    )
+    Ok(json!({"week_start": next_week.to_string(), "rolling": rolling, "plan": get_week(db, next_week)?}))
 }
 
 /// After the Sunday run and the calendar publish: wake the agent for its weekly review, once per week.
@@ -492,7 +451,7 @@ pub fn announce(db: &Connection, now: Ts, unpublished: bool) -> Result<Value> {
     }
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
-    let mut payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now, false)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
+    let mut payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
     // Trends, goals and activities ride on this one wake instead of the standing context; empty ones stay out.
     let activities: Vec<String> = [previous, next_week]
         .iter()
@@ -811,6 +770,7 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
 mod tests {
     use super::*;
     use crate::db::models::{CalendarWrite, NotificationDelivery};
+    use crate::db::new_id;
     use crate::domain::calendar::allocation;
     use crate::domain::calendar_writes::{describe_crowd, event_body, pending_writes};
     use crate::domain::crowd::record_feedback;
@@ -900,7 +860,6 @@ mod tests {
         let result = weekly_plan(&db, "short", sunday(0)).unwrap();
         assert_eq!(result["week_start"], "2026-10-12");
         assert_eq!(result["plan"]["sessions"].as_array().unwrap().len(), 3);
-        assert_eq!(result["audit"]["completed_workouts"], 0);
         assert_eq!(pending_writes(&db).unwrap().len(), 3);
         let first = announce(&db, sunday(0), false).unwrap();
         weekly_plan(&db, "short", sunday(1)).unwrap();
@@ -1039,7 +998,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let report = audit_week(&db, Date::constant(2026, 10, 12), later, false).unwrap();
+        let report = audit_week(&db, Date::constant(2026, 10, 12), later).unwrap();
         assert_eq!(
             (&report["workouts"][0], &report["completed_workouts"]),
             (&json!({"workout": "short", "outcome": "missed"}), &json!(0))

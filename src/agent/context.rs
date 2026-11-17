@@ -225,7 +225,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
 
     let running = WorkoutSession::first(
         db,
-        "WHERE started_at IS NOT NULL AND completed_at IS NULL AND status NOT IN ('WORKOUT_COMPLETE', 'POST_ANALYSIS', 'PLAN_UPDATED') ORDER BY started_at DESC",
+        "WHERE started_at IS NOT NULL AND completed_at IS NULL AND status NOT IN ('WORKOUT_COMPLETE', 'PLAN_UPDATED') ORDER BY started_at DESC",
         [],
     )?;
     if let Some(w) = running {

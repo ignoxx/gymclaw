@@ -83,9 +83,8 @@ pub fn machine_busy(
             workout.update(db)?;
             if was_active {
                 cancel_rest(db, workout_id, now)?;
-                transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
                 // Stay on the same muscle group while the machine is taken.
-                choose_next(db, &mut workout, now, muscle(&exercise).as_deref())?;
+                choose_next(db, &mut workout, muscle(&exercise).as_deref())?;
             }
             let mut result = touch(db, &mut workout, now)?;
             result["deferred_exercise_id"] = json!(exercise.id);
@@ -138,9 +137,7 @@ pub fn machine_free(db: &Connection, workout_id: &str, exercise_id: &str, now: T
                 exercise.status = ExerciseStatus::Active;
                 exercise.update(db)?;
                 cancel_rest(db, workout_id, now)?;
-                transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-                transition(db, &mut workout, WorkoutStatus::ExerciseActive, now)?;
-                transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+                transition(db, &mut workout, WorkoutStatus::SetActive)?;
             }
             touch(db, &mut workout, now)
         },
@@ -255,13 +252,10 @@ pub fn substitute(
             replacement.status = ExerciseStatus::Active;
             replacement.update(db)?;
             cancel_rest(db, workout_id, now)?;
-            transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-            transition(db, &mut workout, WorkoutStatus::ExerciseActive, now)?;
-            transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+            transition(db, &mut workout, WorkoutStatus::SetActive)?;
         } else if was_active || !rows.iter().any(|e| e.status == ExerciseStatus::Active) {
             cancel_rest(db, workout_id, now)?;
-            transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-            choose_next(db, &mut workout, now, None)?;
+            choose_next(db, &mut workout, None)?;
         }
         let mut result = touch(db, &mut workout, now)?;
         result["replacement_exercise_id"] = json!(replacement.id);
@@ -378,8 +372,7 @@ pub fn next_exercise(db: &Connection, workout_id: &str, exercise_id: &str, now: 
             exercise.deferred_reason = if done { None } else { Some("owner_skipped".into()) };
             exercise.update(db)?;
             cancel_rest(db, workout_id, now)?;
-            transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-            choose_next(db, &mut workout, now, None)?;
+            choose_next(db, &mut workout, None)?;
             touch(db, &mut workout, now)
         },
     )
@@ -411,8 +404,7 @@ pub fn skip_exercise(
         exercise.update(db)?;
         if was_active || !exercises(db, workout_id)?.iter().any(|e| e.status == ExerciseStatus::Active) {
             cancel_rest(db, workout_id, now)?;
-            transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-            choose_next(db, &mut workout, now, None)?;
+            choose_next(db, &mut workout, None)?;
         }
         touch(db, &mut workout, now)
     })
@@ -540,9 +532,7 @@ pub fn switch_to(
         row.deferred_reason = None;
         row.update(db)?;
         cancel_rest(db, workout_id, now)?;
-        transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-        transition(db, &mut workout, WorkoutStatus::ExerciseActive, now)?;
-        transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+        transition(db, &mut workout, WorkoutStatus::SetActive)?;
         if remember && let (Some(original), Some(template_id)) = (&replaced, &workout.template_id) {
             remember_swap(db, template_id, original, &spec)?;
         }

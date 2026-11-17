@@ -7,7 +7,7 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde_json::{Map, Value, json};
 
-use crate::db::models::{CrowdFeedback, CrowdObservation, CrowdSourceState, LearnedPreference};
+use crate::db::models::{CrowdFeedback, CrowdObservation, CrowdSourceState};
 use crate::db::{Connection, Json, new_id};
 use crate::domain::core::{emit, mutate};
 use crate::domain::events::outage_open;
@@ -41,13 +41,6 @@ pub fn feel(score: Option<f64>) -> Option<&'static str> {
 
 pub(crate) fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
-}
-
-fn median(values: &[f64]) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let n = sorted.len();
-    if n % 2 == 1 { sorted[n / 2] } else { (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0 }
 }
 
 /// Mean per local date, then the mean of those (repeated polls are not independent days). Returns (mean, days).
@@ -463,35 +456,6 @@ pub fn record_feedback(db: &Connection, workout_id: &str, rating: &str, now: Ts,
         feedback.insert(db)?;
         workout.crowd_feedback = Some(rating.clone());
         workout.update(db)?;
-        let counts: Vec<f64> = CrowdFeedback::select(db, "WHERE rating IN ('BUSY', 'PACKED')", [])?
-            .iter()
-            .filter_map(|f| f.features_json.get(SOURCE).and_then(|g| g["raw_value"].as_f64()))
-            .collect();
-        if counts.len() >= 3 {
-            let key = "crowd_discomfort_reported_count";
-            let n = counts.len() as f64;
-            let value = json!({"median_reported_count": median(&counts), "meaning": "reported count associated with BUSY/PACKED labels, not capacity/guaranteed threshold", "demo": demo});
-            match LearnedPreference::first(db, "WHERE key = ?1", [key])? {
-                Some(mut pref) => {
-                    pref.value_json = Json(value);
-                    pref.confidence = n / (n + 5.0);
-                    pref.evidence_count = counts.len() as i64;
-                    pref.last_observed_at = now;
-                    pref.update(db)?;
-                }
-                None => LearnedPreference {
-                    id: new_id(),
-                    key: key.into(),
-                    value_json: Json(value),
-                    confidence: n / (n + 5.0),
-                    evidence_count: counts.len() as i64,
-                    first_observed_at: now,
-                    last_observed_at: now,
-                    source: "arrival_feedback".into(),
-                }
-                .insert(db)?,
-            }
-        }
         Ok(
             json!({"feedback_id": feedback.id, "workout_id": workout_id, "rating": rating, "normalized_score": normalized, "observed_at": at,
             "paired_sources": paired, "demo": demo, "instruction": "Crowd feedback saved. Future slot estimates now use this visit."}),
@@ -717,11 +681,6 @@ mod tests {
             record_feedback(&db, &workout, "PACKED", at.mins(60), &format!("label-{index}")).unwrap();
         }
         assert_eq!(CrowdSourceState::get(&db, "GYM_API").unwrap().unwrap().evidence_count, 2);
-        let preference =
-            LearnedPreference::first(&db, "WHERE key = 'crowd_discomfort_reported_count'", []).unwrap().unwrap();
-        assert_eq!(preference.evidence_count, 3);
-        assert_eq!(preference.value_json["median_reported_count"], 61.0);
-        assert!(preference.value_json["meaning"].as_str().unwrap().contains("not capacity"));
     }
 
     #[test]

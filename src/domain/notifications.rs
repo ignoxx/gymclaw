@@ -3,15 +3,16 @@ use serde_json::{Value, json};
 
 use crate::db::models::{JobKind, JobStatus, NotificationJob, PlannedSession, SessionStatus};
 use crate::db::{Connection, Json, new_id};
-use crate::domain::core::emit;
 use crate::error::Result;
 use crate::time::Ts;
 
 pub fn pending_jobs(db: &Connection) -> Result<Vec<Value>> {
     Ok(NotificationJob::select(db, "WHERE status = 'PENDING' ORDER BY due_at, id", [])?
         .into_iter()
-        .map(|job| json!({"id": job.id, "kind": job.kind, "due_at": job.due_at, "workout_id": job.workout_session_id,
-            "planned_session_id": job.planned_session_id, "external_job_id": job.external_job_id, "payload": job.payload_json}))
+        .map(|job| {
+            json!({"id": job.id, "kind": job.kind, "due_at": job.due_at, "workout_id": job.workout_session_id,
+            "planned_session_id": job.planned_session_id, "payload": job.payload_json})
+        })
         .collect())
 }
 
@@ -25,12 +26,6 @@ pub fn cancel_session_jobs(db: &Connection, session_id: &str, now: Ts) -> Result
         job.status = JobStatus::Cancelled;
         job.handled_at = Some(now);
         job.update(db)?;
-        emit(
-            db,
-            "notifications.cancel_required",
-            now,
-            json!({"job_id": job.id, "external_job_id": job.external_job_id}),
-        )?;
     }
     Ok(())
 }
@@ -85,11 +80,9 @@ pub fn schedule_session_jobs(db: &Connection, session: &PlannedSession, now: Ts)
             payload_json: Json(
                 json!({"session_id": session.id, "revision": session.source_revision, "instruction": message}),
             ),
-            external_job_id: None,
             handled_at: None,
         };
         job.insert(db)?;
-        emit(db, "notifications.schedule_required", now, json!({"job_id": job.id, "due_at": due, "kind": kind}))?;
     }
     Ok(())
 }

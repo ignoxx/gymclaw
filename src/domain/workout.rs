@@ -20,7 +20,7 @@ use crate::db::models::{
     SetType, WorkoutExercise, WorkoutSession, WorkoutStatus,
 };
 use crate::db::{Connection, Json, new_id};
-use crate::domain::core::{emit, mutate};
+use crate::domain::core::mutate;
 use crate::domain::illustrations::{Entry, bodyweight, for_exercise, primary_muscle};
 use crate::domain::profile::get_profile;
 use crate::domain::set_parser::SetInput;
@@ -35,36 +35,10 @@ pub fn unresolved(status: ExerciseStatus) -> bool {
     UNRESOLVED.contains(&status)
 }
 
-fn allowed(from: WorkoutStatus, to: WorkoutStatus) -> bool {
-    use WorkoutStatus::*;
-    let targets: &[WorkoutStatus] = match from {
-        Scheduled => &[Preparing, Arrived],
-        Preparing => &[Commuting, Arrived],
-        Commuting => &[Arrived],
-        Arrived => &[SessionStarted],
-        SessionStarted => &[ExerciseActive],
-        ExerciseActive => &[SetActive, NextExercise, WorkoutComplete],
-        SetActive => &[Resting, ExerciseComplete, NextExercise, ExerciseActive, WorkoutComplete],
-        Resting => &[SetActive, NextExercise, ExerciseActive, WorkoutComplete],
-        ExerciseComplete => &[NextExercise, Resting, WorkoutComplete],
-        NextExercise => &[ExerciseActive, WorkoutComplete],
-        WorkoutComplete => &[PostAnalysis],
-        PostAnalysis => &[PlanUpdated],
-        PlanUpdated => &[],
-    };
-    targets.contains(&to)
-}
-
-/// Move the workout to `to` (saved right away) and record `workout.state_changed`.
-pub fn transition(db: &Connection, workout: &mut WorkoutSession, to: WorkoutStatus, now: Ts) -> Result<()> {
-    if !allowed(workout.status, to) {
-        crate::bail!("INVALID_TRANSITION", "Cannot transition {} to {}", workout.status, to);
-    }
-    let from = workout.status;
+/// Move the workout to `to`, saved right away. Each action checks the state it starts from.
+pub fn transition(db: &Connection, workout: &mut WorkoutSession, to: WorkoutStatus) -> Result<()> {
     workout.status = to;
-    workout.update(db)?;
-    emit(db, "workout.state_changed", now, json!({"workout_id": workout.id, "from": from, "to": to}))?;
-    Ok(())
+    workout.update(db)
 }
 
 /// The workout with an execution snapshot; `now` before its last action fails with TIME_REVERSED.
@@ -149,12 +123,6 @@ pub fn cancel_rest(db: &Connection, workout_id: &str, now: Ts) -> Result<()> {
         job.status = JobStatus::Cancelled;
         job.handled_at = Some(now);
         job.update(db)?;
-        emit(
-            db,
-            "notifications.cancel_required",
-            now,
-            json!({"job_id": job.id, "external_job_id": job.external_job_id}),
-        )?;
     }
     Ok(())
 }
@@ -300,7 +268,7 @@ pub fn compatible(exercise: &WorkoutExercise, rows: &[WorkoutExercise]) -> bool 
 }
 
 /// Activate the next pending exercise in plan order; `prefer_muscle` pulls same-muscle work forward.
-pub fn choose_next(db: &Connection, workout: &mut WorkoutSession, now: Ts, prefer_muscle: Option<&str>) -> Result<()> {
+pub fn choose_next(db: &Connection, workout: &mut WorkoutSession, prefer_muscle: Option<&str>) -> Result<()> {
     let rows = exercises(db, &workout.id)?;
     let ready: Vec<&WorkoutExercise> =
         rows.iter().filter(|e| e.status == ExerciseStatus::Pending && compatible(e, &rows)).collect();
@@ -309,13 +277,12 @@ pub fn choose_next(db: &Connection, workout: &mut WorkoutSession, now: Ts, prefe
         let mut next = (*next).clone();
         next.status = ExerciseStatus::Active;
         next.update(db)?;
-        transition(db, workout, WorkoutStatus::ExerciseActive, now)?;
-        transition(db, workout, WorkoutStatus::SetActive, now)?;
+        transition(db, workout, WorkoutStatus::SetActive)?;
     } else if rows.iter().any(|e| unresolved(e.status)) {
         // No unresolved exercise is silently discarded. Agent must retry/substitute/skip.
-        transition(db, workout, WorkoutStatus::ExerciseActive, now)?;
+        transition(db, workout, WorkoutStatus::ExerciseActive)?;
     } else {
-        transition(db, workout, WorkoutStatus::WorkoutComplete, now)?;
+        transition(db, workout, WorkoutStatus::WorkoutComplete)?;
     }
     Ok(())
 }
@@ -518,7 +485,6 @@ fn is_external(load: &Load) -> bool {
 pub struct RestJob {
     pub id: String,
     pub due_at: Ts,
-    pub external_job_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -615,7 +581,7 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
         workout_id: workout.id.clone(),
         status: workout.status,
         active_exercise: active_data,
-        rest_job: rest.map(|r| RestJob { id: r.id, due_at: r.due_at, external_job_id: r.external_job_id }),
+        rest_job: rest.map(|r| RestJob { id: r.id, due_at: r.due_at }),
         eta,
         initial_eta: workout.initial_eta,
         seconds_vs_initial_eta: workout.initial_eta.map(|initial| (eta - initial).as_secs_f64()),
@@ -775,7 +741,7 @@ pub fn start(
             arrived_at: Some(now),
             started_by_button: by_button,
             completed_at: None,
-            status: WorkoutStatus::Scheduled,
+            status: WorkoutStatus::ExerciseActive,
             initial_eta: None,
             final_eta: None,
             actual_duration_seconds: None,
@@ -803,10 +769,7 @@ pub fn start(
                 row.update(db)?;
             }
         }
-        // start is explicit arrival intent, not fabricated preparation/travel history.
-        transition(db, &mut workout, WorkoutStatus::Arrived, now)?;
-        transition(db, &mut workout, WorkoutStatus::SessionStarted, now)?;
-        choose_next(db, &mut workout, now, None)?;
+        choose_next(db, &mut workout, None)?;
         if let Some(mut planned) = planned {
             crate::domain::notifications::cancel_session_jobs(db, &planned.id, now)?;
             planned.status = SessionStatus::Started;
@@ -845,7 +808,7 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
         }
         cancel_rest(db, workout_id, now)?;
         if workout.status == WorkoutStatus::Resting {
-            transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+            transition(db, &mut workout, WorkoutStatus::SetActive)?;
         }
         let mut row = SetLog {
             id: new_id(),
@@ -873,25 +836,19 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
                     active.update(db)?;
                     next.status = ExerciseStatus::Active;
                     next.update(db)?;
-                    transition(db, &mut workout, WorkoutStatus::ExerciseActive, now)?;
-                    transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+                    transition(db, &mut workout, WorkoutStatus::SetActive)?;
                     rest = round_over;
                 }
                 _ if completed => {
                     active.status = ExerciseStatus::Completed;
                     active.update(db)?;
-                    transition(db, &mut workout, WorkoutStatus::ExerciseComplete, now)?;
-                    transition(db, &mut workout, WorkoutStatus::NextExercise, now)?;
-                    choose_next(db, &mut workout, now, None)?;
+                    choose_next(db, &mut workout, None)?;
                 }
                 _ => {}
             }
             // Rest after every working set, also before the next exercise (with the finished one's rest
             // time). None after the last exercise, or when only deferred exercises are left.
-            if rest
-                && ((!completed && workout.status != WorkoutStatus::WorkoutComplete)
-                    || workout.status == WorkoutStatus::SetActive)
-            {
+            if rest && workout.status == WorkoutStatus::SetActive {
                 let due = now + SignedDuration::from_secs(active.rest_seconds);
                 row.rest_started_at = Some(now);
                 row.rest_due_at = Some(due);
@@ -905,20 +862,10 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
                     due_at: due,
                     status: JobStatus::Pending,
                     payload_json: Json(json!({"workout_id": workout.id})),
-                    external_job_id: None,
                     handled_at: None,
                 };
                 job.insert(db)?;
-                emit(
-                    db,
-                    "notifications.schedule_required",
-                    now,
-                    json!({"job_id": job.id, "due_at": due, "kind": "REST"}),
-                )?;
-                // Deferred-only queue stays EXERCISE_ACTIVE; rest is still durable.
-                if workout.status == WorkoutStatus::SetActive {
-                    transition(db, &mut workout, WorkoutStatus::Resting, now)?;
-                }
+                transition(db, &mut workout, WorkoutStatus::Resting)?;
             }
         }
         let mut result = touch(db, &mut workout, now)?;
@@ -971,7 +918,7 @@ pub fn rest_complete(db: &Connection, job_id: &str, now: Ts, request_id: &str) -
         job.handled_at = Some(now);
         job.update(db)?;
         if workout.status == WorkoutStatus::Resting {
-            transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+            transition(db, &mut workout, WorkoutStatus::SetActive)?;
         }
         let mut result = touch(db, &mut workout, now)?;
         result["instruction"] =
@@ -1000,7 +947,7 @@ pub fn skip_rest(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -
             crate::bail!("NOT_RESTING", "No rest to skip");
         }
         cancel_rest(db, workout_id, now)?;
-        transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+        transition(db, &mut workout, WorkoutStatus::SetActive)?;
         touch(db, &mut workout, now)
     })
 }
@@ -1035,7 +982,7 @@ pub fn cut_rest(db: &Connection, workout_id: &str, seconds: i64, now: Ts, reques
         let due = job.due_at - SignedDuration::from_secs(seconds);
         if due <= now {
             cancel_rest(db, workout_id, now)?;
-            transition(db, &mut workout, WorkoutStatus::SetActive, now)?;
+            transition(db, &mut workout, WorkoutStatus::SetActive)?;
         } else {
             job.due_at = due;
             job.update(db)?;
@@ -1241,13 +1188,9 @@ pub(crate) mod tests {
         let db = db();
         let id = short(&db);
         type Action<'a> = &'a dyn Fn(&Connection) -> Result<Value>;
-        let actions: [Action; 3] = [
+        let actions: [Action; 2] = [
             // Discards the empty running workout, then fails: the discard rolls back too.
             &|db| start(db, Some("unknown"), None, false, at(0), "start"),
-            &|db| {
-                transition(db, &mut load_workout(db, &id, None)?, WorkoutStatus::PlanUpdated, at(0))
-                    .map(|_| Value::Null)
-            },
             &|db| log_set(db, &id, &set(50.0, 8, SetType::Warmup), at(-1), "past"),
         ];
         for action in actions {
