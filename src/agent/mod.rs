@@ -344,7 +344,7 @@ impl Agent {
                 (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
             Err(_) => {
-                self.gap(GapSource::Deadline, &run_id, state.tool_calls).await;
+                self.gap(GapSource::Deadline, &run_id, state.ran.len()).await;
                 state.error = "turn deadline exceeded".into();
                 (Reply::text(format_failure(&state)), true, Some(state.error.clone()))
             }
@@ -368,17 +368,11 @@ impl Agent {
             settles.clear();
         }
         // A hard owner turn is worth a playbook; background and failed turns (model/network errors) aren't.
-        if !input.background && !failed && (state.tool_calls >= REFLECT_AFTER || forced.is_some()) {
-            let (run, calls, tools, forced, now, asked) = (
-                run_id.clone(),
-                state.tool_calls,
-                state.ran.clone(),
-                forced.map(String::from),
-                (self.clock)(),
-                asked_text,
-            );
+        if !input.background && !failed && (state.ran.len() >= REFLECT_AFTER || forced.is_some()) {
+            let (run, tools, forced, now, asked) =
+                (run_id.clone(), state.ran.clone(), forced.map(String::from), (self.clock)(), asked_text);
             let raised = blocking(&self.db_path, move |db| {
-                let lesson = Lesson::Hard { calls, forced: forced.as_deref(), tools: &tools, asked: &asked };
+                let lesson = Lesson::Hard { forced: forced.as_deref(), tools: &tools, asked: &asked };
                 crate::domain::extensions::reflect(db, &run, lesson, now)
             })
             .await;
@@ -435,7 +429,6 @@ impl Agent {
         }));
 
         let mut steps = 0usize;
-        let mut index = 0usize;
         // Calls made this turn: how often, the error of the first run if it failed, its result if it worked.
         let mut seen: HashMap<String, (u32, Option<String>, Option<Value>)> = HashMap::new();
         // Set once the model loops on one call: the next turn must answer in text.
@@ -482,7 +475,7 @@ impl Agent {
                     self.gap(
                         if looping { GapSource::RepeatedCall } else { GapSource::StepCap },
                         run_id,
-                        state.tool_calls,
+                        state.ran.len(),
                     )
                     .await;
                 }
@@ -558,10 +551,9 @@ impl Agent {
                             (Error::domain("REPEATED_CALL", message).to_json(), false)
                         } else {
                             steps += 1;
-                            index += 1;
-                            state.tool_calls += 1;
+                            let request_id = format!("{}-{}", input.key, state.ran.len() + 1);
                             let Ran { value: result, ok, saved, raised, changes } =
-                                self.tool(&name, args, format!("{}-{index}", input.key)).await;
+                                self.tool(&name, args, request_id).await;
                             state.ran.push(if ok { name.clone() } else { format!("{name} (failed)") });
                             settles.extend(raised);
                             let wrote = saved.is_some();
