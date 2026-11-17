@@ -339,7 +339,7 @@ mod tests {
     use jiff::ToSpan;
 
     use crate::db::test::db;
-    use crate::domain::scheduling::schedule_week;
+    use crate::domain::scheduling::draft_week;
 
     /// 2026-10-12: "move today's workout to tomorrow, don't update the others". The owner's move skips a
     /// rest day; replanning must not cancel or move the other sessions to "repair" that.
@@ -349,9 +349,7 @@ mod tests {
         let tz = get_profile(&db).unwrap().tz();
         let week = jiff::civil::date(2026, 10, 12);
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
-        let planned = schedule_week(&db, week, now, None, None, &[]).unwrap();
-        let ids: Vec<String> =
-            planned["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
+        let ids = draft_week(&db, week, now, None, None, false, &[]).unwrap().created;
         let before: Vec<PlannedSession> = ids.iter().map(|id| PlannedSession::get(&db, id).unwrap().unwrap()).collect();
         assert_eq!(before.iter().map(|s| weekday(s.planned_start_at.local(&tz).date())).collect::<Vec<_>>(), [0, 2, 4]);
 
@@ -429,8 +427,7 @@ mod tests {
         let db = db();
         let week = jiff::civil::date(2026, 10, 12);
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
-        let planned = schedule_week(&db, week, now, None, None, &[]).unwrap();
-        let id = planned["sessions"][0]["id"].as_str().unwrap().to_string();
+        let id = draft_week(&db, week, now, None, None, false, &[]).unwrap().created.remove(0);
         let first = PlannedSession::get(&db, &id).unwrap().unwrap();
         let later = first.planned_end_at.mins(1);
         crate::domain::weekly::mark_missed(&db, later).unwrap();

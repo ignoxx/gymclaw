@@ -87,15 +87,15 @@ mod tests {
     use super::*;
     use crate::db::test::db;
     use crate::domain::replanning::{SessionPatch, edit_session};
-    use crate::domain::scheduling::schedule_week;
+    use crate::domain::scheduling::draft_week;
 
     /// A chain of moves counts once: its first slot is disliked, its last pick liked.
     #[test]
     fn a_chain_of_moves_counts_its_ends() {
         let db = db();
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
-        let planned = schedule_week(&db, jiff::civil::date(2026, 10, 12), now, None, None, &[]).unwrap();
-        let id = planned["sessions"][0]["id"].as_str().unwrap();
+        let planned = draft_week(&db, jiff::civil::date(2026, 10, 12), now, None, None, false, &[]).unwrap();
+        let id = planned.created[0].as_str();
         let first = crate::db::models::PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at;
         for (hours, request) in [(2, "move-1"), (5, "move-2")] {
             edit_session(

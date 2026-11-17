@@ -10,7 +10,6 @@ use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
 use crate::domain::{
     activities, availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling,
-    weekly,
 };
 use crate::error::Result;
 use crate::providers::google::google_provider;
@@ -192,36 +191,24 @@ impl Tool for PlanWeek {
             json!({"week": week.to_string(), "template_id": self.template_id}),
             cx.now,
             || {
-                let before: std::collections::BTreeSet<_> =
-                    PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
-                let template = match &self.template_id {
-                    Some(id) => Some(id.clone()),
+                let rotate = self.template_id.is_none();
+                let template = match self.template_id {
+                    Some(id) => Some(id),
                     None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id,
                 };
-                let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, template.as_deref(), &[])?;
-                if self.template_id.is_none() {
-                    // Before the lock below, or every new slot keeps the one template.
-                    let new: Vec<String> = PlannedSession::select(cx.db, "", [])?
-                        .into_iter()
-                        .map(|s| s.id)
-                        .filter(|id| !before.contains(id))
-                        .collect();
-                    weekly::assign_rotation(cx.db, cx.now, &new)?;
-                }
-                replanning::commit_upcoming(cx.db, cx.now)?;
-                let mut saved = Vec::new();
-                for data in planned["sessions"].as_array().into_iter().flatten() {
-                    if let Some(mut session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
-                        if !before.contains(&session.id) {
-                            session.user_locked = true;
-                            session.save(cx.db)?;
-                        }
-                        calendar_writes::queue_session_write(cx.db, &session, cx.now, false)?;
-                        saved.push(scheduling::session_data(&session));
+                let draft = scheduling::draft_week(cx.db, week, cx.now, None, template.as_deref(), rotate, &[])?;
+                // The agent placed these, like a session it creates: lock them.
+                for id in &draft.created {
+                    if let Some(mut session) = PlannedSession::get(cx.db, id)? {
+                        session.user_locked = true;
+                        session.save(cx.db)?;
                     }
                 }
-                planned["sessions"] = json!(saved);
-                Ok(planned)
+                let mut data = get_week(cx.db, week)?;
+                data["created_count"] = json!(draft.created.len());
+                data["minimum_met"] = json!(draft.minimum_met);
+                data["shortfall"] = json!(draft.shortfall);
+                Ok(data)
             },
         )?;
         Ok(result["data"].clone())

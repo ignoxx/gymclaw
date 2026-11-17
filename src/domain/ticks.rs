@@ -137,8 +137,7 @@ mod tests {
     use crate::db::models::PlannedSession;
     use crate::domain::calendar_writes::queue_session_write;
     use crate::domain::profile::update_profile;
-    use crate::domain::replanning::commit_upcoming;
-    use crate::domain::scheduling::schedule_week;
+    use crate::domain::scheduling::draft_week;
     use crate::error::Error;
     use crate::providers::fixture_calendar::FixtureCalendarProvider;
     use crate::time::iso;
@@ -152,8 +151,7 @@ mod tests {
     fn setup(changes: Value) -> (Connection, FixtureCalendarProvider) {
         let db = crate::db::test::with_short_template();
         update_profile(&db, changes.as_object().unwrap()).unwrap();
-        schedule_week(&db, Date::constant(2026, 10, 12), sunday(0), None, Some("short"), &[]).unwrap();
-        commit_upcoming(&db, sunday(0)).unwrap();
+        draft_week(&db, Date::constant(2026, 10, 12), sunday(0), None, Some("short"), false, &[]).unwrap();
         crate::db::models::RuntimeSettings { recipient: "123".into(), ..crate::db::test::authority() }
             .insert(&db)
             .unwrap();

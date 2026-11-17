@@ -402,7 +402,7 @@ mod tests {
     use crate::domain::calendar_writes::{apply_write, pending_writes};
     use crate::domain::planning::SlotSignal;
     use crate::domain::profile::update_profile;
-    use crate::domain::scheduling::schedule_week;
+    use crate::domain::scheduling::draft_week;
     use crate::domain::templates::import_template;
     use crate::domain::workout::start;
     use crate::providers::calendar::SyncBatch;
@@ -460,13 +460,8 @@ mod tests {
         import_template(&db, &template).unwrap();
         sync_calendar(&db, &mut provider, now(0)).unwrap();
         let signal = SlotSignal { start: at(14, 20, 0), crowd: Some(0.0), confidence: 1.0, preferred_time: 0.0 };
-        let result = schedule_week(&db, Date::constant(2026, 10, 12), now(0), None, Some("long"), &[signal]).unwrap();
-        commit_upcoming(&db, now(0)).unwrap();
-        let ids: Vec<String> =
-            result["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
-        for id in &ids {
-            queue_session_write(&db, &session(&db, id), now(0), false).unwrap();
-        }
+        let week = Date::constant(2026, 10, 12);
+        let ids = draft_week(&db, week, now(0), None, Some("long"), false, &[signal]).unwrap().created;
         publish(&db, &mut provider, now(1));
         sync_calendar(&db, &mut provider, now(2)).unwrap();
         assert!(ids.iter().all(|id| !session(&db, id).user_locked));
@@ -659,9 +654,9 @@ mod tests {
     #[test]
     fn write_retry_after_remote_success_no_duplicate_events() {
         let (db, mut provider, _) = setup();
-        let result = schedule_week(&db, Date::constant(2026, 10, 19), now(3), None, Some("long"), &[]).unwrap();
-        let next = session(&db, result["sessions"][0]["id"].as_str().unwrap());
-        let write = queue_session_write(&db, &next, now(3), false).unwrap().unwrap();
+        let week = Date::constant(2026, 10, 19);
+        let created = draft_week(&db, week, now(3), None, Some("long"), false, &[]).unwrap().created;
+        let write = queue_session_write(&db, &session(&db, &created[0]), now(3), false).unwrap().unwrap();
         let count = provider.event_count();
         provider.create_gym_event(&write.body_json).unwrap(); // Crash after Google accepted, before our ack.
         assert_eq!(apply_write(&db, &mut provider, &write.id, now(4), false).unwrap()["status"], "APPLIED");
