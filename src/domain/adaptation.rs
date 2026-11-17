@@ -14,8 +14,9 @@ use crate::domain::core::mutate;
 use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, lookup, similar, timed, unknown};
 use crate::domain::templates::{ExerciseSpec, Measure, catalog_slot, default_load, get_template, pick, remember_swap};
 use crate::domain::workout::{
-    active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logged_exercise_ids,
-    logs, make_exercise, measure, muscle, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
+    active_exercise, cancel_rest, choose_next, compatible, exercises, field, guide_id, load_workout,
+    logged_exercise_ids, logs, make_exercise, measure, muscle, name, snapshot, touch, transition, unresolved,
+    warmup_pending, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -44,14 +45,6 @@ pub fn spec_of(row: &WorkoutExercise) -> Result<ExerciseSpec> {
         fields.remove("warmup_required");
     }
     serde_json::from_value(config).map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Exercise {}: {e}", row.id)))
-}
-
-fn substitutes(row: &WorkoutExercise) -> Vec<String> {
-    row.config_json
-        .get("substitutes")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default()
 }
 
 pub fn machine_busy(
@@ -149,7 +142,7 @@ fn replacement_spec(
     if let Some(back) = swapped_away(db, &workout.id)?.iter().find(|e| e.exercise_id == substitute_id) {
         return spec_of(back);
     }
-    if substitutes(original).iter().any(|s| s == substitute_id)
+    if field::<Vec<String>>(original, "substitutes").iter().any(|s| s == substitute_id)
         && let Some(spec) = snapshot(workout)?.alternatives.into_iter().find(|e| e.id == substitute_id)
     {
         return Ok(spec);
@@ -207,14 +200,7 @@ pub fn substitute(
         replacement.substituted_from_exercise_id = Some(original.exercise_id.clone());
         replacement.rest_seconds = original.rest_seconds;
         // Neither original nor replacement prerequisites may be bypassed.
-        let mut required: Vec<String> = original
-            .config_json
-            .get("requires_completed")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
+        let mut required: Vec<String> = field(&original, "requires_completed");
         required.extend(spec.requires_completed.iter().cloned());
         required.sort();
         required.dedup();
@@ -264,7 +250,7 @@ pub fn alternatives(
     let mut used: HashSet<String> =
         rows.iter().flat_map(|e| std::iter::once(e.exercise_id.clone()).chain(guide_id(e).map(String::from))).collect();
     let pictures: HashSet<String> = used.iter().filter(|s| catalog().contains_key(*s)).map(|s| artwork(s)).collect();
-    // exercise_id → row, first-seen order (a later duplicate replaces the row, like a dict).
+    // exercise_id → row, first-seen order; a later duplicate replaces the row.
     let mut back: Vec<(String, &WorkoutExercise)> = vec![];
     for e in earlier.iter().filter(|e| e.position == exercise.position && !used.contains(&e.exercise_id)) {
         match back.iter_mut().find(|(k, _)| *k == e.exercise_id) {
@@ -282,7 +268,7 @@ pub fn alternatives(
         })
         .collect();
     used.extend(back.iter().filter_map(|(_, e)| guide_id(e).map(String::from)));
-    let allowed = substitutes(&exercise);
+    let allowed: Vec<String> = field(&exercise, "substitutes");
     for spec in snapshot(&workout)?.alternatives {
         let guide = spec.guide_id.as_deref();
         let taken = guide.is_some_and(|g| used.contains(g) || pictures.contains(&artwork(g)));

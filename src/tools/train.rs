@@ -269,7 +269,7 @@ impl Tool for SetCorrect {
         and updates the finished workout's summary card in the chat.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let seconds = self.minutes.map(|m| (m * 60.0).round() as i64);
+        let seconds = self.minutes.map(workout::in_seconds);
         let result = audit::correct_set(
             cx.db,
             &self.set_id,

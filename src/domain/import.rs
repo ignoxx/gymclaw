@@ -21,6 +21,7 @@ use crate::domain::core::mutate;
 use crate::domain::illustrations::{lookup, matching, suggestions};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{ExerciseSpec, Load, default_load, get_template, pick, template_ids};
+use crate::domain::workout::in_seconds;
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -247,7 +248,7 @@ pub fn from_chat(workouts: &[PastWorkout], unit: Option<Unit>, zone: &TimeZone) 
                 kind: SetType::Working,
                 weight: unit.kg(s.weight),
                 reps: s.reps,
-                seconds: s.minutes.map(|m| (m * 60.0).round() as i64),
+                seconds: s.minutes.map(in_seconds),
                 meters: s.meters,
             })
             .collect();

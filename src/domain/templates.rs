@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
 use crate::domain::illustrations::{Item, catalog, lookup, muscles, suggestions, timed, unknown};
-use crate::domain::workout::{format_distance, format_time, g};
+use crate::domain::workout::{format_distance, format_time, g, in_seconds};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -127,7 +127,12 @@ pub fn catalog_slot(original: &ExerciseSpec, item: &Item) -> ExerciseSpec {
     }
 }
 
-fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+/// About half the working weight on the plate steps, never above half: a warm-up's default.
+pub fn half_weight(target_weight: f64, increment: f64) -> f64 {
+    (target_weight / 2.0 / increment).floor() * increment
+}
+
+pub fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
@@ -292,7 +297,7 @@ impl ExerciseSpec {
 
     /// Length of one working set of a timed exercise.
     pub fn set_seconds(&self) -> Option<i64> {
-        self.minutes.filter(|_| self.measure == Measure::Time).map(|m| (m * 60.0).round() as i64)
+        self.minutes.filter(|_| self.measure == Measure::Time).map(in_seconds)
     }
 
     pub fn kind(&self) -> SetKind {
@@ -459,7 +464,7 @@ pub fn swapped(template: &Template, index: usize, replacement: &ExerciseSpec) ->
             original
                 .warmup_weight
                 .filter(|_| r.measure == Measure::Reps)
-                .map(|_| (r.target_weight / 2.0 / r.increment).floor() * r.increment)
+                .map(|_| half_weight(r.target_weight, r.increment))
         })
     };
     let new = ExerciseSpec {

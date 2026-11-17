@@ -87,7 +87,7 @@ static PER_SIDE: LazyLock<Regex> =
 
 /// A time with its unit in seconds: "25 min", "25m", "1.5h", "90s", "1:30" (minutes:seconds). A bare
 /// number is not a time: on a reps card it means reps.
-pub fn parse_duration(text: &str) -> Option<i64> {
+fn parse_duration(text: &str) -> Option<i64> {
     let clean = text.trim().to_lowercase();
     let m = DURATION.captures(&clean)?;
     let seconds = if let (Some(minutes), Some(secs)) = (m.get(3), m.get(4)) {
@@ -105,7 +105,7 @@ pub fn parse_duration(text: &str) -> Option<i64> {
 
 /// A distance in meters: "2 km", "2.5km", "500 meters". A bare "m" is meters only when `m_is_meters`
 /// (a distance exercise); elsewhere "25m" is minutes.
-pub fn parse_distance(text: &str, m_is_meters: bool) -> Option<f64> {
+fn parse_distance(text: &str, m_is_meters: bool) -> Option<f64> {
     let clean = text.trim().to_lowercase();
     let m = DISTANCE.captures(&clean)?;
     let meters = match &m[2] {
@@ -139,10 +139,10 @@ fn number(text: &str) -> f64 {
     text.replace(',', ".").parse().unwrap_or(f64::NAN)
 }
 
-/// Order is decided by unit words or "+", then rep plausibility (only one side above 30 is the weight), then closeness to `expected_weight`, then reps-first.
-pub fn parse_set(text: &str, set_type: SetType, expected_weight: Option<f64>, bodyweight: bool) -> Result<SetInput> {
+/// A working set of reps and weight. Order is decided by unit words or "+", then rep plausibility (only one side above 30 is the weight), then closeness to `expected_weight`, then reps-first.
+pub fn parse_set(text: &str, expected_weight: Option<f64>, bodyweight: bool) -> Result<SetInput> {
     let clean = PER_SIDE.replace_all(&text.trim().to_lowercase(), "").trim().to_string();
-    let set = |weight: f64, reps: i64| Ok(SetInput::reps(weight, reps, set_type));
+    let set = |weight: f64, reps: i64| Ok(SetInput::reps(weight, reps, SetType::Working));
     if bodyweight
         && let Some(m) = REPS_ONLY.captures(&clean)
         && let Ok(reps) = m[1].parse::<i64>()
@@ -187,7 +187,7 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Result<SetInput> {
-        parse_set(text, SetType::Working, None, false)
+        parse_set(text, None, false)
     }
 
     fn set(weight: f64, reps: i64) -> SetInput {
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn uses_expected_weight_when_order_is_unclear() {
-        assert_eq!(parse_set("12x10", SetType::Working, Some(10.0), false).unwrap(), set(10.0, 12));
+        assert_eq!(parse_set("12x10", Some(10.0), false).unwrap(), set(10.0, 12));
         assert_eq!(parse("12x10").unwrap(), set(10.0, 12)); // reps first by default
         assert_eq!(parse("8x22,5").unwrap(), set(22.5, 8));
     }
@@ -221,14 +221,14 @@ mod tests {
     #[test]
     fn implausible_reps_beat_a_stale_expected_weight() {
         // Expected 10 kg (a stale target) must not turn "49x10" into 49 reps at 10 kg.
-        assert_eq!(parse_set("49x10", SetType::Working, Some(10.0), false).unwrap(), set(49.0, 10));
-        assert_eq!(parse_set("59x7", SetType::Working, Some(7.0), false).unwrap(), set(59.0, 7));
+        assert_eq!(parse_set("49x10", Some(10.0), false).unwrap(), set(49.0, 10));
+        assert_eq!(parse_set("59x7", Some(7.0), false).unwrap(), set(59.0, 7));
     }
 
     #[test]
     fn bodyweight_set_is_reps_alone() {
         for text in ["13", "13 reps", "13x", "13 ×"] {
-            assert_eq!(parse_set(text, SetType::Working, None, true).unwrap(), set(0.0, 13), "{text}");
+            assert_eq!(parse_set(text, None, true).unwrap(), set(0.0, 13), "{text}");
         }
     }
 
@@ -251,7 +251,7 @@ mod tests {
             assert_eq!(parse(text).unwrap(), set(10.0, 8), "{text}");
         }
         for text in ["8/side", "8 per side", "8 each"] {
-            assert_eq!(parse_set(text, SetType::Working, None, true).unwrap(), set(0.0, 8), "{text}");
+            assert_eq!(parse_set(text, None, true).unwrap(), set(0.0, 8), "{text}");
         }
     }
 

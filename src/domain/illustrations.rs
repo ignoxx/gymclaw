@@ -16,8 +16,6 @@ pub struct Item {
     pub equipment: String,
     pub primary_muscle: String,
     #[serde(default)]
-    pub secondary_muscles: Vec<String>,
-    #[serde(default)]
     pub is_stretch: bool,
     #[serde(default)]
     pub frames: Vec<serde_json::Value>,
@@ -35,7 +33,7 @@ pub struct Entry {
 }
 
 /// Slug → item, sorted by slug (manifest order is not needed for any result).
-pub static CATALOG: LazyLock<BTreeMap<String, Item>> = LazyLock::new(|| {
+static CATALOG: LazyLock<BTreeMap<String, Item>> = LazyLock::new(|| {
     let path = crate::config::assets_dir().join("manifest.json");
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("workout guide manifest {}: {e}", path.display()));
@@ -47,7 +45,7 @@ pub fn catalog() -> &'static BTreeMap<String, Item> {
     &CATALOG
 }
 
-pub fn entry(item: &Item) -> Entry {
+fn entry(item: &Item) -> Entry {
     Entry {
         guide_id: item.slug.clone(),
         name: item.name.clone(),
@@ -129,7 +127,7 @@ const ALIASES: &[(&str, &str)] = &[
 const EQUIPMENT_WORDS: &[&str] =
     &["cable", "dumbbell", "barbell", "machine", "kettlebell", "smith", "band", "plate", "bodyweight"];
 
-pub fn words(text: &str) -> HashSet<String> {
+fn words(text: &str) -> HashSet<String> {
     let lower = text.to_lowercase();
     let spelled: Vec<&str> = lower
         .split(|c: char| !c.is_ascii_lowercase())

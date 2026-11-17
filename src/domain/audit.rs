@@ -176,7 +176,7 @@ pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: 
         let mut row = rows[index].clone();
         let value = match parse_block(text, measure(&row)) {
             Some(value) => value,
-            None => parse_set(text, SetType::Working, Some(row.target_weight), reps_alone(&row))?,
+            None => parse_set(text, Some(row.target_weight), reps_alone(&row))?,
         };
         value.validate()?;
         let working = logs(db, &row.id, Some(SetType::Working))?;

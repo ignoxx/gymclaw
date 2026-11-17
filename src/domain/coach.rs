@@ -23,9 +23,8 @@ use crate::domain::set_parser::{SetInput, parse_block, parse_set};
 use crate::domain::templates::{Load, Measure, SetKind, remember_swap};
 use crate::domain::view::{Button, Card, CardKind, CoachView, Edit};
 use crate::domain::workout::{
-    self, active_workout, cut_rest, exercises, expected_weight, format_distance, format_time, g, guide_id, kind,
-    log_set, logs, measure, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved,
-    working_count,
+    self, active_workout, cut_rest, exercises, format_distance, format_time, g, guide_id, kind, log_set, logs, measure,
+    name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -518,9 +517,9 @@ pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Re
         Some(value) => value,
         None => {
             let reps_alone = active.as_ref().is_some_and(workout::reps_alone);
-            let parsed = expected_weight(db, &workout.id)
-                .and_then(|expected| parse_set(text, SetType::Working, expected, reps_alone));
-            match parsed {
+            // The weight the card offers decides an unclear order.
+            let expected = active.as_ref().map(|row| workout::next_working_set(db, row)).transpose()?.flatten();
+            match parse_set(text, expected.map(|(weight, _)| weight), reps_alone) {
                 Ok(value) => value,
                 Err(Error::Domain { .. }) => return Ok(CoachView::default()),
                 Err(other) => return Err(other),
