@@ -4,7 +4,7 @@
 //!   every 15 min when enabled, `publish` after ticks when calendar writes are enabled, and the agent's
 //!   own triggers (`extensions::fire_due`). Then the outbox sends whatever the ticks queued.
 //! - Jobs: one loop sleeps until the next `notification_job` is due (or a wake-up after a write) and
-//!   fires it like `runtime fire`. REST jobs fire 30 s late: the coach countdown normally closes them.
+//!   fires it (`Scheduler::fire`). REST jobs fire 30 s late: the coach countdown normally closes them.
 //!
 //! Nothing runs or sends while `runtime_settings.enabled` is off.
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ use super::{Health, blocking, in_tx, outbox};
 use crate::db::models::{AgentEvent, JobKind, NotificationJob};
 use crate::domain::core::emit;
 use crate::domain::{profile, ticks};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::telegram::Telegram;
 use crate::time::Ts;
 
@@ -50,9 +50,7 @@ impl Scheduler {
             if !outbox::runtime_authority(db)?.enabled {
                 return Ok(vec![]);
             }
-            let tx = db.transaction()?;
-            outbox::settle_unknown(&tx, &recipient, Ts::now())?;
-            tx.commit()?;
+            crate::db::in_tx(db, |tx| outbox::settle_unknown(tx, &recipient, Ts::now()))?;
             outbox::pending(db, &recipient)
         })
         .await;
@@ -102,12 +100,6 @@ impl Scheduler {
         }
         let recipient = self.recipient.clone();
         let mut first_error = None;
-        let mut note = |r: Result<serde_json::Value>, what: &str| {
-            if let Err(e) = r {
-                tracing::warn!("{what}: {} {e}", e.code());
-                first_error.get_or_insert(e);
-            }
-        };
         let r = recipient.clone();
         // Calendar and crowd ticks fetch over the network inside their transaction (`network_tx`).
         let watch = blocking(&self.db_path, move |db| {
@@ -116,22 +108,17 @@ impl Scheduler {
             tx.commit()?;
             Ok(data)
         });
-        note(watch.await, "watch");
+        note(&mut first_error, "watch", watch.await);
         // The agent's own triggers queue wake events; the agent worker picks them up within a minute.
-        let triggers = in_tx(&self.db_path, |db| crate::domain::extensions::fire_due(db, Ts::now()).map(|n| json!(n)));
-        note(triggers.await, "triggers");
+        let triggers = in_tx(&self.db_path, |db| crate::domain::extensions::fire_due(db, Ts::now()));
+        note(&mut first_error, "triggers", triggers.await);
         // Commits per step (plan, publish, review event), so no outer transaction.
-        note(blocking(&self.db_path, |db| weekly_if_due(db, Ts::now())).await, "weekly");
+        note(&mut first_error, "weekly", blocking(&self.db_path, |db| weekly_if_due(db, Ts::now())).await);
         // The bot sends the recap as soon as the agent's review turn ends; this covers a review that
         // never ran. `pump` sends it after the ticks.
         let r = recipient.clone();
-        let recap = blocking(&self.db_path, move |db| {
-            let tx = db.unchecked_transaction()?;
-            let queued = crate::domain::weekly::release_recap(&tx, &r, Ts::now(), false)?;
-            tx.commit()?;
-            Ok(json!(queued))
-        });
-        note(recap.await, "recap");
+        let recap = in_tx(&self.db_path, move |db| crate::domain::weekly::release_recap(db, &r, Ts::now(), false));
+        note(&mut first_error, "recap", recap.await);
         if authority.crowd_polling_enabled && last_crowd.is_none_or(|t| t.elapsed() >= CROWD_EVERY) {
             *last_crowd = Some(Instant::now());
             let poll = blocking(&self.db_path, |db| {
@@ -140,11 +127,11 @@ impl Scheduler {
                 tx.commit()?;
                 Ok(data)
             });
-            note(poll.await, "crowd poll");
+            note(&mut first_error, "crowd poll", poll.await);
         }
         if authority.calendar_writes_enabled {
             // Network per write; it commits each write itself, so no outer transaction.
-            note(blocking(&self.db_path, |db| ticks::publish(db, Ts::now())).await, "publish");
+            note(&mut first_error, "publish", blocking(&self.db_path, |db| ticks::publish(db, Ts::now())).await);
         }
         match first_error {
             Some(e) => Err(e),
@@ -198,47 +185,50 @@ impl Scheduler {
         }
     }
 
-    /// `runtime fire`: advance the job and queue its message, then send it.
+    /// Advance the job and queue its message (`outbox::prepare_notification`), then send it.
     async fn fire(&self, job_id: &str) -> Result<()> {
         let id = job_id.to_string();
         let recipient = self.recipient.clone();
-        let data = blocking(&self.db_path, move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let data = outbox::prepare_notification(&tx, &id, Ts::now(), &recipient)?;
-            tx.commit()?;
-            Ok(data)
-        })
-        .await?;
-        if let Some(delivery) = data["delivery_id"].as_str() {
-            outbox::deliver(&self.db_path, self.tg.as_ref(), delivery, Ts::now()).await?;
+        let delivery = in_tx(&self.db_path, move |db| outbox::prepare_notification(db, &id, Ts::now(), &recipient));
+        if let Some(delivery) = delivery.await? {
+            outbox::deliver(&self.db_path, self.tg.as_ref(), &delivery, Ts::now()).await?;
         }
         Ok(())
     }
 }
 
+/// Log a failed tick step and keep the first error for the tick's result.
+fn note<T>(first_error: &mut Option<Error>, what: &str, result: Result<T>) {
+    if let Err(e) = result {
+        tracing::warn!("{what}: {} {e}", e.code());
+        first_error.get_or_insert(e);
+    }
+}
+
 /// When the job loop fires a job.
-pub fn fire_at(job: &NotificationJob) -> Ts {
+fn fire_at(job: &NotificationJob) -> Ts {
     if job.kind == JobKind::Rest { job.due_at + REST_GRACE } else { job.due_at }
 }
 
 /// Run `ticks::weekly` once per week, on Sunday from 23:00 profile-local (late, so a Sunday evening
 /// workout makes the recap; a restart before midnight still catches up), publish calendar writes, then
 /// wake the agent for its weekly review (`weekly::announce`); the recap follows it (`weekly::release_recap`).
-pub fn weekly_if_due(db: &crate::db::Connection, now: Ts) -> Result<serde_json::Value> {
+/// True when it ran.
+pub fn weekly_if_due(db: &crate::db::Connection, now: Ts) -> Result<bool> {
     let tz = profile::get_profile(db)?.tz();
     let local = now.local(&tz);
     if local.weekday() != jiff::civil::Weekday::Sunday || local.hour() < 23 {
-        return Ok(json!({"due": false}));
+        return Ok(false);
     }
     let week = local.date().checked_add(1.day())?.to_string();
     let done =
         AgentEvent::first(db, "WHERE type = 'runtime.weekly_ran' AND payload_json ->> 'week_start' = ?1", [&week])?;
     if done.is_some() {
-        return Ok(json!({"due": false}));
+        return Ok(false);
     }
     // Drafting and the agent event are idempotent per week, including across crashes.
     let tx = crate::db::network_tx(db)?;
-    let mut data = ticks::weekly(&tx, now)?;
+    ticks::weekly(&tx, now)?;
     tx.commit()?;
     // Publish before recording the weekly run; the agent reads the actual outbox state.
     let writes = outbox::runtime_authority(db)?.calendar_writes_enabled;
@@ -251,11 +241,10 @@ pub fn weekly_if_due(db: &crate::db::Connection, now: Ts) -> Result<serde_json::
             }
         };
     let tx = db.unchecked_transaction()?;
-    data["published"] = json!(published);
-    data["announced"] = crate::domain::weekly::announce(&tx, now, writes && !published)?;
+    crate::domain::weekly::announce(&tx, now, writes && !published)?;
     emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
-    Ok(data)
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -267,13 +256,10 @@ mod tests {
         let db = crate::db::test::db();
         // Saturday 20:00 and Sunday 22:59 Berlin: not yet (ticks::weekly isn't even called).
         for at in ["2026-10-17T18:00:00Z", "2026-10-18T20:59:00Z"] {
-            assert_eq!(weekly_if_due(&db, Ts::parse(at, None).unwrap()).unwrap(), json!({"due": false}));
+            assert!(!weekly_if_due(&db, Ts::parse(at, None).unwrap()).unwrap());
         }
         // Already ran for the week starting Monday 19 Oct: not again.
         emit(&db, "runtime.weekly_ran", Ts::now(), json!({"week_start": "2026-10-19"})).unwrap();
-        assert_eq!(
-            weekly_if_due(&db, Ts::parse("2026-10-18T21:30:00Z", None).unwrap()).unwrap(),
-            json!({"due": false})
-        );
+        assert!(!weekly_if_due(&db, Ts::parse("2026-10-18T21:30:00Z", None).unwrap()).unwrap());
     }
 }
