@@ -115,7 +115,7 @@ impl Tool for ActivityTool {
             Some(text) => Some(Ts::parse(text, Some(&tz))?),
             None => None,
         };
-        let mut fields = activities::Fields {
+        let fields = activities::Fields {
             kind: self.kind,
             at,
             minutes: self.minutes,
@@ -126,10 +126,7 @@ impl Tool for ActivityTool {
         };
         let id = || self.activity_id.as_deref().ok_or_else(|| Error::domain("ARGUMENT_REQUIRED", "Pass activity_id"));
         match self.action {
-            ActivityAction::Log => {
-                fields.at = fields.at.or(Some(cx.now));
-                activities::log(cx.db, fields, cx.now, &cx.request_id)
-            }
+            ActivityAction::Log => activities::log(cx.db, fields, cx.now, &cx.request_id),
             ActivityAction::Update => activities::update(cx.db, id()?, fields, cx.now, &cx.request_id),
             ActivityAction::Remove => activities::remove(cx.db, id()?, cx.now, &cx.request_id),
         }

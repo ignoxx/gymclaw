@@ -208,7 +208,10 @@ mod tests {
         RuntimeSettings { calendar_writes_enabled: true, ..crate::db::test::authority() }.insert(&db).unwrap();
         // Pausing stops the ticks that publish; it leaves the owner's calendar grant alone.
         let paused = call(&db, "runtime_pause", json!({})).unwrap();
-        assert_eq!((paused["enabled"].as_bool(), paused["calendar_writes_enabled"].as_bool()), (Some(false), Some(true)));
+        assert_eq!(
+            (paused["enabled"].as_bool(), paused["calendar_writes_enabled"].as_bool()),
+            (Some(false), Some(true))
+        );
         assert_eq!(call(&db, "calendar_writes_revoke", json!({})).unwrap()["calendar_writes_enabled"], false);
         assert_eq!(
             call(&db, "runtime_resume", json!({"owner_asked": false})).unwrap_err().code(),

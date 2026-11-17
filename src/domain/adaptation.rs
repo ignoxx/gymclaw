@@ -706,8 +706,11 @@ mod tests {
         let exercise = spec(
             json!({"id": "hip-thrust-machine", "name": "Hip Thrust Machine", "role": "glutes", "muscle": "glutes", "target_weight": 60, "warmup_weight": 30, "per_side": true, "group": "a"}),
         );
-        db.execute("INSERT INTO workout_session (id, status, waited_for_equipment_count) VALUES ('w', 'PLAN_UPDATED', 0)", [])
-            .unwrap();
+        db.execute(
+            "INSERT INTO workout_session (id, status, waited_for_equipment_count) VALUES ('w', 'PLAN_UPDATED', 0)",
+            [],
+        )
+        .unwrap();
         let row = make_exercise(&db, "w", &exercise, 0, true, None).unwrap();
         assert_eq!(row.config_json["warmup_required"], json!(true));
         assert_eq!(spec_of(&row).unwrap(), exercise);
