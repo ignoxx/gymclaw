@@ -66,8 +66,6 @@ Trust rules:
 Finish every turn with exactly one of: the reply tool (a message with optional buttons, and/or a reaction), a plain text answer, or nothing (reply with no fields) when nothing needs saying. \
 A button tap comes back to you as the button's value, so make values plain requests (\"Move Push to 13:00\").";
 
-/// Agent events the owner may need to act on (old `events pending`).
-pub use crate::domain::events::ACTIONABLE;
 /// Chat rows in the window.
 pub const HISTORY: i64 = 30;
 
@@ -283,7 +281,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
 
     let mut shown = vec![];
     for mut e in crate::domain::events::open_issues(db)? {
-        if crate::domain::events::WAKE.contains(&e.r#type.as_str()) {
+        if crate::domain::events::wakes(&e.r#type) {
             shown.push(e.id.clone());
         }
         crate::time::localize(&mut e.payload_json.0, &tz);
