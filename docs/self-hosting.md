@@ -114,8 +114,8 @@ docker compose exec gymclaw gymclaw call runtime_resume '{"owner_asked": true, "
 
 **Calendar writes** are a separate grant. Check what would be written with
 `calendar_pending_writes`, then add `"calendar_writes": true` to `runtime_resume` (or ask the bot).
-`calendar_writes_revoke` takes that grant back. `runtime_pause` stops everything and revokes
-calendar writes; resuming never restores them unless asked. `runtime_status` shows what's on.
+`calendar_writes_revoke` takes that grant back. `runtime_pause` stops everything, writes included;
+`runtime_resume` brings back what was granted. `runtime_status` shows what's on.
 
 ## When a message goes missing
 
