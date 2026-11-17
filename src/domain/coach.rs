@@ -833,7 +833,7 @@ pub fn handle_action(
 }
 
 /// 'Start workout' on the session reminder: start that planned session's workout and send its first card.
-pub fn begin(db: &Connection, r: &str, now: Ts, request_id: &str) -> Result<CoachView> {
+fn begin(db: &Connection, r: &str, now: Ts, request_id: &str) -> Result<CoachView> {
     if let Some(running) = active_workout(db)? {
         return Ok(acked("Already running.", vec![exercise_card(db, &running.id, now)?]));
     }
@@ -844,9 +844,9 @@ pub fn begin(db: &Connection, r: &str, now: Ts, request_id: &str) -> Result<Coac
     let Some((planned, template_id)) = planned.and_then(|p| p.workout_template_id.clone().map(|t| (p, t))) else {
         return Ok(acked("⌛ This session can't be started anymore.", vec![]));
     };
-    start(db, Some(&template_id), Some(&planned.id), true, now, request_id)?;
-    let running = active_workout(db)?.ok_or_else(|| Error::domain("NO_ACTIVE_WORKOUT", "Workout did not start"))?;
-    Ok(acked("▶️ Started.", vec![exercise_card(db, &running.id, now)?]))
+    let started = start(db, Some(&template_id), Some(&planned.id), true, now, request_id)?;
+    let workout_id = started["data"]["workout_id"].as_str().unwrap_or_default();
+    Ok(acked("▶️ Started.", vec![exercise_card(db, workout_id, now)?]))
 }
 
 /// Session preview as a standalone coach message (the live card stays).
