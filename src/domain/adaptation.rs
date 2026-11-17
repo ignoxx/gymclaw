@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
-use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, search, similar, timed};
+use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, lookup, similar, timed, unknown};
 use crate::domain::templates::{ExerciseSpec, Measure, default_load, get_template, pick, remember_swap};
 use crate::domain::workout::{
     active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logs, make_exercise,
@@ -419,13 +419,7 @@ fn resolve(
     )? {
         return Ok((None, known.swap_remove(i)));
     }
-    let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
-    let Some(item) = item else {
-        let options: Vec<String> =
-            search(query, None, None, 5).iter().map(|o| format!("{} ({})", o.guide_id, o.name)).collect();
-        let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
-        crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{query}'. Pass one guide_id: {options}");
-    };
+    let item = lookup(query).ok_or_else(|| unknown(query))?;
     let base = |k: &str| current.and_then(|c| c.config_json.get(k).cloned());
     // A cardio machine or hold is timed; from another timed exercise it keeps that one's sets and time.
     let is_timed = timed(Some(&item.slug));

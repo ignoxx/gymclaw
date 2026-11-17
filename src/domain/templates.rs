@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
-use crate::domain::illustrations::{catalog, muscles, search, timed};
+use crate::domain::illustrations::{catalog, lookup, muscles, suggestions, timed, unknown};
 use crate::domain::workout::{format_distance, format_time, g};
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -374,7 +374,7 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
         .chain(&template.alternatives)
         .filter(|s| s.guide_id.is_none())
         .map(|s| {
-            let options: Vec<String> = search(&s.name, None, None, 3).into_iter().map(|e| e.guide_id).collect();
+            let options = suggestions(&s.name);
             format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
         })
         .collect();
@@ -542,8 +542,7 @@ pub fn edit_exercise(
     let rows = definition[list].as_array_mut().expect("exercise list");
     match edit {
         ExerciseEdit::Add(changes) => {
-            let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
-            let mut spec = match item {
+            let mut spec = match lookup(exercise) {
                 Some(item) => {
                     let mut spec = serde_json::json!({"id": item.slug, "name": item.name, "role": "accessory", "guide_id": item.slug, "target_weight": 0});
                     if timed(Some(&item.slug)) {
@@ -561,17 +560,11 @@ pub fn edit_exercise(
                 None if changes.contains_key("id") && changes.contains_key("muscle") => {
                     serde_json::json!({"name": exercise.trim(), "role": "accessory", "target_weight": 0})
                 }
-                None => {
-                    let options: Vec<String> = search(exercise, None, None, 5)
-                        .iter()
-                        .map(|o| format!("{} ({})", o.guide_id, o.name))
-                        .collect();
-                    let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
-                    crate::bail!(
-                        "EXERCISE_UNKNOWN",
-                        "No exact match for '{exercise}'. Pass one guide_id: {options}; or, to keep the owner's name without a picture, pass fields.id and fields.muscle"
-                    );
-                }
+                None => crate::bail!(
+                    "EXERCISE_UNKNOWN",
+                    "{}; or, to keep the owner's name without a picture, pass fields.id and fields.muscle",
+                    unknown(exercise)
+                ),
             };
             spec.as_object_mut().unwrap().extend(changes.clone());
             // Exercises are told apart by id; the guide_id only picks the picture, so two machine
