@@ -10,16 +10,15 @@ macro_rules! table {
         pub struct $name { $(#[$pkmeta])* pub $pk: $pkty, $($(#[$fmeta])* pub $field: $ty),* }
 
         impl $name {
-            pub const TABLE: &'static str = $table;
-            pub const FIELDS: &'static [&'static str] = &[stringify!($pk) $(, stringify!($field))*];
+            const FIELDS: &'static [&'static str] = &[stringify!($pk) $(, stringify!($field))*];
 
             /// Quoted column list (`r#type` → "type").
-            pub fn columns() -> &'static str {
+            fn columns() -> &'static str {
                 static COLUMNS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
                 COLUMNS.get_or_init(|| Self::FIELDS.iter().map(|f| format!("\"{}\"", f.trim_start_matches("r#"))).collect::<Vec<_>>().join(", "))
             }
 
-            pub fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+            fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
                 let mut i = 0usize;
                 let mut next = || { i += 1; i - 1 };
                 Ok($name { $pk: row.get(next())?, $($field: row.get(next())?),* })
