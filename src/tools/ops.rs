@@ -108,13 +108,12 @@ pub struct RuntimePause {}
 
 impl Tool for RuntimePause {
     const NAME: &'static str = "runtime_pause";
-    const DESCRIPTION: &'static str =
-        "Stop all reminders, briefings, planning ticks and calendar writes until the owner explicitly resumes.";
+    const DESCRIPTION: &'static str = "Stop all reminders, briefings, planning ticks and calendar writes until the owner \
+explicitly resumes. Resuming restores calendar writes if they were granted.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let mut settings = settings(cx)?;
         settings.enabled = false;
-        settings.calendar_writes_enabled = false;
         settings.update(cx.db)?;
         Ok(serde_json::to_value(outbox::runtime_authority(cx.db)?)?)
     }
@@ -207,8 +206,10 @@ mod tests {
     fn separate_calendar_write_authority_and_resume_needs_the_owner() {
         let db = crate::db::test::db();
         RuntimeSettings { calendar_writes_enabled: true, ..crate::db::test::authority() }.insert(&db).unwrap();
+        // Pausing stops the ticks that publish; it leaves the owner's calendar grant alone.
+        let paused = call(&db, "runtime_pause", json!({})).unwrap();
+        assert_eq!((paused["enabled"].as_bool(), paused["calendar_writes_enabled"].as_bool()), (Some(false), Some(true)));
         assert_eq!(call(&db, "calendar_writes_revoke", json!({})).unwrap()["calendar_writes_enabled"], false);
-        assert_eq!(call(&db, "runtime_pause", json!({})).unwrap()["enabled"], false);
         assert_eq!(
             call(&db, "runtime_resume", json!({"owner_asked": false})).unwrap_err().code(),
             "RUNTIME_NOT_APPROVED"
