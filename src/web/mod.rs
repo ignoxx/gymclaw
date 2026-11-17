@@ -109,16 +109,15 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         }
         let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let db = crate::db::open(&db_path)?;
-            let dir = db_path.parent().unwrap_or(std::path::Path::new("."));
-            let mut cx = crate::tools::Ctx {
-                db: &db,
-                now: Ts::now(),
-                request_id: format!("dashboard:{}", crate::db::new_id()),
-                data_dir: dir,
-                effects: vec![],
-            };
-            crate::tools::call(&mut cx, &tool, args)
+            let data_dir = db_path.parent().unwrap_or(Path::new("."));
+            crate::db::in_tx(&mut crate::db::open(&db_path)?, |db| {
+                let request_id = format!("dashboard:{}", crate::db::new_id());
+                crate::tools::call(
+                    &mut crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, effects: vec![] },
+                    &tool,
+                    args,
+                )
+            })
         })
         .await;
         return match result {
@@ -271,7 +270,7 @@ mod tests {
             assert_eq!(get(&app, Method::GET, path, "gym.example").await.status(), StatusCode::NOT_FOUND, "{path}");
         }
         assert_eq!(get(&app, Method::POST, "/api/state", "gym.example").await.status(), StatusCode::NOT_FOUND);
-        let _ = std::fs::remove_file(&app.db_path);
+        let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
     }
 
     #[tokio::test]
@@ -301,7 +300,7 @@ mod tests {
         );
         let db = crate::db::open_readonly(&app.db_path).unwrap();
         assert_eq!(crate::tools::meta::notes(&db).unwrap()[0].text, "Weighs in on Sundays");
-        let _ = std::fs::remove_file(&app.db_path);
+        let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
     }
 
     #[tokio::test]
@@ -340,6 +339,19 @@ mod tests {
             crate::domain::templates::get_template(&crate::db::open_readonly(&app.db_path).unwrap(), "legs").unwrap();
         let weights: Vec<f64> = stored.exercises.iter().map(|e| e.target_weight).collect();
         assert_eq!(weights, [85.0, 150.0]);
-        let _ = std::fs::remove_file(&app.db_path);
+
+        // A write that fails midway (here refreshing a planned session, after the plan was saved)
+        // leaves nothing behind.
+        let db = crate::db::open(&app.db_path).unwrap();
+        crate::db::models::PlannedSession::new("2026-11-16".into(), Some("legs".into()), false).insert(&db).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail BEFORE UPDATE ON planned_session BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+        )
+        .unwrap();
+        let failed = post(&app, "/api/template_edit_exercise", &edit(r#"{"target_weight":160}"#), "same-origin").await;
+        let body = axum::body::to_bytes(failed.into_body(), 8192).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("disk full"));
+        assert_eq!(crate::domain::templates::get_template(&db, "legs").unwrap().exercises[1].target_weight, 150.0);
+        let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
     }
 }

@@ -51,6 +51,15 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Run `f` in one transaction (holding the write lock, see `open`), committed only when it succeeds:
+/// a failure midway leaves nothing behind. `domain::core::mutate` relies on its caller for this.
+pub fn in_tx<T>(conn: &mut Connection, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    let tx = conn.transaction()?;
+    let value = f(&tx)?;
+    tx.commit()?;
+    Ok(value)
+}
+
 /// A DEFERRED transaction for work that calls the network: it doesn't hold the write lock through the
 /// fetch, so taps and typed sets aren't stalled behind Google. Under WAL its reads never block a writer;
 /// if one commits mid-fetch, this transaction's own write fails and the next tick retries.

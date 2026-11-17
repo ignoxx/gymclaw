@@ -56,18 +56,12 @@ pub async fn blocking<T: Send + 'static>(
     .unwrap_or_else(|e| Err(Error::domain("INTERNAL", format!("worker failed: {e}"))))
 }
 
-/// `blocking` inside one transaction (holding the write lock, see `db::open`), committed when `f` succeeds.
+/// `blocking` inside one transaction (`db::in_tx`).
 pub async fn in_tx<T: Send + 'static>(
     db_path: &Path,
     f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    blocking(db_path, move |db| {
-        let tx = db.transaction()?;
-        let value = f(&tx)?;
-        tx.commit()?;
-        Ok(value)
-    })
-    .await
+    blocking(db_path, move |db| crate::db::in_tx(db, f)).await
 }
 
 /// Run the bot: Telegram long-poll, agent turns, coach, scheduler and outbox, until shutdown.
