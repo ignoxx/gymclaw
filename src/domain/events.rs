@@ -79,7 +79,7 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 /// sent by the outbox as the session's own message; the owner's answer reaches the agent. A trigger
 /// the agent set itself (`extension.trigger`) wakes it with its own instruction.
 ///
-/// `agent.reflect` (`extensions::reflect`) wakes it to learn from a hard or disliked turn. It is not
+/// `agent.reflect` (`extensions::reflect`) wakes it to learn from a hard turn. It is not
 /// `ACTIONABLE`: an owner turn never sees it as an open issue, so it runs only once the chat is quiet.
 pub const WAKE: [&str; 7] = [
     "planning.attention",

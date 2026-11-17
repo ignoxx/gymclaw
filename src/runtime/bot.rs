@@ -63,6 +63,8 @@ struct Inbound {
     message_id: i64,
     key: String,
     images: Vec<Media>,
+    /// True for background event batches; false for owner messages and reactions.
+    background: bool,
 }
 
 enum Fast {
@@ -316,8 +318,8 @@ impl Bot {
                 };
                 self.to_agent(
                     0,
-                    format!("tg-react:{message_id}"),
-                    format!("[reacted 👎 to: \"{reply_preview}\"]"),
+                    format!("tg-react:{message_id}-{}", Ts::now().0.as_millisecond()),
+                    format!("[reacted 👎 to: \"{reply_preview}\"; find what was wrong, fix it if you can, and save a learned note so it won't repeat]"),
                     vec![],
                     json!({"kind": "reaction", "emoji": "👎", "target_msg": message_id}),
                 )
@@ -419,7 +421,7 @@ impl Bot {
         if let Err(e) = saved {
             tracing::warn!("chat history write failed: {e}");
         }
-        self.inbox.lock().await.push(Inbound { message_id, key, images });
+        self.inbox.lock().await.push(Inbound { message_id, key, images, background: false });
         self.inbox_ready.notify_one();
     }
 
@@ -620,7 +622,7 @@ impl Bot {
         })
         .await?;
         let review = events.as_array().into_iter().flatten().any(|e| e["type"] == "planning.weekly_briefing");
-        if self.turn(vec![Inbound { message_id: 0, key, images: vec![] }], review).await {
+        if self.turn(vec![Inbound { message_id: 0, key, images: vec![], background: true }], review).await {
             in_tx(self.db(), move |db| {
                 for id in ids {
                     crate::domain::events::ack(db, &id, Ts::now())?;
@@ -649,7 +651,7 @@ impl Bot {
         };
         let last = batch.last().expect("non-empty batch").clone();
         let images = batch.iter().flat_map(|b| b.images.clone()).collect();
-        let background = batch.iter().all(|b| b.message_id == 0);
+        let background = batch.iter().all(|b| b.background);
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
         typing.abort();
         if review {
@@ -1007,7 +1009,7 @@ mod tests {
 
         // The owner writes while a background turn thinks: it stays silent and settles nothing.
         attention("Session y: skips a rest day");
-        bot.inbox.lock().await.push(Inbound { message_id: 8, key: "tg-8".into(), images: vec![] });
+        bot.inbox.lock().await.push(Inbound { message_id: 8, key: "tg-8".into(), images: vec![], background: false });
         let sent = |tg: &crate::telegram::coach::tests::FakeTelegram| {
             tg.calls().iter().filter(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))).count()
         };

@@ -318,15 +318,19 @@ impl Agent {
         let mut settles = vec![];
         let mut actions = vec![];
         // Snapshot the owner's message that started this turn, before the model runs (the owner
-        // may send more messages while we're working, e.g. "thanks").
-        let asked_text = blocking(&self.db_path, |db| {
-            Ok::<String, crate::error::Error>(
-                crate::db::models::ChatMessage::first(db, "WHERE role = 'owner' ORDER BY id DESC", [])?
-                    .map_or_else(String::new, |m| m.text),
-            )
-        })
-        .await
-        .unwrap_or_default();
+        // may send more messages while we're working, e.g. "thanks"). Background turns skip this.
+        let asked_text = if !input.background {
+            blocking(&self.db_path, |db| {
+                Ok::<String, crate::error::Error>(
+                    crate::db::models::ChatMessage::first(db, "WHERE role = 'owner' ORDER BY id DESC", [])?
+                        .map_or_else(String::new, |m| m.text),
+                )
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let result = tokio::time::timeout(
             DEADLINE,
             self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles, &mut actions),

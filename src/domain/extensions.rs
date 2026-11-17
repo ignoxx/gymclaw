@@ -301,8 +301,9 @@ impl Extension {
     }
 }
 
-/// Creates the extension, or saves a new version of the one with this kind and name. Saving never
-/// turns an extension back on: one the owner turned off stays off.
+/// Creates the extension, or saves a new version of the one with this kind and name. A spent one-off
+/// trigger (auto-disabled after firing) is re-enabled when saved with a new future time; one the
+/// owner turned off stays off.
 pub fn save(db: &Connection, name: &str, spec: Spec, author: Author, now: Ts) -> Result<Extension> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 40 {
@@ -332,14 +333,18 @@ pub fn save(db: &Connection, name: &str, spec: Spec, author: Author, now: Ts) ->
         Some(mut ext) => {
             ext.spec_json = Json(spec);
             // A one-off that fired auto-disables itself (Author::Agent). Saving a new future time
-            // re-enables it, but one the owner turned off stays off.
+            // re-enables it, but one the owner turned off stays off. We find the version that
+            // actually turned it off: the first disabled version after the last enabled one.
             if !ext.enabled
                 && let Spec::Trigger { when, .. } = &*ext.spec_json
                 && matches!(when.slot(), Ok(Slot::Once(_)))
             {
-                let last_author =
-                    ExtensionVersion::first(db, "WHERE extension_id = ?1 ORDER BY version DESC", [ext.id()])?;
-                if last_author.is_some_and(|v| v.author == Author::Agent) {
+                let turned_off: Option<Author> = db.query_row(
+                    "SELECT author FROM extension_version                      WHERE extension_id = ?1 AND NOT enabled                        AND version > COALESCE((SELECT MAX(version) FROM extension_version WHERE extension_id = ?1 AND enabled), 0)                      ORDER BY version ASC LIMIT 1",
+                    [ext.id()],
+                    |r| r.get(0),
+                ).ok();
+                if turned_off == Some(Author::Agent) {
                     check_room(db)?;
                     ext.enabled = true;
                 }
@@ -629,7 +634,7 @@ pub enum Lesson<'a> {
     Hard { calls: usize, forced: Option<&'a str>, tools: &'a [String], asked: &'a str },
 }
 
-/// Wakes the agent, once the chat is quiet, to turn a hard or disliked turn into a playbook or note,
+/// Wakes the agent, once the chat is quiet, to turn a hard turn into a playbook or note,
 /// so the same request goes right next time. Hermes-style self-written skills, through the same
 /// extension layer. At most `REFLECTS_PER_DAY`; returns whether it raised one.
 pub fn reflect(db: &Connection, run_id: &str, lesson: Lesson, now: Ts) -> Result<bool> {
@@ -896,7 +901,7 @@ mod tests {
     /// A hard turn wakes the agent to save a playbook, but only once the chat is quiet: it is never an
     /// open issue of an owner turn. A 👎 names what the owner asked before that reply. Capped per day.
     #[test]
-    fn hard_and_disliked_turns_wake_a_reflection() {
+    fn hard_turns_wake_a_reflection() {
         let db = crate::db::test::db();
         let now = at("2026-11-15T09:00:00Z");
         let say = |role, text: &str| {
