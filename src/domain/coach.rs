@@ -292,8 +292,7 @@ fn next_session(db: &Connection, now: Ts, tz: &jiff::tz::TimeZone) -> Result<Opt
 /// The wrap-up card: totals, pace and volume against the last session of the same workout, every
 /// lift that beat earlier sessions (🏆 for records, with confetti), next targets, where the week
 /// stands, every set in a collapsed quote, then the crowd question.
-fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
-    let report = &result["data"];
+fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
     let workout_id = report["workout_id"].as_str().unwrap_or_default();
     let h = highlights::workout(db, workout_id)?;
     let profile = crate::domain::profile::get_profile(db)?;
@@ -484,7 +483,8 @@ pub fn card_context(db: &Connection, telegram_message_id: i64) -> Result<Option<
 fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Vec<Card>> {
     let workout = workout::load_workout(db, workout_id, None)?;
     if workout.status == WorkoutStatus::WorkoutComplete {
-        return Ok(vec![summary_card(db, &audit::finish(db, workout_id, now, &format!("{request_id}:finish"))?, now)?]);
+        let finished = audit::finish(db, workout_id, now, &format!("{request_id}:finish"))?;
+        return Ok(vec![summary_card(db, &finished["data"], now)?]);
     }
     Ok(vec![exercise_card(db, workout_id, now)?])
 }

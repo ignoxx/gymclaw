@@ -238,10 +238,10 @@ impl Tool for WorkoutAudit {
     const NAME: &'static str = "workout_audit";
     const LISTED: Listed = Listed::Never;
     const DESCRIPTION: &'static str =
-        "Saved audit of a finished workout: sets, duration, ETA error, progressions, crowd feedback.";
+        "Audit of a finished workout: sets, duration, ETA error, next-weight decisions, crowd feedback.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        audit::get_audit(cx.db, &self.workout_id)
+        audit::report(cx.db, &self.workout_id)
     }
 }
 

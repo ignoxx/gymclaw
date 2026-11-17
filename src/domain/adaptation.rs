@@ -577,7 +577,7 @@ mod tests {
     use super::*;
     use crate::db::models::{ExerciseProgression, NotificationJob};
     use crate::db::test::db;
-    use crate::domain::audit::{finish, get_audit};
+    use crate::domain::audit::{finish, report};
     use crate::domain::set_parser::SetInput;
     use crate::domain::templates::{Template, get_template, import_template, orphaned_history};
     use crate::domain::workout::tests::{at, spec};
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!((data["equipment_waits"].as_i64(), data["progression_count"].as_i64()), (Some(1), Some(3)));
         assert_eq!((progression(&db, "bench"), progression(&db, "fly")), (Some(82.5), Some(52.5)));
         assert_eq!(finish(&db, &id, at(310), "finish").unwrap(), result);
-        assert_eq!(get_audit(&db, &id).unwrap(), result["data"]);
+        assert_eq!(report(&db, &id).unwrap(), result["data"]);
         let second = start(&db, Some("adapt"), None, false, at(2 * 86400), "next").unwrap();
         assert_eq!(second["data"]["active_exercise"]["target_weight"], 50.0); // warm-up unchanged
         let row = second["data"]["active_exercise"]["id"].as_str().unwrap();
