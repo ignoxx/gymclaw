@@ -44,8 +44,13 @@ pub fn pending(db: &Connection, include_all: bool) -> Result<Vec<Value>> {
     };
     Ok(AgentEvent::select(db, &format!("WHERE handled_at IS NULL {filter} ORDER BY created_at, id"), [])?
         .into_iter()
-        .map(|e| json!({"id": e.id, "type": e.r#type, "created_at": e.created_at, "payload": e.payload_json, "correlation_id": e.correlation_id}))
+        .map(listed)
         .collect())
+}
+
+/// An event as `pending` and the wake batch show it.
+fn listed(e: AgentEvent) -> Value {
+    json!({"id": e.id, "type": e.r#type, "created_at": e.created_at, "payload": e.payload_json, "correlation_id": e.correlation_id})
 }
 
 pub fn ack(db: &Connection, event_id: &str, now: Ts) -> Result<Value> {
@@ -73,23 +78,31 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
 /// resolved; acknowledging a model wake must not imply the owner granted authority. A no-show is
 /// sent by the outbox as the session's own message; the owner's answer reaches the agent. A trigger
 /// the agent set itself (`extension.trigger`) wakes it with its own instruction.
-pub const WAKE: [&str; 6] = [
+///
+/// `agent.reflect` (`extensions::reflect`) wakes it to learn from a hard or disliked turn. It is not
+/// `ACTIONABLE`: an owner turn never sees it as an open issue, so it runs only once the chat is quiet.
+pub const WAKE: [&str; 7] = [
     "planning.attention",
     "planning.replan_required",
     "workout.missed",
     "planning.weekly_briefing",
     "workout.stale",
     "extension.trigger",
+    "agent.reflect",
 ];
 
 /// Unhandled wake events, oldest first. The weekly review wakes at once; the Sunday recap waits for it
 /// (`weekly::release_recap`).
 pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
-    Ok(pending(db, false)?
-        .into_iter()
-        .filter(|e| e["type"].as_str().is_some_and(|t| WAKE.contains(&t)))
-        .take(20)
-        .collect())
+    let types = WAKE.map(|t| format!("'{t}'")).join(", ");
+    Ok(AgentEvent::select(
+        db,
+        &format!("WHERE handled_at IS NULL AND type IN ({types}) ORDER BY created_at, id LIMIT 20"),
+        [],
+    )?
+    .into_iter()
+    .map(listed)
+    .collect())
 }
 
 /// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context.

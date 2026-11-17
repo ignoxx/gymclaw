@@ -103,9 +103,10 @@ model never has to. Timestamps without an offset are the owner's local time.
 - Extensions (`domain::extensions`, #92): the layer the agent writes at runtime, built on the tools
   above and never around them. A **playbook** is named steps for a request that keeps coming back; a
   **collection** is the agent's own log (`agent_data` rows via `data_add`, read with `sql_query`); a
-  **trigger** is a daily/weekly local time or a finished workout that raises an `extension.trigger`
-  decision event carrying the agent's own instruction, so it wakes through the same path as every other
-  background event and may stay silent. Triggers run no logic and get no owner permission: the
+  **trigger** is a daily/weekly local time, one local date and time (off again once it has passed), a
+  set number of minutes before each planned session (optionally one workout's), or a finished workout,
+  that raises an `extension.trigger` decision event carrying the agent's own instruction, so it wakes
+  through the same path as every other background event and may stay silent. Triggers run no logic and get no owner permission: the
   `extension.trigger` wake is a background turn, where `runtime_resume` (and with it calendar writes)
   refuses. One wake per trigger per slot, slots older than an hour are skipped, at most 8 trigger wakes a
   day. Every change is a new `extension_version` row and can be restored; enabled extensions appear in
@@ -113,6 +114,13 @@ model never has to. Timestamps without an offset are the owner's local time.
   Memory tab. A request no tool covers goes to `capability_gap` (the `capability_gap` tool, plus a row
   for every turn that hit the step cap, the deadline or the identical-call breaker), listed for review
   and never acted on by code.
+- Reflection (`extensions::reflect`): an owner turn of 6+ tool calls, or one that hit the step cap,
+  deadline or breaker, raises an `agent.reflect` wake with the request and the tools it called; a 👎
+  on an agent reply raises one with that reply and what it saved. The agent then saves or fixes a
+  playbook or learned note (for a 👎, first fixes what's still wrong), or does nothing. It is a wake but
+  not an open issue, so it runs only once the chat is quiet; at most 3 a day.
+- The chat window is the last 30 messages; `chat_message` keeps every one, and the `sql_query`
+  description points the agent there for "like last time".
 - Models via OpenRouter: `GYMCLAW_MODEL` (chat, default Claude Haiku 5.5; GLM 5.3 Flash misread owners and claimed edits it never saved in replays), `GYMCLAW_MODEL_FAST`,
   `GYMCLAW_MODEL_VISION`, `GYMCLAW_MODEL_AUDIO` (voice notes, default Gemini 3.5 Flash Lite);
   `GYMCLAW_PROVIDER` pins the provider (`reasoning.effort: minimal`).

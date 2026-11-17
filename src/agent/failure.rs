@@ -12,6 +12,8 @@ pub struct FailureState {
     pub reasoning: Option<u64>,
     /// Tools that ran (they may have changed data).
     pub tool_calls: usize,
+    /// Each tool that ran, in order, "(failed)" when it did: what a reflection on the turn reads.
+    pub ran: Vec<String>,
     /// A model call was made at all.
     pub observed_input: bool,
 }
