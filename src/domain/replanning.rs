@@ -12,11 +12,9 @@ use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::mutate;
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
-use crate::domain::planning::{
-    Candidate, Inputs, PlannerConfig, overlaps, plan_week, recovery_ok, require_monday, weekday,
-};
+use crate::domain::planning::{Candidate, overlaps, plan_week, recovery_ok, require_monday, weekday};
 use crate::domain::profile::{Profile, get_profile};
-use crate::domain::scheduling::{busy_window, interval};
+use crate::domain::scheduling::{interval, planner_inputs};
 use crate::domain::templates::get_template;
 use crate::error::Result;
 use crate::time::Ts;
@@ -92,18 +90,7 @@ fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Resu
         if sessions.len() as i64 > profile.weekly_max_sessions {
             warnings.push(format!("Week {week}: exceeds weekly maximum"));
         }
-        let existing: Vec<_> = rows.iter().filter(|s| s.status.is_active()).map(interval).collect();
-        let skipped: Vec<_> = rows.iter().filter(|s| s.status == SessionStatus::Skipped).map(interval).collect();
-        let (start, end) = busy_window(week, &profile)?;
-        let busy = busy_intervals(db, start, end)?;
-        let unavailable = crate::domain::scheduling::deleted_intervals(db)?;
-        let plan = plan_week(
-            &profile,
-            week,
-            &Inputs { busy: &busy, unavailable: &unavailable, existing: &existing, skipped: &skipped, signals: &[] },
-            now,
-            &PlannerConfig::default(),
-        )?;
+        let plan = plan_week(&profile, week, &planner_inputs(db, week, &profile)?, now)?;
         let count = sessions.len() as i64;
         if count < profile.weekly_target_sessions {
             warnings.push(format!("Week {week}: {count}/{} sessions saved; {} additional default slots feasible. Agent decides whether to add or accept shortfall.", profile.weekly_target_sessions, plan.sessions.len()));

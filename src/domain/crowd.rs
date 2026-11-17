@@ -11,7 +11,7 @@ use crate::db::models::{CrowdFeedback, CrowdObservation, CrowdSourceState};
 use crate::db::{Connection, Json, new_id};
 use crate::domain::core::{emit, mutate};
 use crate::domain::events::outage_open;
-use crate::domain::planning::SlotSignal;
+use crate::domain::planning::{STEP_MINUTES, SlotSignal};
 use crate::domain::profile::get_profile;
 use crate::error::Result;
 use crate::providers::crowd::{CrowdProvider, METRIC};
@@ -501,7 +501,7 @@ pub fn polling_alert(db: &Connection, now: Ts) -> Result<Option<(String, String)
 }
 
 /// Per-slot crowd forecast plus learned time-of-day habit (see `habits`). Empty without either.
-pub fn planning_signals(db: &Connection, week_start: Date, now: Ts, step_minutes: i64) -> Result<Vec<SlotSignal>> {
+pub fn planning_signals(db: &Connection, week_start: Date, now: Ts) -> Result<Vec<SlotSignal>> {
     let model = CrowdModel::new(db, now)?;
     let has_crowd = model.has_data();
     let habits = crate::domain::habits::evidence(db, now, &model.zone)?;
@@ -535,7 +535,7 @@ pub fn planning_signals(db: &Connection, week_start: Date, now: Ts, step_minutes
                     preferred_time: preferred,
                 });
             }
-            start = start.mins(step_minutes);
+            start = start.mins(STEP_MINUTES);
         }
     }
     Ok(result)

@@ -37,25 +37,12 @@ pub struct SlotSignal {
     pub preferred_time: f64,
 }
 
-#[derive(Clone, Debug)]
-pub struct PlannerConfig {
-    pub step_minutes: i64,
-    /// Below crowd_preference_weight (default 1): habits break ties, a quiet slot still beats a busy habitual one.
-    pub preferred_time_weight: f64,
-    pub uncertainty_weight: f64,
-    pub shortened_duration_penalty: f64,
-}
-
-impl Default for PlannerConfig {
-    fn default() -> Self {
-        PlannerConfig {
-            step_minutes: 15,
-            preferred_time_weight: 0.4,
-            uncertainty_weight: 0.5,
-            shortened_duration_penalty: 1.0,
-        }
-    }
-}
+/// Candidate starts are this far apart.
+pub const STEP_MINUTES: i64 = 15;
+/// Below crowd_preference_weight (default 1): habits break ties, a quiet slot still beats a busy habitual one.
+const PREFERRED_TIME_WEIGHT: f64 = 0.4;
+const UNCERTAINTY_WEIGHT: f64 = 0.5;
+const SHORTENED_DURATION_PENALTY: f64 = 1.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ScoreParts {
@@ -103,22 +90,21 @@ impl Candidate {
 
 #[derive(Clone, Debug)]
 pub struct Plan {
-    pub week_start: Date,
     pub sessions: Vec<Candidate>,
-    pub existing_count: i64,
     pub minimum_met: bool,
     pub shortfall: i64,
 }
 
 #[derive(Default)]
-pub struct Inputs<'a> {
-    pub busy: &'a [Interval],
-    pub unavailable: &'a [Interval],
-    pub existing: &'a [Interval],
+pub struct Inputs {
+    /// Time no slot may touch, prep and travel included.
+    pub busy: Vec<Interval>,
+    /// Sessions that count toward the week and need recovery around them.
+    pub existing: Vec<Interval>,
     /// Skipped sessions: they count toward the week (the owner chose not to make them up) but were never
     /// trained, so they need no recovery around them.
-    pub skipped: &'a [Interval],
-    pub signals: &'a [SlotSignal],
+    pub skipped: Vec<Interval>,
+    pub signals: Vec<SlotSignal>,
 }
 
 /// Weeks are keyed by their Monday.
@@ -142,20 +128,13 @@ pub fn recovery_ok(start: Ts, end: Ts, other: &Interval, profile: &Profile) -> b
     days(first, other_last) >= required || days(other_first, last) >= required
 }
 
-pub fn generate_candidates(
-    profile: &Profile,
-    week_start: Date,
-    inputs: &Inputs,
-    now: Ts,
-    config: &PlannerConfig,
-) -> Result<Vec<Candidate>> {
+pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts) -> Result<Vec<Candidate>> {
     require_monday(week_start)?;
     let tz = profile.tz();
-    let blockers: Vec<&Interval> = inputs.busy.iter().chain(inputs.unavailable).collect();
     let mut durations = vec![profile.preferred_workout_minutes, profile.minimum_workout_minutes];
     durations.sort_unstable_by(|a, b| b.cmp(a));
     durations.dedup();
-    let step = SignedDuration::from_mins(config.step_minutes);
+    let step = SignedDuration::from_mins(STEP_MINUTES);
     let signals: std::collections::HashMap<Ts, &SlotSignal> = inputs.signals.iter().map(|s| (s.start, s)).collect();
     let neutral = SlotSignal { start: now, crowd: None, confidence: 0.0, preferred_time: 0.0 };
     let mut result = Vec::new();
@@ -181,7 +160,7 @@ pub fn generate_candidates(
                 if prep < now || end > latest {
                     continue;
                 }
-                if blockers.iter().any(|b| overlaps(prep, home, b)) {
+                if inputs.busy.iter().any(|b| overlaps(prep, home, b)) {
                     continue;
                 }
                 if inputs.existing.iter().any(|s| !recovery_ok(start, end, s, profile)) {
@@ -191,10 +170,9 @@ pub fn generate_candidates(
                 let confidence = if signal.crowd.is_some() { signal.confidence } else { 0.0 };
                 let parts = ScoreParts {
                     crowd: signal.crowd.map_or(0.0, |c| profile.crowd_preference_weight * (1.0 - c)),
-                    preferred_time: config.preferred_time_weight * signal.preferred_time,
-                    uncertainty: -config.uncertainty_weight * (1.0 - confidence),
-                    duration: -config.shortened_duration_penalty
-                        * (profile.preferred_workout_minutes - duration) as f64
+                    preferred_time: PREFERRED_TIME_WEIGHT * signal.preferred_time,
+                    uncertainty: -UNCERTAINTY_WEIGHT * (1.0 - confidence),
+                    duration: -SHORTENED_DURATION_PENALTY * (profile.preferred_workout_minutes - duration) as f64
                         / profile.preferred_workout_minutes as f64,
                 };
                 result.push(Candidate {
@@ -215,23 +193,17 @@ pub fn generate_candidates(
     Ok(result)
 }
 
-pub fn plan_week(
-    profile: &Profile,
-    week_start: Date,
-    inputs: &Inputs,
-    now: Ts,
-    config: &PlannerConfig,
-) -> Result<Plan> {
+pub fn plan_week(profile: &Profile, week_start: Date, inputs: &Inputs, now: Ts) -> Result<Plan> {
     let tz = profile.tz();
     let week_end = week_start.checked_add(jiff::Span::new().days(7))?;
     let existing_count = inputs
         .existing
         .iter()
-        .chain(inputs.skipped)
+        .chain(&inputs.skipped)
         .filter(|s| (week_start..week_end).contains(&s.start.local(&tz).date()))
         .count() as i64;
     let capacity = (profile.weekly_target_sessions.min(profile.weekly_max_sessions) - existing_count).max(0) as usize;
-    let candidates = generate_candidates(profile, week_start, inputs, now, config)?;
+    let candidates = generate_candidates(profile, week_start, inputs, now)?;
     let mut by_day: std::collections::BTreeMap<Date, Candidate> = Default::default();
     for candidate in candidates {
         let day = candidate.start.local(&tz).date();
@@ -258,9 +230,7 @@ pub fn plan_week(
     let sessions: Vec<Candidate> = best.iter().map(|d| by_day[d].clone()).collect();
     let total = existing_count + sessions.len() as i64;
     Ok(Plan {
-        week_start,
         sessions,
-        existing_count,
         minimum_met: total >= profile.weekly_min_sessions,
         shortfall: (profile.weekly_target_sessions - total).max(0),
     })
@@ -305,7 +275,7 @@ mod tests {
     }
 
     fn plan(profile: &Profile, inputs: Inputs) -> Plan {
-        plan_week(profile, WEEK, &inputs, at(11, 0, 0), &PlannerConfig::default()).unwrap()
+        plan_week(profile, WEEK, &inputs, at(11, 0, 0)).unwrap()
     }
 
     fn one_a_week() -> Profile {
@@ -318,6 +288,7 @@ mod tests {
         assert_eq!(days(&p), [0, 2, 4]);
         assert!(p.minimum_met && p.shortfall == 0);
         assert_eq!(p.sessions[0].start - p.sessions[0].prep_start, SignedDuration::from_mins(35));
+        assert_eq!(p.sessions[0].home_at - p.sessions[0].end, SignedDuration::from_mins(20));
     }
 
     #[test]
@@ -330,15 +301,9 @@ mod tests {
             ..Profile::default()
         };
         let candidates = |busy: &[Interval]| {
-            generate_candidates(
-                &p,
-                WEEK,
-                &Inputs { busy, ..Inputs::default() },
-                at(11, 0, 0),
-                &PlannerConfig::default(),
-            )
-            .unwrap()
-            .len()
+            generate_candidates(&p, WEEK, &Inputs { busy: busy.to_vec(), ..Inputs::default() }, at(11, 0, 0))
+                .unwrap()
+                .len()
         };
         assert_eq!(candidates(&[Interval { start: at(12, 18, 40), end: at(12, 19, 0) }]), 0);
         assert_eq!(candidates(&[Interval { start: at(12, 20, 20), end: at(12, 21, 0) }]), 0);
@@ -354,7 +319,7 @@ mod tests {
     #[test]
     fn recovery_crosses_weeks() {
         let sunday = [Interval { start: at(11, 0, 0), end: at(11, 0, 20) }];
-        let p = plan(&Profile::default(), Inputs { existing: &sunday, ..Inputs::default() });
+        let p = plan(&Profile::default(), Inputs { existing: sunday.to_vec(), ..Inputs::default() });
         assert_eq!(p.sessions.len(), 2);
         assert!(!days(&p).contains(&0));
     }
@@ -362,23 +327,26 @@ mod tests {
     #[test]
     fn skipped_session_counts_but_needs_no_recovery() {
         let sunday = [Interval { start: at(11, 0, 0), end: at(11, 0, 20) }];
-        let p = plan(&Profile::default(), Inputs { skipped: &sunday, ..Inputs::default() });
+        let p = plan(&Profile::default(), Inputs { skipped: sunday.to_vec(), ..Inputs::default() });
         assert_eq!(days(&p), [0, 2, 4]);
         let monday = [Interval { start: at(12, 11, 0), end: at(12, 12, 0) }];
-        assert_eq!(plan(&Profile::default(), Inputs { skipped: &monday, ..Inputs::default() }).sessions.len(), 2);
+        assert_eq!(
+            plan(&Profile::default(), Inputs { skipped: monday.to_vec(), ..Inputs::default() }).sessions.len(),
+            2
+        );
     }
 
     #[test]
     fn session_count_beats_one_great_slot() {
-        let tuesday = [SlotSignal { preferred_time: 1.0, ..signal(at(13, 12, 0), 0.0, 1.0) }];
-        assert_eq!(days(&plan(&Profile::default(), Inputs { signals: &tuesday, ..Inputs::default() })), [0, 2, 4]);
+        let tuesday = vec![SlotSignal { preferred_time: 1.0, ..signal(at(13, 12, 0), 0.0, 1.0) }];
+        assert_eq!(days(&plan(&Profile::default(), Inputs { signals: tuesday, ..Inputs::default() })), [0, 2, 4]);
     }
 
     #[test]
     fn quiet_slot_wins() {
-        let quiet = [signal(at(14, 12, 0), 0.2, 0.9)];
-        let p = plan(&one_a_week(), Inputs { signals: &quiet, ..Inputs::default() });
-        assert_eq!(p.sessions[0].start, quiet[0].start);
+        let quiet = signal(at(14, 12, 0), 0.2, 0.9);
+        let p = plan(&one_a_week(), Inputs { signals: vec![quiet.clone()], ..Inputs::default() });
+        assert_eq!(p.sessions[0].start, quiet.start);
         assert!((p.sessions[0].score - 0.75).abs() < 1e-9);
     }
 
@@ -388,12 +356,13 @@ mod tests {
         let busy_habit = SlotSignal { preferred_time: 0.9, ..signal(at(12, 13, 0), 2.0 / 3.0, 0.9) };
         let quiet = SlotSignal { preferred_time: 0.2, ..signal(at(12, 16, 0), 1.0 / 3.0, 0.9) };
         assert_eq!(
-            plan(&p, Inputs { signals: &[busy_habit.clone(), quiet.clone()], ..Inputs::default() }).sessions[0].start,
+            plan(&p, Inputs { signals: vec![busy_habit.clone(), quiet.clone()], ..Inputs::default() }).sessions[0]
+                .start,
             quiet.start
         );
         let same_crowd = SlotSignal { crowd: Some(2.0 / 3.0), ..quiet };
         assert_eq!(
-            plan(&p, Inputs { signals: &[busy_habit.clone(), same_crowd], ..Inputs::default() }).sessions[0].start,
+            plan(&p, Inputs { signals: vec![busy_habit.clone(), same_crowd], ..Inputs::default() }).sessions[0].start,
             busy_habit.start
         );
     }
@@ -422,7 +391,7 @@ mod tests {
                 ..Profile::default()
             };
             let now = Ts(week.to_zoned(tz.clone()).unwrap().timestamp());
-            let candidates = generate_candidates(&p, week, &Inputs::default(), now, &PlannerConfig::default()).unwrap();
+            let candidates = generate_candidates(&p, week, &Inputs::default(), now).unwrap();
             assert!(!candidates.is_empty());
             for c in candidates {
                 assert!([70, 45].contains(&(c.end - c.start).as_mins()));
@@ -432,20 +401,9 @@ mod tests {
     }
 
     #[test]
-    fn determinism_and_travel_buffers() {
-        let first = plan(&Profile::default(), Inputs::default());
-        assert_eq!(first.sessions, plan(&Profile::default(), Inputs::default()).sessions);
-        for c in &first.sessions {
-            assert!(c.crowd.is_none() && c.confidence == 0.0);
-            assert_eq!(c.start - c.prep_start, SignedDuration::from_mins(35));
-            assert_eq!(c.home_at - c.end, SignedDuration::from_mins(20));
-        }
-    }
-
-    #[test]
     fn travel_entire_week() {
-        let travel = [Interval { start: at(12, 0, 0), end: at(19, 0, 0) }];
-        let p = plan(&Profile::default(), Inputs { unavailable: &travel, ..Inputs::default() });
+        let travel = vec![Interval { start: at(12, 0, 0), end: at(19, 0, 0) }];
+        let p = plan(&Profile::default(), Inputs { busy: travel, ..Inputs::default() });
         assert!(p.sessions.is_empty() && !p.minimum_met && p.shortfall == 3);
     }
 
@@ -456,15 +414,14 @@ mod tests {
             first.sessions.iter().take(2).map(|c| Interval { start: c.start, end: c.end }).collect();
         let p =
             Profile { weekly_min_sessions: 1, weekly_target_sessions: 2, weekly_max_sessions: 2, ..Profile::default() };
-        let full = plan(&p, Inputs { existing: &existing, ..Inputs::default() });
-        assert!(full.sessions.is_empty() && full.existing_count == 2);
+        let full = plan(&p, Inputs { existing, ..Inputs::default() });
+        assert!(full.sessions.is_empty() && full.minimum_met && full.shortfall == 0);
     }
 
     #[test]
     fn no_past_preparation() {
         let now = at(12, 19, 0);
-        let candidates =
-            generate_candidates(&Profile::default(), WEEK, &Inputs::default(), now, &PlannerConfig::default()).unwrap();
+        let candidates = generate_candidates(&Profile::default(), WEEK, &Inputs::default(), now).unwrap();
         assert!(!candidates.is_empty() && candidates.iter().all(|c| c.prep_start >= now));
     }
 
@@ -485,9 +442,7 @@ mod tests {
         }
         let tuesday = jiff::civil::date(2026, 10, 13);
         assert_eq!(
-            plan_week(&Profile::default(), tuesday, &Inputs::default(), at(11, 0, 0), &PlannerConfig::default())
-                .unwrap_err()
-                .code(),
+            plan_week(&Profile::default(), tuesday, &Inputs::default(), at(11, 0, 0)).unwrap_err().code(),
             "INVALID_WEEK"
         );
     }

@@ -3,13 +3,14 @@ use jiff::civil::Date;
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{AgentEvent, PlannedSession};
+use crate::db::models::{AgentEvent, PlannedSession, SessionStatus};
+use crate::domain::calendar::week_of;
 use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::compression::compress_template;
 use crate::domain::core::emit;
 use crate::domain::crowd::planning_signals;
-use crate::domain::planning::{Inputs, Interval, PlannerConfig, SlotSignal, plan_week};
-use crate::domain::profile::get_profile;
+use crate::domain::planning::{Inputs, Interval, SlotSignal, plan_week};
+use crate::domain::profile::{Profile, get_profile};
 use crate::domain::templates::get_template;
 use crate::domain::workout::historical_set_duration;
 use crate::error::Result;
@@ -29,24 +30,27 @@ pub fn interval(session: &PlannedSession) -> Interval {
     Interval { start: session.planned_start_at, end: session.planned_end_at }
 }
 
-/// Owner-deleted sessions: the planner never puts a session back there.
-pub fn deleted_intervals(db: &Connection) -> Result<Vec<Interval>> {
-    Ok(PlannedSession::select(db, "WHERE status = 'CANCELLED' ORDER BY rowid", [])?
-        .iter()
-        .filter(|s| s.deleted_by_user())
-        .map(interval)
-        .collect())
-}
-
-/// Window the planner checks for blockers around a week: Sunday before to Tuesday after, local.
-pub fn busy_window(week_start: Date, profile: &crate::domain::profile::Profile) -> Result<(Ts, Ts)> {
+/// What the planner works around in `week`: busy time from Sunday before to Tuesday after (calendar,
+/// personal feed, availability blocks) and owner-deleted slots, where it never puts a session back, as
+/// blockers; every active session for recovery and the weekly count; skipped ones for the count only.
+/// No crowd signals.
+pub fn planner_inputs(db: &Connection, week_start: Date, profile: &Profile) -> Result<Inputs> {
     let start = Ts(week_start.checked_sub(jiff::Span::new().days(1))?.to_zoned(profile.tz())?.timestamp());
     let end = Ts(week_start.checked_add(jiff::Span::new().days(8))?.to_zoned(profile.tz())?.timestamp());
-    Ok((start, end))
+    let mut inputs = Inputs { busy: busy_intervals(db, start, end)?, ..Inputs::default() };
+    for session in PlannedSession::select(db, "ORDER BY rowid", [])? {
+        match session.status {
+            status if status.is_active() => inputs.existing.push(interval(&session)),
+            SessionStatus::Skipped => inputs.skipped.push(interval(&session)),
+            SessionStatus::Cancelled if session.deleted_by_user() => inputs.busy.push(interval(&session)),
+            _ => {}
+        }
+    }
+    Ok(inputs)
 }
 
-/// Fill a week with new sessions around the existing ones. Idempotent per `request_id`. `fixture_signals`
-/// replace the crowd model's signals (tests).
+/// Fill a week with new sessions around the existing ones. Idempotent per `request_id` (the same week and
+/// template). `fixture_signals` replace the crowd model's signals (tests).
 pub fn schedule_week(
     db: &Connection,
     week_start: Date,
@@ -55,15 +59,13 @@ pub fn schedule_week(
     template_id: Option<&str>,
     fixture_signals: &[SlotSignal],
 ) -> Result<Value> {
-    let mut request = json!({"week_start": week_start.to_string(), "fixture": {"busy": [], "unavailable": [], "signals": fixture_signals,
-        "config": {"step_minutes": 15, "preferred_time_weight": 0.4, "uncertainty_weight": 0.5, "shortened_duration_penalty": 1.0}}});
-    if let Some(id) = template_id {
-        request["template_id"] = json!(id);
-    }
+    let request = json!({"week_start": week_start.to_string(), "template_id": template_id});
     if let Some(key) = request_id
         && let Some(previous) = AgentEvent::first(db, "WHERE correlation_id = ?1", [key])?
     {
-        if previous.payload_json.get("request") != Some(&request) {
+        // Older events also stored the planner's settings; only the week and template make the request.
+        let same = |field: &str| previous.payload_json["request"].get(field).unwrap_or(&Value::Null) == &request[field];
+        if !same("week_start") || !same("template_id") {
             crate::bail!("IDEMPOTENCY_CONFLICT", "Request ID already used with different planning input");
         }
         return Ok(previous.payload_json["result"].clone());
@@ -75,23 +77,10 @@ pub fn schedule_week(
         "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') ORDER BY rowid",
         [],
     )?;
-    let existing: Vec<Interval> = active.iter().map(interval).collect();
-    let (start, end) = busy_window(week_start, &profile)?;
-    let busy = busy_intervals(db, start, end)?;
-    let deleted = deleted_intervals(db)?;
-    let config = PlannerConfig::default();
-    let signals = if fixture_signals.is_empty() {
-        planning_signals(db, week_start, now, config.step_minutes)?
-    } else {
-        fixture_signals.to_vec()
-    };
-    let plan = plan_week(
-        &profile,
-        week_start,
-        &Inputs { busy: &busy, unavailable: &deleted, existing: &existing, skipped: &[], signals: &signals },
-        now,
-        &config,
-    )?;
+    let mut inputs = planner_inputs(db, week_start, &profile)?;
+    inputs.signals =
+        if fixture_signals.is_empty() { planning_signals(db, week_start, now)? } else { fixture_signals.to_vec() };
+    let plan = plan_week(&profile, week_start, &inputs, now)?;
     let template = match template_id {
         Some(id) => {
             let mut t = get_template(db, id)?;
@@ -113,15 +102,8 @@ pub fn schedule_week(
         row.insert(db)?;
         created.push(row);
     }
-    let week_key = (week_start.iso_week_date().year(), week_start.iso_week_date().week());
-    let mut week_rows: Vec<&PlannedSession> = active
-        .iter()
-        .filter(|s| {
-            let d = s.planned_start_at.local(&tz).date().iso_week_date();
-            (d.year(), d.week()) == week_key
-        })
-        .chain(&created)
-        .collect();
+    let mut week_rows: Vec<&PlannedSession> =
+        active.iter().filter(|s| week_of(s.planned_start_at, &tz) == week_start).chain(&created).collect();
     week_rows.sort_by_key(|s| s.planned_start_at);
     let result = json!({
         "week_start": week_start.to_string(),
@@ -182,5 +164,41 @@ mod tests {
         let sessions = result["sessions"].as_array().unwrap();
         assert_eq!((sessions.len(), sessions[0]["id"].as_str()), (1, Some("locked")));
         assert_eq!(PlannedSession::get(&db, "locked").unwrap().unwrap().planned_start_at, start);
+    }
+
+    /// A skipped session counts toward its week: planning the week again doesn't make it up.
+    #[test]
+    fn skipped_slot_is_not_refilled() {
+        let db = crate::db::test::with_short_template();
+        let (week, now) = (jiff::civil::date(2026, 10, 12), ts("2026-10-11T12:00:00+02:00"));
+        let first = schedule_week(&db, week, now, None, Some("short"), &[]).unwrap();
+        let mut skipped = PlannedSession::get(&db, first["sessions"][0]["id"].as_str().unwrap()).unwrap().unwrap();
+        skipped.status = SessionStatus::Skipped;
+        skipped.update(&db).unwrap();
+        assert_eq!(schedule_week(&db, week, now, None, Some("short"), &[]).unwrap()["created_count"], 0);
+    }
+
+    /// Request keys stored before the request shrank to week and template still replay.
+    #[test]
+    fn replays_a_key_stored_with_planner_settings() {
+        let db = crate::db::test::with_short_template();
+        let request = json!({"week_start": "2026-10-12", "template_id": "short", "fixture": {"busy": [], "signals": [],
+            "config": {"step_minutes": 15}}});
+        let mut event = emit(
+            &db,
+            "planning.week_planned",
+            ts("2026-10-11T12:00:00Z"),
+            json!({"request": request, "result": {"old": 1}}),
+        )
+        .unwrap();
+        event.correlation_id = Some("rolling:old".into());
+        event.update(&db).unwrap();
+        let week = jiff::civil::date(2026, 10, 12);
+        let now = ts("2026-10-11T12:00:00Z");
+        assert_eq!(schedule_week(&db, week, now, Some("rolling:old"), Some("short"), &[]).unwrap(), json!({"old": 1}));
+        assert_eq!(
+            schedule_week(&db, week, now, Some("rolling:old"), None, &[]).unwrap_err().code(),
+            "IDEMPOTENCY_CONFLICT"
+        );
     }
 }
