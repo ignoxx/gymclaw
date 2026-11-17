@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn finished_workouts_size_the_next_weight_by_effort() {
         use crate::db::models::ExerciseProgression;
-        use crate::domain::backfill::{PastSet, log_past};
+        use crate::domain::past::{PastSet, log_past};
         use crate::domain::workout::tests::at;
         let db = crate::db::test::with_short_template();
         let next = |reps: [i64; 2], day: i64| {

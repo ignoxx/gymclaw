@@ -11,13 +11,13 @@ pub mod templates;
 // Training
 pub mod adaptation;
 pub mod audit;
-pub mod backfill;
 pub mod body;
 pub mod coach;
 pub mod equipment;
 pub mod highlights;
 pub mod import;
 pub mod onboarding;
+pub mod past;
 pub mod preview;
 pub mod trends;
 pub mod workout;

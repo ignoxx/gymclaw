@@ -16,9 +16,9 @@ use crate::db::models::{
     ExerciseProgression, ExerciseStatus, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus,
 };
 use crate::db::{Connection, Json, new_id};
-use crate::domain::backfill::PastSet;
 use crate::domain::core::mutate;
 use crate::domain::illustrations::{lookup, matching, suggestions};
+use crate::domain::past::PastSet;
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{ExerciseSpec, Load, default_load, get_template, pick, template_ids};
 use crate::domain::workout::in_seconds;
