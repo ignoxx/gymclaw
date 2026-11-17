@@ -11,15 +11,15 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde_json::{Value, json};
 
-use crate::db::models::{CalendarEventSnapshot, CalendarWrite, PlannedSession, SessionStatus, WriteStatus};
+use crate::db::models::{CalendarEventSnapshot, PlannedSession, SessionStatus};
 use crate::db::{Connection, Json};
-use crate::domain::calendar_writes::{event_id_for, queue_session_write};
+use crate::domain::calendar_writes::{cancel_pending, event_id_for, queue_session_write};
 use crate::domain::compression::compress_template;
 use crate::domain::core::emit;
 use crate::domain::events::outage_open;
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
 use crate::domain::profile::get_profile;
-use crate::domain::replanning::{commit_upcoming, inspect_weeks};
+use crate::domain::replanning::{commit_upcoming, inspect_weeks, place, retire_session};
 use crate::domain::scheduling::session_data;
 use crate::domain::templates::{Template, get_template};
 use crate::domain::workout::historical_set_duration;
@@ -187,17 +187,6 @@ pub fn persist_snapshot(
     Ok(row)
 }
 
-fn cancel_writes(db: &Connection, session_id: &str, now: Ts) -> Result<()> {
-    for mut write in
-        CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [session_id])?
-    {
-        write.status = WriteStatus::Cancelled;
-        write.handled_at = Some(now);
-        write.update(db)?;
-    }
-    Ok(())
-}
-
 /// Apply one remote event: owner deletes/moves/resizes of gym sessions become locked intent; other
 /// events are blockers. Own-write echoes are ignored. → (weeks to inspect, emitted events).
 pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Result<(BTreeSet<Date>, Vec<Value>)> {
@@ -229,13 +218,7 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
         let old_week = week_of(session.planned_start_at, &tz);
         if event.cancelled() {
             if !is_closed(session.status) {
-                session.status = SessionStatus::Cancelled;
-                session.user_locked = true;
-                session.merge_plan(json!({"deleted_by_user": true}));
-                session.source_revision += 1;
-                session.save(db)?;
-                cancel_session_jobs(db, &session.id, now)?;
-                cancel_writes(db, &session.id, now)?;
+                retire_session(db, session, SessionStatus::Cancelled, now)?;
                 let log = emit(
                     db,
                     "calendar.gym_event_deleted",
@@ -259,15 +242,7 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
             };
             if times_changed && !own_echo && !is_closed(session.status) {
                 let old_duration = session.planned_end_at - session.planned_start_at;
-                if start != session.planned_start_at {
-                    // The old slot's forecast says nothing about the new one; the next tick fills it again.
-                    session.workout_plan_json.0 = session.crowd_keys(false);
-                }
-                session.planned_start_at = start;
-                session.planned_end_at = end;
-                session.prep_start_at = start.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes));
-                session.leave_home_at = start.mins(-profile.commute_to_gym_minutes);
-                session.week_id = week_of(start, &tz).to_string();
+                place(session, start, end, &profile);
                 session.user_locked = true;
                 manual_update = true;
                 if session.status != SessionStatus::Started {
@@ -277,7 +252,7 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
                 allocation(db, session)?;
                 session.save(db)?;
                 cancel_session_jobs(db, &session.id, now)?;
-                cancel_writes(db, &session.id, now)?;
+                cancel_pending(db, &session.id, now)?;
                 schedule_session_jobs(db, session, now)?;
                 let kind = if old_duration != end - start {
                     "calendar.gym_event_resized"
@@ -423,7 +398,7 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::*;
-    use crate::db::models::{CalendarSyncState, NotificationJob, WorkoutExercise};
+    use crate::db::models::{CalendarSyncState, CalendarWrite, NotificationJob, WorkoutExercise, WriteStatus};
     use crate::domain::calendar_writes::{apply_write, pending_writes};
     use crate::domain::planning::SlotSignal;
     use crate::domain::profile::update_profile;

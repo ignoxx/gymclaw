@@ -6,10 +6,10 @@ use jiff::civil::Date;
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{AgentEvent, CalendarWrite, PlannedSession, SessionStatus, WriteStatus};
+use crate::db::models::{AgentEvent, PlannedSession, SessionStatus};
 use crate::domain::calendar::{allocation, week_of};
 use crate::domain::calendar_busy::busy_intervals;
-use crate::domain::calendar_writes::queue_session_write;
+use crate::domain::calendar_writes::{cancel_pending, queue_session_write};
 use crate::domain::core::mutate;
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
 use crate::domain::planning::{Candidate, overlaps, plan_week, recovery_ok, require_monday, weekday};
@@ -21,12 +21,24 @@ use crate::time::Ts;
 
 const HOURS_48: SignedDuration = SignedDuration::from_hours(48);
 
-/// The session including prep and travel: (leave-prep start, home again).
+/// The session including prep and travel, by the current profile: (get ready, home again).
 pub fn expanded(session: &PlannedSession, profile: &Profile) -> (Ts, Ts) {
-    (
-        session.planned_start_at.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes)),
-        session.planned_end_at.mins(profile.commute_home_minutes),
-    )
+    let slot = Candidate::at(session.planned_start_at, session.planned_end_at, profile);
+    (slot.prep_start, slot.home_at)
+}
+
+/// Put `session` at [start, end): its week and its get-ready and leave-home times. A new start drops the
+/// old slot's crowd forecast (the `crowd_*` plan keys); the next tick fills it again. Caller saves.
+pub fn place(session: &mut PlannedSession, start: Ts, end: Ts, profile: &Profile) {
+    if start != session.planned_start_at
+        && let Some(plan) = session.workout_plan_json.0.as_object_mut()
+    {
+        plan.retain(|key, _| !key.starts_with("crowd_"));
+    }
+    let slot = Candidate::at(start, end, profile);
+    (session.planned_start_at, session.planned_end_at) = (start, end);
+    (session.prep_start_at, session.leave_home_at) = (slot.prep_start, slot.leave_home);
+    session.week_id = week_of(start, &profile.tz()).to_string();
 }
 
 fn active(db: &Connection, except: Option<&str>) -> Result<Vec<PlannedSession>> {
@@ -79,7 +91,7 @@ fn inspect(db: &Connection, weeks: &BTreeSet<Date>, now: Ts, wake: bool) -> Resu
         }
         let from = warnings.len();
         for session in sessions.iter().filter(|s| s.status.is_open() && s.planned_end_at > now) {
-            let slot = Candidate::manual(session.planned_start_at, session.planned_end_at, &profile);
+            let slot = Candidate::at(session.planned_start_at, session.planned_end_at, &profile);
             for warning in rule_breaks(db, &session.id, &slot, &profile)? {
                 warnings.push(format!("Session {}: {warning}", session.id));
             }
@@ -262,7 +274,7 @@ pub fn edit_session(
         } else {
             SessionStatus::Tentative
         });
-        let slot = Candidate::manual(start, end, &profile);
+        let slot = Candidate::at(start, end, &profile);
         let mut warnings = if status.is_active() { rule_breaks(db, &session.id, &slot, &profile)? } else { Vec::new() };
         let week = week_of(start, &profile.tz());
         let mut edited = BTreeSet::from([week]);
@@ -281,22 +293,11 @@ pub fn edit_session(
         cancel_session_jobs(db, &session.id, now)?;
         session.user_locked = true;
         session.source_revision += 1;
-        if start != session.planned_start_at {
-            // The old slot's forecast says nothing about the new one; the next tick fills it again.
-            session.workout_plan_json.0 = session.crowd_keys(false);
-        }
-        session.planned_start_at = start;
-        session.planned_end_at = end;
-        session.prep_start_at = slot.prep_start;
-        session.leave_home_at = slot.leave_home;
-        session.week_id = week.to_string();
+        place(&mut session, start, end, &profile);
         session.status = status;
         allocation(db, &mut session)?;
         if status.is_active() && session.plan("error").is_some_and(|e| !e.is_null()) {
             warnings.push("slot is too short for required movements; adjust the workout or duration".into());
-        }
-        if status == SessionStatus::Cancelled {
-            session.merge_plan(json!({"deleted_by_user": true}));
         }
         if new {
             session.insert(db)?;
@@ -317,20 +318,19 @@ pub fn edit_session(
     })
 }
 
-/// End a session that won't happen. Its calendar event stays as history; reminders and unsent edits are dropped.
+/// End a session that won't happen: its reminders and unsent calendar edits are dropped. A cancelled
+/// session was called off by the owner (in chat or by deleting its event): it is locked and marked
+/// deleted, so the planner never puts a session back there.
 pub fn retire_session(db: &Connection, session: &mut PlannedSession, status: SessionStatus, now: Ts) -> Result<()> {
+    if status == SessionStatus::Cancelled {
+        session.user_locked = true;
+        session.merge_plan(json!({"deleted_by_user": true}));
+    }
     session.status = status;
     session.source_revision += 1;
     session.save(db)?;
     cancel_session_jobs(db, &session.id, now)?;
-    for mut write in
-        CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [&session.id])?
-    {
-        write.status = WriteStatus::Cancelled;
-        write.handled_at = Some(now);
-        write.update(db)?;
-    }
-    Ok(())
+    cancel_pending(db, &session.id, now)
 }
 
 #[cfg(test)]

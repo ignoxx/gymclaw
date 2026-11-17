@@ -72,8 +72,8 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    /// An owner-chosen slot off the planner grid: times only, no score.
-    pub fn manual(start: Ts, end: Ts, profile: &Profile) -> Candidate {
+    /// A workout from `start` to `end` with its get-ready, leave-home and home-again times; unscored.
+    pub fn at(start: Ts, end: Ts, profile: &Profile) -> Candidate {
         Candidate {
             start,
             end,
@@ -154,16 +154,14 @@ pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs,
                 continue;
             }
             for &duration in &durations {
-                let end = start.mins(duration);
-                let prep = start.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes));
-                let home = end.mins(profile.commute_home_minutes);
-                if prep < now || end > latest {
+                let slot = Candidate::at(start, start.mins(duration), profile);
+                if slot.prep_start < now || slot.end > latest {
                     continue;
                 }
-                if inputs.busy.iter().any(|b| overlaps(prep, home, b)) {
+                if inputs.busy.iter().any(|b| overlaps(slot.prep_start, slot.home_at, b)) {
                     continue;
                 }
-                if inputs.existing.iter().any(|s| !recovery_ok(start, end, s, profile)) {
+                if inputs.existing.iter().any(|s| !recovery_ok(slot.start, slot.end, s, profile)) {
                     continue;
                 }
                 let signal = signals.get(&start).copied().unwrap_or(&neutral);
@@ -176,15 +174,11 @@ pub fn generate_candidates(profile: &Profile, week_start: Date, inputs: &Inputs,
                         / profile.preferred_workout_minutes as f64,
                 };
                 result.push(Candidate {
-                    start,
-                    end,
-                    prep_start: prep,
-                    leave_home: start.mins(-profile.commute_to_gym_minutes),
-                    home_at: home,
                     crowd: signal.crowd,
                     confidence,
                     score: parts.total(),
                     score_parts: Some(parts),
+                    ..slot
                 });
             }
             start = start + step;
