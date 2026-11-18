@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Screenshot a page (usually the local dashboard) with headless Chromium.
-#   scripts/shot <url> <out.png> [width=1200] [height=800] [--full] [step…]
-# Viewport-sized at 1x unless --full, so the PNG stays small enough to read back cheaply.
+#   scripts/shot <url> <out.png> [width=1200] [height=800] [--full] [--dark] [--scale 2] [step…]
+# Viewport-sized at 1x unless --full, so the PNG stays small enough to read back cheaply. --dark emulates
+# a dark system theme; --scale 2 renders at 2x (README images).
 # Use width 390 for a phone. Playwright and its browser are cached in ~/.cache/gymclaw-shot.
 # Steps run in order before the shot, to click through dialogs and forms:
 #   --click <selector>  --fill <selector> <value>  --text <selector> (prints its text)  --wait <ms>
 #   e.g. scripts/shot localhost:8766/#exercises out.png --click '.ex-row >> nth=0' --text '.ex-message'
 set -euo pipefail
-[ $# -ge 2 ] || { sed -n 2,8p "$0" >&2; exit 2; }
+[ $# -ge 2 ] || { sed -n 2,9p "$0" >&2; exit 2; }
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/gymclaw-shot"
 if [ ! -d "$cache/node_modules/playwright-core" ]; then
@@ -20,10 +21,13 @@ NODE_PATH="$cache/node_modules" node - "$@" <<'JS'
 const { chromium } = require("playwright-core");
 const args = process.argv.slice(2);
 const full = args.includes("--full");
+const dark = args.includes("--dark");
+let scale = 1;
 const positional = [];
 const steps = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--full") continue;
+  if (args[i] === "--full" || args[i] === "--dark") continue;
+  if (args[i] === "--scale") { scale = +args[++i]; continue; }
   if (args[i] === "--fill") steps.push([args[i], args[++i], args[++i]]);
   else if (["--click", "--text", "--wait"].includes(args[i])) steps.push([args[i], args[++i]]);
   else positional.push(args[i]);
@@ -31,7 +35,7 @@ for (let i = 0; i < args.length; i++) {
 const [url, out, width = "1200", height = "800"] = positional;
 (async () => {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: +width, height: +height }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: +width, height: +height }, deviceScaleFactor: scale, colorScheme: dark ? "dark" : "light" });
   page.on("console", (m) => m.type() === "error" && console.error("console:", m.text()));
   page.on("pageerror", (e) => console.error("pageerror:", e.message));
   await page.goto(url, { waitUntil: "networkidle" });

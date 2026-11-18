@@ -69,8 +69,6 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px soli
 .brand { font-size: 25px; font-weight: 800; letter-spacing: -1.2px; color: var(--ink); text-decoration: none; }
 .brand > span { color: var(--brand-dot); }
 .updated { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
-.credits { margin-top: 28px; color: var(--muted); font-size: 10px; text-align: center; }
-.credits a { color: inherit; }
 
 .page-heading { display: flex; justify-content: space-between; align-items: baseline; padding: 26px 0 20px; }
 h1 { font-family: 'Barlow Condensed', sans-serif; font-size: 40px; font-weight: 600; line-height: 1; margin: 0; }

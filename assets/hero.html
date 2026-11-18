@@ -1,0 +1,67 @@
+<!doctype html>
+<!-- The README banner (assets/hero.png). Render it at 2x from the repo root:
+     scripts/shot "file://$PWD/assets/hero.html" assets/hero.png 1280 640 --scale 2
+     The phone shows assets/screens/live.png, the README's own screenshot. -->
+<html lang="en"><head><meta charset="utf-8"><title>GymClaw Banner</title>
+<style>
+@font-face { font-family: 'Barlow Condensed'; src: url('../web/fonts/BarlowCondensed-SemiBold.ttf'); font-weight: 600; }
+@font-face { font-family: 'DM Sans'; src: url('../web/fonts/DM-Sans.ttf'); font-weight: 100 900; }
+:root { --paper: #121412; --ink: #eef0ea; --muted: #8f968a; --line: #2b302a; --lime: #d7f580;
+  --tg: #17212b; --tg-bubble: #182533; --tg-out: #2b5278; --tg-button: #22303f; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 1280px; height: 640px; overflow: hidden; }
+body { position: relative; background: radial-gradient(900px 520px at 88% 8%, #263018 0%, transparent 62%), var(--paper);
+  color: var(--ink); font: 16px/1.4 'DM Sans', sans-serif; }
+
+.copy { position: absolute; left: 72px; top: 92px; width: 520px; }
+.wordmark { font: 600 132px/0.9 'Barlow Condensed', sans-serif; letter-spacing: -1px; margin: 0; }
+.wordmark i { color: var(--lime); font-style: normal; }
+.tagline { font-size: 38px; font-weight: 700; letter-spacing: -0.8px; line-height: 1.1; margin: 22px 0 0; }
+.tagline em { color: var(--lime); font-style: normal; }
+.lede { color: var(--muted); font-size: 19px; line-height: 1.5; margin: 22px 0 0; }
+.chips { display: flex; gap: 10px; margin-top: 34px; }
+.chips span { border: 1px solid #3a4136; border-radius: 99px; padding: 8px 16px; font-size: 15px; font-weight: 600; }
+
+/* The Mini App, rising from the bottom edge. */
+.phone { position: absolute; right: 70px; top: 54px; width: 312px; height: 640px; padding: 12px 12px 0;
+  background: #050605; border: 1px solid #2c3229; border-bottom: 0; border-radius: 46px 46px 0 0;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .55); }
+.phone img { display: block; width: 100%; border-radius: 35px 35px 0 0; }
+
+/* The chat, in Telegram's dark theme, showing the same set the app just logged. */
+.chat { position: absolute; z-index: 2; left: 606px; top: 140px; width: 306px; padding: 14px; background: var(--tg);
+  border: 1px solid #263445; border-radius: 22px; box-shadow: 0 24px 60px rgba(0, 0, 0, .5); font-size: 14px; }
+.who { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid #22303f; }
+.who b { width: 34px; height: 34px; border-radius: 50%; background: var(--lime); color: #1b1e1b; display: grid; place-items: center; font-size: 15px; }
+.who span { display: block; font-weight: 700; } .who small { color: #7f91a4; font-size: 12px; }
+.bubble { background: var(--tg-bubble); border-radius: 14px; padding: 10px 12px; margin-top: 8px; line-height: 1.35; }
+.tick { width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px; fill: none; stroke: var(--lime); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.bubble .meta { color: #7f91a4; }
+.out { background: var(--tg-out); margin-left: 54px; border-bottom-right-radius: 4px; }
+.buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+.buttons.four { grid-template-columns: repeat(4, 1fr); } .buttons.one { grid-template-columns: 1fr; margin-top: 6px; }
+.buttons span { background: var(--tg-button); border-radius: 9px; padding: 7px 0; text-align: center; font-size: 13px; font-weight: 600; }
+.sync { position: absolute; left: 622px; top: 506px; color: var(--muted); font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.sync i { width: 8px; height: 8px; border-radius: 50%; background: var(--lime); }
+</style></head>
+<body>
+  <div class="copy">
+    <h1 class="wordmark">GymClaw<i>.</i></h1>
+    <p class="tagline">Your training week, <em>run for you.</em></p>
+    <p class="lede">A Telegram coach that plans your gym week around your calendar and the crowd, then
+      runs every workout with you, set by set, in the chat or its Mini App.</p>
+    <div class="chips"><span>Telegram Mini App</span><span>Crowd-aware</span><span>Progressive overload</span></div>
+  </div>
+
+  <div class="chat">
+    <div class="who"><b>G</b><div><span>GymClaw</span><small>bot</small></div></div>
+    <div class="bubble"><b>Leave at 17:35.</b> 14 in the gym, quiet until 19:00.</div>
+    <div class="bubble out"><svg class="tick" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5"/></svg>9 × 87.5 kg (in the app)</div>
+    <div class="bubble"><b>Rest 1:23</b><br><span class="meta">until set 2/3 · 87.5 kg</span>
+      <div class="buttons four"><span>−30s</span><span>−15s</span><span>+15s</span><span>+30s</span></div>
+      <div class="buttons one"><span>Skip</span></div></div>
+  </div>
+  <div class="sync"><i></i>Log in the app, the chat follows.</div>
+
+  <div class="phone"><img src="screens/live.png" alt=""></div>
+</body></html>

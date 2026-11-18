@@ -19,7 +19,14 @@ A Telegram bot that plans my gym week around my calendar and coaches me through 
 - Raises targets when I hit all my reps, and sends a weekly recap every Sunday.
 - Tracks body weight from scale photos.
 
-![GymClaw dashboard](assets/dashboard-demo.png)
+It also runs as a Telegram Mini App: log sets with big steppers and plate math, and the chat card
+follows. Progress, history and the plans live there too.
+
+<p align="center">
+  <img src="assets/screens/live.png" width="30%" alt="Mid-workout: rest timer and set logger">
+  <img src="assets/screens/progress.png" width="30%" alt="Progress: sessions per week and estimated 1RM">
+  <img src="assets/screens/history.png" width="30%" alt="History: past workouts and their sets">
+</p>
 
 ## How it works
 
@@ -38,4 +45,4 @@ gym's check-in count ([crowd data](docs/crowd.md)). Then `docker compose up` and
 
 [Business Source License 1.1](LICENSE): free to clone, self-host and modify for noncommercial use;
 commercial use needs a license from the author. Each release becomes Apache 2.0 four years after
-it is published. Exercise art from [Workout Guide](https://github.com/bryllim/workout-guide).
+it is published.
