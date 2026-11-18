@@ -67,7 +67,8 @@ fn reply(status: StatusCode, body: Vec<u8>, mime: &str) -> Response {
     set(
         headers,
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors https://web.telegram.org",
+        // telegram.org: the Mini App SDK (index.html), which Telegram asks apps to load from there.
+        "default-src 'self'; style-src 'self'; script-src 'self' https://telegram.org; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors https://web.telegram.org",
     );
     response
 }

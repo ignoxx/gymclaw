@@ -1,5 +1,6 @@
 /* View of GymClaw state. Presentation only, except the Memory tab (the agent's notes and extensions) and the
-   Exercises tab (plan targets), which edit through GymClaw's own tools. */
+   Exercises tab (plan targets), which edit through GymClaw's own tools. Made first for Telegram: the bot's
+   menu button opens it as a Mini App (see "Telegram" below); a browser gets the same page. */
 const SVG = 'http://www.w3.org/2000/svg';
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 let restTimer = null;
@@ -9,6 +10,68 @@ const now = () => Date.now();
 // CSS class from a data value, always prefixed: ('crowd', 'A few') → 'crowd-a-few'. A bare value can
 // collide with a layout class (crowd "Empty" picked up the `.empty` placeholder margin).
 const dataClass = (kind, value) => `${kind}-${String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+/* ---------- Telegram ----------
+   `tg` is the Mini App API when Telegram opened the page, else null (a browser, or telegram.org didn't
+   load), and every Telegram call is skipped. Features are gated on the client's Bot API version. */
+const tg = window.Telegram?.WebApp?.initData ? window.Telegram.WebApp : null;
+const tgHas = version => Boolean(tg?.isVersionAtLeast(version));
+const haptic = {
+  // A light tick when a choice changes: tabs, toggles, scrubbing a chart.
+  select: () => tgHas('6.1') && tg.HapticFeedback.selectionChanged(),
+  // A save worked or failed; a rest is over.
+  done: (ok = true) => tgHas('6.1') && tg.HapticFeedback.notificationOccurred(ok ? 'success' : 'error'),
+};
+const token = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+/* Our palette, light or dark as Telegram is, with Telegram's header, background and bottom bar painted
+   to match so the page reads as part of the app. */
+function applyTelegramTheme() {
+  document.documentElement.dataset.theme = tg.colorScheme === 'dark' ? 'dark' : 'light';
+  if (tgHas('6.9')) tg.setHeaderColor(token('--paper'));
+  if (tgHas('6.1')) tg.setBackgroundColor(token('--paper'));
+  if (tgHas('7.10')) tg.setBottomBarColor(token('--white'));
+}
+
+/* Telegram's back button: closes the exercise sheet, else goes back to Today. */
+function syncBack() {
+  if (!tgHas('6.1')) return;
+  if (document.getElementById('ex-detail').open || activeTab() !== 'today') tg.BackButton.show();
+  else tg.BackButton.hide();
+}
+
+/* An edited plan form saves with Telegram's main button (styles.css hides the form's own Save), and
+   closing the app asks first while the edit is unsaved. */
+let dirtyForm = null;
+function markDirty(form, label) {
+  if (!tg) return;
+  dirtyForm = form;
+  tg.MainButton.setParams({ text: label, color: token('--lime'), text_color: token('--on-lime'), is_visible: true, is_active: true });
+  if (tgHas('6.2')) tg.enableClosingConfirmation();
+}
+function clearDirty() {
+  if (!tg) return;
+  dirtyForm = null;
+  tg.MainButton.hideProgress();
+  tg.MainButton.hide();
+  if (tgHas('6.2')) tg.disableClosingConfirmation();
+}
+
+if (tg) {
+  document.documentElement.classList.add('tg');
+  applyTelegramTheme();
+  tg.onEvent('themeChanged', applyTelegramTheme);
+  tg.expand();
+  // Scrubbing a chart would otherwise drag the whole app down; Close stays in Telegram's header.
+  if (tgHas('7.7')) tg.disableVerticalSwipes();
+  if (tgHas('6.1')) tg.BackButton.onClick(() => {
+    const dialog = document.getElementById('ex-detail');
+    if (dialog.open) dialog.close();
+    else location.hash = 'today';
+  });
+  tg.MainButton.onClick(() => dirtyForm?.requestSubmit());
+  tg.ready();
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -69,7 +132,17 @@ function showTip(event, title, rows) {
   tooltip.style.left = `${Math.max(8, left) + window.scrollX}px`;
   tooltip.style.top = `${event.clientY - box.height - 12 + window.scrollY}px`;
 }
-const hideTip = () => { tooltip.hidden = true; };
+// The crosshair a tooltip belongs to, hidden with it.
+let clearHover = null;
+const hideTip = () => { tooltip.hidden = true; clearHover?.(); clearHover = null; };
+/* Hover with a mouse; tap or drag with a finger. A touch tooltip stays after the finger lifts, until
+   the next tap elsewhere, so it can be read. */
+function hover(node, show, hide = hideTip) {
+  node.addEventListener('pointermove', show);
+  node.addEventListener('pointerdown', show);
+  node.addEventListener('pointerleave', event => { if (event.pointerType !== 'touch') hide(); });
+}
+document.addEventListener('pointerdown', event => { if (!event.target.closest?.('.hit, .bar-row, .hm-cell')) hideTip(); });
 
 /* Chart frame: an SVG sized to its container, with y gridlines. */
 function frame(box, top, { height = 160, left = 30, label = 'Chart' } = {}) {
@@ -93,17 +166,22 @@ function crosshair(chart, xs, describe) {
   const dot = svgEl('circle', { r: 4.5, class: 'hover-dot', visibility: 'hidden' });
   const hit = svgEl('rect', { x: chart.L, y: 0, width: chart.W - chart.L - chart.R, height: chart.H, class: 'hit' });
   chart.svg.append(line, dot, hit);
-  hit.addEventListener('pointermove', event => {
+  let shown = -1;
+  const clear = () => { line.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); shown = -1; };
+  hover(hit, event => {
     const rect = chart.svg.getBoundingClientRect();
     const px = (event.clientX - rect.left) * chart.W / rect.width;
     let index = 0;
     xs.forEach((x, i) => { if (Math.abs(x - px) < Math.abs(xs[index] - px)) index = i; });
+    // A finger scrubbing across points ticks once per point.
+    if (event.pointerType === 'touch' && index !== shown) haptic.select();
+    shown = index;
     const info = describe(index);
     line.setAttribute('x1', xs[index]); line.setAttribute('x2', xs[index]); line.setAttribute('visibility', 'visible');
     if (info.y !== undefined) { dot.setAttribute('cx', xs[index]); dot.setAttribute('cy', info.y); dot.setAttribute('visibility', 'visible'); }
     showTip(event, info.title, info.rows);
+    clearHover = clear;
   });
-  hit.addEventListener('pointerleave', () => { line.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); hideTip(); });
 }
 
 /* ---------- Today ---------- */
@@ -357,10 +435,13 @@ function renderActivity(activity, today) {
 
 function startRest(node, until) {
   clearInterval(restTimer);
+  let counting = false;
   const tick = () => {
     const left = Math.max(0, Math.ceil((Date.parse(until) - now()) / 1000));
     node.textContent = left ? `Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'Rest over';
-    if (!left) clearInterval(restTimer);
+    // Buzz only when the rest runs out on screen, not when the page opens after it.
+    if (!left) { clearInterval(restTimer); if (counting) haptic.done(); }
+    counting = left > 0;
   };
   tick();
   restTimer = setInterval(tick, 1000);
@@ -425,6 +506,9 @@ function renderToday(data) {
   const focus = document.getElementById('focus');
   focus.replaceChildren();
   clearInterval(restTimer);
+  // Mid-workout a phone shows just the workout; before a session its card is the dark one (styles.css).
+  document.getElementById('tab-today').classList.toggle('live', Boolean(data.workout));
+  focus.classList.toggle('next', !data.workout && Boolean(data.next));
   if (data.workout) renderWorkout(focus, data.workout);
   else if (data.next) renderNext(focus, data.next);
   else focus.append(el('h2', 'title', 'No sessions planned'));
@@ -469,8 +553,7 @@ function renderWeeks(insights) {
     }
     if (index % (weeks.length > 6 && chart.W < 420 ? 2 : 1) === 0) chart.svg.append(svgText(cx, chart.H - 6, week.label, { 'text-anchor': 'middle' }));
     const hit = svgEl('rect', { x: cx - slot / 2, y: chart.T, width: slot, height: chart.H - chart.T - chart.B, class: 'hit' });
-    hit.addEventListener('pointermove', event => showTip(event, `Week of ${week.label}`, [[`${week.count} of ${insights.target}`, 'sessions']]));
-    hit.addEventListener('pointerleave', hideTip);
+    hover(hit, event => showTip(event, `Week of ${week.label}`, [[`${week.count} of ${insights.target}`, 'sessions']]));
     chart.svg.append(hit);
   });
   const target = chart.y(insights.target);
@@ -532,8 +615,7 @@ function renderMuscles(insights) {
     fill.style.width = `${Math.max(2, muscle.volume / max * 100)}%`;
     track.append(fill);
     row.append(el('span', 'bar-label', muscle.muscle), track, el('span', 'bar-value', tonnes(muscle.volume)));
-    row.addEventListener('pointermove', event => showTip(event, muscle.muscle, [[tonnes(muscle.volume), 'volume'], [muscle.sets, 'working sets']]));
-    row.addEventListener('pointerleave', hideTip);
+    hover(row, event => showTip(event, muscle.muscle, [[tonnes(muscle.volume), 'volume'], [muscle.sets, 'working sets']]));
     box.append(row);
   }
 }
@@ -567,8 +649,7 @@ function renderHeatmap(insights) {
       if (cell) {
         // One hue, light to dark: busier is darker.
         node.style.setProperty('--t', (cell.count / max).toFixed(3));
-        node.addEventListener('pointermove', event => showTip(event, `${name} ${clock(h * 60)}–${clock(h * 60 + 60)}`, [[`~${cell.count}`, 'checked in'], [cell.days, cell.days === 1 ? 'day of data' : 'days of data']]));
-        node.addEventListener('pointerleave', hideTip);
+        hover(node, event => showTip(event, `${name} ${clock(h * 60)}–${clock(h * 60 + 60)}`, [[`~${cell.count}`, 'checked in'], [cell.days, cell.days === 1 ? 'day of data' : 'days of data']]));
       }
       box.append(node);
     }
@@ -706,6 +787,10 @@ function renderMemory(memory) {
       const forget = el('button', 'forget', '×');
       forget.setAttribute('aria-label', 'Forget');
       forget.addEventListener('click', () => {
+        if (tgHas('6.2')) {
+          tg.showConfirm(`Forget “${note.text}”?`, ok => ok && toolCall('note_delete', { id: note.id }).catch(() => item.classList.add('failed')));
+          return;
+        }
         // Two taps: the first arms it, the second forgets.
         if (!item.classList.contains('armed')) { item.classList.add('armed'); forget.textContent = 'Forget?'; return; }
         forget.blur();
@@ -860,7 +945,7 @@ function renderExercises() {
       const chip = el('button', 'chip', value || 'All');
       chip.type = 'button';
       chip.setAttribute('aria-pressed', String(exView.equipment === value));
-      chip.addEventListener('click', () => { exView.equipment = value; renderExercises(); });
+      chip.addEventListener('click', () => { haptic.select(); exView.equipment = value; renderExercises(); });
       return chip;
     }));
     const yours = new Set(state.plans.flatMap(p => p.exercises.map(e => e.guide_id)));
@@ -909,6 +994,7 @@ function planEditor(plan, exercise) {
   const actions = el('div', 'ex-actions');
   actions.append(save, message);
   form.append(grid, actions);
+  form.addEventListener('input', () => markDirty(form, `Save ${plan.name}`));
   form.addEventListener('submit', async event => {
     event.preventDefault();
     const changes = {};
@@ -917,11 +1003,15 @@ function planEditor(plan, exercise) {
       if (input.value === '') { if (input.name === 'rest_seconds') changes.rest_seconds = null; continue; }
       changes[input.name] = Number(input.value);
     }
-    if (!Object.keys(changes).length) { message.textContent = 'Nothing changed'; return; }
+    if (!Object.keys(changes).length) { message.textContent = 'Nothing changed'; clearDirty(); return; }
     save.disabled = true;
     message.textContent = 'Saving…';
+    tg?.MainButton.showProgress();
     try {
-      if (!await toolCall('template_edit_exercise', { template_id: plan.id, exercise: exercise.name, changes })) {
+      const reloaded = await toolCall('template_edit_exercise', { template_id: plan.id, exercise: exercise.name, changes });
+      clearDirty();
+      haptic.done();
+      if (!reloaded) {
         message.textContent = 'Saved · reload to see it';
         return;
       }
@@ -931,6 +1021,8 @@ function planEditor(plan, exercise) {
     } catch (error) {
       message.textContent = error.message;
       save.disabled = false;
+      tg?.MainButton.hideProgress();
+      haptic.done(false);
     }
   });
   return form;
@@ -1008,6 +1100,7 @@ function openExercise(of) {
     sheet.append(sessions);
   }
   if (!dialog.open) dialog.showModal();
+  syncBack();
   if (points.length > 1) drawProgress(chart, points);
 }
 
@@ -1023,6 +1116,7 @@ function showTab() {
   document.querySelectorAll('.tabs button').forEach(button => button.toggleAttribute('aria-current', button.dataset.tab === tab));
   document.querySelectorAll('.tab').forEach(section => { section.hidden = section.id !== `tab-${tab}`; });
   hideTip();
+  syncBack();
   if (!state) return;
   // Charts measure their container, so draw a tab only once it's visible.
   if (tab === 'today') renderToday(state);
@@ -1060,22 +1154,43 @@ async function refresh() {
   }
 }
 
-document.querySelectorAll('.tabs button').forEach(button => button.addEventListener('click', () => { location.hash = button.dataset.tab; }));
+document.querySelectorAll('.tabs button').forEach(button => button.addEventListener('click', () => {
+  if (activeTab() === button.dataset.tab) return;
+  haptic.select();
+  location.hash = button.dataset.tab;
+  // Like any app's tab bar: a tab opens at its top.
+  window.scrollTo(0, 0);
+}));
+// The exercise sheet closes with ×, the backdrop, Esc or Telegram's back button; an unsaved edit goes with it.
+document.getElementById('ex-detail').addEventListener('close', () => { clearDirty(); syncBack(); });
+// In Telegram the client downloads the CSV itself; a download link in its web view does nothing on iOS.
+document.getElementById('export').addEventListener('click', event => {
+  if (!tgHas('8.0')) return;
+  event.preventDefault();
+  tg.downloadFile({ url: new URL('/export.csv', location.href).href, file_name: 'gymclaw-sets.csv' });
+});
 document.getElementById('exercise-select').addEventListener('change', event => { selectedExercise = event.target.value; renderProgress(state.insights); });
 window.addEventListener('hashchange', showTab);
-document.querySelectorAll('#ex-views button').forEach(button => button.addEventListener('click', () => { exView.view = button.dataset.ex; renderExercises(); }));
+document.querySelectorAll('#ex-views button').forEach(button => button.addEventListener('click', () => { haptic.select(); exView.view = button.dataset.ex; renderExercises(); }));
 document.getElementById('ex-search').addEventListener('input', event => { exView.query = event.target.value; renderExercises(); });
 // A tap on the dimmed backdrop (the dialog itself, outside its sheet) closes it.
 document.getElementById('ex-detail').addEventListener('click', event => { if (event.target === event.currentTarget) event.currentTarget.close(); });
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(showTab, 150); });
 document.querySelectorAll('.crowd-nav .segmented button').forEach(button => button.addEventListener('click', () => {
+  haptic.select();
   crowdView.view = button.dataset.view; crowdView.back = 0; renderAttendance(state.crowd);
 }));
 document.getElementById('crowd-prev').addEventListener('click', () => { crowdView.back += 1; renderAttendance(state.crowd); });
 document.getElementById('crowd-next').addEventListener('click', () => { crowdView.back = Math.max(-CROWD_AHEAD[crowdView.view], crowdView.back - 1); renderAttendance(state.crowd); });
 refresh();
 // Live state refreshes itself every 10 s while the page is visible (a refresh is ~70 ms server-side),
-// and at once when you come back to the tab.
-setInterval(() => !document.hidden && refresh(), 10000);
+// and at once when you come back to the tab. Telegram keeps a minimized Mini App's page running and
+// visible, so there it polls only while the app is active.
+let active = true;
+if (tgHas('8.0')) {
+  tg.onEvent('activated', () => { active = true; refresh(); });
+  tg.onEvent('deactivated', () => { active = false; });
+}
+setInterval(() => active && !document.hidden && refresh(), 10000);
 document.addEventListener('visibilitychange', () => !document.hidden && refresh());

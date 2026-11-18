@@ -2,12 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
   <title>GymClaw</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-title" content="GymClaw">
   <link rel="stylesheet" href="/styles.css">
+  <!-- Telegram Mini App SDK: the bot's menu button opens this page inside Telegram. Loaded from
+       telegram.org as Telegram asks, so it tracks new clients; in a browser it is inert. -->
+  <script src="https://telegram.org/js/telegram-web-app.js?59" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -17,16 +21,23 @@
       <span class="updated" id="updated"></span>
     </header>
     <div class="page-heading"><h1>Training</h1>
-      <nav class="tabs" aria-label="Views"><button data-tab="today" aria-current="page">Today</button><button data-tab="progress">Progress</button><button data-tab="history">History</button><button data-tab="exercises">Exercises</button><button data-tab="memory">Memory</button></nav></div>
+      <!-- Pills on wide screens; a bottom bar on phones and in Telegram (styles.css). -->
+      <nav class="tabs" aria-label="Views">
+        <button data-tab="today" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-7 8 7v9H4z"/></svg><span>Today</span></button>
+        <button data-tab="progress"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19l5-6 4 3 7-9"/></svg><span>Progress</span></button>
+        <button data-tab="history"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg><span>History</span></button>
+        <button data-tab="exercises"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3M18 12h3M6 8v8M18 8v8M9 10v4M15 10v4M9 12h6"/></svg><span>Exercises</span></button>
+        <button data-tab="memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a6 6 0 0 0-3.5 10.9V18h7v-3.1A6 6 0 0 0 12 4zM9.5 21h5"/></svg><span>Memory</span></button>
+      </nav></div>
     <div id="load-error" role="alert" hidden>Can't reach GymClaw right now.</div>
     <div id="polling-alert" class="alert" role="alert" hidden></div>
     <div class="layout tab" id="tab-today" hidden>
       <div class="column">
-        <section class="panel" aria-labelledby="week-title">
+        <section class="panel week-panel" aria-labelledby="week-title">
           <div class="section-heading"><h2 id="week-title">Next 7 days</h2><span><span id="range"></span> · <span id="session-count"></span></span></div>
           <div class="week" id="week"></div>
         </section>
-        <section class="panel" aria-labelledby="gym-title">
+        <section class="panel gym-panel" aria-labelledby="gym-title">
           <div class="section-heading"><h2 id="gym-title">Gym</h2><span id="polling"></span></div>
           <div class="count"><strong id="count">—</strong><div><span>checked in</span><small id="count-time"></small></div>
             <div class="legend"><span class="key today" id="legend-day">Today</span><span class="key typical" id="legend-typical"></span></div></div>
@@ -52,7 +63,7 @@
       <section class="panel weight"><div class="section-heading"><h2>Body weight</h2><span class="legend" id="weight-legend"><span class="key">7-day average</span><span class="key weigh-in">Weigh-in</span></span></div><div class="chart" id="weight-chart"></div></section>
     </div>
     <div class="tab" id="tab-history" hidden>
-      <section class="panel"><div class="section-heading"><h2>Workouts</h2><span><span id="history-count"></span> · <a href="/export.csv" download>Export CSV</a></span></div><div id="history"></div></section>
+      <section class="panel"><div class="section-heading"><h2>Workouts</h2><span><span id="history-count"></span> · <a href="/export.csv" id="export" download>Export CSV</a></span></div><div id="history"></div></section>
     </div>
     <div class="tab" id="tab-exercises" hidden>
       <div class="ex-bar">
