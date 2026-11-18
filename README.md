@@ -3,9 +3,9 @@
 [![Tests](https://github.com/ignoxx/gymclaw/actions/workflows/tests.yml/badge.svg)](https://github.com/ignoxx/gymclaw/actions/workflows/tests.yml)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue)](LICENSE)
 
-A personal gym coach that plans my week around my calendar and coaches me through each workout.
+An AI gym coach that adapts to you.
 
-![gymclaw: you lift, it handles the rest](assets/hero.png)
+![gymclaw: the last workout app you'll ever need](assets/hero.png)
 
 > **Work in progress.** I use it every day, and it has rough edges. Expect breaking changes.
 
@@ -18,9 +18,6 @@ A personal gym coach that plans my week around my calendar and coaches me throug
   timer, swaps to a same-muscle exercise.
 - Raises targets when I hit all my reps, and sends a weekly recap every Sunday.
 - Tracks body weight from scale photos.
-
-It runs in a chat, with an app one tap away: log a set there with steppers and plate math and the
-chat card updates. Progress, history and the plans live in the app too.
 
 <p align="center">
   <img src="assets/screens/chat.png" width="30%" alt="The chat mid-workout: exercise card and rest timer">

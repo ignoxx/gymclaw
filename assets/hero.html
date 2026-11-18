@@ -1,33 +1,34 @@
 <!doctype html>
 <!-- The README banner (assets/hero.png). Render it at 2x from the repo root:
-     scripts/shot "file://$PWD/assets/hero.html" assets/hero.png 1280 640 --scale 2
+     scripts/shot "file://$PWD/assets/hero.html" assets/hero.png 1280 600 --scale 2
      The phones are the README's own screens in assets/screens/. -->
 <html lang="en"><head><meta charset="utf-8"><title>gymclaw Banner</title>
 <style>
 @font-face { font-family: 'DM Sans'; src: url('../web/fonts/DM-Sans.ttf'); font-weight: 100 900; }
 :root { --paper: #121412; --ink: #eef0ea; --muted: #8f968a; --lime: #d7f580; }
 * { box-sizing: border-box; }
-html, body { margin: 0; width: 1280px; height: 640px; overflow: hidden; }
+html, body { margin: 0; width: 1280px; height: 600px; overflow: hidden; }
 body { position: relative; color: var(--ink); font: 16px/1.4 'DM Sans', sans-serif;
   background: radial-gradient(760px 520px at 82% 40%, #222a19 0%, transparent 70%), var(--paper); }
 
 .copy { position: absolute; left: 80px; top: 0; bottom: 0; width: 560px; display: flex; flex-direction: column; justify-content: center; }
 .wordmark { font-weight: 800; font-size: 128px; line-height: .9; letter-spacing: -6px; margin: 0 0 0 -6px; }
 .wordmark b { color: var(--lime); }
-.tagline { font-size: 40px; font-weight: 700; letter-spacing: -1px; line-height: 1.1; margin: 30px 0 0; }
+.tagline { font-size: 42px; font-weight: 700; letter-spacing: -1.2px; line-height: 1.08; margin: 28px 0 0; }
 .tagline em { color: var(--lime); font-style: normal; }
-.lede { color: var(--muted); font-size: 19px; line-height: 1.5; margin: 20px 0 0; max-width: 500px; }
+.lede { color: var(--ink); opacity: .72; font-size: 21px; margin: 16px 0 0; }
 
-.phone { position: absolute; height: 568px; filter: drop-shadow(0 30px 50px rgba(0, 0, 0, .6)); }
-.chat { left: 712px; top: 52px; }
-.app { left: 958px; top: 36px; }
+/* Staggered phones run off the edges: the chat off the top (its rest card stays in view), the app
+   off the bottom (its logger stays in view). */
+.phone { position: absolute; height: 700px; filter: drop-shadow(0 30px 50px rgba(0, 0, 0, .6)); }
+.chat { left: 640px; top: -150px; }
+.app { left: 906px; top: 64px; }
 </style></head>
 <body>
   <div class="copy">
     <h1 class="wordmark">gymclaw<b>.</b></h1>
-    <p class="tagline">You lift. <em>It handles the rest.</em></p>
-    <p class="lede">A personal gym coach. It plans your week around your calendar and the gym's quiet
-      hours, then runs every workout with you, set by set, in the chat or the app.</p>
+    <p class="tagline">The last workout app<br>you'll <em>ever</em> need.</p>
+    <p class="lede">An AI gym coach that adapts to you.</p>
   </div>
   <img class="phone chat" src="screens/chat.png" alt="">
   <img class="phone app" src="screens/live.png" alt="">
