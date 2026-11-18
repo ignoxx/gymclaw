@@ -921,14 +921,15 @@ pub fn set_rest(db: &Connection, workout_id: &str, seconds: i64, now: Ts, reques
     })
 }
 
-/// Shorten the running rest countdown. Cutting past zero ends the rest (same as skipping it).
-/// The fallback ping keeps its old time; it finds the job already closed and stays silent.
+/// Shorten the running rest countdown, or lengthen it with negative `seconds` (+15s/+30s on the card).
+/// Cutting past zero ends the rest (same as skipping it). The rest job's own time moves with it, so the
+/// scheduler's fallback ping follows the new end.
 pub fn cut_rest(db: &Connection, workout_id: &str, seconds: i64, now: Ts, request_id: &str) -> Result<Value> {
     mutate(db, "workout.rest_cut", request_id, json!({"workout_id": workout_id, "seconds": seconds}), now, || {
         let mut workout = load_workout(db, workout_id, Some(now))?;
         let job = pending_rest(db, workout_id)?;
         let Some(mut job) = job.filter(|_| workout.status == WorkoutStatus::Resting) else {
-            crate::bail!("NOT_RESTING", "No rest to shorten");
+            crate::bail!("NOT_RESTING", "No rest to change");
         };
         let due = job.due_at - SignedDuration::from_secs(seconds);
         if due <= now {

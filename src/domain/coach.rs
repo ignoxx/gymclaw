@@ -106,14 +106,19 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
         } else {
             "? kg".into()
         };
+        // Shorter or longer: a cut by a negative number adds time (a hard set needs more rest).
         return Ok(Card {
             text: format!("until {upcoming} · {target}"),
             photo: None,
-            buttons: vec![vec![
-                button("−15s", &["cut", r, "15"])?,
-                button("−30s", &["cut", r, "30"])?,
-                button("⏭ Skip", &["skip", r])?,
-            ]],
+            buttons: vec![
+                vec![
+                    button("−30s", &["cut", r, "30"])?,
+                    button("−15s", &["cut", r, "15"])?,
+                    button("+15s", &["cut", r, "-15"])?,
+                    button("+30s", &["cut", r, "-30"])?,
+                ],
+                vec![button("⏭ Skip", &["skip", r])?],
+            ],
             rest_until: Some(rest.due_at),
             kind: CardKind::Rest,
             effect: None,
@@ -1072,7 +1077,13 @@ mod tests {
         let rest = &result.cards[0];
         assert_eq!((rest.kind, rest.rest_until), (CardKind::Rest, Some(at(100))));
         assert_eq!(rest.text, "until **Machine incline press** set 2/2 · 90 kg");
-        assert_eq!(buttons(rest).iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["−15s", "−30s", "⏭ Skip"]);
+        assert_eq!(
+            buttons(rest).iter().map(|b| b.0.as_str()).collect::<Vec<_>>(),
+            ["−30s", "−15s", "+15s", "+30s", "⏭ Skip"]
+        );
+        // +30s pushes the end back; the countdown card is refreshed in place.
+        let longer = handle_tap(&db, &data(rest, "+30s"), at(20), "cb-more").unwrap();
+        assert_eq!((longer.refresh, longer.cards[0].rest_until), (true, Some(at(130))));
         let skipped = handle_tap(&db, &data(rest, "⏭ Skip"), at(30), "cb-skip").unwrap();
         let card = &skipped.cards[0];
         assert!(skipped.delete && card.kind == CardKind::Set);
