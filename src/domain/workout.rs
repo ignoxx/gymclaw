@@ -716,8 +716,8 @@ pub fn start(
     mutate(db, "workout.started", request_id, intent, now, || {
         if blocked_at(db, now)? {
             crate::bail!(
-                "WORKOUT_UNAVAILABLE",
-                "User availability override active; remove/change it explicitly before starting"
+                "AVAILABILITY_BLOCKED",
+                "An availability block (travel, sick, unavailable) covers now; availability_remove lifts it"
             );
         }
         let mut planned_session_id = planned_session_id.map(String::from);

@@ -132,10 +132,10 @@ fn schema_hint(db: &Connection, sql: &str) -> Result<String> {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct NoteAdd {
-    /// `owner`: what the owner told you: a lasting preference or fact, or a dated exception. `learned`: a
-    /// pattern you inferred from their behaviour across at least two weeks (e.g. "late-morning slots get
-    /// missed; early afternoon sticks"). Never current state (a missed session, an open question): the
-    /// database already holds it.
+    /// `owner`: what the owner told you: a lasting preference or fact, or a dated exception. `learned`: what
+    /// you learned: a mistake the owner corrected, or a pattern in their behaviour that held for at least two
+    /// weeks (e.g. "late-morning slots get missed; early afternoon sticks"). Never current state (a missed
+    /// session, an open question): the database already holds it.
     pub kind: NoteKind,
     /// One short line.
     pub text: String,
