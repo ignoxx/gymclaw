@@ -475,10 +475,8 @@ function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, nullab
   input.setAttribute('aria-label', label);
   const show = v => { input.value = v === null || v === undefined ? '' : String(v); };
   show(value);
-  let good = value;
   const commit = v => {
     value = v === null ? null : Math.max(min, Math.round(v * 100) / 100);
-    if (value !== null) good = value;
     onChange(value);
   };
   const typed = () => {
@@ -516,8 +514,9 @@ function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, nullab
   // Select on the next frame: select() right in focus pops iOS's cut/copy/paste bubble over the number.
   input.addEventListener('focus', () => requestAnimationFrame(() => input.setSelectionRange(0, input.value.length)));
   input.addEventListener('keydown', event => { if (event.key === 'Enter') input.blur(); });
-  // What's in the box is what counts: emptied, or under the minimum mid-typing, means "nothing yet" (the Log
-  // button then says what's missing). Left like that, the last good value comes back.
+  // What's in the box is what counts: emptied or under the minimum means "nothing yet", and the Log button
+  // says what's missing. Never put back on blur: the blur comes from tapping Log, which would then log the
+  // put-back value.
   const valid = v => (v === null ? nullable : v !== undefined && v >= min);
   input.addEventListener('input', () => {
     const v = typed();
@@ -526,12 +525,11 @@ function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, nullab
   });
   input.addEventListener('change', () => {
     if (!valid(typed())) {
-      // Not a number: say so (red flash, error buzz) and put the last good value back.
+      // Not a number: say so (red flash, error buzz); the box empties and the button asks for it.
       row.classList.remove('invalid');
       void row.offsetWidth;
       row.classList.add('invalid');
       haptic.done(false);
-      commit(good ?? null);
     }
     show(value);
   });
@@ -632,7 +630,7 @@ function renderLogger(focus, live, active, last) {
         onChange: v => { logger.seconds = v === null ? null : Math.round(long ? v * 60 : v); refreshLabel(); } }));
     words = () => logger.seconds ? duration(logger.seconds) : null;
   } else if (measure === 'distance') {
-    const km = (logger.meters ?? 1000) >= 1000;
+    const km = (spec.meters ?? 1000) >= 1000;
     box.append(stepper('Distance', logger.meters === null ? null : km ? logger.meters / 1000 : logger.meters,
       { step: km ? 0.1 : 50, min: km ? 0.1 : 50, base: km ? 2 : 400, unit: km ? 'km' : 'm', decimal: km,
         onChange: v => { logger.meters = v === null ? null : Math.round(km ? v * 1000 : v); refreshLabel(); } }));
@@ -640,7 +638,7 @@ function renderLogger(focus, live, active, last) {
   } else {
     // Bodyweight hides the weight, except where weight is added (dip belt), even at 0.
     if (!spec.reps_only || spec.added || logger.weight) {
-      box.append(stepper(spec.added ? 'Added' : 'Weight', logger.weight, { step: weightStep(equipment, logger.weight), base: 20, unit: spec.unit, decimal: true,
+      box.append(stepper(spec.added ? 'Added' : 'Weight', logger.weight, { step: weightStep(equipment, logger.weight), base: 20, unit: spec.unit, decimal: true, min: spec.added ? 0 : 0.5,
         onChange: v => { logger.weight = v; refreshLabel(); } }));
       box.plates = el('p', 'plates');
       box.append(box.plates);
@@ -649,7 +647,8 @@ function renderLogger(focus, live, active, last) {
     box.append(stepper(spec.per_side ? 'Reps / side' : 'Reps', logger.reps, { min: 1, base: 8, unit: 'reps', onChange: v => { logger.reps = v; refreshLabel(); } }));
     if (box.best) box.append(box.best);
     words = () => {
-      if (!logger.reps || (!spec.reps_only && !logger.weight)) return null;
+      // Added weight: 0 is an unweighted set, an empty box is missing. A lift needs a weight.
+      if (!logger.reps || (spec.added ? logger.weight === null && !spec.reps_only : !spec.reps_only && !logger.weight)) return null;
       if (!logger.weight) return `${logger.reps} reps`;
       return `${logger.reps} × ${spec.added ? '+' : ''}${logger.weight} ${spec.unit}`;
     };
@@ -679,7 +678,7 @@ function renderLogger(focus, live, active, last) {
     if (box.best) {
       // About to beat the best estimated 1RM: say so before the set, not only in the chat's confetti after.
       const best = Math.max(0, ...(progressOf(active)?.points || []).map(p => p.e1rm));
-      const next = oneRepMax(logger.weight || 0, logger.reps || 0);
+      const next = what ? oneRepMax(logger.weight || 0, logger.reps || 0) : 0;
       box.best.textContent = !fixing && best && next > best ? `New best: ≈ ${next} kg 1RM (was ${best})` : '';
     }
     liveAction = { text: submit.textContent, run };
@@ -868,7 +867,7 @@ function renderNext(focus, next) {
     const button = el('button');
     button.type = 'button';
     const text = el('div');
-    text.append(el('strong', '', exercise.name), el('span', '', exercise.time ? (exercise.sets > 1 ? `${exercise.sets} × ${exercise.time}` : exercise.time) : `${exercise.sets} × ${exercise.target}`));
+    text.append(el('strong', '', exercise.name), el('span', '', exercise.time ? (exercise.sets > 1 ? `${exercise.sets} × ${exercise.time}` : exercise.time) : exercise.sets > 1 ? `${exercise.sets} × ${exercise.target}` : exercise.target));
     button.append(thumb(exercise.svg_url), text, el('em', '', exercise.last ? `Last ${exercise.last}` : ''));
     button.addEventListener('click', () => openExercise({ id: exercise.id }));
     row.append(button);
@@ -889,7 +888,7 @@ function renderFinished(focus, workout, next) {
   // The workout's last set can still be fixed here: a typo on the final set is common.
   if (workout.last && !logger.fixing) focus.append(lastLine(workout.last, null));
   if (workout.last && logger.fixing) renderLogger(focus, null, null, workout.last);
-  if (workout.rate.length) {
+  if (workout.rate.length && !logger.fixing) {
     focus.append(el('h3', 'ask', 'How busy was the gym?'));
     const actions = el('div', 'live-actions');
     workout.rate.forEach(b => actions.append(actionButton(b)));
@@ -930,7 +929,8 @@ function renderToday(data) {
   const finished = !data.workout && data.history[0] && now() - Date.parse(data.history[0].finished_at) < 3 * 3600e3 ? data.history[0] : null;
   // Mid-workout a phone shows just the workout (styles.css); before a session its card is the dark one.
   document.getElementById('tab-today').classList.toggle('live', Boolean(data.workout));
-  document.documentElement.classList.toggle('live-mode', Boolean(data.workout) && activeTab() === 'today');
+  // A main button on the card (the set, or fixing the last one): the tab bar steps aside in Telegram.
+  document.documentElement.classList.toggle('live-mode', Boolean(data.workout || (finished && logger.fixing)) && activeTab() === 'today');
   focus.classList.toggle('next', !data.workout && !finished && Boolean(data.next));
   if (data.workout) renderWorkout(focus, data.workout);
   else if (finished) renderFinished(focus, finished, data.next);
@@ -1366,7 +1366,7 @@ function renderExercises() {
       if (!exercises.length) continue;
       list.append(group(plan.name, `${exercises.length} exercise${exercises.length === 1 ? '' : 's'}`, exercises.map(e => {
         const last = logged.get(e.id)?.sessions[0];
-        const target = `${e.sets} × ${e.target}`;
+        const target = e.sets > 1 || (e.measure || 'reps') === 'reps' ? `${e.sets} × ${e.target}` : e.target;
         return exerciseRow(e, target, last ? `Last ${setText(bestSet(last.sets))}` : 'Not logged yet', () => openExercise({ id: e.id }));
       })));
     }
@@ -1577,7 +1577,8 @@ function showTab() {
   hideTip();
   syncBack();
   syncMain();
-  document.documentElement.classList.toggle('live-mode', Boolean(state?.workout) && tab === 'today');
+  // Today decides it (renderToday); any other tab has its tab bar.
+  if (tab !== 'today') document.documentElement.classList.remove('live-mode');
   // The browser's title line names the tab; in Telegram it's hidden.
   document.querySelector('h1').textContent = { today: 'Today', progress: 'Progress', history: 'History', exercises: 'Exercises', memory: 'Memory' }[tab];
   if (!state) return;
@@ -1599,7 +1600,6 @@ function render(data) {
   if (content === rendered) return;
   rendered = content;
   state = data;
-  renderGym(data.crowd);
   showTab();
 }
 

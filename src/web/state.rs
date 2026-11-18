@@ -12,7 +12,7 @@ use crate::db::models::{
     RuntimeSettings, SetType, UserProfile, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
-use crate::domain::templates::{Load, Measure, get_template};
+use crate::domain::templates::{ExerciseSpec, Load, Measure, get_template};
 use crate::domain::{coach, crowd, illustrations, preview, workout};
 use crate::error::Result;
 use crate::time::Ts;
@@ -74,6 +74,15 @@ fn days(db: &Connection, tz: &TimeZone, today: Date) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// A plan exercise's target as the chat words it: "8–10 × 80 kg", "25 min", "2 km".
+fn target(spec: &ExerciseSpec, weight: f64) -> String {
+    match spec.measure {
+        Measure::Time => spec.set_seconds().map_or("timed".into(), |s| spec.kind().reps(&workout::format_time(s))),
+        Measure::Distance => spec.meters.map_or("distance".into(), workout::format_distance),
+        Measure::Reps => spec.kind().target(spec.rep_min, spec.rep_max, weight),
+    }
+}
+
 fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     let Some(row) = PlannedSession::first(
         db,
@@ -97,7 +106,7 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         exercises.push(json!({"id": spec.id, "name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
             "reps": reps, "time": spec.set_seconds().map(workout::format_time),
             // The target with this session's weight (progression included), worded like the plan list.
-            "target": spec.kind().target(spec.rep_min, spec.rep_max, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight)),
+            "target": target(spec, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight)),
             "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
     Ok(
@@ -127,7 +136,7 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
                 "measure": spec.measure, "load": spec.load,
                 "equipment": spec.guide_id.as_deref().and_then(|g| illustrations::catalog().get(g)).map(|i| i.equipment.clone()),
-                "time": spec.set_seconds().map(workout::format_time), "target": spec.kind().target(spec.rep_min, spec.rep_max, next)}));
+                "time": spec.set_seconds().map(workout::format_time), "target": target(spec, next)}));
         }
         out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));
     }
