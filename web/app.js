@@ -64,6 +64,12 @@ if (tg) {
   applyTelegramTheme();
   tg.onEvent('themeChanged', applyTelegramTheme);
   tg.expand();
+  // On phones the page fills the screen: no header strip, Telegram's Close and ⋯ float over our own
+  // background (styles.css keeps content clear of them). Desktop keeps its window.
+  if (tgHas('8.0') && ['ios', 'android'].includes(tg.platform)) {
+    tg.onEvent('fullscreenChanged', () => document.documentElement.classList.toggle('tg-full', tg.isFullscreen));
+    tg.requestFullscreen();
+  }
   // Scrubbing a chart would otherwise drag the whole app down; Close stays in Telegram's header.
   if (tgHas('7.7')) tg.disableVerticalSwipes();
   if (tgHas('6.1')) tg.BackButton.onClick(() => {
