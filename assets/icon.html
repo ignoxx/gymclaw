@@ -1,0 +1,13 @@
+<!doctype html>
+<!-- The gymclaw icon, full-bleed (Telegram and iOS round the corners themselves). From the repo root:
+     bot profile picture:  scripts/shot "file://$PWD/assets/icon.html" assets/icon.png 1024 1024 --scale 2
+     web/apple-touch-icon: scripts/shot "file://$PWD/assets/icon.html" web/apple-touch-icon.png 180 180
+     The mark is web/favicon.svg's. -->
+<html><head><meta charset="utf-8"><title>gymclaw Icon</title>
+<style>
+html, body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; }
+body { display: grid; place-items: center; background: radial-gradient(circle at 50% 45%, #222a19 0%, #121412 72%); }
+/* Mark at 58% of the side, thinner than the favicon (which needs weight at 16 px): it stays inside Telegram's round crop with room around it. */
+svg { width: 58vmin; height: 58vmin; display: block; margin: 0 0 0 -1vmin; }
+</style></head>
+<body><svg viewBox="11 11 44 44"><g fill="none" stroke="#d7f580" stroke-width="5.6" stroke-linecap="round"><path d="M17 44 Q22 30 31 16"/><path d="M27 49 Q32 34 41 19"/><path d="M37 51 Q42 38 49 26"/></g></svg></body></html>

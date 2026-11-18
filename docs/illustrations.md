@@ -50,7 +50,7 @@ Work files go to `target/illustrations/<slug>/`.
 4. **Install**: `scripts/new-illustration install <slug> target/illustrations/<slug>/<pick>.svg`
    copies the SVG and renders `frame-1.png`.
 5. **Manifest**: add an entry to `assets/workout-guide/manifest.json` next to its closest
-   exercise. Copy `horizontal-leg-press`: same fields, the attribution credits GymClaw with Workout
+   exercise. Copy `horizontal-leg-press`: same fields, the attribution credits gymclaw with Workout
    Guide as the source (CC BY-SA 4.0). Add the slug under "Local additions" in
    `assets/workout-guide/NOTICE.md`.
 6. **Use it**: after deploy, point the plan's exercise at it with `template_edit_exercise`

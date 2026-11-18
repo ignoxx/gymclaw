@@ -122,7 +122,7 @@ explicitly resumes. Resuming restores calendar writes if they were granted.";
 pub struct RuntimeResume {
     /// True only when the owner asked for this in their own words in this conversation.
     pub owner_asked: bool,
-    /// Also let GymClaw write workouts to its Google calendar (needs the owner's explicit OK).
+    /// Also let gymclaw write workouts to its Google calendar (needs the owner's explicit OK).
     #[serde(default)]
     pub calendar_writes: bool,
     /// Also poll the gym's live check-in count every 15 minutes.

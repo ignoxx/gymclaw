@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Consistent snapshot of all GymClaw state into /backups/gymclaw-<UTC timestamp>.tar.gz.
+# Consistent snapshot of all gymclaw state into /backups/gymclaw-<UTC timestamp>.tar.gz.
 # Runs inside the gymclaw container (Coolify scheduled task: `backup.sh`).
 # Keeps the newest ${GYMCLAW_BACKUP_KEEP:-14} archives. Archives contain the
 # Google OAuth token and chat history; copy them off-host only to private storage.

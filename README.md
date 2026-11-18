@@ -1,11 +1,11 @@
-# GymClaw
+# gymclaw
 
 [![Tests](https://github.com/ignoxx/gymclaw/actions/workflows/tests.yml/badge.svg)](https://github.com/ignoxx/gymclaw/actions/workflows/tests.yml)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue)](LICENSE)
 
-A Telegram bot that plans my gym week around my calendar and coaches me through each workout.
+An AI gym coach that adapts to you.
 
-![GymClaw: your training week, run for you](assets/hero.png)
+![gymclaw: the last workout app you'll ever need](assets/hero.png)
 
 > **Work in progress.** I use it every day, and it has rough edges. Expect breaking changes.
 
@@ -19,7 +19,11 @@ A Telegram bot that plans my gym week around my calendar and coaches me through 
 - Raises targets when I hit all my reps, and sends a weekly recap every Sunday.
 - Tracks body weight from scale photos.
 
-![GymClaw dashboard](assets/dashboard-demo.png)
+<p align="center">
+  <img src="assets/screens/chat.png" width="30%" alt="The chat mid-workout: exercise card and rest timer">
+  <img src="assets/screens/live.png" width="30%" alt="The app mid-workout: rest timer and set logger">
+  <img src="assets/screens/progress.png" width="30%" alt="Progress: sessions per week and estimated 1RM">
+</p>
 
 ## How it works
 
@@ -38,4 +42,4 @@ gym's check-in count ([crowd data](docs/crowd.md)). Then `docker compose up` and
 
 [Business Source License 1.1](LICENSE): free to clone, self-host and modify for noncommercial use;
 commercial use needs a license from the author. Each release becomes Apache 2.0 four years after
-it is published. Exercise art from [Workout Guide](https://github.com/bryllim/workout-guide).
+it is published.

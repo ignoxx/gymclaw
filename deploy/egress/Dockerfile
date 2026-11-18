@@ -1,4 +1,4 @@
-# HTTPS-only forward proxy: GymClaw's single route to the internet.
+# HTTPS-only forward proxy: gymclaw's single route to the internet.
 FROM alpine:3.22
 RUN apk add --no-cache squid
 USER squid

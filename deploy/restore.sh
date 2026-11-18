@@ -11,7 +11,7 @@ set -euo pipefail
 ARCHIVE="${1:?usage: restore.sh <archive|-> [--replace]}"
 ROOT=/opt/gymclaw
 if [[ -e "$ROOT/data/gymclaw.db" ]]; then
-  [[ "${2:-}" == --replace ]] || { echo "GymClaw DB already exists; pass --replace" >&2; exit 1; }
+  [[ "${2:-}" == --replace ]] || { echo "gymclaw DB already exists; pass --replace" >&2; exit 1; }
   echo "Backed up current state: $(backup.sh)"
 fi
 

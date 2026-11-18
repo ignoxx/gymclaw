@@ -1,6 +1,6 @@
 # Crowd data
 
-GymClaw learns when your gym is quiet from a live check-in count, polled every 15 minutes. Every
+gymclaw learns when your gym is quiet from a live check-in count, polled every 15 minutes. Every
 gym exposes that differently, if at all, so the source is configured per deployment.
 
 ## Sources
@@ -56,7 +56,7 @@ A prompt that works:
 > My gym is **NAME, ADDRESS** (website/app: …). Find out whether it publishes a live check-in or
 > occupancy count: its website, its member app's backend, or the booking platform it uses
 > (MySports, Eversports, Virtuagym, PerfectGym, …). I need the current number of people, not a
-> percentage if a count exists. Then write a GymClaw crowd source config following
+> percentage if a count exists. Then write a gymclaw crowd source config following
 > https://github.com/ignoxx/gymclaw/blob/main/docs/crowd.md: prefer `http` with `json_path`, use a
 > `command` script in `data/` only if one request isn't enough. Tell me which hosts to add to
 > `EGRESS_EXTRA_HOSTS`. The image has `sh` and `curl`, no Python.

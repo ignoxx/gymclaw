@@ -59,7 +59,7 @@ impl ChatModel for OpenRouter {
             .http
             .post("https://openrouter.ai/api/v1/chat/completions")
             .bearer_auth(&self.key)
-            .header("X-Title", "GymClaw")
+            .header("X-Title", "gymclaw")
             .json(&request)
             .send()
             .await

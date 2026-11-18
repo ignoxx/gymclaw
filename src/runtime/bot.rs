@@ -837,7 +837,7 @@ fn status_text(db: &crate::db::Connection, health: &super::Health, model: &str) 
     };
     let on = |b: bool| if b { "on" } else { "off" };
     let mut lines = vec![
-        format!("**GymClaw** · up {}", super::uptime(health.started.elapsed())),
+        format!("**gymclaw** · up {}", super::uptime(health.started.elapsed())),
         format!(
             "Runtime {} · calendar writes {} · crowd polling {}",
             authority.state(),

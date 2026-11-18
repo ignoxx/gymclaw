@@ -20,7 +20,7 @@ week; each fix added verbs, and the next request still fell through.
 
 ## The agent is the brain
 
-The agent makes GymClaw's decisions; code provides mechanics, data and raw actions. Code keeps the
+The agent makes gymclaw's decisions; code provides mechanics, data and raw actions. Code keeps the
 deterministic hot paths: workout taps, set logging, rest timers, reminders, calendar sync,
 idempotency, validation, slot timing and crowd. Planning decisions, which workout goes in which
 slot, and exceptions belong to the agent. Rules are defaults plus warnings, never refusals or

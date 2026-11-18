@@ -1,6 +1,6 @@
 # Security
 
-GymClaw is a single-owner app, not an audited multi-user service.
+gymclaw is a single-owner app, not an audited multi-user service.
 
 - The bot answers only the allowlisted Telegram user ID (`GYMCLAW_TELEGRAM_USER_ID`), in private
   chats. Everything else is ignored.

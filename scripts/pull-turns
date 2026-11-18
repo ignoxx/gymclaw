@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copy the agent turn log (and optionally a DB snapshot) from a GymClaw host to this machine, for
+# Copy the agent turn log (and optionally a DB snapshot) from a gymclaw host to this machine, for
 # `gymclaw backfill`, `gymclaw rewind`/`replay` and DuckDB (docs/turns.md).
 #
 #   scripts/pull-turns <ssh host> [local dir] [--with-db]

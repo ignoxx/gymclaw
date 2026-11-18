@@ -235,7 +235,7 @@ pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String)
     let hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), allowed_host];
     let app = Router::new().fallback(handle).with_state(Arc::new(App { db_path, hosts }));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("GymClaw dashboard: http://{addr}");
+    tracing::info!("gymclaw dashboard: http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }

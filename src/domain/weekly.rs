@@ -548,7 +548,7 @@ fn days_line(db: &Connection, week_start: Date, workouts: &[WorkoutSession], tz:
 
 /// Sunday Telegram message, sent by code before the agent's take on it. Last week: workouts by day,
 /// time and volume trained, timed work (bike, plank), records, new targets, activities outside the gym,
-/// progress toward each goal, body weight (the only place GymClaw asks for a weigh-in). Then next week's
+/// progress toward each goal, body weight (the only place gymclaw asks for a weigh-in). Then next week's
 /// sessions. 🔥 effect when the week hit its target.
 pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> Result<(String, Option<&'static str>)> {
     let profile = get_profile(db)?;

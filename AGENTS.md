@@ -1,4 +1,4 @@
-# GymClaw
+# gymclaw
 
 One Rust binary: Telegram bot, agent loop, scheduler and training domain over one SQLite DB.
 

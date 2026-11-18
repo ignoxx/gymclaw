@@ -1,4 +1,4 @@
-# Deploying GymClaw
+# Deploying gymclaw
 
 One Docker Compose stack. `gymclaw` and `dashboard` run the same image, which GitHub Actions
 ([`image.yml`](../.github/workflows/image.yml)) builds once Tests pass on `main` and pushes to
