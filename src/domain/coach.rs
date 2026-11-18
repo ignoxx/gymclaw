@@ -503,18 +503,30 @@ fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
     Ok(vec![exercise_card(db, workout_id, now)?])
 }
 
+/// The chat after sets changed outside the coach's flow and the coach moved on (`workout::settle`): the
+/// next exercise's card, or the finish card when that was the last. Nothing while the workout is
+/// finished or the coach stayed put.
+pub fn moved_on(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Option<CoachView>> {
+    if workout::load_workout(db, workout_id, None)?.status == WorkoutStatus::PlanUpdated {
+        return Ok(None);
+    }
+    Ok(Some(acked("✏️ Sets fixed", after_change(db, workout_id, now, request_id)?)))
+}
+
 /// Typed text during a workout ("10x40", "25 min", "2 km"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
-    log_text(db, text, false, now, request_id)
+    Ok(log_text(db, text, false, now, request_id)?.0)
 }
 
 /// `handle_text` for the agent's `workout log`: `warmup` logs the set as the warm-up, which the owner
 /// said it was (2026-11-18: "warm-up done with 45 kg" became working set 1). A typed set is a working set.
-pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: &str) -> Result<CoachView> {
+/// Also returns the logged set as `log_set` reports it (its exercise, type and number) and whether it
+/// skipped a pending warm-up, so the agent's reply names where the set really went.
+pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: &str) -> Result<(CoachView, Value)> {
     let Some(workout) =
         active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting))
     else {
-        return Ok(CoachView::default());
+        return Ok((CoachView::default(), Value::Null));
     };
     let active = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
     let set_kind = active.as_ref().map(kind).unwrap_or_default();
@@ -527,7 +539,7 @@ pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: 
             match parse_block(text, measured) {
                 Some(value) if (measured != Measure::Reps || timed(guide_id(row))) && fresh => Some(value),
                 Some(value) if value.measure() == measured => Some(value),
-                _ if measured != Measure::Reps => return Ok(CoachView::default()),
+                _ if measured != Measure::Reps => return Ok((CoachView::default(), Value::Null)),
                 _ => None,
             }
         }
@@ -541,16 +553,21 @@ pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: 
             let expected = active.as_ref().map(|row| workout::next_working_set(db, row)).transpose()?.flatten();
             match parse_set(text, expected.map(|(weight, _)| weight), reps_alone) {
                 Ok(value) => value,
-                Err(Error::Domain { .. }) => return Ok(CoachView::default()),
+                Err(Error::Domain { .. }) => return Ok((CoachView::default(), Value::Null)),
                 Err(other) => return Err(other),
             }
         }
     };
     let value = if warmup { SetInput { set_type: SetType::Warmup, ..value } } else { value };
-    log_set(db, &workout.id, &value, now, request_id)?;
+    let result = log_set(db, &workout.id, &value, now, request_id)?;
+    let skipped = result["data"]["warmup_skipped"] == true;
     let what = if value.set_type == SetType::Warmup { "Warm-up " } else { "" };
-    let ack = format!("✅ {what}{}", set_kind.set(value.weight, value.reps, value.seconds, value.meters));
-    Ok(CoachView { react: Some("👍".into()), ..acked(ack, after_change(db, &workout.id, now, request_id)?) })
+    let mut ack = format!("✅ {what}{}", set_kind.set(value.weight, value.reps, value.seconds, value.meters));
+    if skipped {
+        ack.push_str(" · warm-up skipped");
+    }
+    let logged = json!({"logged": result["data"]["logged_set"], "warmup_skipped": skipped});
+    Ok((CoachView { react: Some("👍".into()), ..acked(ack, after_change(db, &workout.id, now, request_id)?) }, logged))
 }
 
 fn invalid(message: &str) -> Error {
@@ -1999,5 +2016,44 @@ mod tests {
         );
         let both = agent(&db, at(704), "set_edit", json!({"set_id": warmup, "delete": true, "reps": 5})).unwrap_err();
         assert_eq!(both.code(), "INVALID_ARGUMENT");
+    }
+
+    /// The council's live case: sets fixed mid-workout put exercise status right. A working set that skips
+    /// the warm-up says so; a set moved onto the current exercise finishes it and the coach moves on with a
+    /// new card; an exercise finished early stays finished (the coach doesn't go back) but still takes a
+    /// set named for it.
+    #[test]
+    fn live_fixes_keep_the_coach_in_step() {
+        let db = db();
+        let id = legs(&db);
+        let first = agent(&db, at(10), "workout", json!({"action": "log", "text": "8x45"})).unwrap();
+        assert_eq!(
+            (first["warmup_skipped"].as_bool(), first["logged"]["exercise"].as_str()),
+            (Some(true), Some("Horizontal leg press"))
+        );
+        assert!(first["ack"].as_str().unwrap().ends_with("· warm-up skipped"), "{first}");
+        handle_text(&db, "8x90", at(100), "s1").unwrap();
+        let warmup = logs(&db, &exercises(&db, &id).unwrap()[0].id, None).unwrap()[0].id.clone();
+        agent(&db, at(150), "set_edit", json!({"set_id": warmup, "warmup": true})).unwrap();
+        agent(&db, at(160), "workout", json!({"action": "log", "text": "8x95", "which": "Horizontal leg press"}))
+            .unwrap();
+        handle_text(&db, "10x75", at(200), "e1").unwrap();
+        agent(&db, at(300), "workout", json!({"action": "log", "text": "8x85", "which": "Lying leg curl"})).unwrap();
+        let curl = logs(&db, &exercises(&db, &id).unwrap()[2].id, None).unwrap()[0].id.clone();
+        let moved = agent(&db, at(310), "set_edit", json!({"set_id": curl, "exercise": "Leg extension"})).unwrap();
+        assert_eq!(moved["data"]["coach_moved"], true);
+        assert!(moved["card"].as_str().unwrap().contains("Lying leg curl"), "{moved}");
+        assert_eq!(workout::active_exercise(&db, &id).unwrap().exercise_id, "curl");
+        handle_text(&db, "4x70", at(400), "c1").unwrap();
+        handle_text(&db, "7x60", at(500), "c2").unwrap();
+        assert_eq!(
+            sets(&db, &id),
+            vec![
+                ("Horizontal leg press".into(), vec!["W45x8".into(), "90x8".into(), "95x8".into()]),
+                ("Leg extension".into(), vec!["75x10".into(), "85x8".into()]),
+                ("Lying leg curl".into(), vec!["70x4".into(), "60x7".into()]),
+            ]
+        );
+        assert_eq!(workout::load_workout(&db, &id, None).unwrap().status, WorkoutStatus::PlanUpdated);
     }
 }

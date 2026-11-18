@@ -155,9 +155,10 @@ pub fn edit_set(db: &Connection, set_id: &str, change: SetChange, now: Ts, reque
             db.execute("UPDATE notification_job SET set_log_id = NULL WHERE set_log_id = ?1", [&set.id])?;
             db.execute("DELETE FROM set_log WHERE id = ?1", [&set.id])?;
             renumber(db, &from.id, was_type)?;
+            let coach_moved = workout::settle(db, &from.workout_session_id)?;
             let next_weight = refresh_progression(db, &from, now)?;
             return Ok(json!({"set_id": set.id, "workout_id": from.workout_session_id, "exercise": name(&from),
-                "before": before, "deleted": true, "next_weight": next_weight}));
+                "before": before, "deleted": true, "next_weight": next_weight, "coach_moved": coach_moved}));
         }
         if numbers.iter().any(|g| *g) {
             let how = fixed_by(set.seconds.is_some(), set.meters.is_some());
@@ -208,10 +209,13 @@ pub fn edit_set(db: &Connection, set_id: &str, change: SetChange, now: Ts, reque
                 next_weight = refresh_progression(db, &to, now)?;
             }
         }
-        Ok(json!({"set_id": set.id, "workout_id": to.workout_session_id, "exercise": name(&to), "before": before,
+        let coach_moved = workout::settle(db, &to.workout_session_id)?;
+        Ok(
+            json!({"set_id": set.id, "workout_id": to.workout_session_id, "exercise": name(&to), "before": before, "coach_moved": coach_moved,
             "after": {"exercise": name(&to), "set_type": set.set_type, "set_number": set.set_number, "weight": set.weight,
                 "reps": set.reps, "seconds": set.seconds, "meters": set.meters},
-            "next_weight": next_weight}))
+            "next_weight": next_weight}),
+        )
     })
 }
 
@@ -283,20 +287,17 @@ pub fn add_set(
         };
         set.insert(db)?;
         let was = row.status;
-        let done = if finished {
-            set_type == SetType::Working
-        } else {
-            row.status == ExerciseStatus::Pending && working_count(db, &row.id)? >= row.planned_working_sets
-        };
-        if done && was != ExerciseStatus::Completed {
+        if finished && set_type == SetType::Working && was != ExerciseStatus::Completed {
             row.status = ExerciseStatus::Completed;
             row.deferred_reason = None;
             row.update(db)?;
         }
+        let coach_moved = workout::settle(db, workout_id)?;
+        let row = WorkoutExercise::get(db, &row.id)?.unwrap_or(row);
         let next_weight = refresh_progression(db, &row, now)?;
         Ok(json!({"workout_id": workout.id, "exercise": name(&row), "set_id": set.id, "set_type": set.set_type,
             "set_number": set.set_number, "weight": set.weight, "reps": set.reps, "seconds": set.seconds,
-            "meters": set.meters, "status_before": was, "status": row.status, "next_weight": next_weight}))
+            "meters": set.meters, "status_before": was, "status": row.status, "next_weight": next_weight, "coach_moved": coach_moved}))
     })
 }
 

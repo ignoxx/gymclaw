@@ -551,17 +551,17 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
                     Repeat::Session => {
                         // Ahead of the start only sessions still to come count; at or after it, any not
                         // cancelled (the agent sees its status and decides).
-                        let open = if *minutes < 0 {
-                            "status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?3"
+                        let (open, after) = if *minutes < 0 {
+                            ("status IN ('TENTATIVE', 'COMMITTED')", now)
                         } else {
-                            "status != 'CANCELLED' AND ?3 IS NOT NULL"
+                            ("status != 'CANCELLED'", from)
                         };
                         let sessions = PlannedSession::select(
                             db,
                             &format!(
-                                "WHERE {open} AND planned_start_at > ?1 AND planned_start_at <= ?2 ORDER BY planned_start_at"
+                                "WHERE {open} AND planned_start_at > ?1 AND planned_start_at <= ?2 AND planned_start_at > ?3 ORDER BY planned_start_at"
                             ),
-                            (from, to, now),
+                            (from, to, after),
                         )?;
                         for s in sessions.into_iter().filter(|s| of(s.workout_template_id.as_ref())) {
                             // Keyed by start too: a session moved later fires again for its new time.

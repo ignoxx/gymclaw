@@ -114,6 +114,10 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         if tool == "template_edit_exercise" && !targets_only(&args) {
             return error(StatusCode::FORBIDDEN);
         }
+        // The app fixes a set's numbers; moving, retyping or deleting one stays with the agent.
+        if tool == "set_edit" && ["warmup", "exercise", "delete"].iter().any(|k| args.get(k).is_some()) {
+            return error(StatusCode::FORBIDDEN);
+        }
         let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             let data_dir = db_path.parent().unwrap_or(Path::new("."));

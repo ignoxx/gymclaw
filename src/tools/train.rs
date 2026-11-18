@@ -180,17 +180,9 @@ impl Tool for Workout {
                     let set_type = if self.warmup { SetType::Warmup } else { SetType::Working };
                     let which = self.which.as_deref().unwrap_or_default();
                     let result = audit::add_set(db, &workout_id, which, text, set_type, now, &rid)?;
-                    return refresh_finish_card(cx, &workout_id, result);
+                    return after_edit(cx, &workout_id, result);
                 }
-                let pending = match workout::active_workout(db)? {
-                    Some(running) => workout::active_exercise(db, &running.id)
-                        .ok()
-                        .map(|row| workout::warmup_pending(db, &row))
-                        .transpose()?
-                        .unwrap_or(false),
-                    None => false,
-                };
-                let view = coach::log_text(db, text, self.warmup, now, &rid)?;
+                let (view, logged) = coach::log_text(db, text, self.warmup, now, &rid)?;
                 if !view.handled {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
                     crate::bail!(
@@ -198,13 +190,10 @@ impl Tool for Workout {
                         "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps) or a time or distance on an exercise done for one (25 min, 2 km). Check status, then ask the owner."
                     );
                 }
-                // Which exercise it landed on, so the reply names the right one.
+                // Which exercise it landed on, so the reply names the right one; a skipped warm-up shows.
                 let mut result = shown(&view);
-                result["logged"] = workout::last_logged(db)?;
-                if pending && !self.warmup {
-                    // Logged as working while a warm-up was due: the warm-up is skipped. If it was the
-                    // warm-up, set_edit it.
-                    result["warmup_skipped"] = json!(true);
+                if let (Some(result), Value::Object(logged)) = (result.as_object_mut(), logged) {
+                    result.extend(logged);
                 }
                 cx.effects.push(Effect::Coach(view));
                 return Ok(result);
@@ -313,8 +302,22 @@ impl Tool for SetEdit {
         let result = audit::edit_set(cx.db, &self.set_id, change, cx.now, &cx.request_id)?;
         // A replayed result from before workout_id was returned has none: nothing to refresh.
         let Some(workout_id) = result["data"]["workout_id"].as_str().map(String::from) else { return Ok(result) };
-        refresh_finish_card(cx, &workout_id, result)
+        after_edit(cx, &workout_id, result)
     }
+}
+
+/// After sets changed outside the coach's flow: a finished workout's summary card is edited to match;
+/// in a running one, when the coach moved on (`workout::settle`), the chat gets the next card.
+fn after_edit(cx: &mut Ctx, workout_id: &str, result: Value) -> Result<Value> {
+    if result["data"]["coach_moved"] == true
+        && let Some(view) = coach::moved_on(cx.db, workout_id, cx.now, &cx.request_id)?
+    {
+        let mut result = result;
+        result["card"] = json!(view.cards.first().map(|c| c.text.clone()));
+        cx.effects.push(Effect::Coach(view));
+        return Ok(result);
+    }
+    refresh_finish_card(cx, workout_id, result)
 }
 
 /// After a finished workout's sets changed: its finish card in the chat is edited to match (after the
