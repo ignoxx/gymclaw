@@ -380,6 +380,12 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 10px; font-
 .tg body { overscroll-behavior-y: none; -webkit-tap-highlight-color: transparent; }
 .tg .header, .tg h1 { display: none; }
 .tg .dashboard { padding-top: 12px; }
+/* Fullscreen (phones): the status bar and Telegram's floating buttons sit over the page. Content starts
+   below them, and a strip in the page's colour covers whatever scrolls up under them. */
+:root { --safe-top: calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)); }
+.tg-full .dashboard { padding-top: calc(12px + var(--safe-top)); }
+.tg-full body::before { content: ''; position: fixed; top: 0; left: 0; right: 0; z-index: 25; height: var(--safe-top);
+  background: var(--paper); pointer-events: none; }
 .tg .ex-actions .save { display: none; }
 @media (max-width: 760px) { .tg .page-heading { padding: 0; } }
 @media (min-width: 761px) { .tg .page-heading { padding: 4px 0 18px; } }
@@ -483,6 +489,7 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 10px; font-
   .day { flex: 0 0 68px; }
   .set-list { white-space: pre-wrap; }
   .ex-detail { max-height: min(92vh, var(--tg-viewport-stable-height, 100dvh)); }
+  .tg-full .ex-detail { max-height: min(92vh, calc(100dvh - var(--safe-top))); }
 }
 
 /* Round 3. */

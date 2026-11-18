@@ -109,11 +109,13 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
             "target": target(spec, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight)),
             "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
+    // Only today's session can be started from the app (`begin`, as the reminder's button): a Start on
+    // tomorrow's card reads as "go now". "leave" only means today too.
+    let today = row.planned_start_at.local(tz).date() == now.local(tz).date();
     Ok(
-        // Today's session can be started from the app (`begin`, as the reminder's button); "leave" only means today.
         json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": fmt(row.leave_home_at, tz, "%H:%M"),
-        "today": row.planned_start_at.local(tz).date() == now.local(tz).date(),
-        "begin": workout::startable(db, &row, now)?.then(|| coach::begin_data(&row.id)),
+        "today": today,
+        "begin": (today && workout::startable(db, &row, now)?).then(|| coach::begin_data(&row.id)),
         "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}),
     )
 }
