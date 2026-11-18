@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Screenshot a page (usually the local dashboard) with headless Chromium.
-#   scripts/shot <url> <out.png> [width=1200] [height=800] [--full] [--dark] [--scale 2] [step…]
+#   scripts/shot <url> <out.png> [width=1200] [height=800] [--full] [--dark] [--transparent] [--scale 2] [step…]
 # Viewport-sized at 1x unless --full, so the PNG stays small enough to read back cheaply. --dark emulates
-# a dark system theme; --scale 2 renders at 2x (README images).
+# a dark system theme; --scale 2 renders at 2x and --transparent keeps a page without a background
+# see-through (README images).
 # Use width 390 for a phone. Playwright and its browser are cached in ~/.cache/gymclaw-shot.
 # Steps run in order before the shot, to click through dialogs and forms:
 #   --click <selector>  --fill <selector> <value>  --text <selector> (prints its text)  --wait <ms>
@@ -22,11 +23,12 @@ const { chromium } = require("playwright-core");
 const args = process.argv.slice(2);
 const full = args.includes("--full");
 const dark = args.includes("--dark");
+const clear = args.includes("--transparent");
 let scale = 1;
 const positional = [];
 const steps = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--full" || args[i] === "--dark") continue;
+  if (["--full", "--dark", "--transparent"].includes(args[i])) continue;
   if (args[i] === "--scale") { scale = +args[++i]; continue; }
   if (args[i] === "--fill") steps.push([args[i], args[++i], args[++i]]);
   else if (["--click", "--text", "--wait"].includes(args[i])) steps.push([args[i], args[++i]]);
@@ -48,7 +50,7 @@ const [url, out, width = "1200", height = "800"] = positional;
     // Let the page react (re-render, open a dialog) before the next step.
     if (step !== "--wait") await page.waitForTimeout(300);
   }
-  await page.screenshot({ path: out, fullPage: full });
+  await page.screenshot({ path: out, fullPage: full, omitBackground: clear });
   await browser.close();
   console.log(out);
 })().catch((e) => { console.error(e.message); process.exit(1); });

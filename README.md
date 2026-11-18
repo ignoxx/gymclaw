@@ -1,11 +1,11 @@
-# GymClaw
+# gymclaw
 
 [![Tests](https://github.com/ignoxx/gymclaw/actions/workflows/tests.yml/badge.svg)](https://github.com/ignoxx/gymclaw/actions/workflows/tests.yml)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue)](LICENSE)
 
-A Telegram bot that plans my gym week around my calendar and coaches me through each workout.
+A personal gym coach that plans my week around my calendar and coaches me through each workout.
 
-![GymClaw: your training week, run for you](assets/hero.png)
+![gymclaw: you lift, it handles the rest](assets/hero.png)
 
 > **Work in progress.** I use it every day, and it has rough edges. Expect breaking changes.
 
@@ -19,13 +19,13 @@ A Telegram bot that plans my gym week around my calendar and coaches me through 
 - Raises targets when I hit all my reps, and sends a weekly recap every Sunday.
 - Tracks body weight from scale photos.
 
-It also runs as a Telegram Mini App: log sets with big steppers and plate math, and the chat card
-follows. Progress, history and the plans live there too.
+It runs in a chat, with an app one tap away: log a set there with steppers and plate math and the
+chat card updates. Progress, history and the plans live in the app too.
 
 <p align="center">
-  <img src="assets/screens/live.png" width="30%" alt="Mid-workout: rest timer and set logger">
+  <img src="assets/screens/chat.png" width="30%" alt="The chat mid-workout: exercise card and rest timer">
+  <img src="assets/screens/live.png" width="30%" alt="The app mid-workout: rest timer and set logger">
   <img src="assets/screens/progress.png" width="30%" alt="Progress: sessions per week and estimated 1RM">
-  <img src="assets/screens/history.png" width="30%" alt="History: past workouts and their sets">
 </p>
 
 ## How it works
