@@ -93,7 +93,7 @@ fn fixed_by(seconds: bool, meters: bool) -> &'static str {
     }
 }
 
-/// What `correct_set` changes on one logged set; `None` keeps a field as it is.
+/// What `edit_set` changes on one logged set; `None` keeps a field as it is.
 #[derive(Debug, Default, Serialize)]
 pub struct SetChange {
     pub weight: Option<f64>,
@@ -128,7 +128,7 @@ fn renumber(db: &Connection, exercise_row_id: &str, set_type: SetType) -> Result
 /// distance), whether it was a warm-up, which exercise it was for, or delete it. The sets left are
 /// renumbered in the order done, and when the finished workout set an exercise's next weight, it is
 /// recomputed from the sets as they are now. The coach stays on the exercise it is on.
-pub fn correct_set(db: &Connection, set_id: &str, change: SetChange, now: Ts, request_id: &str) -> Result<Value> {
+pub fn edit_set(db: &Connection, set_id: &str, change: SetChange, now: Ts, request_id: &str) -> Result<Value> {
     let intent = json!({"set_id": set_id, "change": change});
     mutate(db, "set.corrected", request_id, intent, now, || {
         let SetChange { weight, reps, seconds, meters, warmup, exercise, delete } = &change;

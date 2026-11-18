@@ -427,7 +427,7 @@ fn crowd_ack(rating: &str) -> String {
 /// A finished workout's finish card, re-rendered from its sets as they are now, as an edit of the
 /// message it went out as (empty while it runs, or when no finish card was recorded for it). The
 /// stored chat text follows, so the agent's view of the chat never shows the old sets.
-/// Called after anything changes a finished workout's sets: `set_correct`, a set added later, relabel.
+/// Called after anything changes a finished workout's sets: `set_edit`, a set added later, relabel.
 pub fn finish_card_edits(db: &Connection, workout_id: &str, now: Ts) -> Result<Vec<Edit>> {
     let workout = workout::load_workout(db, workout_id, None)?;
     if workout.status != WorkoutStatus::PlanUpdated {
@@ -505,14 +505,12 @@ fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
 
 /// Typed text during a workout ("10x40", "25 min", "2 km"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
-    log_text(db, text, None, now, request_id)
+    log_text(db, text, false, now, request_id)
 }
 
-/// `handle_text` for the agent's `workout log`: `warmup` Some(true) logs a warm-up, Some(false) a working
-/// set. None decides like a typed set: while the warm-up is pending, a set lighter than the working
-/// target is the warm-up (2026-11-18: "warm-up done with 45 kg" became working set 1, and every later
-/// set landed one exercise late).
-pub fn log_text(db: &Connection, text: &str, warmup: Option<bool>, now: Ts, request_id: &str) -> Result<CoachView> {
+/// `handle_text` for the agent's `workout log`: `warmup` logs the set as the warm-up, which the owner
+/// said it was (2026-11-18: "warm-up done with 45 kg" became working set 1). A typed set is a working set.
+pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: &str) -> Result<CoachView> {
     let Some(workout) =
         active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting))
     else {
@@ -548,15 +546,7 @@ pub fn log_text(db: &Connection, text: &str, warmup: Option<bool>, now: Ts, requ
             }
         }
     };
-    let mut value = value;
-    if let Some(row) = &active
-        && value.measure() == Measure::Reps
-    {
-        let lighter = set_kind.signed(value.weight) < set_kind.signed(row.target_weight);
-        if warmup.unwrap_or(lighter && workout::warmup_pending(db, row)?) {
-            value.set_type = SetType::Warmup;
-        }
-    }
+    let value = if warmup { SetInput { set_type: SetType::Warmup, ..value } } else { value };
     log_set(db, &workout.id, &value, now, request_id)?;
     let what = if value.set_type == SetType::Warmup { "Warm-up " } else { "" };
     let ack = format!("✅ {what}{}", set_kind.set(value.weight, value.reps, value.seconds, value.meters));
@@ -718,7 +708,7 @@ pub fn app_action(data: &str) -> bool {
     .contains(&action)
 }
 
-/// A set fixed in the Mini App (`set_correct`): a note in the chat, and the chat's cards redrawn from the fixed
+/// A set fixed in the Mini App (`set_edit`): a note in the chat, and the chat's cards redrawn from the fixed
 /// set: the live card's ✅ suggests the next set from it, a finished workout's summary shows it.
 pub fn app_fixed(db: &Connection, set_id: &str, now: Ts) -> Result<()> {
     let Some(set) = crate::db::models::SetLog::get(db, set_id)? else { return Ok(()) };
@@ -1156,7 +1146,7 @@ mod tests {
         let r = &data(&live(&db, at(6)), "🔄 Swap")["swap:".len()..];
         app_tap(&db, &format!("gc:log:{r}:25:10"), at(10), "app-log").unwrap();
         let set = app_last(&db, &workout).unwrap()["id"].as_str().unwrap().to_string();
-        crate::domain::audit::correct_set(&db, &set, kg(30.0), at(20), "fix").unwrap();
+        crate::domain::audit::edit_set(&db, &set, kg(30.0), at(20), "fix").unwrap();
         app_fixed(&db, &set, at(20)).unwrap();
         let views: Vec<CoachView> = AgentEvent::select(&db, "WHERE type = ?1 ORDER BY rowid", [APP_VIEW])
             .unwrap()
@@ -1326,7 +1316,7 @@ mod tests {
         handle_tap(&db, &data(&live(&db, at(110)), "⏭ Next exercise"), at(112), "cb-1").unwrap();
         handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
-        let fixed = crate::domain::audit::correct_set(&db, &set.id, kg(95.0), at(700), "fix").unwrap();
+        let fixed = crate::domain::audit::edit_set(&db, &set.id, kg(95.0), at(700), "fix").unwrap();
         assert_eq!(
             (fixed["data"]["before"]["weight"].as_f64(), fixed["data"]["next_weight"].as_f64()),
             (Some(90.0), Some(95.0))
@@ -1363,7 +1353,7 @@ mod tests {
         assert!(summary.text.contains("\n>> Machine incline press 90 kg: 8\n"), "{}", summary.text);
         sent(&db, &summary, 500);
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
-        // The agent only calls set_correct; the card edit comes with it.
+        // The agent only calls set_edit; the card edit comes with it.
         let mut cx = crate::tools::Ctx {
             db: &db,
             now: at(700),
@@ -1371,7 +1361,7 @@ mod tests {
             data_dir: Path::new("/tmp"),
             effects: vec![],
         };
-        let fixed = crate::tools::call(&mut cx, "set_correct", json!({"set_id": set.id, "reps": 12})).unwrap();
+        let fixed = crate::tools::call(&mut cx, "set_edit", json!({"set_id": set.id, "reps": 12})).unwrap();
         assert_eq!(fixed["finish_card"], "updated in the chat");
         let [crate::tools::Effect::Coach(CoachView { edits, .. })] = &cx.effects[..] else {
             panic!("{:?}", cx.effects)
@@ -1688,7 +1678,7 @@ mod tests {
         let mixed = audit::add_set(&db, &id, "cycling", "10x40", SetType::Working, at(7201), "mixed").unwrap_err();
         assert!(mixed.to_string().contains("logged as a time"), "{mixed}");
         let set_id = fixed["set_id"].as_str().unwrap();
-        let corrected = audit::correct_set(
+        let corrected = audit::edit_set(
             &db,
             set_id,
             audit::SetChange { seconds: Some(1560), ..Default::default() },
@@ -1697,7 +1687,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(corrected["data"]["after"]["seconds"], 1560);
-        assert_eq!(audit::correct_set(&db, set_id, kg(40.0), at(7203), "kg").unwrap_err().code(), "INVALID_SET");
+        assert_eq!(audit::edit_set(&db, set_id, kg(40.0), at(7203), "kg").unwrap_err().code(), "INVALID_SET");
     }
 
     fn planned(
@@ -1920,15 +1910,19 @@ mod tests {
     }
 
     /// 2026-11-18: "warm-up done with 45kg" was logged as working set 1, leg press counted itself done one
-    /// set early, and every set after it landed one exercise late while the agent said it was fine. Now a
-    /// lighter set while the warm-up is pending is the warm-up, a set goes on the exercise named, and the
-    /// reply learns where each set landed.
+    /// set early, and every set after it landed one exercise late while the agent said it was fine. Now the
+    /// agent can log the warm-up as one, a set goes on the exercise named, and the reply learns where each
+    /// set landed.
     #[test]
     fn a_typed_warmup_and_named_sets_land_where_the_owner_said() {
         let db = db();
         let id = legs(&db);
-        let warm =
-            agent(&db, at(10), "workout", json!({"action": "log", "text": "8x45", "which": "Horizontal leg press"}));
+        let warm = agent(
+            &db,
+            at(10),
+            "workout",
+            json!({"action": "log", "text": "8x45", "which": "Horizontal leg press", "warmup": true}),
+        );
         assert_eq!(warm.unwrap()["logged"]["set_type"], "WARMUP");
         handle_text(&db, "8x90", at(100), "s1").unwrap();
         // The agent names leg press while the coach is still on it: same as the card.
@@ -1968,13 +1962,14 @@ mod tests {
         );
     }
 
-    /// Today's mess fixed after the fact with set_correct alone: a warm-up logged as working, sets on
+    /// Today's mess fixed after the fact with set_edit alone: a warm-up logged as working, sets on
     /// the wrong exercise, a set that never happened. The rest renumber in the order done.
     #[test]
     fn any_logged_set_can_be_retyped_moved_or_deleted() {
         let db = db();
         let id = legs(&db);
-        agent(&db, at(10), "workout", json!({"action": "log", "text": "8x45", "warmup": false})).unwrap();
+        let unsaid = agent(&db, at(10), "workout", json!({"action": "log", "text": "8x45"})).unwrap();
+        assert_eq!(unsaid["warmup_skipped"], true, "the agent hears the warm-up was skipped");
         for (i, text) in ["8x90", "8x95", "10x75", "8x85", "8x85"].iter().enumerate() {
             handle_text(&db, text, at(100 * (i as i64 + 1)), &format!("s{i}")).unwrap();
         }
@@ -1987,13 +1982,13 @@ mod tests {
             .unwrap()
         };
         let (warmup, ninety_five, eighty_five) = (set(45.0, "press"), set(95.0, "ext"), set(85.0, "curl"));
-        agent(&db, at(700), "set_correct", json!({"set_id": warmup, "warmup": true})).unwrap();
-        agent(&db, at(701), "set_correct", json!({"set_id": ninety_five, "exercise": "Horizontal leg press"})).unwrap();
+        agent(&db, at(700), "set_edit", json!({"set_id": warmup, "warmup": true})).unwrap();
+        agent(&db, at(701), "set_edit", json!({"set_id": ninety_five, "exercise": "Horizontal leg press"})).unwrap();
         let moved =
-            agent(&db, at(702), "set_correct", json!({"set_id": eighty_five, "exercise": "leg extension"})).unwrap();
+            agent(&db, at(702), "set_edit", json!({"set_id": eighty_five, "exercise": "leg extension"})).unwrap();
         assert_eq!(moved["data"]["after"]["set_number"], 2);
         let doubled = set(85.0, "curl");
-        agent(&db, at(703), "set_correct", json!({"set_id": doubled, "delete": true})).unwrap();
+        agent(&db, at(703), "set_edit", json!({"set_id": doubled, "delete": true})).unwrap();
         assert_eq!(
             sets(&db, &id),
             vec![
@@ -2002,8 +1997,7 @@ mod tests {
                 ("Lying leg curl".into(), vec![]),
             ]
         );
-        let both =
-            agent(&db, at(704), "set_correct", json!({"set_id": warmup, "delete": true, "reps": 5})).unwrap_err();
+        let both = agent(&db, at(704), "set_edit", json!({"set_id": warmup, "delete": true, "reps": 5})).unwrap_err();
         assert_eq!(both.code(), "INVALID_ARGUMENT");
     }
 }

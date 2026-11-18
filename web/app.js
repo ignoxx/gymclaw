@@ -681,7 +681,7 @@ function renderLogger(focus, live, active, last) {
     if (fixing) {
       const fix = measure === 'time' ? { minutes: logger.seconds / 60 } : measure === 'distance' ? { meters: logger.meters } : { weight: logger.weight || 0, reps: logger.reps };
       logger.fixing = false;
-      send('/api/set_correct', { set_id: last.id, ...fix }, () => `Fixed: ${words()} · in the chat too`);
+      send('/api/set_edit', { set_id: last.id, ...fix }, () => `Fixed: ${words()} · in the chat too`);
       return;
     }
     const data = measure === 'time' ? `gc:time:${live.ref}:${logger.seconds}` : measure === 'distance' ? `gc:dist:${live.ref}:${logger.meters}` : `gc:log:${live.ref}:${logger.weight || 0}:${logger.reps}`;

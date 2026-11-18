@@ -36,7 +36,7 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
 /// (Memory), plan targets (Exercises) and fixing a logged set (the live workout). They run exactly as
 /// the agent's calls do, with the same validation; extension changes are recorded as the owner's.
 const DASHBOARD_TOOLS: [&str; 6] =
-    ["note_add", "note_edit", "note_delete", "extension_edit", "template_edit_exercise", "set_correct"];
+    ["note_add", "note_edit", "note_delete", "extension_edit", "template_edit_exercise", "set_edit"];
 /// The only exercise fields the dashboard may change. An id, name or picture change would cut an
 /// exercise off from its history, so those stay with the agent.
 const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];
@@ -126,7 +126,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
                 }
                 let mut cx = crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, effects: vec![] };
                 let result = crate::tools::call(&mut cx, &tool, args.clone())?;
-                if tool == "set_correct" {
+                if tool == "set_edit" {
                     // The chat saw the old number on the set's card: it gets a note with the fixed one.
                     crate::domain::coach::app_fixed(db, args["set_id"].as_str().unwrap_or_default(), Ts::now())?;
                 }

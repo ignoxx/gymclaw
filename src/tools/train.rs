@@ -23,7 +23,7 @@ pub fn tools() -> Vec<ToolDef> {
         def::<Workout>(),
         def::<WorkoutLogPast>(),
         def::<WorkoutAudit>(),
-        def::<SetCorrect>(),
+        def::<SetEdit>(),
         def::<TemplateGet>(),
         def::<TemplateImport>(),
         def::<TemplateEditExercise>(),
@@ -88,9 +88,9 @@ pub struct Workout {
     pub exercise: Option<String>,
     /// relabel: the logged exercise to correct; log: the exercise the set is for.
     pub which: Option<String>,
-    /// log: true for a warm-up set, false for a working set; omitted, a set lighter than the target while
-    /// the warm-up is pending is the warm-up.
-    pub warmup: Option<bool>,
+    /// log: the owner says this set was the warm-up.
+    #[serde(default)]
+    pub warmup: bool,
     /// relabel/log/discard: a past workout (workout_session.id from sql_query); default the running or latest one.
     pub workout_id: Option<String>,
     pub seconds: Option<i64>,
@@ -177,11 +177,19 @@ impl Tool for Workout {
                     (None, None) => None,
                 };
                 if let Some(workout_id) = elsewhere {
-                    let set_type = if self.warmup == Some(true) { SetType::Warmup } else { SetType::Working };
+                    let set_type = if self.warmup { SetType::Warmup } else { SetType::Working };
                     let which = self.which.as_deref().unwrap_or_default();
                     let result = audit::add_set(db, &workout_id, which, text, set_type, now, &rid)?;
                     return refresh_finish_card(cx, &workout_id, result);
                 }
+                let pending = match workout::active_workout(db)? {
+                    Some(running) => workout::active_exercise(db, &running.id)
+                        .ok()
+                        .map(|row| workout::warmup_pending(db, &row))
+                        .transpose()?
+                        .unwrap_or(false),
+                    None => false,
+                };
                 let view = coach::log_text(db, text, self.warmup, now, &rid)?;
                 if !view.handled {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
@@ -193,6 +201,11 @@ impl Tool for Workout {
                 // Which exercise it landed on, so the reply names the right one.
                 let mut result = shown(&view);
                 result["logged"] = workout::last_logged(db)?;
+                if pending && !self.warmup {
+                    // Logged as working while a warm-up was due: the warm-up is skipped. If it was the
+                    // warm-up, set_edit it.
+                    result["warmup_skipped"] = json!(true);
+                }
                 cx.effects.push(Effect::Coach(view));
                 return Ok(result);
             }
@@ -264,7 +277,7 @@ impl Tool for WorkoutAudit {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SetCorrect {
+pub struct SetEdit {
     /// set_log.id
     pub set_id: String,
     pub weight: Option<f64>,
@@ -280,8 +293,8 @@ pub struct SetCorrect {
     pub delete: bool,
 }
 
-impl Tool for SetCorrect {
-    const NAME: &'static str = "set_correct";
+impl Tool for SetEdit {
+    const NAME: &'static str = "set_edit";
     const DESCRIPTION: &'static str = "Fix any logged set when the owner says it was logged wrong, during or long after the workout: \
         its weight, reps, minutes or meters, warm-up or working, which exercise it was for, or delete it. Find the set with \
         sql_query on set_log (or the set_ids of a card the owner replied to). Renumbers the sets left, recomputes next \
@@ -297,7 +310,7 @@ impl Tool for SetCorrect {
             exercise: self.exercise,
             delete: self.delete,
         };
-        let result = audit::correct_set(cx.db, &self.set_id, change, cx.now, &cx.request_id)?;
+        let result = audit::edit_set(cx.db, &self.set_id, change, cx.now, &cx.request_id)?;
         // A replayed result from before workout_id was returned has none: nothing to refresh.
         let Some(workout_id) = result["data"]["workout_id"].as_str().map(String::from) else { return Ok(result) };
         refresh_finish_card(cx, &workout_id, result)

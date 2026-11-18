@@ -41,10 +41,11 @@ impl Tool for ExtensionSave {
     const NAME: &'static str = "extension_save";
     const DESCRIPTION: &'static str = "Extend yourself when the owner wants something recurring your tools don't do on their own: \
 a playbook (steps for a request that keeps coming back), a collection (your own log) or a trigger (wakes you with an instruction daily/weekly \
-at a local time, once at a local date and time, some minutes before each planned session, or after each workout; you decide then, \
-and stay silent when nothing needs saying). \
+at a local time, once at a local date and time, or some minutes before or after a session's planned start, a workout's start or \
+its end; you decide then, and stay silent when nothing needs saying). \
 \"Track my creatine and nag me if I forget\" = a creatine collection + a daily 09:00 trigger that asks only if nothing was logged today. \
-\"Remind me tomorrow at 9 to buy chalk\" = a once trigger. \"Before leg day, remind me to bring the belt\" = a before_session trigger for that workout. \
+\"Remind me tomorrow at 9 to buy chalk\" = a once trigger. \"Before leg day, remind me to bring the belt\" = a session trigger at -60 for that workout. \
+\"Vitamins an hour after my workout\" = workout_finished at 60. \"Nudge me if I haven't started 15 min in\" = session at 15. \
 Plain preferences stay notes. Every change is a version the owner can roll back.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
