@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{
     AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession,
-    RuntimeSettings, SetLog, SetType, UserProfile, WorkoutExercise, WorkoutSession, WorkoutTemplate,
+    RuntimeSettings, SetType, UserProfile, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
 use crate::domain::templates::{Load, Measure, get_template};
@@ -99,7 +99,10 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
             "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
     Ok(
+        // Today's session can be started from the app (`begin`, as the reminder's button); "leave" only means today.
         json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": fmt(row.leave_home_at, tz, "%H:%M"),
+        "today": row.planned_start_at.local(tz).date() == now.local(tz).date(),
+        "begin": workout::startable(db, &row, now)?.then(|| coach::begin_data(&row.id)),
         "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}),
     )
 }
@@ -158,11 +161,6 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
             "done": workout::logs(db, &row.id, Some(SetType::Working))?.len(), "status": row.status}));
     }
     let active = &data["active_exercise"];
-    let latest = SetLog::first(
-        db,
-        "WHERE set_type = 'WORKING' AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1) ORDER BY logged_at DESC",
-        [&w.id],
-    )?;
     let eta = data["eta"].as_str().and_then(|e| Ts::parse(e, None).ok()).map(|e| fmt(e, tz, "%H:%M"));
     let active = if active.is_object() {
         json!({"id": active["id"], "name": active["name"], "set_type": active["set_type"], "set_number": active["set_number"], "sets": active["working_sets"],
@@ -171,24 +169,13 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     } else {
         Value::Null
     };
-    // The last set, so the app can fix it (`set_correct`).
-    let last = match latest {
-        Some(l) => {
-            json!({"id": l.id, "text": set_text(db, &l)?, "weight": l.weight, "reps": l.reps, "seconds": l.seconds, "meters": l.meters})
-        }
-        None => Value::Null,
-    };
+    // The last set with its exercise, so the app can fix it (`set_correct`).
+    let last = coach::app_last(db, &w.id)?;
     Ok(
         json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
         "rest_until": data["rest_job"].get("due_at"), "last_set": last["text"], "last": last, "exercises": exercises,
         "live": coach::app_live(db, &w.id, now)?}),
     )
-}
-
-/// A logged set the way the coach shows it ("8/side × +10 kg", "2 km").
-fn set_text(db: &Connection, set: &SetLog) -> Result<String> {
-    let kind = WorkoutExercise::get(db, &set.workout_exercise_id)?.map(|e| workout::kind(&e)).unwrap_or_default();
-    Ok(kind.set(set.weight, set.reps, set.seconds, set.meters))
 }
 
 /// Wall-clock minutes since 1970-01-01 in `tz`; lets the browser slice days/weeks without timezone math.
@@ -302,6 +289,10 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             "template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "minutes": seconds.div_euclid(60),
             "sets": sets, "volume": round(volume, 0) as i64, "prs": prs, "crowd": ratings.get(&w.id).map(|r| label(r)), "exercises": exercises,
             "finished_at": w.completed_at, "rate": if ratings.contains_key(&w.id) { vec![] } else { coach::crowd_buttons(&w.id)? }}));
+    }
+    // The newest workout's last set can still be fixed from its "done" card.
+    if let Some(newest) = result.last_mut() {
+        newest["last"] = coach::app_last(db, newest["id"].as_str().unwrap_or_default())?;
     }
     result.reverse();
     Ok(result)

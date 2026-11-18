@@ -548,7 +548,8 @@ impl Bot {
         loop {
             timer.tick().await;
             // A plain read first: the write lock is taken only when there is a step to claim.
-            const PENDING: &str = "WHERE type = ?1 AND handled_at IS NULL ORDER BY created_at, id";
+            // In the order they were written: a fix note, then the card redrawn from it.
+            const PENDING: &str = "WHERE type = ?1 AND handled_at IS NULL ORDER BY rowid";
             let waiting =
                 blocking(self.db(), |db| Ok(AgentEvent::first(db, PENDING, [coach::APP_VIEW])?.is_some())).await;
             if !matches!(waiting, Ok(true)) {

@@ -403,6 +403,11 @@ fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
 }
 
 /// The ack a crowd answer leaves under the finish card.
+/// The button data that starts a planned session (`begin`), as the reminder's Start button carries it.
+pub fn begin_data(session_id: &str) -> String {
+    format!("gc:begin:{}", reference(session_id))
+}
+
 /// "How busy was the gym?" after a workout: one button per rating (the finish card and the Mini App).
 pub fn crowd_buttons(workout_id: &str) -> Result<Vec<Button>> {
     let r = reference(workout_id);
@@ -564,6 +569,7 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
     let row = if r.is_empty() { None } else { exercises(db, &workout.id)?.into_iter().find(|e| e.id.starts_with(r)) };
     let allowed: &[ExerciseStatus] = match action {
         "free" => &[ExerciseStatus::Deferred],
+        "now" => &[ExerciseStatus::Pending, ExerciseStatus::Deferred],
         "drop" | "swap" | "sub" | "wait" => &[ExerciseStatus::Active, ExerciseStatus::Deferred],
         _ => &[ExerciseStatus::Active],
     };
@@ -656,6 +662,11 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
             adaptation::next_exercise(db, id, &row.id, now, request_id)?;
             next(Some("⏭ Moved on.".into()))
         }
+        "now" => {
+            // Out of order: the current exercise keeps its sets (or goes back in the queue if not started).
+            adaptation::switch_to(db, id, &row.exercise_id, false, now, request_id)?;
+            next(Some(format!("↪ Now {}.", name(&row))))
+        }
         "free" => {
             adaptation::machine_free(db, id, &row.id, now, request_id)?;
             next(Some(format!("↩ Back to {}.", name(&row))))
@@ -672,15 +683,20 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
 /// bot renders in the chat as if the button had been tapped there.
 pub const APP_VIEW: &str = "coach.app_view";
 
-/// Coach buttons the Mini App offers, the same ones the chat card has. Swapping stays in the chat,
-/// where its options are cards of their own.
+/// Coach steps the Mini App offers: the chat card's buttons, its swap options (`sub`, `later`; the app shows
+/// them itself, not through the chat's two-step `swap` menu), starting today's session and doing a queued
+/// exercise now.
 pub fn app_action(data: &str) -> bool {
     let action = data.strip_prefix("gc:").unwrap_or(data).split(':').next().unwrap_or_default();
-    ["log", "time", "dist", "warm", "nowarm", "skip", "cut", "next", "free", "drop", "swap", "sub", "later", "crowd"]
-        .contains(&action)
+    [
+        "log", "time", "dist", "warm", "nowarm", "skip", "cut", "next", "free", "drop", "sub", "later", "crowd",
+        "begin", "now",
+    ]
+    .contains(&action)
 }
 
-/// A set fixed in the Mini App (`set_correct`): a note in the chat, so the ✅ on the old card isn't the last word.
+/// A set fixed in the Mini App (`set_correct`): a note in the chat, and the chat's cards redrawn from the fixed
+/// set: the live card's ✅ suggests the next set from it, a finished workout's summary shows it.
 pub fn app_fixed(db: &Connection, set_id: &str, now: Ts) -> Result<()> {
     let Some(set) = crate::db::models::SetLog::get(db, set_id)? else { return Ok(()) };
     let Some(row) = WorkoutExercise::get(db, &set.workout_exercise_id)? else { return Ok(()) };
@@ -688,21 +704,69 @@ pub fn app_fixed(db: &Connection, set_id: &str, now: Ts) -> Result<()> {
     let note = Card { text: text.clone(), kind: CardKind::Other, ..Card::default() };
     let view = CoachView { ack: Some(text), cards: vec![note], standalone: true, ..handled() };
     crate::domain::core::emit(db, APP_VIEW, now, serde_json::to_value(&view)?)?;
+    let workout = &row.workout_session_id;
+    let redraw = if active_workout(db)?.is_some_and(|w| &w.id == workout) {
+        CoachView { refresh: true, cards: vec![exercise_card(db, workout, now)?], ..handled() }
+    } else {
+        CoachView { keep: true, edits: finish_card_edits(db, workout, now)?, ..handled() }
+    };
+    crate::domain::core::emit(db, APP_VIEW, now, serde_json::to_value(&redraw)?)?;
     Ok(())
 }
 
-/// The Mini App's live card: the chat card's buttons, the swap options the chat would send, and what the
-/// set logger starts from, all worded as the chat words them (`SetKind`).
+/// The latest working set of a workout, the way the app shows and fixes it: its exercise and how its sets read.
+pub fn app_last(db: &Connection, workout_id: &str) -> Result<Value> {
+    let Some(set) = crate::db::models::SetLog::first(
+        db,
+        "WHERE set_type = 'WORKING' AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1) ORDER BY logged_at DESC",
+        [workout_id],
+    )?
+    else {
+        return Ok(Value::Null);
+    };
+    let Some(row) = WorkoutExercise::get(db, &set.workout_exercise_id)? else { return Ok(Value::Null) };
+    let set_kind = kind(&row);
+    Ok(json!({"id": set.id, "exercise": name(&row), "workout_exercise_id": row.id,
+        "text": set_kind.set(set.weight, set.reps, set.seconds, set.meters),
+        "weight": set.weight, "reps": set.reps, "seconds": set.seconds, "meters": set.meters,
+        "unit": set_kind.unit(), "added": set_kind.load == Load::Added, "per_side": set_kind.per_side,
+        "equipment": guide_id(&row).and_then(|g| catalog().get(g)).map(|i| i.equipment.clone())}))
+}
+
+/// Swap options for an exercise not started yet, as the chat's swap menu offers them: other exercises
+/// for the slot, and doing it later when something else is left.
+fn app_swap(db: &Connection, workout_id: &str, row: &WorkoutExercise, rows: &[WorkoutExercise]) -> Result<Value> {
+    let r = reference(&row.id);
+    let options: Vec<Value> = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?
+        .into_iter()
+        .map(|o| {
+            json!({"name": o.name, "equipment": o.illustration.as_ref().map(|i| i.equipment.clone()),
+                "svg_url": o.illustration.map(|i| i.svg_url), "data": format!("gc:sub:{r}:{}", o.substitute_id)})
+        })
+        .collect();
+    let later = row.status == ExerciseStatus::Active && rows.iter().any(|e| e.status == ExerciseStatus::Pending);
+    Ok(json!({"options": options, "later": later.then(|| format!("gc:later:{r}"))}))
+}
+
+/// The Mini App's live card: the chat card's buttons, the swap options the chat would send, what the set
+/// logger starts from, all worded as the chat words them (`SetKind`), and "do it now" for what's queued.
 pub fn app_live(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
     let buttons: Vec<Button> = exercise_card(db, workout_id, now)
         .map(|card| card.buttons.into_iter().flatten().filter(|b| app_action(&b.data)).collect())
         .unwrap_or_default();
     let data = workout::state(db, workout_id, now)?;
     let rows = exercises(db, workout_id)?;
+    // Any exercise still to do can be done now instead (a free machine, a different order).
+    let queue: Map<String, Value> = rows
+        .iter()
+        .filter(|e| matches!(e.status, ExerciseStatus::Pending | ExerciseStatus::Deferred))
+        .map(|e| (e.id.clone(), json!(format!("gc:now:{}", reference(&e.id)))))
+        .collect();
     let Some(active) = data.active_exercise else {
-        // Only machines that were taken are left: the chat asks whether one is free now.
-        let waiting = rows.iter().find(|e| e.status == ExerciseStatus::Deferred).map(name);
-        return Ok(json!({"buttons": buttons, "waiting": waiting}));
+        // Only machines that were taken are left: the chat asks whether one is free now, or offers a swap.
+        let waiting = rows.iter().find(|e| e.status == ExerciseStatus::Deferred);
+        let swap = waiting.map(|w| app_swap(db, workout_id, w, &rows)).transpose()?;
+        return Ok(json!({"buttons": buttons, "waiting": waiting.map(name), "swap": swap, "queue": queue}));
     };
     let r = reference(&active.id);
     let row = rows.iter().find(|e| e.id == active.id).expect("active row");
@@ -720,19 +784,9 @@ pub fn app_live(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
         Measure::Distance => active.meters.map_or("distance".into(), format_distance),
         Measure::Reps => set_kind.target(active.rep_min, active.rep_max, weight.unwrap_or(0.0)),
     };
-    // Before the first set, as in the chat: other exercises for this slot, or doing it later.
-    let swap = if active.new_exercise && active.set_type != SetType::Warmup {
-        let options = adaptation::alternatives(db, workout_id, Some(&active.id), 3)?;
-        let options: Vec<Value> = options
-            .into_iter()
-            .map(|o| json!({"name": o.name, "svg_url": o.illustration.map(|i| i.svg_url), "data": format!("gc:sub:{r}:{}", o.substitute_id)}))
-            .collect();
-        let later = rows.iter().any(|e| e.status == ExerciseStatus::Pending);
-        json!({"options": options, "later": later.then(|| format!("gc:later:{r}"))})
-    } else {
-        Value::Null
-    };
-    Ok(json!({"ref": r, "buttons": buttons, "target": target, "swap": swap,
+    // Before the first set (warm-up included: that's when a taken machine shows), as in the chat.
+    let swap = if active.new_exercise { app_swap(db, workout_id, row, &rows)? } else { Value::Null };
+    Ok(json!({"ref": r, "buttons": buttons, "target": target, "swap": swap, "queue": queue,
         "equipment": active.illustration.as_ref().map(|i| i.equipment.clone()),
         "logger": {"measure": active.measure, "weight": weight, "reps": reps, "seconds": active.seconds, "meters": active.meters,
             "unit": set_kind.unit(), "added": set_kind.load == Load::Added, "per_side": set_kind.per_side,
@@ -1048,6 +1102,31 @@ mod tests {
         handle_tap(&db, &format!("gc:next:{r}"), at(12), "cb-next").unwrap();
         assert_eq!(app_tap(&db, &format!("gc:log:{r}:90:12"), at(13), "app-3").unwrap_err().code(), "COACH_STALE");
         assert_eq!(AgentEvent::select(&db, "WHERE type = ?1", [APP_VIEW]).unwrap().len(), 1);
+    }
+
+    /// "Do it now" on a queued exercise switches to it; fixing a set redraws the chat's live card from it.
+    #[test]
+    fn app_now_switches_and_a_fix_redraws_the_chat_card() {
+        let db = db();
+        push(&db);
+        let workout = active_workout(&db).unwrap().unwrap().id;
+        let queued = app_live(&db, &workout, at(0)).unwrap()["queue"].as_object().unwrap().clone();
+        let shoulder = exercises(&db, &workout).unwrap().into_iter().find(|e| name(e) == "Shoulder press").unwrap();
+        app_tap(&db, queued[&shoulder.id].as_str().unwrap(), at(5), "app-now").unwrap();
+        assert_eq!(app_live(&db, &workout, at(6)).unwrap()["target"], "8–10 × 25 kg");
+        let r = &data(&live(&db, at(6)), "🔄 Swap")["swap:".len()..];
+        app_tap(&db, &format!("gc:log:{r}:25:10"), at(10), "app-log").unwrap();
+        let set = app_last(&db, &workout).unwrap()["id"].as_str().unwrap().to_string();
+        crate::domain::audit::correct_set(&db, &set, Some(30.0), None, None, None, at(20), "fix").unwrap();
+        app_fixed(&db, &set, at(20)).unwrap();
+        let views: Vec<CoachView> = AgentEvent::select(&db, "WHERE type = ?1 ORDER BY rowid", [APP_VIEW])
+            .unwrap()
+            .into_iter()
+            .map(|e| serde_json::from_value(e.payload_json.0).unwrap())
+            .collect();
+        let (note, redraw) = (&views[views.len() - 2], &views[views.len() - 1]);
+        assert_eq!(note.ack.as_deref(), Some("✏️ Fixed Shoulder press: 10 × 30 kg"));
+        assert!(redraw.refresh && redraw.cards[0].text.contains("30 kg"), "{:?}", redraw.cards);
     }
 
     #[test]
