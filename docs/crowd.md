@@ -85,35 +85,16 @@ the same hour on other days while history is thin) plus the owner's own Empty/A 
 feel once labels exist, e.g. `Busy · ~13 people checked in (Fridays 19:00, 2 wk)`. The watcher
 fills missing forecasts right away, re-checks sessions in the next 24 h every 30 min, and edits the
 event only when the feel changes or the count moves by ≥3 people and ≥25%. Nothing changes within
-1 h of start, so imminent reminders stay put. No invented gym
-capacity, count↔percentage mapping, historical count archive or future attendance.
-MySports display limits 14/57 are categories, not physical occupancy conversion.
+1 h of start, so imminent reminders stay put. No invented gym capacity, count↔percentage mapping
+or future attendance.
 
 ## Model
 
-- Raw counts stay unnormalized until paired arrival labels exist.
-- Labels pair only with readings retrieved before arrival within 30 min. Unknown
-  backend freshness still caps confidence. Known-old proxy readings are excluded.
-- Up to 9 paired labels: nearest three label/count samples, distance-weighted heuristic.
-- 10+: pool-adjacent-violators monotonic regression; prediction clamps outside range
-  and halves confidence. This encodes simple count/crowding monotonic prior, not
-  scientific proof. No neural model or unnecessary numerical dependencies.
-- Future input uses local weekday/hour history, one mean per dated hour. Cached
-  repeated polls cannot masquerade as many independent days.
-- Blend available label-calibrated count and user slot means.
-  No signal → null score/zero confidence; outages preserve history/decrease confidence.
-- Source reliability uses exponential update from pre-label prediction error. Source
-  prediction never trains on the label it is evaluated against.
-- Historical lookback: 90 days. Confidence is heuristic evidence support, never
-  measured validation accuracy or empty-gym guarantee. Holiday/weather not modeled.
-- Discomfort summary only after 3+ busy/packed visits with paired counts. It describes
-  median *reported* count associated with those ratings, not max capacity or hard limit.
-
-SQLite stores readings, retrieval health, frozen label features and learned summary.
-Calendar descriptions label personal score explicitly; synthetic evidence stays demo.
-No model calls needed for collection/scoring. Agent explains only meaningful decisions.
-
-## Outstanding
-
-Real arrival labels, refresh-cadence investigation and live MySports
-verification remain operator-dependent. Do not advertise validated crowd accuracy.
+The forecast (`src/domain/crowd.rs`) is deliberately simple. A slot's typical count comes from the
+last 90 days of readings at that weekday and hour, one mean per day so repeated polls don't count as
+more evidence. Each crowd answer is paired with a reading from the 30 minutes before arrival, and
+those pairs turn a count into a felt-crowd score: with under 10 pairs a weighted average of the
+nearest three, from 10 on a monotonic fit (more people never feels emptier). That score is blended
+with the owner's own answers for the slot. Confidence is how much evidence there is, never measured
+accuracy; no signal means no score. Holidays and weather aren't modelled, and no model calls are
+involved.

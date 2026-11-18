@@ -22,6 +22,5 @@ umask 077
 rm -f "$ROOT"/data/gymclaw.db-wal "$ROOT"/data/gymclaw.db-shm
 cp "$TMP/gymclaw.db" "$ROOT/data/gymclaw.db"
 [[ -d "$TMP/data" ]] && cp -R "$TMP/data/." "$ROOT/data/"
-# Older archives may also hold an `openclaw/` folder; it is no longer used and stays unrestored.
 cd "$ROOT" && gymclaw migrate >/dev/null
 echo "Restored $ARCHIVE"

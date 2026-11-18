@@ -9,7 +9,7 @@ license-file = "LICENSE"
 [dependencies]
 ab_glyph = "0.2.32"
 async-trait = "0.1.92"
-axum = { version = "0.8.9", features = ["http1", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 hex = "0.4.3"
@@ -19,7 +19,7 @@ kamadak-exif = "0.6.1"
 libheif-rs = { version = "3", optional = true, default-features = false, features = ["v1_17"] }
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "multipart", "blocking", "query", "form"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "serde_json", "hooks", "backup", "session"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup", "session"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
@@ -36,4 +36,4 @@ default = ["heic"]
 heic = ["dep:libheif-rs"]
 
 [dev-dependencies]
-tokio = { version = "1.53.2", features = ["test-util", "full"] }
+tokio = { version = "1.53.2", features = ["test-util"] }

@@ -1,9 +1,10 @@
 //! Runtime settings from the environment. The only module that reads env vars (clippy
 //! `disallowed_methods`). In production a variable reaches the bot only if the `gymclaw` service's
-//! `environment` in docker-compose.yaml passes it.
+//! `environment` in docker-compose.yaml passes it. Unset and empty are the same. Every variable is
+//! listed in docs/self-hosting.md; keep that table in step.
 use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
@@ -13,8 +14,6 @@ pub struct Config {
     pub openrouter_key: String,
     /// Conversation model.
     pub model: String,
-    /// Cheap model for background judgment (event triage).
-    pub model_fast: String,
     /// Model that reads photos (scale, plan screenshots).
     pub model_vision: String,
     /// Model that transcribes voice notes; needs audio input (the chat model's default has none).
@@ -30,6 +29,16 @@ pub struct Config {
 #[expect(clippy::disallowed_methods, reason = "the one env read")]
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// The chat model (`GYMCLAW_MODEL`), for `Config` and `gymclaw replay`.
+pub fn model() -> String {
+    var("GYMCLAW_MODEL").unwrap_or_else(|| "anthropic/claude-haiku-5.5".into())
+}
+
+/// The OpenRouter provider pin (`GYMCLAW_PROVIDER`), if any.
+pub fn provider() -> Option<String> {
+    var("GYMCLAW_PROVIDER")
 }
 
 /// The owner's Telegram user id, for code that runs without a full `Config` (tools, CLI).
@@ -67,18 +76,17 @@ impl Config {
         let (data_dir, db_path) = Self::paths();
         let need = |name: &str| var(name).ok_or_else(|| format!("{name} is required"));
         let owner_id = owner_id()?;
-        let model = var("GYMCLAW_MODEL").unwrap_or_else(|| "anthropic/claude-haiku-5.5".into());
+        let model = model();
         Ok(Config {
             data_dir,
             db_path,
             owner_id,
             telegram_token: need("TELEGRAM_BOT_TOKEN")?,
             openrouter_key: need("OPENROUTER_API_KEY")?,
-            model_fast: var("GYMCLAW_MODEL_FAST").unwrap_or_else(|| model.clone()),
             model_vision: var("GYMCLAW_MODEL_VISION").unwrap_or_else(|| model.clone()),
             model_audio: var("GYMCLAW_MODEL_AUDIO").unwrap_or_else(|| "google/gemini-3.5-flash-lite".into()),
             model,
-            provider: var("GYMCLAW_PROVIDER"),
+            provider: provider(),
             dashboard_host: var("GYMCLAW_DASHBOARD_HOST"),
             turn_log_dir: var("GYMCLAW_TURN_LOG_DIR").map(PathBuf::from),
         })
