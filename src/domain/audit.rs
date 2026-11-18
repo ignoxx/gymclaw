@@ -194,9 +194,7 @@ pub fn add_set(db: &Connection, workout_id: &str, which: &str, text: &str, now: 
             set_type: SetType::Working,
             weight: value.weight,
             reps: value.reps,
-            rir_optional: None,
             logged_at: workout.completed_at.or(workout.started_at).unwrap_or(now),
-            rest_started_at: None,
             rest_due_at: None,
             seconds: value.seconds,
             meters: value.meters,
@@ -267,7 +265,6 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
             crate::bail!("INVALID_TRANSITION", "Cannot finish workout in {}", workout.status);
         }
         cancel_rest(db, workout_id, now)?;
-        transition(db, &mut workout, WorkoutStatus::PostAnalysis, now)?;
         let duration = workout.started_at.map_or(0, |s| (now - s).as_secs());
         workout.completed_at = Some(now);
         workout.last_action_at = Some(now);
@@ -326,7 +323,7 @@ pub fn finish(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> R
         });
         // PLAN_UPDATED means training targets persisted. The summary card is the wrap-up; the agent wakes
         // only to fix upcoming sessions (an agent take was praise with nothing in it, 2026-11-13).
-        transition(db, &mut workout, WorkoutStatus::PlanUpdated, now)?;
+        transition(db, &mut workout, WorkoutStatus::PlanUpdated)?;
         emit(db, "planning.replan_required", now, json!({"workout_id": workout.id, "reason": "workout_completed"}))?;
         Ok(audit)
     })

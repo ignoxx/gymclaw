@@ -49,11 +49,8 @@ pub fn event_body(db: &Connection, session: &PlannedSession) -> Result<Value> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let name = session.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).unwrap_or("Workout");
-    let mut crowd = describe_crowd(session.plan("crowd_forecast"), &session.planned_start_at.local(&tz));
-    if session.plan("crowd_source").and_then(Value::as_str) == Some("demo_fixture") {
-        crowd += " (demo fixture)";
-    }
-    let home = session.expected_finish_at.mins(profile.commute_home_minutes);
+    let crowd = describe_crowd(session.plan("crowd_forecast"), &session.planned_start_at.local(&tz));
+    let home = session.planned_end_at.mins(profile.commute_home_minutes);
     let hm = |t: Ts| t.local(&tz).strftime("%H:%M").to_string();
     let mut lines = vec![
         format!("Expected crowd: {crowd}"),

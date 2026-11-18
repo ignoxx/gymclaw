@@ -7,7 +7,7 @@ use crate::db::models::{AgentEvent, PlannedSession};
 use crate::domain::calendar_busy::busy_intervals;
 use crate::domain::compression::compress_template;
 use crate::domain::core::emit;
-use crate::domain::crowd::{CrowdModel, planning_signals};
+use crate::domain::crowd::planning_signals;
 use crate::domain::planning::{Inputs, Interval, PlannerConfig, SlotSignal, plan_week};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::get_template;
@@ -20,8 +20,7 @@ pub fn session_data(row: &PlannedSession) -> Value {
     json!({
         "id": row.id, "week_id": row.week_id, "status": row.status,
         "start": row.planned_start_at, "end": row.planned_end_at, "prep_start": row.prep_start_at,
-        "leave_home": row.leave_home_at, "expected_finish": row.expected_finish_at,
-        "crowd": row.crowd_prediction, "confidence": row.crowd_confidence, "user_locked": row.user_locked,
+        "leave_home": row.leave_home_at, "user_locked": row.user_locked,
         "workout_template_id": row.workout_template_id, "workout_plan": row.workout_plan_json, "follows_session_id": row.follows_session_id,
     })
 }
@@ -47,7 +46,7 @@ pub fn busy_window(week_start: Date, profile: &crate::domain::profile::Profile) 
 }
 
 /// Fill a week with new sessions around the existing ones. Idempotent per `request_id`. `fixture_signals`
-/// replace the crowd model's signals (demos and tests); their crowd values are marked demo.
+/// replace the crowd model's signals (tests).
 pub fn schedule_week(
     db: &Connection,
     week_start: Date,
@@ -57,7 +56,7 @@ pub fn schedule_week(
     fixture_signals: &[SlotSignal],
 ) -> Result<Value> {
     let mut request = json!({"week_start": week_start.to_string(), "fixture": {"busy": [], "unavailable": [], "signals": fixture_signals,
-        "config": {"step_minutes": 15, "adherence_weight": 1.0, "preferred_time_weight": 0.4, "uncertainty_weight": 0.5, "shortened_duration_penalty": 1.0}}});
+        "config": {"step_minutes": 15, "preferred_time_weight": 0.4, "uncertainty_weight": 0.5, "shortened_duration_penalty": 1.0}}});
     if let Some(id) = template_id {
         request["template_id"] = json!(id);
     }
@@ -86,7 +85,6 @@ pub fn schedule_week(
     } else {
         fixture_signals.to_vec()
     };
-    let model = if signals.is_empty() || !fixture_signals.is_empty() { None } else { Some(CrowdModel::new(db, now)?) };
     let plan = plan_week(
         &profile,
         week_start,
@@ -112,13 +110,6 @@ pub fn schedule_week(
         row.planned_end_at = slot.end;
         row.prep_start_at = slot.prep_start;
         row.leave_home_at = slot.leave_home;
-        row.expected_finish_at = slot.end;
-        row.crowd_prediction = slot.crowd;
-        row.crowd_confidence = Some(slot.confidence);
-        if slot.crowd.is_some() {
-            let demo = !fixture_signals.is_empty() || model.as_ref().is_some_and(|m| m.predict(slot.start).demo);
-            row.merge_plan(json!({"crowd_source": if demo { "demo_fixture" } else { "local_crowd_model" }, "crowd_score_kind": "personal_perceived_crowd_proxy"}));
-        }
         row.insert(db)?;
         created.push(row);
     }
@@ -167,18 +158,14 @@ mod tests {
         let (start, end) = (ts("2026-10-15T19:00:00+02:00"), ts("2026-10-15T20:10:00+02:00"));
         CalendarEventSnapshot {
             calendar_event_id: "travel".into(),
-            ical_uid: None,
             etag: None,
             title: "Travel".into(),
             start_at: ts("2026-10-12T00:00:00+02:00"),
             end_at: ts("2026-10-14T00:00:00+02:00"),
             status: "confirmed".into(),
-            updated_at_remote: None,
             gymclaw_managed: false,
             gymclaw_session_id: None,
-            gymclaw_plan_revision: None,
             user_locked: false,
-            last_seen_at: start,
             raw_json: Json(json!({})),
         }
         .insert(&db)
@@ -186,13 +173,8 @@ mod tests {
         let mut locked = PlannedSession::new("2026-10-12".into(), None, true);
         locked.id = "locked".into();
         locked.status = SessionStatus::Tentative;
-        (
-            locked.planned_start_at,
-            locked.planned_end_at,
-            locked.prep_start_at,
-            locked.leave_home_at,
-            locked.expected_finish_at,
-        ) = (start, end, start, start, end);
+        (locked.planned_start_at, locked.planned_end_at, locked.prep_start_at, locked.leave_home_at) =
+            (start, end, start, start);
         locked.insert(&db).unwrap();
         let result =
             schedule_week(&db, jiff::civil::date(2026, 10, 12), ts("2026-10-11T12:00:00+02:00"), None, None, &[])

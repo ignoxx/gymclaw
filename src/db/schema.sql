@@ -1,5 +1,6 @@
--- Generated from a fresh `gymclaw migrate` (user_version 10); don't edit. When a migration
--- changes the schema, `cargo test schema_snapshot` rewrites this file: review and commit it.
+-- Generated from baseline.sql plus every migration (user_version 11); don't edit. When a
+-- migration changes the schema, `cargo test schema_snapshot` rewrites this file: review and
+-- commit it. Fresh databases are created from this file.
 
 CREATE TABLE activity (
 	id VARCHAR PRIMARY KEY,
@@ -94,18 +95,14 @@ CREATE TABLE calendar_credential (
 
 CREATE TABLE calendar_event_snapshot (
 	calendar_event_id VARCHAR NOT NULL, 
-	ical_uid VARCHAR, 
 	etag VARCHAR, 
 	title VARCHAR NOT NULL, 
 	start_at DATETIME NOT NULL, 
 	end_at DATETIME NOT NULL, 
 	status VARCHAR NOT NULL, 
-	updated_at_remote DATETIME, 
 	gymclaw_managed BOOLEAN NOT NULL, 
 	gymclaw_session_id VARCHAR, 
-	gymclaw_plan_revision INTEGER, 
 	user_locked BOOLEAN NOT NULL, 
-	last_seen_at DATETIME NOT NULL, 
 	raw_json JSON NOT NULL, 
 	PRIMARY KEY (calendar_event_id)
 );
@@ -166,8 +163,7 @@ CREATE TABLE crowd_feedback (
 	observed_at DATETIME NOT NULL, 
 	rating VARCHAR NOT NULL, 
 	normalized_score DOUBLE NOT NULL, 
-	waited_for_equipment_count INTEGER NOT NULL, 
-	notes VARCHAR, features_json JSON DEFAULT '{}' NOT NULL, 
+	features_json JSON DEFAULT '{}' NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(workout_session_id) REFERENCES workout_session (id)
 );
@@ -177,7 +173,6 @@ CREATE TABLE "crowd_observation" (
 	observed_at DATETIME NOT NULL, 
 	source VARCHAR NOT NULL, 
 	raw_value DOUBLE NOT NULL, 
-	normalized_value DOUBLE, 
 	freshness_seconds INTEGER, 
 	metadata_json JSON NOT NULL, 
 	PRIMARY KEY (id)
@@ -251,19 +246,6 @@ CREATE TABLE gym_location (
 	PRIMARY KEY (name)
 );
 
-CREATE TABLE learned_preference (
-	id VARCHAR NOT NULL, 
-	"key" VARCHAR NOT NULL, 
-	value_json JSON NOT NULL, 
-	confidence DOUBLE NOT NULL, 
-	evidence_count INTEGER NOT NULL, 
-	first_observed_at DATETIME NOT NULL, 
-	last_observed_at DATETIME NOT NULL, 
-	source VARCHAR NOT NULL, 
-	PRIMARY KEY (id), 
-	UNIQUE ("key")
-);
-
 CREATE VIEW lift_history AS
 SELECT w.id AS workout_id, w.started_at, e.exercise_id, e.config_json ->> 'name' AS name,
 	e.rep_min, e.rep_max, e.target_weight,
@@ -281,7 +263,6 @@ CREATE TABLE "notification_delivery" (
 	id VARCHAR NOT NULL, 
 	notification_job_id VARCHAR, 
 	recipient VARCHAR NOT NULL, 
-	runtime_profile VARCHAR NOT NULL, 
 	message TEXT NOT NULL, 
 	result_json JSON NOT NULL, 
 	status VARCHAR NOT NULL, 
@@ -306,7 +287,6 @@ CREATE TABLE "notification_job" (
 	due_at DATETIME NOT NULL, 
 	status VARCHAR NOT NULL, 
 	payload_json JSON NOT NULL, 
-	external_job_id VARCHAR, 
 	handled_at DATETIME, 
 	planned_session_id VARCHAR, 
 	PRIMARY KEY (id), 
@@ -320,16 +300,14 @@ CREATE TABLE "notification_job" (
 
 CREATE INDEX ix_notification_job_due_at ON notification_job (due_at);
 
-CREATE TABLE onboarding_state (
-	id INTEGER NOT NULL, 
-	goal VARCHAR, 
-	profile_fingerprint VARCHAR, 
-	template_id VARCHAR, 
-	template_fingerprint VARCHAR, 
-	completed_fingerprint VARCHAR, interview_json JSON DEFAULT '{}' NOT NULL, split_json JSON DEFAULT '[]' NOT NULL, plan_text TEXT, 
-	PRIMARY KEY (id), 
-	CHECK (id = 1), 
-	FOREIGN KEY(template_id) REFERENCES workout_template (id)
+CREATE TABLE "onboarding_state" (
+	id INTEGER NOT NULL,
+	completed_fingerprint VARCHAR,
+	interview_json JSON DEFAULT '{}' NOT NULL,
+	split_json JSON DEFAULT '[]' NOT NULL,
+	plan_text TEXT,
+	PRIMARY KEY (id),
+	CHECK (id = 1)
 );
 
 CREATE TABLE personal_busy_interval (
@@ -361,10 +339,7 @@ CREATE TABLE planned_session (
 	planned_end_at DATETIME NOT NULL, 
 	prep_start_at DATETIME NOT NULL, 
 	leave_home_at DATETIME NOT NULL, 
-	expected_finish_at DATETIME NOT NULL, 
 	calendar_event_id VARCHAR, 
-	crowd_prediction DOUBLE, 
-	crowd_confidence DOUBLE, 
 	user_locked BOOLEAN NOT NULL, 
 	source_revision INTEGER NOT NULL, 
 	created_at DATETIME NOT NULL, 
@@ -376,19 +351,14 @@ CREATE TABLE planned_session (
 
 CREATE INDEX ix_planned_session_week_id ON planned_session (week_id);
 
-CREATE TABLE runtime_settings (
-	id INTEGER NOT NULL, 
-	profile VARCHAR NOT NULL, 
-	recipient VARCHAR NOT NULL, 
-	project_root VARCHAR NOT NULL, 
-	python_path VARCHAR NOT NULL, 
-	template_id VARCHAR, 
-	enabled BOOLEAN NOT NULL, 
-	calendar_writes_enabled BOOLEAN NOT NULL, 
-	crowd_polling_enabled BOOLEAN NOT NULL, 
-	PRIMARY KEY (id), 
-	CHECK (id = 1), 
-	FOREIGN KEY(template_id) REFERENCES workout_template (id)
+CREATE TABLE "runtime_settings" (
+	id INTEGER NOT NULL,
+	recipient VARCHAR NOT NULL,
+	enabled BOOLEAN NOT NULL,
+	calendar_writes_enabled BOOLEAN NOT NULL,
+	crowd_polling_enabled BOOLEAN NOT NULL,
+	PRIMARY KEY (id),
+	CHECK (id = 1)
 );
 
 CREATE TABLE "set_log" (
@@ -398,9 +368,7 @@ CREATE TABLE "set_log" (
 	set_type VARCHAR NOT NULL,
 	weight DOUBLE NOT NULL,
 	reps INTEGER NOT NULL,
-	rir_optional DOUBLE,
 	logged_at DATETIME NOT NULL,
-	rest_started_at DATETIME,
 	rest_due_at DATETIME,
 	seconds INTEGER,
 	meters DOUBLE,
@@ -410,8 +378,6 @@ CREATE TABLE "set_log" (
 	CONSTRAINT ck_set_values CHECK (weight >= 0 AND set_number > 0 AND reps >= 0 AND (reps > 0 OR seconds > 0 OR meters > 0)),
 	FOREIGN KEY(workout_exercise_id) REFERENCES workout_exercise (id)
 );
-
-CREATE TABLE sqlite_sequence(name,seq);
 
 CREATE TABLE user_profile (
 	id INTEGER NOT NULL, 
@@ -430,7 +396,6 @@ CREATE TABLE user_profile (
 	commute_home_minutes INTEGER NOT NULL, 
 	rest_seconds INTEGER NOT NULL, 
 	crowd_preference_weight DOUBLE NOT NULL, 
-	calendar_preference_weight DOUBLE NOT NULL, 
 	created_at DATETIME NOT NULL, 
 	updated_at DATETIME NOT NULL, gym_address VARCHAR, 
 	PRIMARY KEY (id), 
@@ -460,7 +425,6 @@ CREATE TABLE "workout_session" (
 	id VARCHAR NOT NULL, 
 	planned_session_id VARCHAR, 
 	started_at DATETIME, 
-	arrived_at DATETIME, 
 	completed_at DATETIME, 
 	status VARCHAR NOT NULL, 
 	initial_eta DATETIME, 
@@ -468,7 +432,6 @@ CREATE TABLE "workout_session" (
 	actual_duration_seconds INTEGER, 
 	crowd_feedback VARCHAR, 
 	waited_for_equipment_count INTEGER NOT NULL, 
-	notes TEXT, 
 	template_id VARCHAR, 
 	template_snapshot JSON DEFAULT '{}' NOT NULL, 
 	last_action_at DATETIME, 

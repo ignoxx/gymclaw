@@ -154,13 +154,10 @@ mod tests {
         update_profile(&db, changes.as_object().unwrap()).unwrap();
         schedule_week(&db, Date::constant(2026, 10, 12), sunday(0), None, Some("short"), &[]).unwrap();
         commit_upcoming(&db, sunday(0)).unwrap();
-        crate::db::models::RuntimeSettings {
-            recipient: "123".into(),
-            template_id: Some("short".into()),
-            ..crate::db::test::authority()
-        }
-        .insert(&db)
-        .unwrap();
+        crate::db::models::RuntimeSettings { recipient: "123".into(), ..crate::db::test::authority() }
+            .insert(&db)
+            .unwrap();
+        db.execute("INSERT INTO onboarding_state (id, split_json) VALUES (1, '[\"short\"]')", []).unwrap();
         (db, FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin"))
     }
 

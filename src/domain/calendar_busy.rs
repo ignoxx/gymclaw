@@ -122,18 +122,14 @@ mod tests {
     fn event(db: &Connection, id: &str, status: &str, start: &str, end: &str, raw: Value) {
         CalendarEventSnapshot {
             calendar_event_id: id.into(),
-            ical_uid: None,
             etag: None,
             title: "t".into(),
             start_at: ts(start),
             end_at: ts(end),
             status: status.into(),
-            updated_at_remote: None,
             gymclaw_managed: false,
             gymclaw_session_id: None,
-            gymclaw_plan_revision: None,
             user_locked: false,
-            last_seen_at: ts(start),
             raw_json: Json(raw),
         }
         .insert(db)

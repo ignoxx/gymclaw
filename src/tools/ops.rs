@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::{Ctx, Tool, ToolDef, def};
 use crate::db::models::{NotificationDelivery, NotificationJob, RuntimeSettings};
 use crate::error::Result;
-use crate::runtime::outbox::{self, PROFILE};
+use crate::runtime::outbox;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
@@ -147,11 +147,7 @@ impl Tool for RuntimeResume {
                 };
                 let row = RuntimeSettings {
                     id: 1,
-                    profile: PROFILE.into(),
                     recipient: owner.to_string(),
-                    project_root: String::new(),
-                    python_path: String::new(),
-                    template_id: None,
                     enabled: true,
                     calendar_writes_enabled: false,
                     crowd_polling_enabled: false,

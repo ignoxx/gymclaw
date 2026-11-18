@@ -6,12 +6,15 @@ use crate::time::Ts;
 use crate::{sql_enum, table};
 
 sql_enum!(SessionStatus { Tentative = "TENTATIVE", Committed = "COMMITTED", Started = "STARTED", Completed = "COMPLETED", Cancelled = "CANCELLED", Skipped = "SKIPPED", Missed = "MISSED" });
-sql_enum!(WorkoutStatus {
-    Scheduled = "SCHEDULED", Preparing = "PREPARING", Commuting = "COMMUTING", Arrived = "ARRIVED",
-    SessionStarted = "SESSION_STARTED", ExerciseActive = "EXERCISE_ACTIVE", SetActive = "SET_ACTIVE", Resting = "RESTING",
-    ExerciseComplete = "EXERCISE_COMPLETE", NextExercise = "NEXT_EXERCISE", WorkoutComplete = "WORKOUT_COMPLETE",
-    PostAnalysis = "POST_ANALYSIS", PlanUpdated = "PLAN_UPDATED",
-});
+sql_enum!(
+    /// SET_ACTIVE: a set is up. RESTING: the rest after one runs. EXERCISE_ACTIVE: only deferred exercises
+    /// are left. WORKOUT_COMPLETE: everything is resolved, not yet finished. PLAN_UPDATED: finished, next
+    /// targets saved.
+    WorkoutStatus {
+        ExerciseActive = "EXERCISE_ACTIVE", SetActive = "SET_ACTIVE", Resting = "RESTING",
+        WorkoutComplete = "WORKOUT_COMPLETE", PlanUpdated = "PLAN_UPDATED",
+    }
+);
 sql_enum!(ExerciseStatus { Pending = "PENDING", Active = "ACTIVE", Deferred = "DEFERRED", Completed = "COMPLETED", Skipped = "SKIPPED", Substituted = "SUBSTITUTED" });
 sql_enum!(SetType { Warmup = "WARMUP", Working = "WORKING" });
 sql_enum!(JobKind { Rest = "REST", GetReady = "GET_READY", Leave = "LEAVE", SessionStart = "SESSION_START" });
@@ -59,7 +62,6 @@ table!(UserProfile = "user_profile" {
     commute_home_minutes: i64,
     rest_seconds: i64,
     crowd_preference_weight: f64,
-    calendar_preference_weight: f64,
     gym_address: Option<String>,
     created_at: Ts,
     updated_at: Ts,
@@ -67,27 +69,12 @@ table!(UserProfile = "user_profile" {
 
 table!(OnboardingState = "onboarding_state" {
     id: i64,
-    goal: Option<String>,
-    profile_fingerprint: Option<String>,
-    template_id: Option<String>,
-    template_fingerprint: Option<String>,
     completed_fingerprint: Option<String>,
     interview_json: Json<Value>,
     /// Ordered template IDs; planned sessions rotate through them.
     split_json: Json<Vec<String>>,
     /// The owner's plan in their words: what they train, how often, what rotates. The agent plans by it.
     plan_text: Option<String>,
-});
-
-table!(LearnedPreference = "learned_preference" {
-    id: String,
-    key: String,
-    value_json: Json<Value>,
-    confidence: f64,
-    evidence_count: i64,
-    first_observed_at: Ts,
-    last_observed_at: Ts,
-    source: String,
 });
 
 table!(AvailabilityBlock = "availability_block" {
@@ -102,18 +89,14 @@ table!(AvailabilityBlock = "availability_block" {
 
 table!(CalendarEventSnapshot = "calendar_event_snapshot" {
     calendar_event_id: String,
-    ical_uid: Option<String>,
     etag: Option<String>,
     title: String,
     start_at: Ts,
     end_at: Ts,
     status: String,
-    updated_at_remote: Option<Ts>,
     gymclaw_managed: bool,
     gymclaw_session_id: Option<String>,
-    gymclaw_plan_revision: Option<i64>,
     user_locked: bool,
-    last_seen_at: Ts,
     raw_json: Json<Value>,
 });
 
@@ -127,10 +110,7 @@ table!(PlannedSession = "planned_session" {
     planned_end_at: Ts,
     prep_start_at: Ts,
     leave_home_at: Ts,
-    expected_finish_at: Ts,
     calendar_event_id: Option<String>,
-    crowd_prediction: Option<f64>,
-    crowd_confidence: Option<f64>,
     user_locked: bool,
     source_revision: i64,
     created_at: Ts,
@@ -146,8 +126,7 @@ table!(WorkoutSession = "workout_session" {
     template_snapshot: Json<Value>,
     last_action_at: Option<Ts>,
     started_at: Option<Ts>,
-    arrived_at: Option<Ts>,
-    /// Started from the reminder's ▶️ button at the gym (not via chat), so arrived_at is a real arrival.
+    /// Started from the reminder's ▶️ button at the gym (not via chat), so started_at is a real arrival.
     started_by_button: bool,
     completed_at: Option<Ts>,
     status: WorkoutStatus,
@@ -156,7 +135,6 @@ table!(WorkoutSession = "workout_session" {
     actual_duration_seconds: Option<i64>,
     crowd_feedback: Option<String>,
     waited_for_equipment_count: i64,
-    notes: Option<String>,
 });
 
 table!(WorkoutExercise = "workout_exercise" {
@@ -182,9 +160,7 @@ table!(SetLog = "set_log" {
     set_type: SetType,
     weight: f64,
     reps: i64,
-    rir_optional: Option<f64>,
     logged_at: Ts,
-    rest_started_at: Option<Ts>,
     rest_due_at: Option<Ts>,
     /// A timed set (bike, plank): its length, with reps 0. None for reps × weight.
     seconds: Option<i64>,
@@ -216,7 +192,6 @@ table!(
     due_at: Ts,
     status: JobStatus,
     payload_json: Json<Value>,
-    external_job_id: Option<String>,
     handled_at: Option<Ts>,
 });
 
@@ -227,7 +202,6 @@ table!(
     notification_job_id: Option<String>,
     agent_event_id: Option<String>,
     recipient: String,
-    runtime_profile: String,
     message: String,
     result_json: Json<Value>,
     status: DeliveryStatus,
@@ -254,15 +228,10 @@ table!(PersonalBusyInterval = "personal_busy_interval" {
 });
 
 table!(
-    /// `profile`, `project_root` and `python_path` are unused columns kept so the schema stays as is;
     /// `enabled` and the two authorities gate the runtime.
     RuntimeSettings = "runtime_settings" {
     id: i64,
-    profile: String,
     recipient: String,
-    project_root: String,
-    python_path: String,
-    template_id: Option<String>,
     enabled: bool,
     calendar_writes_enabled: bool,
     crowd_polling_enabled: bool,
@@ -304,7 +273,6 @@ table!(CrowdObservation = "crowd_observation" {
     observed_at: Ts,
     source: String,
     raw_value: f64,
-    normalized_value: Option<f64>,
     freshness_seconds: Option<i64>,
     metadata_json: Json<Value>,
 });
@@ -329,8 +297,6 @@ table!(CrowdFeedback = "crowd_feedback" {
     rating: String,
     normalized_score: f64,
     features_json: Json<Value>,
-    waited_for_equipment_count: i64,
-    notes: Option<String>,
 });
 
 table!(AgentEvent = "agent_event" {
@@ -437,10 +403,7 @@ impl PlannedSession {
             planned_end_at: now,
             prep_start_at: now,
             leave_home_at: now,
-            expected_finish_at: now,
             calendar_event_id: None,
-            crowd_prediction: None,
-            crowd_confidence: None,
             user_locked,
             source_revision: 1,
             created_at: now,

@@ -22,11 +22,7 @@ pub fn db() -> Connection {
 pub fn authority() -> RuntimeSettings {
     RuntimeSettings {
         id: 1,
-        profile: crate::runtime::outbox::PROFILE.into(),
         recipient: "42".into(),
-        project_root: String::new(),
-        python_path: String::new(),
-        template_id: None,
         enabled: true,
         calendar_writes_enabled: false,
         crowd_polling_enabled: false,
