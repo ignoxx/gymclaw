@@ -476,7 +476,8 @@ function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, nullab
   const show = v => { input.value = v === null || v === undefined ? '' : String(v); };
   show(value);
   const commit = v => {
-    value = v === null ? null : Math.max(min, Math.round(v * 100) / 100);
+    const whole = !decimal && step % 1 === 0;
+    value = v === null ? null : Math.max(min, whole ? Math.round(v) : Math.round(v * 100) / 100);
     onChange(value);
   };
   const typed = () => {
@@ -557,7 +558,11 @@ async function coachTap(data) {
 }
 
 /* POST, then a fresh state. Buttons and the main button wait meanwhile; the outcome buzzes and toasts. */
+let sending = false;
 async function send(url, payload, said) {
+  // One at a time: a double tap on the main button would otherwise log the set twice.
+  if (sending) return;
+  sending = true;
   document.activeElement?.blur?.();
   if (liveAction) { liveAction.busy = true; syncMain(); }
   tg?.MainButton.showProgress();
@@ -565,7 +570,7 @@ async function send(url, payload, said) {
   try {
     // No connection (a dead zone): say what didn't happen, not the browser's "Failed to fetch".
     const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-      .catch(() => { throw new Error('No connection: not saved. Try again.'); });
+      .catch(() => { throw new Error('No connection. Check the last set before trying again.'); });
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new Error(body?.error?.message?.split('\n')[0] || 'Didn\'t go through. Try again.');
     haptic.done();
@@ -577,7 +582,13 @@ async function send(url, payload, said) {
   } finally {
     tg?.MainButton.hideProgress();
     rendered = '';
-    await refresh();
+    sending = false;
+    // Offline the refresh fails too and nothing redraws: give the buttons back so "try again" can be tapped.
+    if (!await refresh()) {
+      document.querySelectorAll('.focus button').forEach(b => { b.disabled = false; });
+      if (liveAction) liveAction.busy = false;
+      syncMain();
+    }
     // The card moved on (next set, rest, next exercise): bring its top into view.
     const focus = document.getElementById('focus');
     if (focus.getBoundingClientRect().top < 0) focus.scrollIntoView({ block: 'start' });
