@@ -40,22 +40,24 @@ function syncBack() {
   else tg.BackButton.hide();
 }
 
-/* An edited plan form saves with Telegram's main button (styles.css hides the form's own Save), and
-   closing the app asks first while the edit is unsaved. */
+/* Telegram's main button does the screen's one main thing: save an edited plan form while the exercise
+   sheet is open, else log the live set on Today. In a browser each has its own button on the page
+   (styles.css hides those in Telegram). An unsaved edit asks before the app closes. */
 let dirtyForm = null;
-function markDirty(form, label) {
+let liveAction = null;
+let mainRun = null;
+function syncMain() {
+  const sheet = document.getElementById('ex-detail').open;
+  const action = sheet ? dirtyForm && { text: dirtyForm.dataset.label, run: () => dirtyForm.requestSubmit() }
+    : activeTab() === 'today' ? liveAction : null;
+  mainRun = action?.run || null;
   if (!tg) return;
-  dirtyForm = form;
-  tg.MainButton.setParams({ text: label, color: token('--lime'), text_color: token('--on-lime'), is_visible: true, is_active: true });
-  if (tgHas('6.2')) tg.enableClosingConfirmation();
+  if (action) tg.MainButton.setParams({ text: action.text, color: token('--lime'), text_color: token('--on-lime'), is_visible: true, is_active: !action.busy });
+  else tg.MainButton.hide();
+  if (tgHas('6.2')) dirtyForm ? tg.enableClosingConfirmation() : tg.disableClosingConfirmation();
 }
-function clearDirty() {
-  if (!tg) return;
-  dirtyForm = null;
-  tg.MainButton.hideProgress();
-  tg.MainButton.hide();
-  if (tgHas('6.2')) tg.disableClosingConfirmation();
-}
+function markDirty(form, label) { form.dataset.label = label; dirtyForm = form; syncMain(); }
+function clearDirty() { dirtyForm = null; tg?.MainButton.hideProgress(); syncMain(); }
 
 if (tg) {
   document.documentElement.classList.add('tg');
@@ -69,7 +71,7 @@ if (tg) {
     if (dialog.open) dialog.close();
     else location.hash = 'today';
   });
-  tg.MainButton.onClick(() => dirtyForm?.requestSubmit());
+  tg.MainButton.onClick(() => mainRun?.());
   tg.ready();
 }
 
@@ -447,31 +449,151 @@ function startRest(node, until) {
   restTimer = setInterval(tick, 1000);
 }
 
+/* A number with − and + on either side: big targets for a sweaty thumb, and a tap on the number types
+   it (decimal keypad, no spinner arrows). `onChange` gets each valid value. */
+function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, onChange }) {
+  const row = el('div', 'stepper');
+  const input = el('input');
+  Object.assign(input, { type: 'text', inputMode: step % 1 ? 'decimal' : 'numeric', enterKeyHint: 'done', autocomplete: 'off' });
+  input.setAttribute('aria-label', label);
+  input.placeholder = 'default';
+  const show = v => { input.value = v === null || v === undefined ? '' : String(v); };
+  show(value);
+  const set = v => { value = Math.max(min, Math.round(v * 100) / 100); show(value); onChange(value); };
+  const button = (text, delta, name) => {
+    const b = el('button', 'step', text);
+    b.type = 'button';
+    b.setAttribute('aria-label', `${name} ${label.toLowerCase()}`);
+    // A blank (a default the server fills in) steps from `base`.
+    b.addEventListener('click', () => { haptic.select(); set(value === null || value === undefined ? base : Number(value) + delta); });
+    return b;
+  };
+  input.addEventListener('focus', () => input.select());
+  input.addEventListener('keydown', event => { if (event.key === 'Enter') input.blur(); });
+  input.addEventListener('change', () => {
+    const typed = Number(input.value.replace(',', '.'));
+    if (input.value.trim() !== '' && Number.isFinite(typed)) set(typed); else show(value);
+  });
+  const field = el('label', 'step-value');
+  field.append(input, el('span', '', unit));
+  row.append(el('span', 'step-label', label), button('−', -step, 'Less'), field, button('+', step, 'More'));
+  return row;
+}
+
+/* Small note at the bottom: what just happened. */
+let toastTimer;
+function toast(text, failed = false) {
+  const node = document.getElementById('toast');
+  node.textContent = text;
+  node.classList.toggle('failed', failed);
+  node.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { node.hidden = true; }, 3200);
+}
+
+/* A coach button from the app: the server runs it like a tap in the chat (`coach::app_tap`), and the bot
+   moves the chat's card on as well. A button the workout has moved past is refused and the view refreshes. */
+async function coachTap(data) {
+  if (liveAction) { liveAction.busy = true; syncMain(); }
+  tg?.MainButton.showProgress();
+  document.querySelectorAll('.focus button').forEach(b => { b.disabled = true; });
+  try {
+    const response = await fetch('/api/coach', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data }) });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(body?.error?.message?.split('\n')[0] || 'Didn\'t go through');
+    haptic.done();
+    if (body?.ack) toast(`${body.ack} · also in the chat`);
+  } catch (error) {
+    haptic.done(false);
+    toast(error.message, true);
+  } finally {
+    tg?.MainButton.hideProgress();
+    rendered = '';
+    await refresh();
+  }
+}
+
+// What the logger shows, kept while the same set is on screen so a refresh doesn't undo a change.
+const logger = { key: null, weight: null, reps: null };
+const parts = data => data.replace(/^gc:/, '').split(':');
+
+/* Live workout: what to do now, entered and logged right here. The buttons are the chat card's own
+   (same labels, same effect), and every step shows up in the chat too. */
 function renderWorkout(focus, workout) {
   const active = workout.active;
+  const buttons = workout.buttons || [];
+  const done = workout.exercises.filter(e => e.status === 'COMPLETED').length;
   const heading = el('div', 'section-heading');
-  heading.append(el('span', '', `${workout.template} · in progress`), el('span', '', `Finish ~${workout.eta}`));
+  heading.append(el('span', '', `${workout.template} · exercise ${Math.min(done + 1, workout.exercises.length)} of ${workout.exercises.length}`), el('span', '', `Finish ~${workout.eta}`));
   focus.append(heading);
+  liveAction = null;
   if (!active) {
     focus.append(el('h2', 'title', 'Wrapping up'));
   } else {
-    focus.append(el('h2', 'title', active.name));
+    const head = el('div', 'live-head');
+    const titles = el('div');
+    const warmup = active.set_type === 'WARMUP';
+    const target = active.time || `${active.rep_min === active.rep_max ? active.rep_min : `${active.rep_min}–${active.rep_max}`} reps${active.weight && !active.bodyweight ? ` × ${kgs(active.weight)}` : ''}`;
+    titles.append(el('h2', 'title', active.name), el('p', 'subtitle', `${warmup ? 'Warm-up' : `Set ${active.set_number} of ${active.sets}`} · ${target}`));
+    if (workout.last_set) titles.append(el('p', 'subtitle', `Last set ${workout.last_set}`));
     const pose = el('div', 'pose');
     pose.append(thumb(workout.exercises.find(e => e.id === active.id)?.svg_url));
-    focus.append(pose);
-    const target = el('div', 'target');
-    if (active.time) target.append(el('strong', '', active.time));
-    else target.append(el('strong', '', active.rep_min === active.rep_max ? active.rep_min : `${active.rep_min}–${active.rep_max}`), el('span', '', 'reps'));
-    if (active.weight && !active.time) target.append(el('span', 'times', '×'), el('strong', '', active.weight), el('span', '', 'kg'));
-    focus.append(target);
-    const status = el('div', 'status');
-    const label = el('strong', '', active.set_type === 'WARMUP' ? 'Warm-up' : `Set ${active.set_number} of ${active.sets}`);
-    status.append(label, el('span', '', workout.last_set ? `Last ${workout.last_set}` : ''));
+    head.append(titles, pose);
+    focus.append(head);
+    const used = new Set();
     if (workout.rest_until) {
-      status.classList.add('resting');
+      // Resting: the countdown and the chat's ways to shorten it.
+      const rest = el('div', 'status resting');
+      const label = el('strong');
+      rest.append(label);
+      const actions = el('div', 'rest-actions');
+      for (const b of buttons.filter(b => /^gc:(cut|skip):/.test(b.data))) {
+        used.add(b);
+        const button = el('button', 'chip', b.text);
+        button.type = 'button';
+        button.addEventListener('click', () => coachTap(b.data));
+        actions.append(button);
+      }
+      rest.append(actions);
       startRest(label, workout.rest_until);
+      focus.append(rest);
     }
-    focus.append(status);
+    const log = buttons.find(b => b.data.startsWith('gc:log:'));
+    if (active.measure === 'reps' && !warmup && log) {
+      used.add(log);
+      // Reps × weight: the chat's suggestion to start from, changed with steppers, logged with the main button.
+      const [, ref, w, r] = parts(log.data);
+      const key = `${active.id}:${active.set_number}`;
+      if (logger.key !== key) Object.assign(logger, { key, weight: Number(w), reps: Number(r) });
+      const box = el('div', 'logger');
+      const label = () => `Log ${logger.reps} × ${kgs(logger.weight)}`.replace(' × 0 kg', ' reps');
+      const submit = el('button', 'save log-button');
+      submit.type = 'button';
+      const update = () => { submit.textContent = label(); liveAction = { text: label(), run }; syncMain(); };
+      const run = () => coachTap(`gc:log:${ref}:${logger.weight}:${logger.reps}`);
+      if (!active.bodyweight || logger.weight > 0) {
+        box.append(stepper('Weight', logger.weight, { step: logger.weight >= 20 ? 2.5 : 1, unit: 'kg', onChange: v => { logger.weight = v; update(); } }));
+      }
+      box.append(stepper('Reps', logger.reps, { min: 1, unit: 'reps', onChange: v => { logger.reps = v; update(); } }));
+      submit.addEventListener('click', run);
+      box.append(submit);
+      focus.append(box);
+      update();
+    }
+    // Everything else the chat card offers: warm-up done, a timed set, next exercise, a machine free again.
+    const rest = buttons.filter(b => !used.has(b));
+    if (rest.length) {
+      const actions = el('div', 'live-actions');
+      rest.forEach((b, i) => {
+        const primary = !liveAction && i === 0 && b.text.startsWith('✅');
+        const button = el('button', primary ? 'save log-button' : 'chip', b.text);
+        button.type = 'button';
+        button.addEventListener('click', () => coachTap(b.data));
+        if (primary) liveAction = { text: b.text.replace(/^✅\s*/, ''), run: () => coachTap(b.data) };
+        actions.append(button);
+      });
+      focus.append(actions);
+    }
   }
   const queue = el('div', 'queue');
   for (const exercise of workout.exercises) {
@@ -480,6 +602,7 @@ function renderWorkout(focus, workout) {
     queue.append(item);
   }
   focus.append(queue);
+  syncMain();
 }
 
 function renderNext(focus, next) {
@@ -508,10 +631,12 @@ function renderToday(data) {
   clearInterval(restTimer);
   // Mid-workout a phone shows just the workout; before a session its card is the dark one (styles.css).
   document.getElementById('tab-today').classList.toggle('live', Boolean(data.workout));
+  liveAction = null;
   focus.classList.toggle('next', !data.workout && Boolean(data.next));
   if (data.workout) renderWorkout(focus, data.workout);
   else if (data.next) renderNext(focus, data.next);
   else focus.append(el('h2', 'title', 'No sessions planned'));
+  syncMain();
 }
 
 /* ---------- Progress ---------- */
@@ -973,20 +1098,16 @@ function planEditor(plan, exercise) {
   form.dataset.plan = plan.id;
   form.append(el('h3', '', `Plan · ${plan.name}`));
   // Names are ExerciseSpec fields, sent as they are.
-  const fields = [['working_sets', 'Sets', exercise.sets, 1], ['rep_min', 'Reps min', exercise.rep_min, 1], ['rep_max', 'Reps max', exercise.rep_max, 1],
-    ['rest_seconds', 'Rest (s)', exercise.rest_seconds, 5]];
-  if (!exercise.bodyweight) fields.unshift(['target_weight', 'Weight (kg)', exercise.weight, 0.5]);
+  // Empty rest means the profile's default for the exercise's role; it shows blank until changed.
+  const fields = [['working_sets', 'Sets', exercise.sets, 1, ''], ['rep_min', 'Reps from', exercise.rep_min, 1, 'reps'],
+    ['rep_max', 'Reps to', exercise.rep_max, 1, 'reps'], ['rest_seconds', 'Rest', exercise.rest_seconds, 15, 's']];
+  if (!exercise.bodyweight) fields.unshift(['target_weight', 'Weight', exercise.weight, exercise.weight >= 20 ? 2.5 : 1, 'kg']);
+  const was = Object.fromEntries(fields.map(([name, , value]) => [name, value ?? null]));
+  const values = { ...was };
   const grid = el('div', 'ex-fields');
-  for (const [name, label, value, step] of fields) {
-    const field = el('label', '', label);
-    const input = el('input');
-    Object.assign(input, { type: 'number', name, step, min: name === 'target_weight' ? 0 : 1, inputMode: 'decimal' });
-    if (value !== null && value !== undefined) input.value = value;
-    // Empty rest means the profile's default for the exercise's role; clearing it goes back to that.
-    if (name === 'rest_seconds') input.placeholder = 'default';
-    input.dataset.was = input.value;
-    field.append(input);
-    grid.append(field);
+  for (const [name, label, value, step, unit] of fields) {
+    grid.append(stepper(label, value, { step, unit, min: name === 'target_weight' || name === 'rest_seconds' ? 0 : 1,
+      onChange: v => { values[name] = v; markDirty(form, `Save ${plan.name}`); } }));
   }
   const save = el('button', 'save', 'Save');
   save.type = 'submit';
@@ -994,15 +1115,9 @@ function planEditor(plan, exercise) {
   const actions = el('div', 'ex-actions');
   actions.append(save, message);
   form.append(grid, actions);
-  form.addEventListener('input', () => markDirty(form, `Save ${plan.name}`));
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    const changes = {};
-    for (const input of form.querySelectorAll('input')) {
-      if (input.value === input.dataset.was) continue;
-      if (input.value === '') { if (input.name === 'rest_seconds') changes.rest_seconds = null; continue; }
-      changes[input.name] = Number(input.value);
-    }
+    const changes = Object.fromEntries(Object.entries(values).filter(([name, value]) => value !== was[name]));
     if (!Object.keys(changes).length) { message.textContent = 'Nothing changed'; clearDirty(); return; }
     save.disabled = true;
     message.textContent = 'Saving…';
@@ -1078,7 +1193,11 @@ function openExercise(of) {
     for (const [label, value, note] of [['Latest', setText(bestSet(logged.sessions[0].sets)), logged.sessions[0].label],
       ['Best', setText(bestSet(all)), 'heaviest set'], ['Sessions', logged.sessions.length, `${all.length} sets`]]) {
       const stat = el('div', 'kpi');
-      stat.append(el('span', '', label), el('strong', '', value), el('small', '', note));
+      // "10 × 86.5 kg": the unit goes small so the number fits on one line.
+      const strong = el('strong', '', String(value).replace(/ (kg|reps|min|s)$/, ''));
+      const unit = String(value).match(/ (kg|reps|min|s)$/);
+      if (unit) strong.append(el('small', '', unit[1]));
+      stat.append(el('span', '', label), strong, el('small', '', note));
       stats.append(stat);
     }
     sheet.append(stats);
@@ -1117,6 +1236,7 @@ function showTab() {
   document.querySelectorAll('.tab').forEach(section => { section.hidden = section.id !== `tab-${tab}`; });
   hideTip();
   syncBack();
+  syncMain();
   if (!state) return;
   // Charts measure their container, so draw a tab only once it's visible.
   if (tab === 'today') renderToday(state);
@@ -1192,5 +1312,11 @@ if (tgHas('8.0')) {
   tg.onEvent('activated', () => { active = true; refresh(); });
   tg.onEvent('deactivated', () => { active = false; });
 }
-setInterval(() => active && !document.hidden && refresh(), 10000);
+// Mid-workout every 3 s, so a set logged in the chat shows here at once.
+let lastPoll = Date.now();
+setInterval(() => {
+  if (!active || document.hidden || Date.now() - lastPoll < (state?.workout ? 3000 : 10000)) return;
+  lastPoll = Date.now();
+  refresh();
+}, 1000);
 document.addEventListener('visibilitychange', () => !document.hidden && refresh());

@@ -664,6 +664,32 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
     }
 }
 
+/// Event the Mini App leaves for the bot: `payload` is the `CoachView` of a step taken there, which the
+/// bot renders in the chat as if the button had been tapped there.
+pub const APP_VIEW: &str = "coach.app_view";
+
+/// Coach buttons the Mini App offers, the same ones the chat card has. Swapping stays in the chat,
+/// where its options are cards of their own.
+pub fn app_action(data: &str) -> bool {
+    let action = data.strip_prefix("gc:").unwrap_or(data).split(':').next().unwrap_or_default();
+    ["log", "time", "dist", "warm", "nowarm", "skip", "cut", "next", "free", "drop"].contains(&action)
+}
+
+/// A coach button pressed in the Mini App (a set typed there arrives as `log` with its numbers): the same
+/// step as a tap in the chat, plus an `APP_VIEW` event so the chat's card moves on too. A button the
+/// workout has moved past fails with `COACH_STALE` instead of acting on whatever is current.
+pub fn app_tap(db: &Connection, data: &str, now: Ts, request_id: &str) -> Result<CoachView> {
+    if !app_action(data) {
+        return Err(invalid("Not a coach button the app offers"));
+    }
+    let view = handle_tap(db, data, now, request_id)?;
+    if let Some(stale) = view.ack.as_deref().filter(|ack| ack.starts_with('⌛')) {
+        return Err(Error::domain("COACH_STALE", stale.trim_start_matches("⌛ ").to_string()));
+    }
+    crate::domain::core::emit(db, APP_VIEW, now, serde_json::to_value(&view)?)?;
+    Ok(view)
+}
+
 /// One photo card per same-muscle alternative, each with a single 'Use' button.
 fn swap_cards(db: &Connection, workout_id: &str, row: &WorkoutExercise) -> Result<Vec<Card>> {
     let r = reference(&row.id);
@@ -858,7 +884,7 @@ pub fn preview(db: &Connection, now: Ts, planned_session_id: Option<&str>, data_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::{ExerciseProgression, JobStatus, NotificationJob};
+    use crate::db::models::{AgentEvent, ExerciseProgression, JobStatus, NotificationJob};
     use crate::db::test::db;
     use crate::domain::templates::{Template, get_template, import_template};
     use crate::domain::workout::tests::{at, spec};
@@ -932,6 +958,25 @@ mod tests {
         assert!(!buttons(card).iter().any(|b| b.0 == "🔄 Swap"));
         let swap = handle_tap(&db, &data(&first, "🔄 Swap"), at(31), "cb-swap").unwrap();
         assert_eq!(swap.ack.as_deref(), Some("Already started Machine incline press: finish it or tap Next."));
+    }
+
+    /// A set typed in the Mini App logs like a chat tap and leaves the view for the bot to render; a button
+    /// from a card the workout has moved past, or a swap (chat only), changes nothing.
+    #[test]
+    fn app_tap_logs_and_leaves_the_view_for_the_chat() {
+        let db = db();
+        push(&db);
+        let r = &data(&live(&db, at(0)), "🔄 Swap")["swap:".len()..];
+        let view = app_tap(&db, &format!("gc:log:{r}:90:12"), at(10), "app-1").unwrap();
+        assert_eq!(view.ack.as_deref(), Some("✅ 12 × 90 kg"));
+        let events = AgentEvent::select(&db, "WHERE type = ?1", [APP_VIEW]).unwrap();
+        let sent: CoachView = serde_json::from_value(events[0].payload_json.0.clone()).unwrap();
+        assert_eq!((events.len(), sent), (1, view));
+        assert_eq!(app_tap(&db, &format!("gc:swap:{r}"), at(11), "app-2").unwrap_err().code(), "INVALID_INPUT");
+        // Moved on to the next exercise in the chat: the app's old card can't log onto it.
+        handle_tap(&db, &format!("gc:next:{r}"), at(12), "cb-next").unwrap();
+        assert_eq!(app_tap(&db, &format!("gc:log:{r}:90:12"), at(13), "app-3").unwrap_err().code(), "COACH_STALE");
+        assert_eq!(AgentEvent::select(&db, "WHERE type = ?1", [APP_VIEW]).unwrap().len(), 1);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //!   model). There is no `/new`: the window is the last messages, always current.
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
+//! - Coach steps taken in the Mini App (`coach::APP_VIEW` events) are shown in the chat like taps.
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use super::{blocking, in_tx};
 use crate::agent::turnlog::{TurnLog, scrub};
 use crate::agent::{Agent, Outcome, TurnInput, media};
-use crate::db::models::{AgentButton, ChatMessage, ChatRole, NotificationJob};
+use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
 use crate::domain::set_parser::looks_like_set;
 use crate::domain::view::Button;
@@ -29,6 +30,11 @@ const ACK: &str = "👀";
 /// Longest quote of a replied-to message the agent gets (chars); finish cards are long.
 const QUOTED_CHARS: usize = 1500;
 const SESSION: &str = "telegram:owner";
+/// How often the chat picks up coach steps taken in the Mini App; a log there shows here within this.
+const APP_POLL: Duration = Duration::from_millis(700);
+/// A Mini App step older than this when the bot gets to it (it was down) only updates the DB: its cards
+/// would be out of date by now.
+const APP_STALE: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
 
 #[derive(Debug, PartialEq)]
 pub enum Route {
@@ -125,6 +131,8 @@ impl Bot {
         });
         let worker = bot.clone();
         tokio::spawn(async move { worker.agent_loop().await });
+        let worker = bot.clone();
+        tokio::spawn(async move { worker.app_views().await });
         bot
     }
 
@@ -529,6 +537,61 @@ impl Bot {
         }
         entry["ms"] = json!(started.elapsed().as_millis() as u64);
         self.log.log(entry);
+    }
+
+    /// Coach steps taken in the Mini App, shown in the chat as if tapped there: the old card is retired
+    /// with the ack, the next card (or rest countdown) is sent. The Mini App runs in its own process
+    /// without Telegram access, so it leaves each step as an `APP_VIEW` event; this claims and renders them.
+    async fn app_views(&self) {
+        let mut timer = tokio::time::interval(APP_POLL);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            timer.tick().await;
+            let claimed = in_tx(self.db(), |db| {
+                let now = Ts::now();
+                let events = AgentEvent::select(
+                    db,
+                    "WHERE type = ?1 AND handled_at IS NULL ORDER BY created_at, id",
+                    [coach::APP_VIEW],
+                )?;
+                for event in &events {
+                    AgentEvent { handled_at: Some(now), ..event.clone() }.update(db)?;
+                }
+                Ok(events)
+            })
+            .await;
+            let events = match claimed {
+                Ok(events) => events,
+                Err(e) => {
+                    tracing::warn!("app coach steps: {} {e}", e.code());
+                    continue;
+                }
+            };
+            for event in events {
+                let Ok(view) = serde_json::from_value::<crate::domain::view::CoachView>(event.payload_json.0.clone())
+                else {
+                    tracing::warn!("app coach step {} unreadable", event.id);
+                    continue;
+                };
+                if Ts::now() - event.created_at > APP_STALE {
+                    continue;
+                }
+                if let Err(e) = self.coach.apply(&view, None, None).await {
+                    tracing::warn!("app coach step render failed: {e}");
+                }
+                // The agent reads the chat history: a set logged in the app belongs there like a typed one.
+                if let Some(ack) = view.ack.clone() {
+                    self.remember(
+                        ChatRole::Owner,
+                        format!("{ack} (in the app)"),
+                        None,
+                        json!({"kind": "set", "source": "app"}),
+                    )
+                    .await;
+                }
+                self.wake.notify_one();
+            }
+        }
     }
 
     async fn agent_loop(&self) {

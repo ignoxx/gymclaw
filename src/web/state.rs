@@ -13,7 +13,7 @@ use crate::db::models::{
 };
 use crate::domain::profile::{Profile, get_profile};
 use crate::domain::templates::{Load, Measure, get_template};
-use crate::domain::{crowd, illustrations, preview, workout};
+use crate::domain::{coach, crowd, illustrations, preview, workout};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -166,13 +166,21 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     let active = if active.is_object() {
         json!({"id": active["id"], "name": active["name"], "set_type": active["set_type"], "set_number": active["set_number"], "sets": active["working_sets"],
             "weight": active["target_weight"], "rep_min": active["rep_min"], "rep_max": active["rep_max"],
-            "time": active["seconds"].as_i64().map(workout::format_time)})
+            "time": active["seconds"].as_i64().map(workout::format_time), "bodyweight": active["bodyweight"],
+            "measure": active["measure"], "last": active["last_set"]})
     } else {
         Value::Null
     };
+    // The chat card's buttons, so the app offers exactly what the chat does (`coach::app_tap` runs them).
+    let buttons: Vec<Value> = coach::exercise_card(db, &w.id, now)
+        .map(|card| {
+            card.buttons.into_iter().flatten().filter(|b| coach::app_action(&b.data)).map(|b| json!(b)).collect()
+        })
+        .unwrap_or_default();
     Ok(
         json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
-        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| set_text(db, &l)).transpose()?, "exercises": exercises}),
+        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| set_text(db, &l)).transpose()?, "exercises": exercises,
+        "buttons": buttons}),
     )
 }
 

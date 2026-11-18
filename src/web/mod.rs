@@ -3,7 +3,8 @@
 //! Serves the frontend in `web/` (embedded), exercise SVGs, `/api/state` (a fresh snapshot from a
 //! read-only connection per request) and `/export.csv` (every logged set, `import::export_csv`). The
 //! only writes are `DASHBOARD_TOOLS` (`POST /api/<tool>`), so the owner can edit what the agent
-//! remembers and built, and plan targets. Only the allowed Host (or loopback) gets an answer, so DNS
+//! remembers and built, and plan targets, and `POST /api/coach`, the live workout's buttons and typed
+//! sets (`coach::app_tap`; the bot then shows the step in the chat). Only the allowed Host (or loopback) gets an answer, so DNS
 //! rebinding can't read it, and writes need a same-origin JSON request.
 pub mod state;
 
@@ -85,8 +86,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         return error(StatusCode::FORBIDDEN);
     }
     if request.method() == Method::POST {
-        let Some(tool) =
-            request.uri().path().strip_prefix("/api/").filter(|t| DASHBOARD_TOOLS.contains(t)).map(String::from)
+        let Some(tool) = request
+            .uri()
+            .path()
+            .strip_prefix("/api/")
+            .filter(|t| *t == "coach" || DASHBOARD_TOOLS.contains(t))
+            .map(String::from)
         else {
             return error(StatusCode::NOT_FOUND);
         };
@@ -113,6 +118,11 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
             let data_dir = db_path.parent().unwrap_or(Path::new("."));
             crate::db::in_tx(&mut crate::db::open(&db_path)?, |db| {
                 let request_id = format!("dashboard:{}", crate::db::new_id());
+                if tool == "coach" {
+                    let data = args["data"].as_str().unwrap_or_default();
+                    let view = crate::domain::coach::app_tap(db, data, Ts::now(), &request_id)?;
+                    return Ok(serde_json::json!({"ack": view.ack}));
+                }
                 crate::tools::call(
                     &mut crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, effects: vec![] },
                     &tool,

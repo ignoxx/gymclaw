@@ -349,9 +349,6 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
 .ex-stats .kpi { padding: 12px 14px; }
 .ex-stats .kpi > strong { font-size: 26px; }
 .ex-edit { margin-top: 4px; }
-.ex-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 10px; }
-.ex-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
-.ex-fields input { font: inherit; font-size: 14px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--white); color: var(--ink); width: 100%; }
 .ex-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
 .save { border: 0; border-radius: 99px; padding: 7px 18px; background: var(--ink); color: var(--white); font-weight: 600; }
 .save:disabled { opacity: .5; }
@@ -365,8 +362,7 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
   .ex-pose img { width: 84px; height: 84px; }
   .ex-session { grid-template-columns: 1fr; gap: 2px; }
   .ex-session .set-list { white-space: pre-wrap; }
-  .ex-stats .kpi > strong { font-size: 20px; }
-  .ex-fields { grid-template-columns: repeat(3, 1fr); }
+  .ex-stats .kpi > strong { font-size: 22px; }
 }
 /* Memory: what the agent built (extensions) and its version history. */
 .note.ext .forget, .ext-version .forget { font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -400,4 +396,44 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
   .tabs button[aria-current] svg { stroke-width: 2.3; }
   .tabs svg { display: block; }
   .dashboard { padding-bottom: calc(84px + var(--safe-bottom)); }
+}
+
+/* Live workout: the exercise beside its picture, then the logger and the chat card's other buttons. */
+.live-head { display: grid; grid-template-columns: 1fr 120px; gap: 12px; align-items: center; margin-top: 4px; }
+.live-head .title { margin-top: 4px; }
+.live-head .subtitle { font-size: 13px; color: var(--muted); }
+.live-head .pose { height: 120px; margin: 0; }
+.live-head .pose img { width: 120px; height: 120px; }
+.status.resting { margin-top: 14px; flex-wrap: wrap; gap: 10px; }
+.rest-actions, .live-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.rest-actions .chip { background: transparent; border-color: color-mix(in oklab, var(--on-lime) 25%, transparent); color: var(--on-lime); font-weight: 600; }
+.live-actions { margin-top: 12px; }
+.chip { min-height: 40px; padding: 8px 14px; font-size: 13px; color: var(--ink); }
+.logger { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; padding: 14px; border-radius: 12px; background: var(--soft); }
+.log-button { width: 100%; min-height: 52px; font-size: 16px; background: var(--lime); color: var(--on-lime); border-radius: 12px; }
+.live-actions .log-button { order: -1; }
+.tg .log-button { display: none; }
+/* Stepper: label, − value +. 48 px targets; the value types on tap, no spinner arrows. */
+.stepper { display: grid; grid-template-columns: 1fr 48px minmax(96px, auto) 48px; align-items: center; gap: 8px; }
+.step-label { font-size: 13px; color: var(--muted); }
+.step { width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); color: var(--ink); font-size: 22px; line-height: 1; touch-action: manipulation; }
+.step:active { background: var(--track); }
+.step-value { display: flex; align-items: baseline; justify-content: center; gap: 4px; font-family: 'Barlow Condensed', sans-serif; font-weight: 600; }
+.step-value input { width: 3.6ch; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--ink); font: inherit; font-size: 30px; text-align: right; padding: 0; }
+.step-value input:focus { outline: 0; border-bottom-color: var(--lime); }
+.step-value input::placeholder { color: var(--faint); font-size: 18px; }
+.step-value span { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 400; color: var(--muted); }
+.ex-fields { display: flex; flex-direction: column; gap: 8px; }
+.toast { position: fixed; left: 50%; bottom: calc(96px + var(--safe-bottom)); z-index: 30; transform: translateX(-50%); max-width: calc(100vw - 32px);
+  padding: 10px 16px; border-radius: 99px; background: var(--ink); color: var(--paper); font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, .2); }
+.toast.failed { background: var(--danger-bg); color: var(--danger); }
+@media (min-width: 761px) { .toast { bottom: 28px; } }
+/* An exercise's stats: the number big, its unit small, never wrapping. */
+.kpi > strong small { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+.ex-stats .kpi > strong { white-space: nowrap; }
+@media (max-width: 560px) {
+  .queue { display: flex; overflow-x: auto; scrollbar-width: none; margin: 18px -16px 0; padding: 0 16px; }
+  .queue .exercise { flex: 0 0 92px; }
+  .ex-stats { gap: 8px; }
+  .ex-stats .kpi { padding: 10px; }
 }
