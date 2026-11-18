@@ -563,7 +563,9 @@ async function send(url, payload, said) {
   tg?.MainButton.showProgress();
   document.querySelectorAll('.focus button').forEach(b => { b.disabled = true; });
   try {
-    const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    // No connection (a dead zone): say what didn't happen, not the browser's "Failed to fetch".
+    const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      .catch(() => { throw new Error('No connection: not saved. Try again.'); });
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new Error(body?.error?.message?.split('\n')[0] || 'Didn\'t go through. Try again.');
     haptic.done();

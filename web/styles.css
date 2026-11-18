@@ -412,8 +412,8 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 10px; font-
 .live-actions .log-button { order: -1; }
 .tg .log-button:not(.in-sheet) { display: none; }
 /* Stepper: label, − value +. 48 px targets; the value types on tap, no spinner arrows. */
-/* A fixed value column: every row's − and + line up whatever the unit. */
-.stepper { display: grid; grid-template-columns: 1fr 48px 124px 48px; align-items: center; gap: 8px; }
+/* Columns that line every row's − and + up whatever the unit, and give way on narrow phones. */
+.stepper { display: grid; grid-template-columns: minmax(56px, 1fr) 48px minmax(88px, 124px) 48px; align-items: center; gap: 8px; }
 .step-label { font-size: 13px; color: var(--muted); }
 .step { width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); color: var(--ink); font-size: 22px; line-height: 1; touch-action: manipulation; }
 .step:active { background: var(--track); }
@@ -504,3 +504,13 @@ img[data-missing] { visibility: hidden; }
 .focus > .chip { margin-top: 12px; }
 .best { margin: -4px 0 0; font-size: 13px; font-weight: 600; color: var(--olive); text-align: right; }
 .best:empty { display: none; }
+/* The rest card's five buttons fit one row on a phone. */
+.rest-actions .chip { padding: 8px 10px; min-width: 0; }
+@media (max-width: 374px) {
+  /* Small phones (320–374 px): the label goes above its − value + row, the picture shrinks. */
+  .stepper { grid-template-columns: 48px minmax(0, 1fr) 48px; row-gap: 2px; }
+  .step-label { grid-column: 1 / -1; }
+  .live-head { grid-template-columns: 1fr 84px; }
+  .live-head .pose, .live-head .pose img { width: 84px; height: 84px; }
+  .rest-actions .chip { padding: 8px 8px; font-size: 12px; }
+}
