@@ -183,7 +183,7 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     } else {
         Value::Null
     };
-    // The last set with its exercise, so the app can fix it (`set_correct`).
+    // The last set with its exercise, so the app can fix it (`set_edit`).
     let last = coach::app_last(db, &w.id)?;
     Ok(
         json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,

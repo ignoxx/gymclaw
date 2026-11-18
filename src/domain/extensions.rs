@@ -78,10 +78,11 @@ pub struct When {
     /// Once only: the local date, "YYYY-MM-DD".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
-    /// Before_session only: minutes before the session starts (1–1440).
+    /// Session, workout_started, workout_finished: minutes from that moment, negative before it
+    /// (-60 = an hour before the session, 60 = an hour after the workout). Default 0; within a day.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minutes: Option<i64>,
-    /// Before_session only: just sessions of this workout (template id); every session when absent.
+    /// Session, workout_started, workout_finished: only this workout (template id); every one when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workout: Option<String>,
 }
@@ -93,9 +94,11 @@ pub enum Repeat {
     Weekly,
     /// One local date and time ("remind me tomorrow at 9"); turns itself off afterwards.
     Once,
-    /// `minutes` before each planned session (or each of one `workout`).
-    BeforeSession,
-    /// Once after each finished workout.
+    /// Each planned session's start time (+ `minutes`); a cancelled one doesn't count.
+    Session,
+    /// Each workout's actual start (+ `minutes`).
+    WorkoutStarted,
+    /// Each workout's end (+ `minutes`).
     WorkoutFinished,
 }
 
@@ -105,8 +108,12 @@ pub enum Slot {
     Daily(Time),
     Weekly(Weekday, Time),
     Once(DateTime),
-    BeforeSession { minutes: i64, workout: Option<String> },
-    WorkoutFinished,
+    /// `minutes` from each session or workout moment, optionally of one workout (template id).
+    Event {
+        on: Repeat,
+        minutes: i64,
+        workout: Option<String>,
+    },
 }
 
 impl When {
@@ -122,12 +129,32 @@ impl When {
         When { date: Some(date.into()), at: Some(at.into()), ..When::new(Repeat::Once) }
     }
 
-    pub fn before_session(minutes: i64, workout: Option<&str>) -> Self {
-        When { minutes: Some(minutes), workout: workout.map(String::from), ..When::new(Repeat::BeforeSession) }
+    /// `minutes` from each session (`Repeat::Session`) or workout moment; negative is before it.
+    pub fn event(on: Repeat, minutes: i64, workout: Option<&str>) -> Self {
+        When { minutes: (minutes != 0).then_some(minutes), workout: workout.map(String::from), ..When::new(on) }
     }
 
-    pub fn workout_finished() -> Self {
-        When::new(Repeat::WorkoutFinished)
+    /// When it fires, in words: "daily 14:00", "60 min before each legs session", "after each workout".
+    pub fn phrase(&self) -> String {
+        let at = self.at.as_deref().unwrap_or("?");
+        let (moment, minutes) = match self.on {
+            Repeat::Daily => return format!("daily {at}"),
+            Repeat::Weekly => return format!("{} {at}", self.day.map_or("?".into(), |d| format!("{d:?}"))),
+            Repeat::Once => return format!("once {} {at}", self.date.as_deref().unwrap_or("?")),
+            Repeat::Session => ("session", self.minutes.unwrap_or(0)),
+            Repeat::WorkoutStarted => ("workout start", self.minutes.unwrap_or(0)),
+            Repeat::WorkoutFinished => ("workout", self.minutes.unwrap_or(0)),
+        };
+        let what = match &self.workout {
+            Some(workout) => format!("each {workout} {moment}"),
+            None => format!("each {moment}"),
+        };
+        match minutes {
+            0 if self.on == Repeat::Session => format!("at {what}"),
+            0 => format!("after {what}"),
+            m if m < 0 => format!("{} min before {what}", -m),
+            m => format!("{m} min after {what}"),
+        }
     }
 
     /// Refuses a schedule that is missing its time or day.
@@ -151,11 +178,15 @@ impl When {
                 };
                 Slot::Once(date.to_datetime(at()?))
             }
-            Repeat::BeforeSession => match self.minutes {
-                Some(minutes @ 1..=1440) => Slot::BeforeSession { minutes, workout: self.workout.clone() },
-                _ => crate::bail!("INVALID_EXTENSION", "A before_session trigger needs `minutes` (1–1440)"),
-            },
-            Repeat::WorkoutFinished => Slot::WorkoutFinished,
+            on => {
+                let minutes = self.minutes.unwrap_or(0);
+                // A workout is only known once it happens: its trigger can't fire before it.
+                let earliest = if on == Repeat::Session { -1440 } else { 0 };
+                if !(earliest..=1440).contains(&minutes) {
+                    crate::bail!("INVALID_EXTENSION", "A {on:?} trigger's `minutes` is {earliest}–1440");
+                }
+                Slot::Event { on, minutes, workout: self.workout.clone() }
+            }
         })
     }
 }
@@ -195,25 +226,11 @@ impl Spec {
         }
     }
 
-    /// One line for the prompt, `/extensions` and the dashboard.
+    /// One line for the prompt and the dashboard.
     pub fn summary(&self) -> String {
         match self {
             Spec::Playbook { summary, .. } | Spec::Collection { summary } => summary.clone(),
-            Spec::Trigger { when, instruction } => {
-                let at = when.at.as_deref().unwrap_or("?");
-                let when = match when.on {
-                    Repeat::Daily => format!("daily {at}"),
-                    Repeat::Weekly => format!("{} {at}", when.day.map_or("?".into(), |d| format!("{d:?}"))),
-                    Repeat::Once => format!("once {} {at}", when.date.as_deref().unwrap_or("?")),
-                    Repeat::BeforeSession => format!(
-                        "{} min before each {} session",
-                        when.minutes.unwrap_or_default(),
-                        when.workout.as_deref().unwrap_or("planned")
-                    ),
-                    Repeat::WorkoutFinished => "after each workout".into(),
-                };
-                format!("{when}: {}", short(instruction, 120))
-            }
+            Spec::Trigger { when, instruction } => format!("{}: {}", when.phrase(), short(instruction, 120)),
         }
     }
 
@@ -318,7 +335,7 @@ pub fn save(db: &Connection, name: &str, spec: Spec, author: Author, now: Ts) ->
                     crate::bail!("INVALID_EXTENSION", "{at} has passed (owner-local); pick a later date or time");
                 }
             }
-            Slot::BeforeSession { workout: Some(id), .. } if WorkoutTemplate::get(db, id.as_str())?.is_none() => {
+            Slot::Event { workout: Some(id), .. } if WorkoutTemplate::get(db, id.as_str())?.is_none() => {
                 crate::bail!(
                     "INVALID_EXTENSION",
                     "No workout template {id:?}; pass a template id or leave `workout` out"
@@ -525,29 +542,48 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
                 // cap blocks it. If the grace period has passed without firing, give up.
                 spent = slot + GRACE < now;
             }
-            Slot::BeforeSession { minutes, workout } => {
-                let lead = SignedDuration::from_mins(*minutes);
-                // Only fire for sessions that haven't started yet: planned_start_at > now.
-                for s in PlannedSession::select(
-                    db,
-                    "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 AND planned_start_at <= ?2 AND planned_start_at > ?3 ORDER BY planned_start_at",
-                    (since + lead, now + lead, now),
-                )? {
-                    if workout.as_ref().is_some_and(|w| s.workout_template_id.as_ref() != Some(w)) {
-                        continue;
+            Slot::Event { on, minutes, workout } => {
+                // The moment is due when moment + offset falls in (since, now].
+                let offset = SignedDuration::from_mins(*minutes);
+                let (from, to) = (since - offset, now - offset);
+                let of = |template: Option<&String>| workout.is_none() || workout.as_ref() == template;
+                match on {
+                    Repeat::Session => {
+                        // Ahead of the start only sessions still to come count; at or after it, any not
+                        // cancelled (the agent sees its status and decides).
+                        let (open, after) = if *minutes < 0 {
+                            ("status IN ('TENTATIVE', 'COMMITTED')", now)
+                        } else {
+                            ("status != 'CANCELLED'", from)
+                        };
+                        let sessions = PlannedSession::select(
+                            db,
+                            &format!(
+                                "WHERE {open} AND planned_start_at > ?1 AND planned_start_at <= ?2 AND planned_start_at > ?3 ORDER BY planned_start_at"
+                            ),
+                            (from, to, after),
+                        )?;
+                        for s in sessions.into_iter().filter(|s| of(s.workout_template_id.as_ref())) {
+                            // Keyed by start too: a session moved later fires again for its new time.
+                            let key = format!("{}@{}", s.id, s.planned_start_at.0.as_second());
+                            due.push((
+                                key,
+                                json!({"session_id": s.id, "starts_at": s.planned_start_at, "status": s.status}),
+                            ));
+                        }
                     }
-                    // Keyed by start too: a session moved later fires again before its new time.
-                    let key = format!("{}@{}", s.id, s.planned_start_at.0.as_second());
-                    due.push((key, json!({"session_id": s.id, "starts_at": s.planned_start_at})));
-                }
-            }
-            Slot::WorkoutFinished => {
-                for w in WorkoutSession::select(
-                    db,
-                    "WHERE status = 'PLAN_UPDATED' AND completed_at > ?1 AND completed_at <= ?2 ORDER BY completed_at",
-                    [since, now],
-                )? {
-                    due.push((w.id.clone(), json!({"workout_id": w.id})));
+                    _ => {
+                        let column = if *on == Repeat::WorkoutStarted { "started_at" } else { "completed_at" };
+                        let finished = if *on == Repeat::WorkoutFinished { "status = 'PLAN_UPDATED' AND" } else { "" };
+                        let workouts = WorkoutSession::select(
+                            db,
+                            &format!("WHERE {finished} {column} > ?1 AND {column} <= ?2 ORDER BY {column}"),
+                            [from, to],
+                        )?;
+                        for w in workouts.into_iter().filter(|w| of(w.template_id.as_ref())) {
+                            due.push((w.id.clone(), json!({"workout_id": w.id, "status": w.status})));
+                        }
+                    }
                 }
             }
         }
@@ -661,34 +697,30 @@ pub fn reflect(db: &Connection, run_id: &str, lesson: Lesson, now: Ts) -> Result
     Ok(crate::domain::events::mark(db)? > before)
 }
 
-/// `/extensions`: everything the agent built, on or off, and how to turn one off. No model.
+/// `/extensions`: everything the agent built, on or off, one short line each so nothing gets cut off,
+/// and how to switch one. No model.
 pub fn overview(db: &Connection) -> Result<String> {
     let all = Extension::select(db, "ORDER BY kind, name", [])?;
     if all.is_empty() {
         return Ok("The agent hasn't built any extensions yet.".into());
     }
-    let mut lines = vec!["**Extensions** · `/extensions off <id>` turns one off, `on <id>` back on".to_string()];
+    let mut lines = vec!["**Extensions**".to_string()];
     for e in &all {
-        let rows = if e.kind == ExtensionKind::Collection {
-            let n: i64 =
-                db.query_row("SELECT count(*) FROM agent_data WHERE collection = ?1", [&e.name], |r| r.get(0))?;
-            format!(" ({n} rows)")
-        } else {
-            String::new()
+        let what = match &*e.spec_json {
+            Spec::Trigger { when, .. } => when.phrase(),
+            Spec::Collection { .. } => {
+                let n: i64 =
+                    db.query_row("SELECT count(*) FROM agent_data WHERE collection = ?1", [&e.name], |r| r.get(0))?;
+                format!("log, {n} entries")
+            }
+            Spec::Playbook { .. } => "playbook".into(),
         };
-        lines.push(format!(
-            "{} [{}] {} **{}**{rows}: {}",
-            if e.enabled { "✅" } else { "⏸" },
-            e.id(),
-            e.kind,
-            e.name,
-            short(&e.spec_json.summary(), 100)
-        ));
+        let on = if e.enabled { "✅" } else { "⏸" };
+        lines.push(format!("{on} {} {} · {what}", e.id(), e.name.replace(['-', '_'], " ")));
     }
-    let gaps: i64 = db.query_row("SELECT count(*) FROM capability_gap", [], |r| r.get(0))?;
-    if gaps > 0 {
-        lines.push(format!("{gaps} capability gaps logged (dashboard → Memory)."));
-    }
+    lines.push(String::new());
+    let id = all[0].id();
+    lines.push(format!("`/extensions off {id}` turns one off, `on {id}` back on."));
     Ok(lines.join("\n"))
 }
 
@@ -820,8 +852,17 @@ mod tests {
     fn workout_triggers_fire_once_and_the_day_is_capped() {
         let db = crate::db::test::db();
         let now = at("2026-11-15T09:00:00Z");
-        let after = Spec::Trigger { when: When::workout_finished(), instruction: "Ask how the shoulder felt".into() };
+        let after = Spec::Trigger {
+            when: When::event(Repeat::WorkoutFinished, 0, None),
+            instruction: "Ask how the shoulder felt".into(),
+        };
         save(&db, "shoulder", after, Author::Agent, now).unwrap();
+        // "An hour after my workout" (2026-11-18): the same workout wakes the delayed trigger at +60 min.
+        let later = Spec::Trigger {
+            when: When::event(Repeat::WorkoutFinished, 60, None),
+            instruction: "Vitamins and creatine".into(),
+        };
+        save(&db, "vitamins", later, Author::Agent, now).unwrap();
         db.execute(
             "INSERT INTO workout_session (id, status, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES ('w1', 'PLAN_UPDATED', ?1, ?2, 0, '{}')",
             [now.mins(50), now.mins(55)],
@@ -830,12 +871,16 @@ mod tests {
         assert_eq!(fire_due(&db, now.mins(56)).unwrap(), 1);
         assert_eq!(fire_due(&db, now.mins(57)).unwrap(), 0);
         assert_eq!(wakes(&db)[0]["payload"]["workout_id"], "w1");
+        assert_eq!(fire_due(&db, now.mins(114)).unwrap(), 0, "not before the hour is up");
+        assert_eq!(fire_due(&db, now.mins(116)).unwrap(), 1);
+        assert_eq!(fire_due(&db, now.mins(118)).unwrap(), 0);
+        assert_eq!(wakes(&db)[1]["payload"]["trigger"], "vitamins");
 
         for i in 0..DAILY_FIRES {
             let spec = Spec::Trigger { when: When::daily("12:00"), instruction: format!("check {i}") };
             save(&db, &format!("t{i}"), spec, Author::Agent, now).unwrap();
         }
-        assert_eq!(fire_due(&db, at("2026-11-15T11:00:00Z")).unwrap() as i64, DAILY_FIRES - 1);
+        assert_eq!(fire_due(&db, at("2026-11-15T11:00:00Z")).unwrap() as i64, DAILY_FIRES - 2);
         assert_eq!(wakes(&db).len() as i64, DAILY_FIRES);
     }
 
@@ -873,7 +918,7 @@ mod tests {
         let db = crate::db::test::with_short_template();
         let now = at("2026-11-15T09:00:00Z");
         let belt = |workout: &str| Spec::Trigger {
-            when: When::before_session(60, Some(workout)),
+            when: When::event(Repeat::Session, -60, Some(workout)),
             instruction: "Remind them to bring the belt".into(),
         };
         assert_eq!(save(&db, "belt", belt("legs"), Author::Agent, now).unwrap_err().code(), "INVALID_EXTENSION");
@@ -896,6 +941,23 @@ mod tests {
         assert_eq!(fire_due(&db, at("2026-11-16T12:00:30Z")).unwrap(), 1);
         assert_eq!(fire_due(&db, at("2026-11-16T16:00:30Z")).unwrap(), 0);
         assert!(prompt(&db).unwrap().unwrap().contains("belt: 60 min before each short session"));
+
+        // "Nudge me if I haven't started 15 min in": the same session, after its (moved) start.
+        let nudge = Spec::Trigger {
+            when: When::event(Repeat::Session, 15, None),
+            instruction: "If the workout hasn't started, nudge".into(),
+        };
+        save(&db, "late", nudge, Author::Agent, at("2026-11-16T12:00:00Z")).unwrap();
+        assert_eq!(fire_due(&db, at("2026-11-16T13:10:00Z")).unwrap(), 0);
+        assert_eq!(fire_due(&db, at("2026-11-16T13:15:30Z")).unwrap(), 1);
+        assert_eq!(wakes(&db).last().unwrap()["payload"]["session_id"], monday.id);
+
+        // `/extensions`: one short line each, the schedule in words, no instruction to cut off.
+        assert_eq!(
+            overview(&db).unwrap(),
+            "**Extensions**\n✅ 1 belt · 60 min before each short session\n✅ 2 late · 15 min after each session\n\n\
+             `/extensions off 1` turns one off, `on 1` back on."
+        );
     }
 
     /// A hard turn wakes the agent to save a playbook, but only once the chat is quiet: it is never an

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::{Ctx, Effect, Listed, Tool, ToolDef, def};
+use crate::db::models::{ExerciseStatus, SetType};
 use crate::domain::body::{self, WeighIn};
 use crate::domain::coach::{self, Action};
 use crate::domain::illustrations::search;
@@ -22,7 +23,7 @@ pub fn tools() -> Vec<ToolDef> {
         def::<Workout>(),
         def::<WorkoutLogPast>(),
         def::<WorkoutAudit>(),
-        def::<SetCorrect>(),
+        def::<SetEdit>(),
         def::<TemplateGet>(),
         def::<TemplateImport>(),
         def::<TemplateEditExercise>(),
@@ -49,7 +50,8 @@ pub enum WorkoutAction {
     /// No args: today's planned session. template_id/planned_session_id only to start something else.
     /// Replaces a running workout with nothing logged, on its session.
     Start,
-    /// `text` like "10x40" (10 reps at 40 kg), "25 min" or "2 km" logs a set; with `workout_id` and `which`, into that finished workout.
+    /// `text` like "10x40" (10 reps at 40 kg), "25 min" or "2 km" logs a set on `which` (default the current
+    /// exercise; another one leaves the coach where it is); with `workout_id` and `which`, into that workout.
     Log,
     /// Resend the current card.
     Card,
@@ -84,8 +86,11 @@ pub struct Workout {
     pub planned_session_id: Option<String>,
     /// switch/relabel: guide_id or exact exercise name.
     pub exercise: Option<String>,
-    /// relabel: the logged exercise to correct; log: its exercise.
+    /// relabel: the logged exercise to correct; log: the exercise the set is for.
     pub which: Option<String>,
+    /// log: the owner says this set was the warm-up.
+    #[serde(default)]
+    pub warmup: bool,
     /// relabel/log/discard: a past workout (workout_session.id from sql_query); default the running or latest one.
     pub workout_id: Option<String>,
     pub seconds: Option<i64>,
@@ -156,20 +161,28 @@ impl Tool for Workout {
                 return Ok(json!({"workout": running.map(|w| workout::current(db, &w.id, now)).transpose()?}));
             }
             WorkoutAction::Preview => coach::preview(db, now, self.planned_session_id.as_deref(), cx.data_dir)?,
-            WorkoutAction::Log if self.workout_id.is_some() => {
-                let workout_id = self.workout_id.as_deref().unwrap_or_default();
-                let result = audit::add_set(
-                    db,
-                    workout_id,
-                    self.which.as_deref().unwrap_or_default(),
-                    self.text.as_deref().unwrap_or_default(),
-                    now,
-                    &rid,
-                )?;
-                return refresh_finish_card(cx, workout_id, result);
-            }
             WorkoutAction::Log => {
-                let view = coach::handle_text(db, self.text.as_deref().unwrap_or_default(), now, &rid)?;
+                let text = self.text.as_deref().unwrap_or_default();
+                // A set for another exercise than the coach's current one goes straight onto it.
+                let elsewhere = match (self.workout_id.as_deref(), self.which.as_deref()) {
+                    (Some(id), _) => Some(id.to_string()),
+                    (None, Some(which)) => match workout::active_workout(db)? {
+                        Some(running)
+                            if audit::find_exercise(db, &running.id, which)?.status != ExerciseStatus::Active =>
+                        {
+                            Some(running.id)
+                        }
+                        _ => None,
+                    },
+                    (None, None) => None,
+                };
+                if let Some(workout_id) = elsewhere {
+                    let set_type = if self.warmup { SetType::Warmup } else { SetType::Working };
+                    let which = self.which.as_deref().unwrap_or_default();
+                    let result = audit::add_set(db, &workout_id, which, text, set_type, now, &rid)?;
+                    return after_edit(cx, &workout_id, result);
+                }
+                let (view, logged) = coach::log_text(db, text, self.warmup, now, &rid)?;
                 if !view.handled {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
                     crate::bail!(
@@ -177,7 +190,13 @@ impl Tool for Workout {
                         "Nothing logged: no running set, or the text isn't reps × weight (e.g. 10x40; bodyweight: 13 reps) or a time or distance on an exercise done for one (25 min, 2 km). Check status, then ask the owner."
                     );
                 }
-                view
+                // Which exercise it landed on, so the reply names the right one; a skipped warm-up shows.
+                let mut result = shown(&view);
+                if let (Some(result), Value::Object(logged)) = (result.as_object_mut(), logged) {
+                    result.extend(logged);
+                }
+                cx.effects.push(Effect::Coach(view));
+                return Ok(result);
             }
             WorkoutAction::Start => {
                 workout::start(db, self.template_id.as_deref(), self.planned_session_id.as_deref(), false, now, &rid)?;
@@ -247,37 +266,58 @@ impl Tool for WorkoutAudit {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SetCorrect {
+pub struct SetEdit {
     /// set_log.id
     pub set_id: String,
     pub weight: Option<f64>,
     pub reps: Option<i64>,
     pub minutes: Option<f64>,
     pub meters: Option<f64>,
+    /// true: it was a warm-up; false: a working set.
+    pub warmup: Option<bool>,
+    /// The exercise of the same workout it was really for (guide_id or name).
+    pub exercise: Option<String>,
+    /// The set never happened (double log, typo); pass alone.
+    #[serde(default)]
+    pub delete: bool,
 }
 
-impl Tool for SetCorrect {
-    const NAME: &'static str = "set_correct";
-    const DESCRIPTION: &'static str = "Fix a logged set's weight, reps, minutes or meters when the owner says it was logged wrong, during or after the workout. \
-        Find the set with sql_query on set_log. Recomputes that exercise's next weight if this workout set it, \
-        and updates the finished workout's summary card in the chat.";
+impl Tool for SetEdit {
+    const NAME: &'static str = "set_edit";
+    const DESCRIPTION: &'static str = "Fix any logged set when the owner says it was logged wrong, during or long after the workout: \
+        its weight, reps, minutes or meters, warm-up or working, which exercise it was for, or delete it. Find the set with \
+        sql_query on set_log (or the set_ids of a card the owner replied to). Renumbers the sets left, recomputes next \
+        weights the workout set, and updates a finished workout's summary card in the chat. The live coach stays where it is.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let seconds = self.minutes.map(workout::in_seconds);
-        let result = audit::correct_set(
-            cx.db,
-            &self.set_id,
-            self.weight,
-            self.reps,
-            seconds,
-            self.meters,
-            cx.now,
-            &cx.request_id,
-        )?;
+        let change = audit::SetChange {
+            weight: self.weight,
+            reps: self.reps,
+            seconds: self.minutes.map(|m| (m * 60.0).round() as i64),
+            meters: self.meters,
+            warmup: self.warmup,
+            exercise: self.exercise,
+            delete: self.delete,
+        };
+        let result = audit::edit_set(cx.db, &self.set_id, change, cx.now, &cx.request_id)?;
         // A replayed result from before workout_id was returned has none: nothing to refresh.
         let Some(workout_id) = result["data"]["workout_id"].as_str().map(String::from) else { return Ok(result) };
-        refresh_finish_card(cx, &workout_id, result)
+        after_edit(cx, &workout_id, result)
     }
+}
+
+/// After sets changed outside the coach's flow: a finished workout's summary card is edited to match;
+/// in a running one, when the coach moved on (`workout::settle`), the chat gets the next card.
+fn after_edit(cx: &mut Ctx, workout_id: &str, result: Value) -> Result<Value> {
+    if result["data"]["coach_moved"] == true
+        && let Some(view) = coach::moved_on(cx.db, workout_id, cx.now, &cx.request_id)?
+    {
+        let mut result = result;
+        result["card"] = json!(view.cards.first().map(|c| c.text.clone()));
+        cx.effects.push(Effect::Coach(view));
+        return Ok(result);
+    }
+    refresh_finish_card(cx, workout_id, result)
 }
 
 /// After a finished workout's sets changed: its finish card in the chat is edited to match (after the

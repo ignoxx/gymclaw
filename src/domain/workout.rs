@@ -257,6 +257,42 @@ pub fn compatible(exercise: &WorkoutExercise, rows: &[WorkoutExercise]) -> bool 
     field::<Vec<String>>(exercise, "requires_completed").iter().all(|r| completed.contains(&r.as_str()))
 }
 
+/// After sets changed outside the coach's own logging (a set added to a named exercise, one moved,
+/// retyped or deleted) in a running workout: an exercise whose planned working sets are all in counts as
+/// done, one with working sets no longer waits for its warm-up, and when the current exercise is done the
+/// next comes up (or the workout completes). An exercise left short stays as it is: the coach doesn't
+/// go back. Returns whether the coach moved on.
+pub fn settle(db: &Connection, workout_id: &str) -> Result<bool> {
+    let mut workout = load_workout(db, workout_id, None)?;
+    if workout.status == WorkoutStatus::PlanUpdated {
+        return Ok(false);
+    }
+    let mut moved = false;
+    for mut row in exercises(db, workout_id)? {
+        if !unresolved(row.status) && row.status != ExerciseStatus::Skipped {
+            continue;
+        }
+        let done = working_count(db, &row.id)?;
+        if done > 0 && warmup_pending(db, &row)? {
+            set_warmup_required(db, &mut row, false)?;
+        }
+        if row.planned_working_sets > 0 && done >= row.planned_working_sets {
+            moved |= row.status == ExerciseStatus::Active;
+            row.status = ExerciseStatus::Completed;
+            row.deferred_reason = None;
+            row.update(db)?;
+        }
+    }
+    let waiting =
+        matches!(workout.status, WorkoutStatus::SetActive | WorkoutStatus::Resting | WorkoutStatus::ExerciseActive);
+    if waiting && !exercises(db, workout_id)?.iter().any(|e| e.status == ExerciseStatus::Active) {
+        let before = workout.status;
+        choose_next(db, &mut workout, None)?;
+        moved |= workout.status != before;
+    }
+    Ok(moved)
+}
+
 /// Activate the next pending exercise in plan order; `prefer_muscle` pulls same-muscle work forward.
 pub fn choose_next(db: &Connection, workout: &mut WorkoutSession, prefer_muscle: Option<&str>) -> Result<()> {
     let rows = exercises(db, &workout.id)?;
@@ -755,9 +791,7 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             // Going straight to working sets skips the warm-up; it is a suggestion, not a gate.
             set_warmup_required(db, &mut active, false)?;
         }
-        if value.set_type == SetType::Warmup && !needs_warmup {
-            crate::bail!("UNEXPECTED_WARMUP", "No warm-up is pending for this exercise");
-        }
+        // A warm-up the owner names is logged even when none is due (a second one, none planned).
         cancel_rest(db, workout_id, now)?;
         if workout.status == WorkoutStatus::Resting {
             transition(db, &mut workout, WorkoutStatus::SetActive)?;
@@ -818,7 +852,8 @@ pub fn log_set(db: &Connection, workout_id: &str, value: &SetInput, now: Ts, req
             }
         }
         let mut result = touch(db, &mut workout, now)?;
-        result["logged_set"] = json!({"id": row.id, "weight": row.weight, "reps": row.reps, "seconds": row.seconds, "meters": row.meters, "set_type": row.set_type, "set_number": row.set_number});
+        result["warmup_skipped"] = json!(value.set_type == SetType::Working && needs_warmup);
+        result["logged_set"] = json!({"exercise": name(&active), "id": row.id, "weight": row.weight, "reps": row.reps, "seconds": row.seconds, "meters": row.meters, "set_type": row.set_type, "set_number": row.set_number});
         Ok(result)
     })
 }
