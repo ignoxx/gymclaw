@@ -3,7 +3,8 @@
 //! Serves the frontend in `web/` (embedded), exercise SVGs, `/api/state` (a fresh snapshot from a
 //! read-only connection per request) and `/export.csv` (every logged set, `import::export_csv`). The
 //! only writes are `DASHBOARD_TOOLS` (`POST /api/<tool>`), so the owner can edit what the agent
-//! remembers and built, and plan targets. Only the allowed Host (or loopback) gets an answer, so DNS
+//! remembers and built, and plan targets, and `POST /api/coach`, the live workout's buttons and typed
+//! sets (`coach::app_tap`; the bot then shows the step in the chat). Only the allowed Host (or loopback) gets an answer, so DNS
 //! rebinding can't read it, and writes need a same-origin JSON request.
 pub mod state;
 
@@ -32,9 +33,10 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
 ];
 
 /// Tools the dashboard may call: note edits and turning the agent's extensions off, on or back
-/// (Memory), and plan targets (Exercises). They run exactly as the agent's calls do, with the same
-/// validation; extension changes are recorded as the owner's.
-const DASHBOARD_TOOLS: [&str; 5] = ["note_add", "note_edit", "note_delete", "extension_edit", "template_edit_exercise"];
+/// (Memory), plan targets (Exercises) and fixing a logged set (the live workout). They run exactly as
+/// the agent's calls do, with the same validation; extension changes are recorded as the owner's.
+const DASHBOARD_TOOLS: [&str; 6] =
+    ["note_add", "note_edit", "note_delete", "extension_edit", "template_edit_exercise", "set_correct"];
 /// The only exercise fields the dashboard may change. An id, name or picture change would cut an
 /// exercise off from its history, so those stay with the agent.
 const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];
@@ -67,7 +69,8 @@ fn reply(status: StatusCode, body: Vec<u8>, mime: &str) -> Response {
     set(
         headers,
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors https://web.telegram.org",
+        // telegram.org: the Mini App SDK (index.html), which Telegram asks apps to load from there.
+        "default-src 'self'; style-src 'self'; script-src 'self' https://telegram.org; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors https://web.telegram.org",
     );
     response
 }
@@ -84,8 +87,12 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         return error(StatusCode::FORBIDDEN);
     }
     if request.method() == Method::POST {
-        let Some(tool) =
-            request.uri().path().strip_prefix("/api/").filter(|t| DASHBOARD_TOOLS.contains(t)).map(String::from)
+        let Some(tool) = request
+            .uri()
+            .path()
+            .strip_prefix("/api/")
+            .filter(|t| *t == "coach" || DASHBOARD_TOOLS.contains(t))
+            .map(String::from)
         else {
             return error(StatusCode::NOT_FOUND);
         };
@@ -112,11 +119,18 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
             let data_dir = db_path.parent().unwrap_or(Path::new("."));
             crate::db::in_tx(&mut crate::db::open(&db_path)?, |db| {
                 let request_id = format!("dashboard:{}", crate::db::new_id());
-                crate::tools::call(
-                    &mut crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, effects: vec![] },
-                    &tool,
-                    args,
-                )
+                if tool == "coach" {
+                    let data = args["data"].as_str().unwrap_or_default();
+                    let view = crate::domain::coach::app_tap(db, data, Ts::now(), &request_id)?;
+                    return Ok(serde_json::json!({"ack": view.ack}));
+                }
+                let mut cx = crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, effects: vec![] };
+                let result = crate::tools::call(&mut cx, &tool, args.clone())?;
+                if tool == "set_correct" {
+                    // The chat saw the old number on the set's card: it gets a note with the fixed one.
+                    crate::domain::coach::app_fixed(db, args["set_id"].as_str().unwrap_or_default(), Ts::now())?;
+                }
+                Ok(result)
             })
         })
         .await;

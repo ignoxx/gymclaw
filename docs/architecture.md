@@ -13,7 +13,7 @@ gymclaw backup [dest]
 gymclaw export [path]  # every logged set as CSV in Strong's format (also the dashboard's /export.csv)
 gymclaw illustrations missing  # exercises with no picture of their own, the work list for scripts/new-illustration
 gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
-gymclaw dashboard    # dashboard; its only writes are DASHBOARD_TOOLS in src/web/mod.rs
+gymclaw dashboard    # the Mini App (the bot's "Gym" menu button); its writes are DASHBOARD_TOOLS and live-workout steps in src/web/mod.rs
 GYMCLAW_DB=copy.db gymclaw replay --at <local time> [--model …]   # re-run the agent on the chat's last owner message
 gymclaw rewind <run> --db copy.db --turns <dir>   # undo a turn's tool calls on a DB copy (turn-log changesets)
 gymclaw backfill --db copy.db --turns <dir> --out <file> [--git .]   # index past turns with outcome labels

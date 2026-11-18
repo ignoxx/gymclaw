@@ -46,10 +46,11 @@ impl Bot {
         Ok(())
     }
 
-    /// Point the chat menu button at the dashboard as a Mini App, or back to the "/" menu without one.
+    /// Point the chat menu button at the dashboard as a Mini App, or back to the "/" menu without one. It
+    /// reads "Gym": the app is where today's training, the live workout and its logging are, not just stats.
     pub async fn set_menu_button(&self, dashboard_url: Option<&str>) -> Result<()> {
         let button = match dashboard_url {
-            Some(url) => json!({"type": "web_app", "text": "Dashboard", "web_app": {"url": url}}),
+            Some(url) => json!({"type": "web_app", "text": "Gym", "web_app": {"url": url}}),
             None => json!({"type": "commands"}),
         };
         let _: bool = self.call("setChatMenuButton", json!({"menu_button": button})).await?;

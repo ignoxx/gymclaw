@@ -9,11 +9,11 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{
     AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession,
-    RuntimeSettings, SetLog, SetType, UserProfile, WorkoutExercise, WorkoutSession, WorkoutTemplate,
+    RuntimeSettings, SetType, UserProfile, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
-use crate::domain::templates::{Load, Measure, get_template};
-use crate::domain::{crowd, illustrations, preview, workout};
+use crate::domain::templates::{ExerciseSpec, Load, Measure, get_template};
+use crate::domain::{coach, crowd, illustrations, preview, workout};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -74,6 +74,15 @@ fn days(db: &Connection, tz: &TimeZone, today: Date) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// A plan exercise's target as the chat words it: "8–10 × 80 kg", "25 min", "2 km".
+fn target(spec: &ExerciseSpec, weight: f64) -> String {
+    match spec.measure {
+        Measure::Time => spec.set_seconds().map_or("timed".into(), |s| spec.kind().reps(&workout::format_time(s))),
+        Measure::Distance => spec.meters.map_or("distance".into(), workout::format_distance),
+        Measure::Reps => spec.kind().target(spec.rep_min, spec.rep_max, weight),
+    }
+}
+
 fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     let Some(row) = PlannedSession::first(
         db,
@@ -94,12 +103,17 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         } else {
             format!("{}–{}", spec.rep_min, spec.rep_max)
         };
-        exercises.push(json!({"name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
+        exercises.push(json!({"id": spec.id, "name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
             "reps": reps, "time": spec.set_seconds().map(workout::format_time),
+            // The target with this session's weight (progression included), worded like the plan list.
+            "target": target(spec, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight)),
             "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
     Ok(
+        // Today's session can be started from the app (`begin`, as the reminder's button); "leave" only means today.
         json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": fmt(row.leave_home_at, tz, "%H:%M"),
+        "today": row.planned_start_at.local(tz).date() == now.local(tz).date(),
+        "begin": workout::startable(db, &row, now)?.then(|| coach::begin_data(&row.id)),
         "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}),
     )
 }
@@ -120,7 +134,9 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
             exercises.push(json!({"id": spec.id, "name": spec.name, "guide_id": spec.guide_id, "svg_url": svg(&spec.name, spec.guide_id.as_deref()),
                 "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()).or(spec.muscle.clone()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
-                "time": spec.set_seconds().map(workout::format_time), "target": spec.kind().target(spec.rep_min, spec.rep_max, next)}));
+                "measure": spec.measure, "load": spec.load,
+                "equipment": spec.guide_id.as_deref().and_then(|g| illustrations::catalog().get(g)).map(|i| i.equipment.clone()),
+                "time": spec.set_seconds().map(workout::format_time), "target": target(spec, next)}));
         }
         out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));
     }
@@ -153,15 +169,10 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         workout::exercises(db, &w.id)?.iter().filter(|r| r.status != crate::db::models::ExerciseStatus::Substituted)
     {
         let name = row.config_json["name"].as_str().unwrap_or_default();
-        exercises.push(json!({"id": row.id, "name": name, "svg_url": svg(name, row.config_json["guide_id"].as_str()), "sets": row.planned_working_sets,
+        exercises.push(json!({"id": row.id, "exercise_id": row.exercise_id, "name": name, "svg_url": svg(name, row.config_json["guide_id"].as_str()), "sets": row.planned_working_sets,
             "done": workout::logs(db, &row.id, Some(SetType::Working))?.len(), "status": row.status}));
     }
     let active = &data["active_exercise"];
-    let latest = SetLog::first(
-        db,
-        "WHERE set_type = 'WORKING' AND workout_exercise_id IN (SELECT id FROM workout_exercise WHERE workout_session_id = ?1) ORDER BY logged_at DESC",
-        [&w.id],
-    )?;
     let eta = data["eta"].as_str().and_then(|e| Ts::parse(e, None).ok()).map(|e| fmt(e, tz, "%H:%M"));
     let active = if active.is_object() {
         json!({"id": active["id"], "name": active["name"], "set_type": active["set_type"], "set_number": active["set_number"], "sets": active["working_sets"],
@@ -170,16 +181,13 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     } else {
         Value::Null
     };
+    // The last set with its exercise, so the app can fix it (`set_correct`).
+    let last = coach::app_last(db, &w.id)?;
     Ok(
         json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
-        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| set_text(db, &l)).transpose()?, "exercises": exercises}),
+        "rest_until": data["rest_job"].get("due_at"), "last_set": last["text"], "last": last, "exercises": exercises,
+        "live": coach::app_live(db, &w.id, now)?}),
     )
-}
-
-/// A logged set the way the coach shows it ("8/side × +10 kg", "2 km").
-fn set_text(db: &Connection, set: &SetLog) -> Result<String> {
-    let kind = WorkoutExercise::get(db, &set.workout_exercise_id)?.map(|e| workout::kind(&e)).unwrap_or_default();
-    Ok(kind.set(set.weight, set.reps, set.seconds, set.meters))
 }
 
 /// Wall-clock minutes since 1970-01-01 in `tz`; lets the browser slice days/weeks without timezone math.
@@ -291,7 +299,12 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
         }
         result.push(json!({"id": w.id, "date": started_at.local(tz).date().to_string(), "label": fmt(started_at, tz, "%a %-d %b"), "time": fmt(started_at, tz, "%H:%M"),
             "template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "minutes": seconds.div_euclid(60),
-            "sets": sets, "volume": round(volume, 0) as i64, "prs": prs, "crowd": ratings.get(&w.id).map(|r| label(r)), "exercises": exercises}));
+            "sets": sets, "volume": round(volume, 0) as i64, "prs": prs, "crowd": ratings.get(&w.id).map(|r| label(r)), "exercises": exercises,
+            "finished_at": w.completed_at, "rate": if ratings.contains_key(&w.id) { vec![] } else { coach::crowd_buttons(&w.id)? }}));
+    }
+    // The newest workout's last set can still be fixed from its "done" card.
+    if let Some(newest) = result.last_mut() {
+        newest["last"] = coach::app_last(db, newest["id"].as_str().unwrap_or_default())?;
     }
     result.reverse();
     Ok(result)
