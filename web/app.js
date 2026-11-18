@@ -1,5 +1,5 @@
-/* View of GymClaw state. Presentation only, except the Memory tab (the agent's notes and extensions) and the
-   Exercises tab (plan targets), which edit through GymClaw's own tools. Made first for Telegram: the bot's
+/* View of gymclaw state. Presentation only, except the Memory tab (the agent's notes and extensions) and the
+   Exercises tab (plan targets), which edit through gymclaw's own tools. Made first for Telegram: the bot's
    menu button opens it as a Mini App (see "Telegram" below); a browser gets the same page. */
 const SVG = 'http://www.w3.org/2000/svg';
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -920,7 +920,7 @@ function renderNothing(focus, data) {
   const k = data.insights.kpis;
   focus.append(el('h2', 'title', 'Nothing planned'));
   focus.append(el('p', 'subtitle', `${k.this_week ?? 0} of ${data.insights.target} sessions this week${data.history[0] ? ` · last: ${data.history[0].template}, ${data.history[0].label}` : ''}`));
-  focus.append(el('p', 'subtitle', 'Tell GymClaw in the chat when you want to train, and it plans the session.'));
+  focus.append(el('p', 'subtitle', 'Tell gymclaw in the chat when you want to train, and it plans the session.'));
   if (tg) {
     const chat = el('button', 'chip', 'Back to the chat');
     chat.type = 'button';
@@ -1108,7 +1108,7 @@ function renderWeight(insights) {
   const points = insights.weight || [];
   document.getElementById('weight-legend').hidden = !points.length;
   if (!points.length) {
-    box.replaceChildren(el('p', 'empty', 'Send GymClaw a photo of your scale to start tracking.'));
+    box.replaceChildren(el('p', 'empty', 'Send gymclaw a photo of your scale to start tracking.'));
     return;
   }
   const values = points.flatMap(p => [p.kg, p.avg]);
@@ -1186,9 +1186,9 @@ function renderHistory(history) {
 
 /* ---------- Memory ---------- */
 
-const PLACEHOLDER = { owner: 'Add something GymClaw should know', learned: 'Add a pattern' };
+const PLACEHOLDER = { owner: 'Add something gymclaw should know', learned: 'Add a pattern' };
 
-/* Runs one GymClaw tool (the server allows a few), then reloads the state; true if that reload
+/* Runs one gymclaw tool (the server allows a few), then reloads the state; true if that reload
    worked. A refused call throws with the domain's message, e.g. why a plan edit is invalid. */
 async function toolCall(tool, args) {
   const response = await fetch(`/api/${tool}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) });

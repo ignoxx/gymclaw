@@ -18,7 +18,7 @@ pub fn conflict() -> Error {
     Error::domain(WRITE_CONFLICT, "Calendar event changed remotely; sync before retry")
 }
 
-/// A Google Calendar event, reduced to what GymClaw stores. `raw` keeps only the whitelisted keys
+/// A Google Calendar event, reduced to what gymclaw stores. `raw` keeps only the whitelisted keys
 /// (no descriptions, attendees, …) and is what goes into `calendar_event_snapshot.raw_json`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CalendarEvent {
@@ -53,7 +53,7 @@ pub struct SyncBatch {
     pub full: bool,
 }
 
-/// A calendar GymClaw syncs from and writes its gym sessions to. Implemented by
+/// A calendar gymclaw syncs from and writes its gym sessions to. Implemented by
 /// `GoogleCalendarProvider` (live) and `FixtureCalendarProvider` (tests/demos).
 /// Bodies are Google event resources (`calendar_write.body_json`).
 pub trait CalendarProvider {

@@ -25,7 +25,7 @@ use crate::domain::workout::in_seconds;
 use crate::error::Result;
 use crate::time::Ts;
 
-/// A workout the owner did before GymClaw, as the agent read it from a screenshot or pasted text.
+/// A workout the owner did before gymclaw, as the agent read it from a screenshot or pasted text.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PastWorkout {

@@ -4,7 +4,7 @@
 //! Sync uses stable list params and pages without time filters. Recurring masters and exceptions
 //! are expanded locally (`recurrence::occurrences`); syncToken can't be combined with timeMin/timeMax.
 //!
-//! Updates and deletes first check the event is GymClaw's own and still has the expected ETag, then
+//! Updates and deletes first check the event is gymclaw's own and still has the expected ETag, then
 //! send it as If-Match: a concurrent owner edit is a conflict, never overwritten. An update whose
 //! response was lost is recognized on retry and acknowledged instead of applied twice.
 //!
@@ -435,7 +435,7 @@ impl<'a> GoogleCalendarProvider<'a> {
 
     fn owned(event: &CalendarEvent, session_id: Option<&str>) -> Result<()> {
         if !event.managed || session_id.is_none_or(str::is_empty) || event.session_id.as_deref() != session_id {
-            bail!("CALENDAR_NOT_OWNED", "Refusing to modify event without matching GymClaw ownership");
+            bail!("CALENDAR_NOT_OWNED", "Refusing to modify event without matching gymclaw ownership");
         }
         Ok(())
     }

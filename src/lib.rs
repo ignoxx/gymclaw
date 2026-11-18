@@ -1,4 +1,4 @@
-//! GymClaw: a private Telegram gym coach. One binary owns the bot, the agent, the scheduler and the
+//! gymclaw: a private Telegram gym coach. One binary owns the bot, the agent, the scheduler and the
 //! training domain over one SQLite file.
 pub mod agent;
 pub mod config;

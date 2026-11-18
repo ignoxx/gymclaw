@@ -46,7 +46,7 @@ pub struct SqlQuery {
 
 impl Tool for SqlQuery {
     const NAME: &'static str = "sql_query";
-    const DESCRIPTION: &'static str = "Read anything in the GymClaw database with one SELECT. Use it for history or analysis. The schema is in your instructions (\"Database\"); JOIN on *_id. Timestamps are stored as naive UTC text (compare against UTC in WHERE) but come back in the owner's local time with offset. JSON text columns. The lift_history view has each exercise of each finished workout with its reps per set and best estimated 1-rep max (e1rm): how a lift is going. \
+    const DESCRIPTION: &'static str = "Read anything in the gymclaw database with one SELECT. Use it for history or analysis. The schema is in your instructions (\"Database\"); JOIN on *_id. Timestamps are stored as naive UTC text (compare against UTC in WHERE) but come back in the owner's local time with offset. JSON text columns. The lift_history view has each exercise of each finished workout with its reps per set and best estimated 1-rep max (e1rm): how a lift is going. \
 Your chat only shows the latest messages; chat_message holds every one (role owner/assistant/bot, text, at), so for \"like last time\" or \"what did I say about…\" search it with text LIKE. At most 200 rows. OAuth credentials and private feed URLs are excluded.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {

@@ -1,5 +1,5 @@
 //! Busy time the planner avoids: availability blocks, the personal ICS feed,
-//! and gym-calendar events that aren't GymClaw's own, with recurring masters expanded locally within a
+//! and gym-calendar events that aren't gymclaw's own, with recurring masters expanded locally within a
 //! bounded horizon.
 use std::collections::HashSet;
 

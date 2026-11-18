@@ -1,4 +1,4 @@
-# GymClaw on a single host (Coolify "Docker Compose" build pack, or plain `docker compose up`).
+# gymclaw on a single host (Coolify "Docker Compose" build pack, or plain `docker compose up`).
 # gymclaw sits on an internal network with no internet route; `egress` is its only way out.
 # Setup and migration: deploy/README.md
 services:

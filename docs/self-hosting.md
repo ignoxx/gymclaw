@@ -1,16 +1,16 @@
-# Self-hosting GymClaw
+# Self-hosting gymclaw
 
-GymClaw is a single-owner app: one deployment, one Telegram user, one gym. Run your own copy.
+gymclaw is a single-owner app: one deployment, one Telegram user, one gym. Run your own copy.
 
 ## What you need
 
-- A host with Docker (any small VPS works; it has to stay on, since GymClaw runs your week on a schedule).
+- A host with Docker (any small VPS works; it has to stay on, since gymclaw runs your week on a schedule).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric Telegram user ID
   (for example from [@userinfobot](https://t.me/userinfobot)).
 - An [OpenRouter](https://openrouter.ai) API key. Set a spending limit on it.
 - A Google account with a **dedicated** calendar for workouts, plus a Google Cloud OAuth client
   ([Google Calendar](#google-calendar)).
-- Optional: a live check-in count for your gym ([crowd data](crowd.md)). Without it, GymClaw
+- Optional: a live check-in count for your gym ([crowd data](crowd.md)). Without it, gymclaw
   still plans and coaches; it just can't pick quiet hours from data.
 
 ## Deploy
@@ -49,7 +49,7 @@ Every setting is an environment variable; this table is the full list, and `.env
 | `GYMCLAW_BACKUP_KEEP` | no | How many archives `backup.sh` keeps; set it on the command (`GYMCLAW_BACKUP_KEEP=30 backup.sh`). Default 14. |
 | `GYMCLAW_ALLOW_DIRECT_EGRESS` | no | `1` lets the container start with direct internet access (`docker run` only; compose never passes it). Local testing only. |
 
-The stack is three containers: GymClaw (one Rust binary: bot, agent, coach, scheduler), an egress
+The stack is three containers: gymclaw (one Rust binary: bot, agent, coach, scheduler), an egress
 proxy with a host allowlist, and the dashboard, the Mini App behind the bot's "Gym" menu button.
 Coolify steps, backups and moving hosts: [deploy/README.md](../deploy/README.md).
 
@@ -64,9 +64,9 @@ Coolify steps, backups and moving hosts: [deploy/README.md](../deploy/README.md)
 
 ## Google Calendar
 
-Use one dedicated Google calendar for GymClaw's workouts. Blockers you add there count, and so does
+Use one dedicated Google calendar for gymclaw's workouts. Blockers you add there count, and so does
 an optional read-only [personal calendar](#personal-calendar-read-only). Moving, resizing or
-deleting a workout in any calendar app counts as your intent; GymClaw adapts.
+deleting a workout in any calendar app counts as your intent; gymclaw adapts.
 
 1. In Google Cloud, enable the Google Calendar API and configure the OAuth consent screen (add your
    account as a test user while the app is in testing).
@@ -81,16 +81,16 @@ deleting a workout in any calendar app counts as your intent; GymClaw adapts.
 
 `calendar-auth` prints a URL. Open it in any browser, approve, and paste back the URL the browser
 ends up on (a `127.0.0.1` page that won't load, which is expected). Google expires refresh tokens of
-testing-mode apps after 7 days: re-run `calendar-auth` whenever GymClaw reports
+testing-mode apps after 7 days: re-run `calendar-auth` whenever gymclaw reports
 `CALENDAR_AUTH_REQUIRED`.
 
-The `calendar.events.owned` scope covers every calendar you own, so GymClaw binds its DB to the one
+The `calendar.events.owned` scope covers every calendar you own, so gymclaw binds its DB to the one
 ID you authorized and refuses any other. Tokens live in the SQLite DB in plain text.
 
 ### Personal calendar (read-only)
 
-Your everyday calendar can block workout slots without GymClaw getting write access. It is read as
-an ICS feed; GymClaw only GETs it and keeps busy start and end times, no titles or notes.
+Your everyday calendar can block workout slots without gymclaw getting write access. It is read as
+an ICS feed; gymclaw only GETs it and keeps busy start and end times, no titles or notes.
 
 1. Apple Calendar: right-click the calendar → **Share Calendar…** → tick **Public Calendar** → copy
    the `webcal://…` link. (Google's **Secret address in iCal format** works the same way.)

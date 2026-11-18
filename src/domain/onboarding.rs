@@ -1,6 +1,6 @@
 //! Mandatory owner interview, then an owner-confirmed plan.
 //!
-//! Steps: INTERVIEW (one question at a time) → PLAN (owner's plan from a photo, or one GymClaw builds from
+//! Steps: INTERVIEW (one question at a time) → PLAN (owner's plan from a photo, or one gymclaw builds from
 //! the catalog) → REVIEW (one summary, owner confirms) → READY. Defaults never count as answers. Ready
 //! stays ready: later profile or template edits don't send the owner back into setup. Grants no runtime
 //! or calendar authority.

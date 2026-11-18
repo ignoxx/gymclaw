@@ -1,4 +1,4 @@
-//! Durable calendar write outbox. Only GymClaw-owned events; live writes
+//! Durable calendar write outbox. Only gymclaw-owned events; live writes
 //! need the explicit calendar-write authority.
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -62,7 +62,7 @@ pub fn event_body(db: &Connection, session: &PlannedSession) -> Result<Value> {
         lines.extend(crate::domain::preview::plan_lines(db, session)?);
     }
     lines.push(String::new());
-    lines.push("Managed by GymClaw. Move or resize freely; it adapts.".into());
+    lines.push("Managed by gymclaw. Move or resize freely; it adapts.".into());
     let split = OnboardingState::get(db, 1)?.map(|o| o.split_json.0).unwrap_or_default();
     let color = session
         .workout_template_id

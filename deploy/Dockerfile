@@ -1,4 +1,4 @@
-# GymClaw: one Rust binary (bot, agent, scheduler, dashboard) on Debian slim.
+# gymclaw: one Rust binary (bot, agent, scheduler, dashboard) on Debian slim.
 # Build from repo root: docker build -f deploy/Dockerfile .
 # cargo-chef: dependencies compile in their own layer keyed only on Cargo.toml/Cargo.lock, so with
 # CI's layer cache (.github/workflows/image.yml) a source-only change recompiles just this crate.

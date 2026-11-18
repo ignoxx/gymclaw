@@ -1,4 +1,4 @@
-# How GymClaw is built
+# How gymclaw is built
 
 One binary owns Telegram, the agent loop, the scheduler, the outbox and the training domain, all
 over one SQLite DB (`data/gymclaw.db`). Every module opens with a `//!` summary; `rg '^//!' src` is

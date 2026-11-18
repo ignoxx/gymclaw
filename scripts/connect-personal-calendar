@@ -16,7 +16,7 @@ case "$LINK" in
   *) echo "Expected a webcal:// or https:// link" >&2; exit 1 ;;
 esac
 
-# Follow iCloud's partition redirect so the allowlisted host is the one GymClaw will hit.
+# Follow iCloud's partition redirect so the allowlisted host is the one gymclaw will hit.
 # URL goes through curl's stdin config, not argv.
 FINAL="$(printf 'url = "%s"\n' "$URL" | curl -fsSL --proto '=https' --proto-redir '=https' --max-time 60 -o /dev/null -w '%{url_effective}' -K -)" \
   || { echo "Feed not reachable. Is Public Calendar still enabled?" >&2; exit 1; }

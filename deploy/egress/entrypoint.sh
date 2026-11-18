@@ -1,5 +1,5 @@
 #!/bin/sh
-# Allowlist = GymClaw's fixed integrations + EGRESS_EXTRA_HOSTS (comma/space separated,
+# Allowlist = gymclaw's fixed integrations + EGRESS_EXTRA_HOSTS (comma/space separated,
 # e.g. the personal calendar feed host, kept out of the public repo).
 set -eu
 {
