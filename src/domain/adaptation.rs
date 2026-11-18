@@ -466,7 +466,8 @@ pub fn switch_to(
                 row
             }
         };
-        if let Some(c) = &current {
+        // A replacement takes over the slot's rest; a planned exercise done out of order keeps its own.
+        if let (Some(c), Some(_)) = (&current, &replaced) {
             row.rest_seconds = c.rest_seconds;
         }
         row.status = ExerciseStatus::Active;

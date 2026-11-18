@@ -745,6 +745,10 @@ fn app_swap(db: &Connection, workout_id: &str, row: &WorkoutExercise, rows: &[Wo
         })
         .collect();
     let later = row.status == ExerciseStatus::Active && rows.iter().any(|e| e.status == ExerciseStatus::Pending);
+    // Nothing to offer: no "Machine taken?" that opens onto nothing.
+    if options.is_empty() && !later {
+        return Ok(Value::Null);
+    }
     Ok(json!({"options": options, "later": later.then(|| format!("gc:later:{r}"))}))
 }
 
@@ -1114,6 +1118,8 @@ mod tests {
         let shoulder = exercises(&db, &workout).unwrap().into_iter().find(|e| name(e) == "Shoulder press").unwrap();
         app_tap(&db, queued[&shoulder.id].as_str().unwrap(), at(5), "app-now").unwrap();
         assert_eq!(app_live(&db, &workout, at(6)).unwrap()["target"], "8–10 × 25 kg");
+        // Done out of order, it keeps its own rest (only a replacement takes over the slot's).
+        assert_eq!(WorkoutExercise::get(&db, &shoulder.id).unwrap().unwrap().rest_seconds, shoulder.rest_seconds);
         let r = &data(&live(&db, at(6)), "🔄 Swap")["swap:".len()..];
         app_tap(&db, &format!("gc:log:{r}:25:10"), at(10), "app-log").unwrap();
         let set = app_last(&db, &workout).unwrap()["id"].as_str().unwrap().to_string();

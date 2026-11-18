@@ -96,6 +96,8 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         };
         exercises.push(json!({"id": spec.id, "name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
             "reps": reps, "time": spec.set_seconds().map(workout::format_time),
+            // The target with this session's weight (progression included), worded like the plan list.
+            "target": spec.kind().target(spec.rep_min, spec.rep_max, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight)),
             "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
     Ok(
@@ -124,6 +126,7 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
                 "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()).or(spec.muscle.clone()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
                 "measure": spec.measure, "load": spec.load,
+                "equipment": spec.guide_id.as_deref().and_then(|g| illustrations::catalog().get(g)).map(|i| i.equipment.clone()),
                 "time": spec.set_seconds().map(workout::format_time), "target": spec.kind().target(spec.rep_min, spec.rep_max, next)}));
         }
         out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));

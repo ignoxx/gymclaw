@@ -451,7 +451,12 @@ function startRest(node, until) {
     const left = Math.max(0, Math.ceil((Date.parse(until) - now()) / 1000));
     node.textContent = left ? `Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'Rest over';
     // Buzz only when the rest runs out on screen, not when the page opens after it.
-    if (!left) { clearInterval(restTimer); if (counting) { haptic.done(); toast('Rest over · next set'); } }
+    if (!left) {
+      clearInterval(restTimer);
+      // Over: no −15s on a rest that's done; the logger comes into view for the set.
+      node.closest('.resting')?.querySelector('.rest-actions')?.remove();
+      if (counting) { haptic.done(); toast('Rest over · next set'); document.querySelector('.logger')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+    }
     counting = left > 0;
   };
   tick();
@@ -470,7 +475,12 @@ function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, nullab
   input.setAttribute('aria-label', label);
   const show = v => { input.value = v === null || v === undefined ? '' : String(v); };
   show(value);
-  const commit = v => { value = v === null ? null : Math.max(min, Math.round(v * 100) / 100); onChange(value); };
+  let good = value;
+  const commit = v => {
+    value = v === null ? null : Math.max(min, Math.round(v * 100) / 100);
+    if (value !== null) good = value;
+    onChange(value);
+  };
   const typed = () => {
     const text = input.value.trim().replace(',', '.');
     if (text === '') return nullable ? null : undefined;
@@ -506,14 +516,22 @@ function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, nullab
   // Select on the next frame: select() right in focus pops iOS's cut/copy/paste bubble over the number.
   input.addEventListener('focus', () => requestAnimationFrame(() => input.setSelectionRange(0, input.value.length)));
   input.addEventListener('keydown', event => { if (event.key === 'Enter') input.blur(); });
-  input.addEventListener('input', () => { const v = typed(); if (v !== undefined) commit(v); });
+  // What's in the box is what counts: emptied, or under the minimum mid-typing, means "nothing yet" (the Log
+  // button then says what's missing). Left like that, the last good value comes back.
+  const valid = v => (v === null ? nullable : v !== undefined && v >= min);
+  input.addEventListener('input', () => {
+    const v = typed();
+    if (valid(v)) commit(v);
+    else { value = null; onChange(null); }
+  });
   input.addEventListener('change', () => {
-    if (typed() === undefined) {
+    if (!valid(typed())) {
       // Not a number: say so (red flash, error buzz) and put the last good value back.
       row.classList.remove('invalid');
       void row.offsetWidth;
       row.classList.add('invalid');
       haptic.done(false);
+      commit(good ?? null);
     }
     show(value);
   });
@@ -581,6 +599,14 @@ function plates(weight) {
 // What the logger shows, kept while the same set is on screen so a refresh doesn't undo a change.
 const logger = { key: null, weight: null, reps: null, seconds: null, meters: null, fixing: false };
 
+// Estimated 1-rep max (Epley) to the nearest 0.5 kg, as the server computes it (`state::one_rep_max`).
+const oneRepMax = (weight, reps) => reps > 1 ? Math.round(weight * (1 + reps / 30) * 2) / 2 : weight;
+// The Progress series of the exercise on screen (its plan exercise id), if it has history.
+const progressOf = active => {
+  const id = state?.workout?.exercises.find(e => e.id === active?.id)?.exercise_id;
+  return state?.insights.progress.find(s => s.id === id);
+};
+
 // Steps the gym's weights come in: barbell plates in pairs (2.5), dumbbells by 2, light stacks by 1.
 const weightStep = (equipment, weight) => equipment === 'Barbell' ? 2.5 : equipment === 'Dumbbell' ? 2 : weight >= 20 ? 2.5 : 1;
 
@@ -600,11 +626,11 @@ function renderLogger(focus, live, active, last) {
   let words;
   if (measure === 'time') {
     // Minutes for cardio (and an open time), seconds for a plank.
-    const long = (logger.seconds ?? 1200) >= 120;
+    const long = (spec.seconds ?? 1200) >= 120;
     box.append(stepper(long ? 'Time' : 'Seconds', logger.seconds === null ? null : long ? logger.seconds / 60 : logger.seconds,
       { step: long ? 1 : 5, min: long ? 1 : 5, base: long ? 20 : 30, unit: long ? 'min' : 's', decimal: long,
         onChange: v => { logger.seconds = v === null ? null : Math.round(long ? v * 60 : v); refreshLabel(); } }));
-    words = () => logger.seconds ? (logger.seconds >= 120 ? `${Math.round(logger.seconds / 60)} min` : `${logger.seconds} s`) : null;
+    words = () => logger.seconds ? duration(logger.seconds) : null;
   } else if (measure === 'distance') {
     const km = (logger.meters ?? 1000) >= 1000;
     box.append(stepper('Distance', logger.meters === null ? null : km ? logger.meters / 1000 : logger.meters,
@@ -612,13 +638,16 @@ function renderLogger(focus, live, active, last) {
         onChange: v => { logger.meters = v === null ? null : Math.round(km ? v * 1000 : v); refreshLabel(); } }));
     words = () => logger.meters ? (logger.meters >= 1000 ? `${logger.meters / 1000} km` : `${logger.meters} m`) : null;
   } else {
-    if (!spec.reps_only || logger.weight) {
+    // Bodyweight hides the weight, except where weight is added (dip belt), even at 0.
+    if (!spec.reps_only || spec.added || logger.weight) {
       box.append(stepper(spec.added ? 'Added' : 'Weight', logger.weight, { step: weightStep(equipment, logger.weight), base: 20, unit: spec.unit, decimal: true,
         onChange: v => { logger.weight = v; refreshLabel(); } }));
       box.plates = el('p', 'plates');
       box.append(box.plates);
     }
+    if (!spec.added && spec.unit === 'kg') { box.best = el('p', 'best'); }
     box.append(stepper(spec.per_side ? 'Reps / side' : 'Reps', logger.reps, { min: 1, base: 8, unit: 'reps', onChange: v => { logger.reps = v; refreshLabel(); } }));
+    if (box.best) box.append(box.best);
     words = () => {
       if (!logger.reps || (!spec.reps_only && !logger.weight)) return null;
       if (!logger.weight) return `${logger.reps} reps`;
@@ -627,9 +656,10 @@ function renderLogger(focus, live, active, last) {
   }
   const submit = el('button', 'save log-button');
   submit.type = 'button';
+  const missing = () => measure !== 'reps' ? measure : !logger.reps && (spec.reps_only || logger.weight) ? 'reps' : 'weight';
   const run = () => {
     // Nothing to log yet (a new exercise's weight, an open time): say what's missing instead of sending it.
-    if (!words()) { toast(measure === 'reps' ? 'Enter the weight first' : `Enter the ${measure} first`, true); haptic.done(false); return; }
+    if (!words()) { toast(`Enter the ${missing()} first`, true); haptic.done(false); return; }
     if (fixing) {
       const fix = measure === 'time' ? { minutes: logger.seconds / 60 } : measure === 'distance' ? { meters: logger.meters } : { weight: logger.weight || 0, reps: logger.reps };
       logger.fixing = false;
@@ -643,9 +673,15 @@ function renderLogger(focus, live, active, last) {
     const what = words();
     // The set number changes with every log, so the button itself shows the last tap went through.
     const set = active && active.sets > 1 ? `set ${active.set_number} · ` : '';
-    const text = !what ? (measure === 'reps' ? 'Enter the weight' : `Enter the ${measure}`) : fixing ? `Fix to ${what}` : `Log ${set}${what}`;
+    const text = !what ? `Enter the ${missing()}` : fixing ? `Fix to ${what}` : `Log ${set}${what}`;
     submit.textContent = text.charAt(0).toUpperCase() + text.slice(1);
     if (box.plates) box.plates.textContent = equipment === 'Barbell' && plates(logger.weight) ? `Each side: ${plates(logger.weight)}` : '';
+    if (box.best) {
+      // About to beat the best estimated 1RM: say so before the set, not only in the chat's confetti after.
+      const best = Math.max(0, ...(progressOf(active)?.points || []).map(p => p.e1rm));
+      const next = oneRepMax(logger.weight || 0, logger.reps || 0);
+      box.best.textContent = !fixing && best && next > best ? `New best: ≈ ${next} kg 1RM (was ${best})` : '';
+    }
     liveAction = { text: submit.textContent, run };
     syncMain();
   }
@@ -654,7 +690,7 @@ function renderLogger(focus, live, active, last) {
   if (fixing) {
     const cancel = el('button', 'link', 'Cancel');
     cancel.type = 'button';
-    cancel.addEventListener('click', () => { logger.fixing = false; rerender(); });
+    cancel.addEventListener('click', () => { logger.fixing = false; logger.key = null; rerender(); });
     box.append(cancel);
   }
   focus.append(box);
@@ -670,7 +706,7 @@ function lastLine(last, activeId) {
   line.append(`Last set ${last.workout_exercise_id === activeId ? '' : `(${last.exercise}) `}${last.text} `);
   const fix = el('button', 'link', 'Fix');
   fix.type = 'button';
-  fix.addEventListener('click', () => { logger.fixing = true; rerender(); });
+  fix.addEventListener('click', () => { logger.fixing = true; logger.key = null; rerender(); });
   line.append(fix);
   return line;
 }
@@ -713,12 +749,13 @@ function renderWorkout(focus, workout) {
     pose.type = 'button';
     pose.setAttribute('aria-label', `${active.name}: details`);
     pose.append(thumb(workout.exercises.find(e => e.id === active.id)?.svg_url));
-    const exerciseId = workout.exercises.find(e => e.id === active.id)?.exercise_id;
-    pose.addEventListener('click', () => exerciseId && openExercise({ id: exerciseId }));
+    const current = workout.exercises.find(e => e.id === active.id);
+    pose.addEventListener('click', () => current && openExercise({ id: current.exercise_id, name: current.name, svg_url: current.svg_url }));
     head.append(titles, pose);
     focus.append(head);
     const used = new Set();
-    if (workout.rest_until) {
+    buttons.filter(b => /^gc:(cut|skip):/.test(b.data)).forEach(b => used.add(b));
+    if (workout.rest_until && Date.parse(workout.rest_until) > now()) {
       // Resting: the countdown and the chat's ways to shorten it. The logger below is for the set after.
       const rest = el('div', 'status resting');
       const time = el('strong');
@@ -745,7 +782,12 @@ function renderWorkout(focus, workout) {
       renderLogger(focus, live, active, workout.last);
     }
     // Machine taken, before the first set: the swap options and "later" (the app's own, not the chat's menu).
-    if (live.swap && !logger.fixing) renderSwap(focus, live.swap, false);
+    if (live.swap && !logger.fixing) {
+      // Not started: "Skip" belongs with the other ways out of an exercise you can't do, in "Machine taken?".
+      const skip = current?.done ? null : buttons.find(b => b.data.startsWith('gc:next:'));
+      if (skip) used.add(skip);
+      renderSwap(focus, live.swap, false, skip);
+    }
     const rest = buttons.filter(b => !used.has(b));
     if (rest.length && !logger.fixing) {
       const actions = el('div', 'live-actions');
@@ -778,10 +820,12 @@ function renderWorkout(focus, workout) {
 
 /* "Machine taken?": other exercises for the slot as picture tiles, and "Do it later". `open` when nothing
    else is left to do. Kept open across refreshes once opened. */
-function renderSwap(focus, swap, open) {
+function renderSwap(focus, swap, open, skip = null) {
   const box = el('details', 'swap');
-  box.open = open || swapOpen;
-  box.addEventListener('toggle', () => { swapOpen = box.open; });
+  // Remembered for this exercise only: a swap or "later" moves on, and the next one starts closed.
+  const id = state.workout?.active?.id;
+  box.open = open || swapOpen === id;
+  box.addEventListener('toggle', () => { if (!open) swapOpen = box.open ? id : null; });
   box.append(el('summary', '', open ? 'Or swap it' : 'Machine taken?'));
   const options = el('div', 'swap-options');
   for (const option of swap.options) {
@@ -793,10 +837,13 @@ function renderSwap(focus, swap, open) {
     options.append(tile);
   }
   box.append(options);
-  if (swap.later) box.append(actionButton({ text: 'Do it later', data: swap.later }));
+  const ways = el('div', 'live-actions');
+  if (swap.later) ways.append(actionButton({ text: 'Do it later', data: swap.later }));
+  if (skip) ways.append(actionButton(skip));
+  if (ways.children.length) box.append(ways);
   focus.append(box);
 }
-let swapOpen = false;
+let swapOpen = null;
 
 function renderNext(focus, next) {
   const heading = el('div', 'section-heading');
@@ -821,7 +868,7 @@ function renderNext(focus, next) {
     const button = el('button');
     button.type = 'button';
     const text = el('div');
-    text.append(el('strong', '', exercise.name), el('span', '', exercise.time ? (exercise.sets > 1 ? `${exercise.sets} × ${exercise.time}` : exercise.time) : `${exercise.sets} sets of ${exercise.reps}`));
+    text.append(el('strong', '', exercise.name), el('span', '', exercise.time ? (exercise.sets > 1 ? `${exercise.sets} × ${exercise.time}` : exercise.time) : `${exercise.sets} × ${exercise.target}`));
     button.append(thumb(exercise.svg_url), text, el('em', '', exercise.last ? `Last ${exercise.last}` : ''));
     button.addEventListener('click', () => openExercise({ id: exercise.id }));
     row.append(button);
@@ -867,12 +914,12 @@ function renderNothing(focus, data) {
 function renderToday(data) {
   // A background refresh (the ETA ticks every minute) mustn't close the keypad mid-number: while a field
   // on the card has focus, the card waits and redraws when it's left.
-  const typing = document.getElementById('focus').contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
-  if (typing && !renderToday.waiting) {
-    renderToday.waiting = true;
-    document.activeElement.addEventListener('blur', () => { renderToday.waiting = false; rerender(); }, { once: true });
+  // Redrawing on blur would replace the button whose tap caused the blur, and the tap would be lost; the
+  // next poll (3 s) or the action's own refresh draws it instead.
+  if (document.getElementById('focus').contains(document.activeElement) && document.activeElement.tagName === 'INPUT') {
+    rendered = '';
+    return;
   }
-  if (typing) return;
   renderWeek(data.days, data.range);
   renderGym(data.crowd);
   renderActivity(data.activity, data.days[0]?.name);
@@ -1376,13 +1423,13 @@ function planEditor(plan, exercise) {
   fields.push(['rest_seconds', 'Rest', exercise.rest_seconds, 15, 's']);
   const load = exercise.load || 'external';
   if (reps && (!exercise.bodyweight || load !== 'external')) {
-    fields.unshift(['target_weight', load === 'added' ? 'Added' : 'Weight', exercise.weight, exercise.weight >= 20 ? 2.5 : 1, load === 'assisted' ? 'kg assist' : 'kg']);
+    fields.unshift(['target_weight', load === 'added' ? 'Added' : 'Weight', exercise.weight, weightStep(exercise.equipment, exercise.weight), load === 'assisted' ? 'kg assist' : 'kg']);
   }
   const was = Object.fromEntries(fields.map(([name, , value]) => [name, value ?? null]));
   const values = { ...was };
   const grid = el('div', 'ex-fields');
   for (const [name, label, value, step, unit] of fields) {
-    grid.append(stepper(label, value, { step, unit, min: name === 'target_weight' ? 0 : name === 'rest_seconds' ? 15 : 1, nullable: name === 'rest_seconds',
+    grid.append(stepper(label, value, { step, unit, min: name === 'target_weight' ? 0 : name === 'rest_seconds' ? 15 : 1, nullable: name === 'rest_seconds', decimal: name === 'target_weight',
       onChange: v => { values[name] = v; markDirty(form, `Save ${plan.name}`); } }));
   }
   const save = el('button', 'save', 'Save');
@@ -1393,7 +1440,7 @@ function planEditor(plan, exercise) {
   form.append(grid, actions);
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    const changes = Object.fromEntries(Object.entries(values).filter(([name, value]) => value !== was[name]));
+    const changes = Object.fromEntries(Object.entries(values).filter(([name, value]) => value !== was[name] && (value !== null || name === 'rest_seconds')));
     if (!Object.keys(changes).length) { message.textContent = 'Nothing changed'; clearDirty(); return; }
     save.disabled = true;
     message.textContent = 'Saving…';
@@ -1454,7 +1501,7 @@ function openExercise(of) {
   const pose = el('div', 'ex-pose');
   pose.append(thumb(item.svg_url));
   const titles = el('div');
-  titles.append(el('h2', 'title', item.name), el('p', 'subtitle', [item.muscle, of.guide?.equipment].filter(Boolean).join(' · ')));
+  titles.append(el('h2', 'title', item.name), el('p', 'subtitle', [item.muscle, item.equipment || of.guide?.equipment].filter(Boolean).join(' · ')));
   titles.querySelector('h2').id = 'ex-detail-title';
   head.append(pose, titles);
   sheet.append(close, head);
@@ -1465,6 +1512,9 @@ function openExercise(of) {
     now.type = 'button';
     now.addEventListener('click', () => { dialog.close(); coachTap(of.now); });
     sheet.append(now);
+    // Switching ends a half-done exercise where it is (its sets stay logged): say so before the tap.
+    const current = state.workout?.exercises.find(e => e.id === state.workout.active?.id);
+    if (current && current.done > 0 && current.done < current.sets) sheet.append(el('p', 'subtitle', `${current.name} ends at ${current.done} of ${current.sets} sets.`));
   }
   if (of.guide) {
     const yours = exercisesWithPicture(of.guide);
@@ -1473,6 +1523,7 @@ function openExercise(of) {
       for (const { e, where } of yours) sheet.append(exerciseRow(e, where, '', () => openExercise({ id: e.id })));
     } else sheet.append(el('p', 'empty', 'You haven\'t done this one yet.'));
   }
+  if (!of.guide && !logged && !occurrences.length) sheet.append(el('p', 'empty', 'No history for this exercise yet.'));
   if (logged) {
     const all = logged.sessions.flatMap(s => s.sets);
     const stats = el('div', 'ex-stats');
@@ -1507,6 +1558,8 @@ function openExercise(of) {
   }
   if (!dialog.open) dialog.showModal();
   syncBack();
+  // The sheet has its own main action (saving a plan edit): the live set's "Log" isn't armed underneath.
+  clearDirty();
   if (points.length > 1) drawProgress(chart, points);
 }
 
