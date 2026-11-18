@@ -505,6 +505,14 @@ fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
 
 /// Typed text during a workout ("10x40", "25 min", "2 km"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
+    log_text(db, text, None, now, request_id)
+}
+
+/// `handle_text` for the agent's `workout log`: `warmup` Some(true) logs a warm-up, Some(false) a working
+/// set. None decides like a typed set: while the warm-up is pending, a set lighter than the working
+/// target is the warm-up (2026-11-18: "warm-up done with 45 kg" became working set 1, and every later
+/// set landed one exercise late).
+pub fn log_text(db: &Connection, text: &str, warmup: Option<bool>, now: Ts, request_id: &str) -> Result<CoachView> {
     let Some(workout) =
         active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting))
     else {
@@ -540,8 +548,18 @@ pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Re
             }
         }
     };
+    let mut value = value;
+    if let Some(row) = &active
+        && value.measure() == Measure::Reps
+    {
+        let lighter = set_kind.signed(value.weight) < set_kind.signed(row.target_weight);
+        if warmup.unwrap_or(lighter && workout::warmup_pending(db, row)?) {
+            value.set_type = SetType::Warmup;
+        }
+    }
     log_set(db, &workout.id, &value, now, request_id)?;
-    let ack = format!("✅ {}", set_kind.set(value.weight, value.reps, value.seconds, value.meters));
+    let what = if value.set_type == SetType::Warmup { "Warm-up " } else { "" };
+    let ack = format!("✅ {what}{}", set_kind.set(value.weight, value.reps, value.seconds, value.meters));
     Ok(CoachView { react: Some("👍".into()), ..acked(ack, after_change(db, &workout.id, now, request_id)?) })
 }
 
@@ -1017,6 +1035,10 @@ mod tests {
     use crate::domain::templates::{Template, get_template, import_template};
     use crate::domain::workout::tests::{at, spec};
 
+    fn kg(weight: f64) -> audit::SetChange {
+        audit::SetChange { weight: Some(weight), ..Default::default() }
+    }
+
     /// Plan order puts shoulders between the two chest exercises, like the first real session.
     fn push(db: &Connection) {
         let template = Template {
@@ -1134,7 +1156,7 @@ mod tests {
         let r = &data(&live(&db, at(6)), "🔄 Swap")["swap:".len()..];
         app_tap(&db, &format!("gc:log:{r}:25:10"), at(10), "app-log").unwrap();
         let set = app_last(&db, &workout).unwrap()["id"].as_str().unwrap().to_string();
-        crate::domain::audit::correct_set(&db, &set, Some(30.0), None, None, None, at(20), "fix").unwrap();
+        crate::domain::audit::correct_set(&db, &set, kg(30.0), at(20), "fix").unwrap();
         app_fixed(&db, &set, at(20)).unwrap();
         let views: Vec<CoachView> = AgentEvent::select(&db, "WHERE type = ?1 ORDER BY rowid", [APP_VIEW])
             .unwrap()
@@ -1304,8 +1326,7 @@ mod tests {
         handle_tap(&db, &data(&live(&db, at(110)), "⏭ Next exercise"), at(112), "cb-1").unwrap();
         handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
-        let fixed =
-            crate::domain::audit::correct_set(&db, &set.id, Some(95.0), None, None, None, at(700), "fix").unwrap();
+        let fixed = crate::domain::audit::correct_set(&db, &set.id, kg(95.0), at(700), "fix").unwrap();
         assert_eq!(
             (fixed["data"]["before"]["weight"].as_f64(), fixed["data"]["next_weight"].as_f64()),
             (Some(90.0), Some(95.0))
@@ -1651,7 +1672,8 @@ mod tests {
         let ended = handle_action(&db, Action::End, None, None, None, false, at(1800), "end").unwrap();
         assert!(ended.cards[0].text.contains("~~Cycling~~ skipped"), "{}", ended.cards[0].text);
         let id = WorkoutSession::first(&db, "", []).unwrap().unwrap().id;
-        let fixed = audit::add_set(&db, &id, "cycling", "25 min", at(7200), "fix").unwrap()["data"].clone();
+        let fixed =
+            audit::add_set(&db, &id, "cycling", "25 min", SetType::Working, at(7200), "fix").unwrap()["data"].clone();
         assert_eq!(
             (fixed["status_before"].as_str(), fixed["status"].as_str(), fixed["seconds"].as_i64()),
             (Some("SKIPPED"), Some("COMPLETED"), Some(1500))
@@ -1663,15 +1685,19 @@ mod tests {
         // Logged during the workout, so later history keeps its order.
         assert_eq!(logs(&db, &row.id, None).unwrap()[0].logged_at, at(1800));
         // A second, different kind of set on it is refused; a wrong time is corrected instead.
-        let mixed = audit::add_set(&db, &id, "cycling", "10x40", at(7201), "mixed").unwrap_err();
+        let mixed = audit::add_set(&db, &id, "cycling", "10x40", SetType::Working, at(7201), "mixed").unwrap_err();
         assert!(mixed.to_string().contains("logged as a time"), "{mixed}");
         let set_id = fixed["set_id"].as_str().unwrap();
-        let corrected = audit::correct_set(&db, set_id, None, None, Some(1560), None, at(7202), "fix-time").unwrap();
+        let corrected = audit::correct_set(
+            &db,
+            set_id,
+            audit::SetChange { seconds: Some(1560), ..Default::default() },
+            at(7202),
+            "fix-time",
+        )
+        .unwrap();
         assert_eq!(corrected["data"]["after"]["seconds"], 1560);
-        assert_eq!(
-            audit::correct_set(&db, set_id, Some(40.0), None, None, None, at(7203), "kg").unwrap_err().code(),
-            "INVALID_SET"
-        );
+        assert_eq!(audit::correct_set(&db, set_id, kg(40.0), at(7203), "kg").unwrap_err().code(), "INVALID_SET");
     }
 
     fn planned(
@@ -1841,5 +1867,143 @@ mod tests {
         let plan = planned(&db, "push", tomorrow, crate::db::models::SessionStatus::Committed);
         begin(&db, &plan.id[..8], tomorrow, "begin").unwrap();
         assert_eq!(evidence(&db, tomorrow, &tz).unwrap(), vec![(20.0 * 60.0, 1.0)]); // 18:00 UTC = 20:00 Berlin
+    }
+
+    /// Legs as on 2026-11-18: leg press with a warm-up, then two more exercises, two sets each.
+    fn legs(db: &Connection) -> String {
+        let template = Template {
+            id: "legs".into(),
+            name: "Legs".into(),
+            exercises: vec![
+                spec(
+                    json!({"id": "press", "name": "Horizontal leg press", "role": "press", "primary": true, "muscle": "Quads", "working_sets": 2, "target_weight": 85, "warmup_weight": 42.5}),
+                ),
+                spec(
+                    json!({"id": "ext", "name": "Leg extension", "role": "accessory", "muscle": "Quads", "working_sets": 2, "target_weight": 75}),
+                ),
+                spec(
+                    json!({"id": "curl", "name": "Lying leg curl", "role": "accessory", "muscle": "Hamstrings", "working_sets": 2, "target_weight": 60}),
+                ),
+            ],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(db, &template).unwrap();
+        start(db, Some("legs"), None, false, at(0), "start").unwrap();
+        active_workout(db).unwrap().unwrap().id
+    }
+
+    fn agent(db: &Connection, now: Ts, tool: &str, args: Value) -> Result<Value> {
+        let request_id = format!("{tool}-{}", now.0.as_second());
+        let mut cx = crate::tools::Ctx { db, now, request_id, data_dir: Path::new("/tmp"), effects: vec![] };
+        crate::tools::call(&mut cx, tool, args)
+    }
+
+    /// Each exercise's sets as "W45x8" / "90x8", by exercise name.
+    fn sets(db: &Connection, workout_id: &str) -> Vec<(String, Vec<String>)> {
+        exercises(db, workout_id)
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let sets = logs(db, &e.id, None).unwrap();
+                let mut sets: Vec<_> = sets.iter().map(|s| (s.set_type == SetType::Working, s.set_number, s)).collect();
+                sets.sort_by_key(|(working, n, _)| (*working, *n));
+                let text = |s: &crate::db::models::SetLog| {
+                    let w = if s.set_type == SetType::Warmup { "W" } else { "" };
+                    format!("{w}{}x{}", s.weight, s.reps)
+                };
+                (name(e).to_string(), sets.into_iter().map(|(_, _, s)| text(s)).collect())
+            })
+            .collect()
+    }
+
+    /// 2026-11-18: "warm-up done with 45kg" was logged as working set 1, leg press counted itself done one
+    /// set early, and every set after it landed one exercise late while the agent said it was fine. Now a
+    /// lighter set while the warm-up is pending is the warm-up, a set goes on the exercise named, and the
+    /// reply learns where each set landed.
+    #[test]
+    fn a_typed_warmup_and_named_sets_land_where_the_owner_said() {
+        let db = db();
+        let id = legs(&db);
+        let warm =
+            agent(&db, at(10), "workout", json!({"action": "log", "text": "8x45", "which": "Horizontal leg press"}));
+        assert_eq!(warm.unwrap()["logged"]["set_type"], "WARMUP");
+        handle_text(&db, "8x90", at(100), "s1").unwrap();
+        // The agent names leg press while the coach is still on it: same as the card.
+        let second =
+            agent(&db, at(200), "workout", json!({"action": "log", "text": "8x95", "which": "Horizontal leg press"}));
+        assert_eq!(second.unwrap()["logged"]["exercise"], "Horizontal leg press");
+        // The coach moved on to leg extension; an extra leg press set still goes on leg press.
+        let extra =
+            agent(&db, at(300), "workout", json!({"action": "log", "text": "6x95", "which": "Horizontal leg press"}))
+                .unwrap();
+        assert_eq!(extra["data"]["exercise"], "Horizontal leg press");
+        assert_eq!(workout::active_exercise(&db, &id).unwrap().exercise_id, "ext", "the coach stays where it is");
+        // A set for an exercise not started yet goes on it, and the coach finds it done.
+        for (i, text) in ["8x60", "7x60"].iter().enumerate() {
+            agent(
+                &db,
+                at(400 + i as i64),
+                "workout",
+                json!({"action": "log", "text": text, "which": "Lying leg curl"}),
+            )
+            .unwrap();
+        }
+        handle_text(&db, "10x75", at(500), "e1").unwrap();
+        handle_text(&db, "8x85", at(600), "e2").unwrap();
+        assert_eq!(
+            sets(&db, &id),
+            vec![
+                ("Horizontal leg press".into(), vec!["W45x8".into(), "90x8".into(), "95x8".into(), "95x6".into()]),
+                ("Leg extension".into(), vec!["75x10".into(), "85x8".into()]),
+                ("Lying leg curl".into(), vec!["60x8".into(), "60x7".into()]),
+            ]
+        );
+        assert_eq!(
+            workout::load_workout(&db, &id, None).unwrap().status,
+            WorkoutStatus::PlanUpdated,
+            "the coach finished it"
+        );
+    }
+
+    /// Today's mess fixed after the fact with set_correct alone: a warm-up logged as working, sets on
+    /// the wrong exercise, a set that never happened. The rest renumber in the order done.
+    #[test]
+    fn any_logged_set_can_be_retyped_moved_or_deleted() {
+        let db = db();
+        let id = legs(&db);
+        agent(&db, at(10), "workout", json!({"action": "log", "text": "8x45", "warmup": false})).unwrap();
+        for (i, text) in ["8x90", "8x95", "10x75", "8x85", "8x85"].iter().enumerate() {
+            handle_text(&db, text, at(100 * (i as i64 + 1)), &format!("s{i}")).unwrap();
+        }
+        let set = |weight: f64, exercise: &str| -> String {
+            db.query_row(
+                "SELECT s.id FROM set_log s JOIN workout_exercise e ON e.id = s.workout_exercise_id WHERE s.weight = ?1 AND e.exercise_id = ?2 ORDER BY s.logged_at LIMIT 1",
+                rusqlite::params![weight, exercise],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let (warmup, ninety_five, eighty_five) = (set(45.0, "press"), set(95.0, "ext"), set(85.0, "curl"));
+        agent(&db, at(700), "set_correct", json!({"set_id": warmup, "warmup": true})).unwrap();
+        agent(&db, at(701), "set_correct", json!({"set_id": ninety_five, "exercise": "Horizontal leg press"})).unwrap();
+        let moved =
+            agent(&db, at(702), "set_correct", json!({"set_id": eighty_five, "exercise": "leg extension"})).unwrap();
+        assert_eq!(moved["data"]["after"]["set_number"], 2);
+        let doubled = set(85.0, "curl");
+        agent(&db, at(703), "set_correct", json!({"set_id": doubled, "delete": true})).unwrap();
+        assert_eq!(
+            sets(&db, &id),
+            vec![
+                ("Horizontal leg press".into(), vec!["W45x8".into(), "90x8".into(), "95x8".into()]),
+                ("Leg extension".into(), vec!["75x10".into(), "85x8".into()]),
+                ("Lying leg curl".into(), vec![]),
+            ]
+        );
+        let both =
+            agent(&db, at(704), "set_correct", json!({"set_id": warmup, "delete": true, "reps": 5})).unwrap_err();
+        assert_eq!(both.code(), "INVALID_ARGUMENT");
     }
 }

@@ -74,6 +74,14 @@ pub fn logs(db: &Connection, exercise_row_id: &str, kind: Option<SetType>) -> Re
     }
 }
 
+/// The set logged last (by insert order), with its exercise: what a log reply should name.
+pub fn last_logged(db: &Connection) -> Result<Value> {
+    let Some(set) = SetLog::first(db, "ORDER BY rowid DESC", [])? else { return Ok(Value::Null) };
+    let exercise = WorkoutExercise::get(db, &set.workout_exercise_id)?;
+    Ok(json!({"exercise": exercise.as_ref().map(name), "set_id": set.id, "set_type": set.set_type,
+        "set_number": set.set_number, "weight": set.weight, "reps": set.reps, "seconds": set.seconds, "meters": set.meters}))
+}
+
 pub fn working_count(db: &Connection, exercise_row_id: &str) -> Result<i64> {
     Ok(logs(db, exercise_row_id, Some(SetType::Working))?.len() as i64)
 }

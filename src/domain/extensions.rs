@@ -78,7 +78,8 @@ pub struct When {
     /// Once only: the local date, "YYYY-MM-DD".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
-    /// Before_session only: minutes before the session starts (1–1440).
+    /// Before_session: minutes before the session starts (1–1440). Workout_finished: minutes after the
+    /// workout ends (0–1440, default 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minutes: Option<i64>,
     /// Before_session only: just sessions of this workout (template id); every session when absent.
@@ -95,7 +96,7 @@ pub enum Repeat {
     Once,
     /// `minutes` before each planned session (or each of one `workout`).
     BeforeSession,
-    /// Once after each finished workout.
+    /// Once after each finished workout, `minutes` after it ends (default right away).
     WorkoutFinished,
 }
 
@@ -105,8 +106,12 @@ pub enum Slot {
     Daily(Time),
     Weekly(Weekday, Time),
     Once(DateTime),
-    BeforeSession { minutes: i64, workout: Option<String> },
-    WorkoutFinished,
+    BeforeSession {
+        minutes: i64,
+        workout: Option<String>,
+    },
+    /// Minutes after the workout ends.
+    WorkoutFinished(i64),
 }
 
 impl When {
@@ -126,8 +131,8 @@ impl When {
         When { minutes: Some(minutes), workout: workout.map(String::from), ..When::new(Repeat::BeforeSession) }
     }
 
-    pub fn workout_finished() -> Self {
-        When::new(Repeat::WorkoutFinished)
+    pub fn workout_finished(minutes: i64) -> Self {
+        When { minutes: (minutes > 0).then_some(minutes), ..When::new(Repeat::WorkoutFinished) }
     }
 
     /// Refuses a schedule that is missing its time or day.
@@ -155,7 +160,10 @@ impl When {
                 Some(minutes @ 1..=1440) => Slot::BeforeSession { minutes, workout: self.workout.clone() },
                 _ => crate::bail!("INVALID_EXTENSION", "A before_session trigger needs `minutes` (1–1440)"),
             },
-            Repeat::WorkoutFinished => Slot::WorkoutFinished,
+            Repeat::WorkoutFinished => match self.minutes.unwrap_or(0) {
+                minutes @ 0..=1440 => Slot::WorkoutFinished(minutes),
+                _ => crate::bail!("INVALID_EXTENSION", "A workout_finished trigger's `minutes` is 0–1440"),
+            },
         })
     }
 }
@@ -210,7 +218,10 @@ impl Spec {
                         when.minutes.unwrap_or_default(),
                         when.workout.as_deref().unwrap_or("planned")
                     ),
-                    Repeat::WorkoutFinished => "after each workout".into(),
+                    Repeat::WorkoutFinished => match when.minutes.unwrap_or(0) {
+                        0 => "after each workout".into(),
+                        minutes => format!("{minutes} min after each workout"),
+                    },
                 };
                 format!("{when}: {}", short(instruction, 120))
             }
@@ -541,11 +552,12 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
                     due.push((key, json!({"session_id": s.id, "starts_at": s.planned_start_at})));
                 }
             }
-            Slot::WorkoutFinished => {
+            Slot::WorkoutFinished(minutes) => {
+                let lag = SignedDuration::from_mins(*minutes);
                 for w in WorkoutSession::select(
                     db,
                     "WHERE status = 'PLAN_UPDATED' AND completed_at > ?1 AND completed_at <= ?2 ORDER BY completed_at",
-                    [since, now],
+                    [since - lag, now - lag],
                 )? {
                     due.push((w.id.clone(), json!({"workout_id": w.id})));
                 }
@@ -820,8 +832,11 @@ mod tests {
     fn workout_triggers_fire_once_and_the_day_is_capped() {
         let db = crate::db::test::db();
         let now = at("2026-11-15T09:00:00Z");
-        let after = Spec::Trigger { when: When::workout_finished(), instruction: "Ask how the shoulder felt".into() };
+        let after = Spec::Trigger { when: When::workout_finished(0), instruction: "Ask how the shoulder felt".into() };
         save(&db, "shoulder", after, Author::Agent, now).unwrap();
+        // "An hour after my workout" (2026-11-18): the same workout wakes the delayed trigger at +60 min.
+        let later = Spec::Trigger { when: When::workout_finished(60), instruction: "Vitamins and creatine".into() };
+        save(&db, "vitamins", later, Author::Agent, now).unwrap();
         db.execute(
             "INSERT INTO workout_session (id, status, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES ('w1', 'PLAN_UPDATED', ?1, ?2, 0, '{}')",
             [now.mins(50), now.mins(55)],
@@ -830,12 +845,16 @@ mod tests {
         assert_eq!(fire_due(&db, now.mins(56)).unwrap(), 1);
         assert_eq!(fire_due(&db, now.mins(57)).unwrap(), 0);
         assert_eq!(wakes(&db)[0]["payload"]["workout_id"], "w1");
+        assert_eq!(fire_due(&db, now.mins(114)).unwrap(), 0, "not before the hour is up");
+        assert_eq!(fire_due(&db, now.mins(116)).unwrap(), 1);
+        assert_eq!(fire_due(&db, now.mins(118)).unwrap(), 0);
+        assert_eq!(wakes(&db)[1]["payload"]["trigger"], "vitamins");
 
         for i in 0..DAILY_FIRES {
             let spec = Spec::Trigger { when: When::daily("12:00"), instruction: format!("check {i}") };
             save(&db, &format!("t{i}"), spec, Author::Agent, now).unwrap();
         }
-        assert_eq!(fire_due(&db, at("2026-11-15T11:00:00Z")).unwrap() as i64, DAILY_FIRES - 1);
+        assert_eq!(fire_due(&db, at("2026-11-15T11:00:00Z")).unwrap() as i64, DAILY_FIRES - 2);
         assert_eq!(wakes(&db).len() as i64, DAILY_FIRES);
     }
 
