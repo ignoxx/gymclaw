@@ -69,7 +69,6 @@ pub fn scrub(text: &str, max: usize) -> String {
     for pattern in SECRET_VALUE.iter() {
         value = pattern.replace_all(&value, "[redacted]").into_owned();
     }
-    // JS counts UTF-16 units; chars are close enough for a cap.
     let count = value.chars().count();
     if count > max { format!("{}…[+{}]", value.chars().take(max).collect::<String>(), count - max) } else { value }
 }
@@ -133,7 +132,7 @@ impl TurnLog {
         TurnLog { tx: Some(tx) }
     }
 
-    /// Queue one event; `ts` is added. Null fields are dropped (JSON.stringify drops undefined).
+    /// Queue one event; `ts` is added and null fields are dropped.
     pub fn log(&self, event: Value) {
         let Some(tx) = &self.tx else { return };
         let ts = jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();

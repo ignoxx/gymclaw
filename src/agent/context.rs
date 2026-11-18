@@ -6,9 +6,8 @@ use jiff::{SignedDuration, ToSpan};
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{
-    AvailabilityBlock, ChatMessage, ChatRole, NoteKind, OnboardingState, PlannedSession, WorkoutSession,
-};
+use crate::db::models::{AvailabilityBlock, ChatMessage, ChatRole, NoteKind, OnboardingState, PlannedSession};
+use crate::domain::calendar::workout_name;
 use crate::domain::profile::get_profile;
 use crate::error::Result;
 use crate::runtime::outbox::runtime_authority;
@@ -66,8 +65,6 @@ Trust rules:
 Finish every turn with exactly one of: the reply tool (a message with optional buttons, and/or a reaction), a plain text answer, or nothing (reply with no fields) when nothing needs saying. \
 A button tap comes back to you as the button's value, so make values plain requests (\"Move Push to 13:00\").";
 
-/// Agent events the owner may need to act on (old `events pending`).
-pub use crate::domain::events::ACTIONABLE;
 /// Chat rows in the window.
 pub const HISTORY: i64 = 30;
 
@@ -86,10 +83,10 @@ pub fn system(db: &Connection, now: Ts) -> Result<(String, String, Vec<String>)>
             .map(|n| format!("- [{}] {}", n.id.unwrap_or_default(), n.text))
             .collect();
         if !lines.is_empty() {
-            let used: usize = notes.iter().filter(|n| n.kind == kind).map(|n| n.text.chars().count()).sum();
             write!(
                 out,
-                "\n\n## {title} ({used}/{} chars; ids for note_edit/note_delete)\n{}",
+                "\n\n## {title} ({}/{} chars; ids for note_edit/note_delete)\n{}",
+                meta::used(db, kind)?,
                 meta::budget(kind),
                 lines.join("\n")
             )
@@ -151,8 +148,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
             .collect();
         writeln!(out, "Last completed per workout, longest ago first: {}.", done.join(", ")).unwrap();
     }
-    let setup_done = onboarding.is_some_and(|o| o.completed_fingerprint.is_some());
-    if !setup_done {
+    if !crate::domain::onboarding::finished(db)? {
         writeln!(out, "Setup: not finished. Check onboarding status before planning; never interrupt a running workout with setup.").unwrap();
     }
     let authority = runtime_authority(db)?;
@@ -198,12 +194,6 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         writeln!(out, "- none planned").unwrap();
     }
     for s in &sessions {
-        let name = s
-            .workout_plan_json
-            .pointer("/template/name")
-            .and_then(Value::as_str)
-            .or(s.workout_template_id.as_deref())
-            .unwrap_or("Workout");
         let begin = s.planned_start_at.local(&tz);
         let follows = match &s.follows_session_id {
             Some(id) => format!(" make-up for {}", name_sessions(db, id)?),
@@ -215,7 +205,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
             begin.strftime("%a %-d %b"),
             begin.strftime("%H:%M"),
             s.planned_end_at.local(&tz).strftime("%H:%M"),
-            name,
+            workout_name(s),
             s.status,
             if s.user_locked { " locked" } else { "" },
             s.id,
@@ -223,12 +213,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         .unwrap();
     }
 
-    let running = WorkoutSession::first(
-        db,
-        "WHERE started_at IS NOT NULL AND completed_at IS NULL AND status NOT IN ('WORKOUT_COMPLETE', 'PLAN_UPDATED') ORDER BY started_at DESC",
-        [],
-    )?;
-    if let Some(w) = running {
+    if let Some(w) = crate::domain::workout::active_workout(db)? {
         let mut stmt = db.prepare(
             "SELECT e.config_json ->> 'name', e.status, e.planned_working_sets,
                 (SELECT count(*) FROM set_log s WHERE s.workout_exercise_id = e.id AND s.set_type = 'WORKING')
@@ -283,7 +268,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
 
     let mut shown = vec![];
     for mut e in crate::domain::events::open_issues(db)? {
-        if crate::domain::events::WAKE.contains(&e.r#type.as_str()) {
+        if crate::domain::events::wakes(&e.r#type) {
             shown.push(e.id.clone());
         }
         crate::time::localize(&mut e.payload_json.0, &tz);
@@ -321,13 +306,8 @@ pub fn name_sessions(db: &Connection, text: &str) -> Result<String> {
             PlannedSession::get(db, m.as_str())?
         };
         if let Some(s) = found {
-            let name = s
-                .workout_plan_json
-                .pointer("/template/name")
-                .and_then(Value::as_str)
-                .or(s.workout_template_id.as_deref())
-                .unwrap_or("Workout");
-            write!(out, " ({} {name})", s.planned_start_at.local(&tz).strftime("%a %-d %b %H:%M")).unwrap();
+            write!(out, " ({} {})", s.planned_start_at.local(&tz).strftime("%a %-d %b %H:%M"), workout_name(&s))
+                .unwrap();
         }
         last = m.end();
     }

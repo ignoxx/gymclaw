@@ -76,7 +76,7 @@ pub fn photo_taken_at(path: &Path, zone: &TimeZone) -> Result<Ts> {
     let Some(stamp) = stamp else {
         crate::bail!(
             "PHOTO_DATE_UNKNOWN",
-            "Photo has no capture date (Telegram strips it from compressed photos). Ask for the original sent as a file, or pass the date with --at."
+            "Photo has no capture date (Telegram strips it from compressed photos). Ask for the original sent as a file, or pass the date as `at`."
         );
     };
     let taken = civil::DateTime::strptime("%Y:%m:%d %H:%M:%S", &stamp)
@@ -199,7 +199,8 @@ pub fn trend(db: &Connection, now: Ts) -> Result<Value> {
     Ok(json!({"latest": entry_data(latest, &get_profile(db)?.tz()), "change_kg": change, "days_since": days_since}))
 }
 
-/// Weekly briefing line about weight trend, or None without data.
+/// Weekly briefing line: the weight trend, a nudge when the last weigh-in is a week old, or an
+/// invitation when there is none yet. Always Some.
 pub fn briefing_line(db: &Connection, now: Ts) -> Result<Option<String>> {
     let summary = trend(db, now)?;
     let Some(kg) = summary["latest"]["kg"].as_f64() else {
@@ -260,7 +261,7 @@ mod tests {
             out["data"]["logged"].as_array().unwrap().iter().map(|e| e["measured_at"].as_str().unwrap()).collect();
         assert_eq!(times, ["2026-09-28T05:05:00+00:00", "2026-10-05T05:40:00+00:00", "2026-09-27T06:00:00+00:00"]);
         // 7 days up to the Oct 5 weigh-in: 82.4. The 7 days before: (83.0 + 83.4) / 2.
-        assert_eq!(out["user_message_hint"], "3 weigh-ins logged · -0.8 kg vs the week before");
+        assert_eq!(out["data"]["instruction"], "3 weigh-ins logged · -0.8 kg vs the week before");
         let again = log(&db, &entries, now(), "tg-2").unwrap();
         assert_eq!(
             (again["data"]["logged"].as_array().unwrap().len(), again["data"]["duplicates"].as_array().unwrap().len()),

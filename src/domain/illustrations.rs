@@ -16,8 +16,6 @@ pub struct Item {
     pub equipment: String,
     pub primary_muscle: String,
     #[serde(default)]
-    pub secondary_muscles: Vec<String>,
-    #[serde(default)]
     pub is_stretch: bool,
     #[serde(default)]
     pub frames: Vec<serde_json::Value>,
@@ -35,7 +33,7 @@ pub struct Entry {
 }
 
 /// Slug → item, sorted by slug (manifest order is not needed for any result).
-pub static CATALOG: LazyLock<BTreeMap<String, Item>> = LazyLock::new(|| {
+static CATALOG: LazyLock<BTreeMap<String, Item>> = LazyLock::new(|| {
     let path = crate::config::assets_dir().join("manifest.json");
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("workout guide manifest {}: {e}", path.display()));
@@ -47,7 +45,7 @@ pub fn catalog() -> &'static BTreeMap<String, Item> {
     &CATALOG
 }
 
-pub fn entry(item: &Item) -> Entry {
+fn entry(item: &Item) -> Entry {
     Entry {
         guide_id: item.slug.clone(),
         name: item.name.clone(),
@@ -129,7 +127,7 @@ const ALIASES: &[(&str, &str)] = &[
 const EQUIPMENT_WORDS: &[&str] =
     &["cable", "dumbbell", "barbell", "machine", "kettlebell", "smith", "band", "plate", "bodyweight"];
 
-pub fn words(text: &str) -> HashSet<String> {
+fn words(text: &str) -> HashSet<String> {
     let lower = text.to_lowercase();
     let spelled: Vec<&str> = lower
         .split(|c: char| !c.is_ascii_lowercase())
@@ -195,6 +193,28 @@ fn rank(query: &str, muscle: Option<&str>, equipment: Option<&str>) -> Vec<Score
 /// Search the catalog (see `rank`); filters are case-insensitive exact matches.
 pub fn search(query: &str, muscle: Option<&str>, equipment: Option<&str>, limit: usize) -> Vec<Entry> {
     rank(query, muscle, equipment).into_iter().take(limit).map(|s| entry(s.item)).collect()
+}
+
+/// The catalog item a guide_id or exact name (any case) names.
+pub fn lookup(key: &str) -> Option<&'static Item> {
+    let key = key.trim().to_lowercase();
+    catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key))
+}
+
+/// The top 3 search matches' guide_ids, for "closest: …" hints.
+pub fn suggestions(name: &str) -> Vec<String> {
+    search(name, None, None, 3).into_iter().map(|e| e.guide_id).collect()
+}
+
+/// EXERCISE_UNKNOWN for a name `lookup` doesn't know, with the best search matches to pick from.
+pub fn unknown(query: &str) -> crate::error::Error {
+    let options: Vec<String> =
+        search(query, None, None, 5).iter().map(|o| format!("{} ({})", o.guide_id, o.name)).collect();
+    let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
+    crate::error::Error::domain(
+        "EXERCISE_UNKNOWN",
+        format!("No exact match for '{query}'. Pass one guide_id: {options}"),
+    )
 }
 
 /// Identity of an entry's picture. A few catalog entries are the same movement under two names with

@@ -10,9 +10,8 @@ pub struct FailureState {
     pub stop: Option<String>,
     pub output: Option<u64>,
     pub reasoning: Option<u64>,
-    /// Tools that ran (they may have changed data).
-    pub tool_calls: usize,
-    /// Each tool that ran, in order, "(failed)" when it did: what a reflection on the turn reads.
+    /// Each tool that ran (it may have changed data), in order, "(failed)" when it did: what a
+    /// reflection on the turn reads.
     pub ran: Vec<String>,
     /// A model call was made at all.
     pub observed_input: bool,
@@ -62,7 +61,7 @@ pub fn diagnose(state: &FailureState) -> String {
     if let Some(r) = state.reasoning {
         metrics.push(format!("reasoning {}", thousands(r)));
     }
-    metrics.push(format!("{} tool calls", state.tool_calls));
+    metrics.push(format!("{} tool calls", state.ran.len()));
     if !state.observed_input {
         metrics.push("no model call".into());
     }
@@ -91,7 +90,7 @@ mod tests {
             stop: Some("length".into()),
             output: Some(16384),
             reasoning: Some(15900),
-            tool_calls: 2,
+            ran: vec!["get_week".into(), "session_update".into()],
             observed_input: true,
             ..Default::default()
         };

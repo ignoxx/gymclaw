@@ -6,8 +6,6 @@
 //! exercise ID, so old buttons stop working once the workout has moved past that exercise.
 use std::path::Path;
 
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::db::Connection;
@@ -23,11 +21,10 @@ use crate::domain::illustrations::{catalog, timed};
 use crate::domain::profile::update_profile;
 use crate::domain::set_parser::{SetInput, parse_block, parse_set};
 use crate::domain::templates::{Load, Measure, SetKind, remember_swap};
-use crate::domain::view::{Button, Card, CardKind, Cleanup, CoachView, Edit};
+use crate::domain::view::{Button, Card, CardKind, CoachView, Edit};
 use crate::domain::workout::{
-    self, active_workout, cut_rest, exercises, expected_weight, format_distance, format_time, g, guide_id, kind,
-    log_set, logs, measure, name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved,
-    working_count,
+    self, active_workout, cut_rest, exercises, format_distance, format_time, g, guide_id, kind, log_set, logs, measure,
+    name, pending_rest, rest_complete, set_rest, skip_rest, skip_warmup, start, unresolved, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -57,7 +54,7 @@ fn acked(ack: impl Into<String>, cards: Vec<Card>) -> CoachView {
 }
 
 fn deleted(cards: Vec<Card>) -> CoachView {
-    CoachView { cleanup: Some(Cleanup::Delete), cards, ..handled() }
+    CoachView { delete: true, cards, ..handled() }
 }
 
 /// `workout::next_working_set`, or bodyweight reps (no weight to ask for). The set card, its quick
@@ -295,8 +292,7 @@ fn next_session(db: &Connection, now: Ts, tz: &jiff::tz::TimeZone) -> Result<Opt
 /// The wrap-up card: totals, pace and volume against the last session of the same workout, every
 /// lift that beat earlier sessions (🏆 for records, with confetti), next targets, where the week
 /// stands, every set in a collapsed quote, then the crowd question.
-fn summary_card(db: &Connection, result: &Value, now: Ts) -> Result<Card> {
-    let report = &result["data"];
+fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
     let workout_id = report["workout_id"].as_str().unwrap_or_default();
     let h = highlights::workout(db, workout_id)?;
     let profile = crate::domain::profile::get_profile(db)?;
@@ -487,7 +483,8 @@ pub fn card_context(db: &Connection, telegram_message_id: i64) -> Result<Option<
 fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Vec<Card>> {
     let workout = workout::load_workout(db, workout_id, None)?;
     if workout.status == WorkoutStatus::WorkoutComplete {
-        return Ok(vec![summary_card(db, &audit::finish(db, workout_id, now, &format!("{request_id}:finish"))?, now)?]);
+        let finished = audit::finish(db, workout_id, now, &format!("{request_id}:finish"))?;
+        return Ok(vec![summary_card(db, &finished["data"], now)?]);
     }
     Ok(vec![exercise_card(db, workout_id, now)?])
 }
@@ -520,9 +517,9 @@ pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Re
         Some(value) => value,
         None => {
             let reps_alone = active.as_ref().is_some_and(workout::reps_alone);
-            let parsed = expected_weight(db, &workout.id)
-                .and_then(|expected| parse_set(text, SetType::Working, expected, reps_alone));
-            match parsed {
+            // The weight the card offers decides an unclear order.
+            let expected = active.as_ref().map(|row| workout::next_working_set(db, row)).transpose()?.flatten();
+            match parse_set(text, expected.map(|(weight, _)| weight), reps_alone) {
                 Ok(value) => value,
                 Err(Error::Domain { .. }) => return Ok(CoachView::default()),
                 Err(other) => return Err(other),
@@ -670,7 +667,7 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
 /// One photo card per same-muscle alternative, each with a single 'Use' button.
 fn swap_cards(db: &Connection, workout_id: &str, row: &WorkoutExercise) -> Result<Vec<Card>> {
     let r = reference(&row.id);
-    let options = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?.options;
+    let options = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?;
     if options.is_empty() {
         return Ok(vec![Card {
             kind: CardKind::Option,
@@ -744,33 +741,19 @@ pub fn handle_rest_over(db: &Connection, now: Ts) -> Result<CoachView> {
     }
     let request_id = format!("rest-due:{}", job.id);
     rest_complete(db, &job.id, now, &request_id)?;
-    Ok(CoachView { rest_over: true, ..deleted(after_change(db, &workout.id, now, &request_id)?) })
+    Ok(deleted(after_change(db, &workout.id, now, &request_id)?))
 }
 
-/// Agent-initiated coach actions (the `workout` tool's verbs).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+/// The `workout` tool's verbs that act on the running workout (documented on `WorkoutAction`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Resend the current card.
     Card,
-    /// Show up to 3 same-muscle alternatives as buttons (only before the first set).
     Swap,
-    /// Do the current exercise later.
     Later,
-    /// Move on to the next exercise.
     Next,
-    /// End early, save, show the summary.
     End,
-    /// The owner is doing `exercise` now.
     Switch,
-    /// `exercise` is what the owner really did (`which`: the logged one).
-    Relabel,
-    /// Seconds between sets for this workout (`remember`: also the default).
     Rest,
-}
-
-fn needed<T>(value: Option<T>, name: &str) -> Result<T> {
-    value.ok_or_else(|| Error::domain("ARGUMENT_REQUIRED", format!("Missing {name}")))
 }
 
 /// Owner says a logged exercise was really `exercise`. `workout_id` picks any past workout; default
@@ -799,31 +782,26 @@ pub fn relabel(
     Ok(CoachView { edits: finish_card_edits(db, &workout.id, now)?, ..acked(ack, vec![]) })
 }
 
-/// Agent-initiated action: 'card', 'swap', 'later', 'next', 'end' on the current exercise;
-/// 'switch' (exercise: do this one now), 'relabel' (exercise: what was really done, which: the logged one;
-/// also after the workout), 'rest' (seconds for this workout; remember: also the default from now on).
+/// Run a `workout` tool verb. The tool has already checked that Switch has `exercise` and Rest has
+/// `seconds`; `remember` makes Rest's seconds the owner's default too.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_action(
     db: &Connection,
     action: Action,
     exercise: Option<&str>,
-    which: Option<&str>,
+    _which: Option<&str>,
     seconds: Option<i64>,
     remember: bool,
     now: Ts,
     request_id: &str,
 ) -> Result<CoachView> {
-    let seconds = if action == Action::Rest { Some(needed(seconds, "seconds")?) } else { seconds };
+    let seconds = seconds.unwrap_or_default();
     if action == Action::Rest && remember {
         update_profile(db, &Map::from_iter([("rest_seconds".to_string(), json!(seconds))]))?;
     }
-    if action == Action::Relabel {
-        return relabel(db, None, needed(exercise, "exercise")?, which, now, request_id);
-    }
-    let running = active_workout(db)?;
-    let Some(workout) = running else {
+    let Some(workout) = active_workout(db)? else {
         if action == Action::Rest && remember {
-            return Ok(acked(format!("Rest is {}s from now on.", seconds.unwrap_or_default()), vec![]));
+            return Ok(acked(format!("Rest is {seconds}s from now on."), vec![]));
         }
         crate::bail!("NO_ACTIVE_WORKOUT", "No workout running; start one first");
     };
@@ -831,18 +809,17 @@ pub fn handle_action(
         Action::Card => return Ok(CoachView { cards: after_change(db, &workout.id, now, request_id)?, ..handled() }),
         Action::End => return end_workout(db, &workout, now, request_id),
         Action::Rest => {
-            set_rest(db, &workout.id, seconds.unwrap_or_default(), now, request_id)?;
+            set_rest(db, &workout.id, seconds, now, request_id)?;
             // The live card stays; the next rest uses the new time.
             return Ok(CoachView { keep: true, ..handled() });
         }
         Action::Switch => {
-            adaptation::switch_to(db, &workout.id, needed(exercise, "exercise")?, true, now, request_id)?;
+            adaptation::switch_to(db, &workout.id, exercise.unwrap_or_default(), true, now, request_id)?;
             return Ok(deleted(after_change(db, &workout.id, now, request_id)?));
         }
         Action::Swap => "swap",
         Action::Later => "later",
         Action::Next => "next",
-        Action::Relabel => unreachable!("handled above"),
     };
     let rows = exercises(db, &workout.id)?;
     let Some(row) = rows
@@ -856,7 +833,7 @@ pub fn handle_action(
 }
 
 /// 'Start workout' on the session reminder: start that planned session's workout and send its first card.
-pub fn begin(db: &Connection, r: &str, now: Ts, request_id: &str) -> Result<CoachView> {
+fn begin(db: &Connection, r: &str, now: Ts, request_id: &str) -> Result<CoachView> {
     if let Some(running) = active_workout(db)? {
         return Ok(acked("Already running.", vec![exercise_card(db, &running.id, now)?]));
     }
@@ -867,9 +844,9 @@ pub fn begin(db: &Connection, r: &str, now: Ts, request_id: &str) -> Result<Coac
     let Some((planned, template_id)) = planned.and_then(|p| p.workout_template_id.clone().map(|t| (p, t))) else {
         return Ok(acked("⌛ This session can't be started anymore.", vec![]));
     };
-    start(db, Some(&template_id), Some(&planned.id), true, now, request_id)?;
-    let running = active_workout(db)?.ok_or_else(|| Error::domain("NO_ACTIVE_WORKOUT", "Workout did not start"))?;
-    Ok(acked("▶️ Started.", vec![exercise_card(db, &running.id, now)?]))
+    let started = start(db, Some(&template_id), Some(&planned.id), true, now, request_id)?;
+    let workout_id = started["data"]["workout_id"].as_str().unwrap_or_default();
+    Ok(acked("▶️ Started.", vec![exercise_card(db, workout_id, now)?]))
 }
 
 /// Session preview as a standalone coach message (the live card stays).
@@ -949,7 +926,7 @@ mod tests {
         assert_eq!(buttons(rest).iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["−15s", "−30s", "⏭ Skip"]);
         let skipped = handle_tap(&db, &data(rest, "⏭ Skip"), at(30), "cb-skip").unwrap();
         let card = &skipped.cards[0];
-        assert_eq!((skipped.cleanup, card.kind), (Some(Cleanup::Delete), CardKind::Set));
+        assert!(skipped.delete && card.kind == CardKind::Set);
         data(card, "✅ 12 × 90 kg");
         // Already on the machine: no Swap after the first set, not even from an older card.
         assert!(!buttons(card).iter().any(|b| b.0 == "🔄 Swap"));
@@ -964,9 +941,11 @@ mod tests {
         handle_text(&db, "10x90", at(10), "m1").unwrap();
         assert!(handle_rest_over(&db, at(50)).unwrap().cards.is_empty());
         let over = handle_rest_over(&db, at(101)).unwrap();
-        assert!(over.rest_over && over.cleanup == Some(Cleanup::Delete) && over.cards[0].kind == CardKind::Set);
+        assert!(over.delete && over.cards[0].kind == CardKind::Set);
         assert_eq!(NotificationJob::select(&db, "", []).unwrap()[0].status, JobStatus::Fired);
-        assert!(!handle_rest_over(&db, at(102)).unwrap().rest_over);
+        // Already closed: the countdown is still replaced, and the job fired once.
+        assert!(handle_rest_over(&db, at(102)).unwrap().delete);
+        assert_eq!(NotificationJob::select(&db, "", []).unwrap().len(), 1);
         let rest = handle_text(&db, "10x90", at(110), "m2").unwrap().cards.remove(0);
         // The finished exercise's rest (90 s), and the countdown says what comes next.
         assert_eq!((rest.text.as_str(), rest.rest_until), ("until next: **Shoulder press** · 25 kg", Some(at(200))));
@@ -997,7 +976,7 @@ mod tests {
         let option = handle_tap(&db, &data(&back.cards[0], "🔄 Swap"), at(9), "cb-5").unwrap().cards.remove(0);
         let sub = buttons(&option)[0].1.clone();
         let slug = sub.split(':').nth(2).unwrap().to_string();
-        assert_eq!(handle_tap(&db, &sub, at(10), "cb-6").unwrap().cleanup, Some(Cleanup::Delete));
+        assert!(handle_tap(&db, &sub, at(10), "cb-6").unwrap().delete);
         let template = get_template(&db, "push").unwrap();
         assert_eq!((template.exercises[0].id.as_str(), template.exercises[0].working_sets), (slug.as_str(), 2));
         assert_eq!(
@@ -1056,17 +1035,8 @@ mod tests {
         );
         // Unknown starting weight becomes the logged baseline for next time.
         assert_eq!(ExerciseProgression::get(&db, "incline").unwrap().unwrap().next_weight, 90.0);
-        let fixed = handle_action(
-            &db,
-            Action::Relabel,
-            Some("incline-dumbbell-press"),
-            Some("Machine incline press"),
-            None,
-            false,
-            at(700),
-            "fix",
-        )
-        .unwrap();
+        let fixed =
+            relabel(&db, None, "incline-dumbbell-press", Some("Machine incline press"), at(700), "fix").unwrap();
         assert_eq!((fixed.ack.as_deref(), fixed.cards.len()), (Some("✏️ Saved as Incline Dumbbell Press."), 0));
         assert!(ExerciseProgression::get(&db, "incline").unwrap().is_none());
         assert_eq!(ExerciseProgression::get(&db, "incline-dumbbell-press").unwrap().unwrap().next_weight, 90.0);
@@ -1211,7 +1181,7 @@ mod tests {
         assert!(cut.refresh && cut.cards[0].rest_until == Some(at(40)));
         // Cutting past zero ends the rest: the next set card comes right away.
         let over = handle_tap(&db, &data(&rest, "−30s"), at(30), "cb-2").unwrap();
-        assert!(over.cleanup == Some(Cleanup::Delete) && over.cards[0].kind == CardKind::Set);
+        assert!(over.delete && over.cards[0].kind == CardKind::Set);
         let profile = crate::domain::profile::get_profile(&db).unwrap();
         assert_eq!(profile.rest_seconds, 60);
     }

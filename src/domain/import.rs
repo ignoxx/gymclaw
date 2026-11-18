@@ -16,11 +16,12 @@ use crate::db::models::{
     ExerciseProgression, ExerciseStatus, SetLog, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus,
 };
 use crate::db::{Connection, Json, new_id};
-use crate::domain::backfill::PastSet;
 use crate::domain::core::mutate;
-use crate::domain::illustrations::{catalog, matching, search};
+use crate::domain::illustrations::{lookup, matching, suggestions};
+use crate::domain::past::PastSet;
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{ExerciseSpec, Load, default_load, get_template, pick, template_ids};
+use crate::domain::workout::in_seconds;
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -247,7 +248,7 @@ pub fn from_chat(workouts: &[PastWorkout], unit: Option<Unit>, zone: &TimeZone) 
                 kind: SetType::Working,
                 weight: unit.kg(s.weight),
                 reps: s.reps,
-                seconds: s.minutes.map(|m| (m * 60.0).round() as i64),
+                seconds: s.minutes.map(in_seconds),
                 meters: s.meters,
             })
             .collect();
@@ -333,8 +334,7 @@ fn chosen(specs: &[ExerciseSpec], to: &str) -> Result<Target> {
     if let Some(i) = pick(to, &keys(specs))? {
         return Ok(Target::from_spec(&specs[i]));
     }
-    let key = to.trim().to_lowercase();
-    match catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key)) {
+    match lookup(to) {
         Some(item) => Ok(Target::catalog(&item.slug, &item.name)),
         None => crate::bail!("EXERCISE_UNKNOWN", "'{to}' is neither a plan exercise nor a catalog guide_id"),
     }
@@ -367,10 +367,6 @@ fn names(history: &History) -> Vec<(String, usize)> {
     counts
 }
 
-fn closest(name: &str) -> Vec<String> {
-    search(name, None, None, 3).into_iter().map(|e| e.guide_id).collect()
-}
-
 /// Short summary of a saved export for the agent: format, size, and every exercise name with where it
 /// would go. Handed over with the owner's message when they send a CSV.
 pub fn summary(db: &Connection, path: &Path) -> Result<String> {
@@ -392,7 +388,7 @@ pub fn summary(db: &Connection, path: &Path) -> Result<String> {
     for (name, sets) in &names {
         let to = match automatic(&specs, name) {
             Some(t) => format!("{} ({})", t.id, t.name),
-            None => format!("? closest: {}", closest(name).join(", ")),
+            None => format!("? closest: {}", suggestions(name).join(", ")),
         };
         lines.push(format!("- {name} ({sets}) → {to}"));
     }
@@ -437,8 +433,8 @@ pub fn import(
         match &target {
             Some(t) => report.push(json!({"name": name, "sets": sets, "to": t})),
             None => {
-                report.push(json!({"name": name, "sets": sets, "to": null, "closest": closest(&name)}));
-                unresolved.push(format!("{name} (closest: {})", closest(&name).join(", ")));
+                report.push(json!({"name": name, "sets": sets, "to": null, "closest": suggestions(&name)}));
+                unresolved.push(format!("{name} (closest: {})", suggestions(&name).join(", ")));
             }
         }
         if let Some(t) = target {

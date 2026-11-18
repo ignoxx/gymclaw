@@ -2,7 +2,7 @@
 //!
 //! Every mutation runs through `mutate` with a request ID: a retry returns the original result, reuse
 //! with a different intent fails. Rest jobs are durable `notification_job` rows; the scheduler and the
-//! coach's live countdown fire them. Rows are written back as soon as they change (no autoflush).
+//! coach's live countdown fire them.
 //!
 //! - One unfinished workout at a time (`WORKOUT_ALREADY_ACTIVE`); a new start replaces one with nothing logged.
 //! - Nothing logged never counts as trained: `finish` refuses it, `discard` deletes it and reopens its session.
@@ -10,6 +10,8 @@
 //! - Warm-ups never count toward volume or progression, and logging a working set skips a pending one.
 //! - Exercises sharing a `group` (superset, circuit) take turns: after a working set the next member still
 //!   owed a set this round is up with no rest; rest comes after the round.
+use std::collections::HashSet;
+
 use jiff::SignedDuration;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -24,15 +26,13 @@ use crate::domain::core::mutate;
 use crate::domain::illustrations::{Entry, bodyweight, for_exercise, primary_muscle};
 use crate::domain::profile::get_profile;
 use crate::domain::set_parser::SetInput;
-use crate::domain::templates::{ExerciseSpec, Load, Measure, SetKind, Template, get_template};
+use crate::domain::templates::{ExerciseSpec, Load, Measure, SetKind, Template, get_template, half_weight, is_default};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
 /// Exercise states that still need a decision before the workout can finish.
-pub const UNRESOLVED: [ExerciseStatus; 3] = [ExerciseStatus::Pending, ExerciseStatus::Active, ExerciseStatus::Deferred];
-
 pub fn unresolved(status: ExerciseStatus) -> bool {
-    UNRESOLVED.contains(&status)
+    matches!(status, ExerciseStatus::Pending | ExerciseStatus::Active | ExerciseStatus::Deferred)
 }
 
 /// Move the workout to `to`, saved right away. Each action checks the state it starts from.
@@ -81,6 +81,14 @@ pub fn working_count(db: &Connection, exercise_row_id: &str) -> Result<i64> {
 /// The running workout (anything not yet PLAN_UPDATED), latest first.
 pub fn active_workout(db: &Connection) -> Result<Option<WorkoutSession>> {
     WorkoutSession::first(db, "WHERE status != 'PLAN_UPDATED' ORDER BY started_at DESC", [])
+}
+
+/// Ids of every exercise the owner has logged a set of.
+pub fn logged_exercise_ids(db: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = db.prepare_cached(
+        "SELECT DISTINCT e.exercise_id FROM workout_exercise e JOIN set_log s ON s.workout_exercise_id = e.id",
+    )?;
+    Ok(stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Sets of any kind (warm-ups, timed) logged in a workout.
@@ -157,7 +165,7 @@ pub fn muscle(exercise: &WorkoutExercise) -> Option<String> {
 }
 
 /// A typed `config_json` field (an `ExerciseSpec` field the workout copied); missing or older rows get the default.
-fn field<T: DeserializeOwned + Default>(exercise: &WorkoutExercise, key: &str) -> T {
+pub fn field<T: DeserializeOwned + Default>(exercise: &WorkoutExercise, key: &str) -> T {
     exercise.config_json.get(key).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
 }
 
@@ -188,8 +196,12 @@ pub fn group(exercise: &WorkoutExercise) -> Option<String> {
 
 /// Planned length of one working set of a timed exercise.
 pub fn target_seconds(exercise: &WorkoutExercise) -> Option<i64> {
-    let minutes = exercise.config_json.get("minutes").and_then(Value::as_f64);
-    minutes.filter(|_| measure(exercise) == Measure::Time).map(|m| (m * 60.0).round() as i64)
+    field::<Option<f64>>(exercise, "minutes").filter(|_| measure(exercise) == Measure::Time).map(in_seconds)
+}
+
+/// Minutes as whole seconds.
+pub fn in_seconds(minutes: f64) -> i64 {
+    (minutes * 60.0).round() as i64
 }
 
 /// Planned distance of one working set of a distance exercise.
@@ -213,34 +225,19 @@ pub fn set_measure(db: &Connection, exercise: &mut WorkoutExercise, measure: Mea
     exercise.update(db)
 }
 
-/// Whether a JSON value is set: null, false, 0, "", [] and {} are not.
-fn truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-    }
-}
-
 /// Unknown working weight (first session): a warm-up has no weight to aim for, so it's skipped.
 pub fn warmup_pending(db: &Connection, exercise: &WorkoutExercise) -> Result<bool> {
-    Ok(truthy(exercise.config_json.get("warmup_required"))
+    Ok(field::<bool>(exercise, "warmup_required")
         && exercise.target_weight > 0.0
         && logs(db, &exercise.id, Some(SetType::Warmup))?.is_empty())
 }
 
-/// Template warm-up weight, else about half the working weight on the exercise's increment.
+/// Template warm-up weight, else half the working weight (`half_weight`).
 pub fn warmup_weight(exercise: &WorkoutExercise) -> f64 {
-    let explicit = exercise.config_json.get("warmup_weight");
-    if truthy(explicit) {
-        return explicit.and_then(Value::as_f64).unwrap_or_default();
-    }
-    let increment = exercise.config_json.get("increment");
-    let step = if truthy(increment) { increment.and_then(Value::as_f64).unwrap_or(2.5) } else { 2.5 };
-    (exercise.target_weight / 2.0 / step).round_ties_even() * step
+    let set = |w: &f64| *w != 0.0;
+    field::<Option<f64>>(exercise, "warmup_weight").filter(set).unwrap_or_else(|| {
+        half_weight(exercise.target_weight, field::<Option<f64>>(exercise, "increment").filter(set).unwrap_or(2.5))
+    })
 }
 
 fn set_warmup_required(db: &Connection, exercise: &mut WorkoutExercise, required: bool) -> Result<()> {
@@ -250,13 +247,6 @@ fn set_warmup_required(db: &Connection, exercise: &mut WorkoutExercise, required
     exercise.update(db)
 }
 
-fn string_list(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default()
-}
-
 /// Prerequisites (`requires_completed`) are done, also via a substitute.
 pub fn compatible(exercise: &WorkoutExercise, rows: &[WorkoutExercise]) -> bool {
     let completed: Vec<&str> = rows
@@ -264,7 +254,7 @@ pub fn compatible(exercise: &WorkoutExercise, rows: &[WorkoutExercise]) -> bool 
         .filter(|e| e.status == ExerciseStatus::Completed)
         .flat_map(|e| std::iter::once(e.exercise_id.as_str()).chain(e.substituted_from_exercise_id.as_deref()))
         .collect();
-    string_list(exercise.config_json.get("requires_completed")).iter().all(|r| completed.contains(&r.as_str()))
+    field::<Vec<String>>(exercise, "requires_completed").iter().all(|r| completed.contains(&r.as_str()))
 }
 
 /// Activate the next pending exercise in plan order; `prefer_muscle` pulls same-muscle work forward.
@@ -308,11 +298,6 @@ fn snapshot_number(workout: &WorkoutSession, key: &str) -> f64 {
     workout.template_snapshot.get(key).and_then(Value::as_f64).unwrap_or_default()
 }
 
-/// Seconds as a duration, rounded to microseconds.
-pub fn seconds(value: f64) -> SignedDuration {
-    SignedDuration::from_micros((value * 1e6).round() as i64)
-}
-
 pub fn estimate_finish(db: &Connection, workout: &WorkoutSession, now: Ts) -> Result<Ts> {
     let rows: Vec<WorkoutExercise> = exercises(db, &workout.id)?.into_iter().filter(|e| unresolved(e.status)).collect();
     if rows.is_empty() {
@@ -336,7 +321,7 @@ pub fn estimate_finish(db: &Connection, workout: &WorkoutSession, now: Ts) -> Re
             total += exercise.rest_seconds as f64 + snapshot_number(workout, "transition_seconds");
         }
     }
-    Ok(now + seconds(total))
+    Ok(now + SignedDuration::from_micros((total * 1e6).round() as i64))
 }
 
 /// A number in at most 6 significant digits without trailing zeros (printf `%g`): 80 → "80", 22.5 → "22.5".
@@ -370,63 +355,31 @@ pub fn format_distance(meters: f64) -> String {
     if meters < 1000.0 { format!("{} m", g(meters)) } else { format!("{} km", g(meters / 1000.0)) }
 }
 
-/// The next time or distance block (`value` picks which): this workout's last one, else the target,
-/// else last time's.
-fn next_block<T>(
+/// What the next set offers (`value` picks weight and reps, time or distance): this workout's last
+/// working set, else `target`, else last time's working set.
+fn next_set<T>(
     db: &Connection,
     exercise: &WorkoutExercise,
     target: Option<T>,
-    value: fn(&SetLog) -> Option<T>,
+    value: impl Fn(SetLog) -> Option<T>,
 ) -> Result<Option<T>> {
-    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop().and_then(|s| value(&s)) {
+    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop().and_then(&value) {
         return Ok(Some(own));
     }
     if target.is_some() {
         return Ok(target);
     }
-    Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.and_then(|s| value(&s)))
+    Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.and_then(value))
 }
 
-/// The next timed set's length (see `next_block`).
-pub fn next_timed_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<i64>> {
-    next_block(db, exercise, target_seconds(exercise), |s| s.seconds)
-}
-
-/// The next distance set's length (see `next_block`).
-pub fn next_distance(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<f64>> {
-    next_block(db, exercise, target_meters(exercise), |s| s.meters)
-}
-
-/// Latest working set for this exercise: this workout first, else any earlier workout.
-pub fn last_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<SetLog>> {
-    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop() {
-        return Ok(Some(own));
-    }
-    crate::domain::preview::last_set(db, &exercise.exercise_id)
-}
-
-/// The next working set as (weight, reps): this workout's last set, else the prescribed target, else
-/// last time's set. What the coach card offers and what a typed set is read against.
+/// The next working set as (weight, reps) (see `next_set`; the target is the prescribed weight at
+/// the bottom of the rep range). What the coach card offers and what a typed set is read against.
 pub fn next_working_set(db: &Connection, exercise: &WorkoutExercise) -> Result<Option<(f64, i64)>> {
-    if let Some(own) = logs(db, &exercise.id, Some(SetType::Working))?.pop() {
-        return Ok(Some((own.weight, own.reps)));
-    }
     // A learned assisted target of 0 is no help left, not an unknown weight.
     let no_help =
         kind(exercise).load == Load::Assisted && ExerciseProgression::get(db, &exercise.exercise_id)?.is_some();
-    if exercise.target_weight != 0.0 || no_help {
-        return Ok(Some((exercise.target_weight, exercise.rep_min)));
-    }
-    Ok(crate::domain::preview::last_set(db, &exercise.exercise_id)?.map(|s| (s.weight, s.reps)))
-}
-
-/// Weight the owner most likely means when a typed set's order is unclear: the one the card offers.
-pub fn expected_weight(db: &Connection, workout_id: &str) -> Result<Option<f64>> {
-    let workout = load_workout(db, workout_id, None)?;
-    let Some(active) = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active) else {
-        return Ok(None);
-    };
-    Ok(next_working_set(db, &active)?.map(|(weight, _)| weight))
+    let target = (exercise.target_weight != 0.0 || no_help).then_some((exercise.target_weight, exercise.rep_min));
+    next_set(db, exercise, target, |s| Some((s.weight, s.reps)))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -459,14 +412,14 @@ pub struct Active {
     pub rep_min: i64,
     pub rep_max: i64,
     pub measure: Measure,
-    #[serde(skip_serializing_if = "is_external")]
+    #[serde(skip_serializing_if = "is_default")]
     pub load: Load,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub per_side: bool,
-    /// Timed exercise: the next set's length (see `next_timed_set`).
+    /// Timed exercise: the next set's length (see `next_set`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds: Option<i64>,
-    /// Distance exercise: the next set's distance (see `next_distance`).
+    /// Distance exercise: the next set's distance (see `next_set`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meters: Option<f64>,
 }
@@ -475,10 +428,6 @@ impl Active {
     pub fn kind(&self) -> SetKind {
         SetKind { load: self.load, per_side: self.per_side }
     }
-}
-
-fn is_external(load: &Load) -> bool {
-    *load == Load::External
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -496,7 +445,7 @@ pub struct QueueItem {
     pub reason: Option<String>,
 }
 
-/// Workout state as the old `workout current` JSON.
+/// A workout's state: what the `workout` tool's status and every workout mutation return.
 #[derive(Clone, Debug, Serialize)]
 pub struct State {
     pub workout_id: String,
@@ -519,7 +468,7 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
     let mut active_data = None;
     if let Some(active) = rows.iter().find(|e| e.status == ExerciseStatus::Active) {
         let is_warmup = warmup_pending(db, active)?;
-        let last = last_working_set(db, active)?;
+        let last = next_set(db, active, None, Some)?;
         let guide = guide_id(active);
         let warmup_reps = active.config_json.get("warmup_reps").and_then(Value::as_i64).unwrap_or(8);
         let set_kind = kind(active);
@@ -541,8 +490,14 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
             measure: measure(active),
             load: set_kind.load,
             per_side: set_kind.per_side,
-            seconds: if measure(active) == Measure::Time { next_timed_set(db, active)? } else { None },
-            meters: if measure(active) == Measure::Distance { next_distance(db, active)? } else { None },
+            seconds: match measure(active) {
+                Measure::Time => next_set(db, active, target_seconds(active), |s| s.seconds)?,
+                _ => None,
+            },
+            meters: match measure(active) {
+                Measure::Distance => next_set(db, active, target_meters(active), |s| s.meters)?,
+                _ => None,
+            },
         };
         let step = if is_warmup {
             "warm-up".to_string()
@@ -590,7 +545,7 @@ pub fn state(db: &Connection, workout_id: &str, now: Ts) -> Result<State> {
     })
 }
 
-/// Workout state as the old `workout current` JSON (status, active_exercise, queue, rest_job, …).
+/// `state` as JSON.
 pub fn current(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
     Ok(serde_json::to_value(state(db, workout_id, now)?)?)
 }
@@ -598,7 +553,6 @@ pub fn current(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
 /// Record the action time and a fresh ETA; returns `current`.
 pub fn touch(db: &Connection, workout: &mut WorkoutSession, now: Ts) -> Result<Value> {
     workout.last_action_at = Some(now);
-    workout.update(db)?;
     workout.final_eta = Some(estimate_finish(db, workout, now)?);
     workout.update(db)?;
     current(db, &workout.id, now)
@@ -895,9 +849,9 @@ fn group_next(
     Ok(members.iter().min_by_key(|(row, sets)| (*sets, row.position)).map(|(row, _)| ((*row).clone(), true)))
 }
 
-/// A due REST job: rest is over. Mutation result envelope; `user_message_hint` is the message to send.
+/// A due REST job: rest is over. `user_message_hint` is the fallback ping the outbox sends.
 pub fn rest_complete(db: &Connection, job_id: &str, now: Ts, request_id: &str) -> Result<Value> {
-    mutate(db, "workout.rest_completed", request_id, json!({"job_id": job_id}), now, || {
+    let mut result = mutate(db, "workout.rest_completed", request_id, json!({"job_id": job_id}), now, || {
         let mut job = match NotificationJob::get(db, job_id)? {
             Some(job) if job.kind == JobKind::Rest => job,
             _ => crate::bail!("JOB_NOT_FOUND", "Unknown rest job"),
@@ -919,7 +873,9 @@ pub fn rest_complete(db: &Connection, job_id: &str, now: Ts, request_id: &str) -
         result["instruction"] =
             Value::String(format!("⏱ Rest over · {}", result["instruction"].as_str().unwrap_or_default()));
         Ok(result)
-    })
+    })?;
+    result["user_message_hint"] = result["data"]["instruction"].clone();
+    Ok(result)
 }
 
 pub fn skip_warmup(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Value> {
@@ -1067,9 +1023,8 @@ pub(crate) mod tests {
         let initial = state(&db, &id, at(0)).unwrap();
         assert_eq!(initial.active_exercise.unwrap().set_type, SetType::Warmup);
         assert_eq!(initial.eta, at(220));
-        log_set(&db, &id, &parse_set("8x50", SetType::Warmup, None, false).unwrap(), at(30), "warmup").unwrap();
-        let first =
-            log_set(&db, &id, &parse_set("9x80", SetType::Working, None, false).unwrap(), at(60), "set-1").unwrap();
+        log_set(&db, &id, &set(50.0, 8, SetType::Warmup), at(30), "warmup").unwrap();
+        let first = log_set(&db, &id, &parse_set("9x80", None, false).unwrap(), at(60), "set-1").unwrap();
         let job_id = first["data"]["rest_job"]["id"].as_str().unwrap().to_string();
         assert_eq!(first["data"]["status"], "RESTING");
         assert_eq!(first["data"]["active_exercise"]["set_number"], 2);

@@ -51,7 +51,7 @@ pub enum Spec {
         /// The steps in order, naming the tools to use.
         steps: Vec<String>,
     },
-    /// Your own log, e.g. creatine taken. Rows go in with data_add; read them with sql_query on agent_data.
+    /// Your own log, e.g. creatine taken. Rows go in with data_add.
     Collection {
         /// One line: what a row means and its data fields, e.g. "creatine taken; data {grams}".
         summary: String,
@@ -631,7 +631,7 @@ const REFLECTS_PER_DAY: i64 = 3;
 /// Why a turn is worth learning from.
 pub enum Lesson<'a> {
     /// It took many tool calls or ran out of room; `tools` are the calls it made, in order.
-    Hard { calls: usize, forced: Option<&'a str>, tools: &'a [String], asked: &'a str },
+    Hard { forced: Option<&'a str>, tools: &'a [String], asked: &'a str },
 }
 
 /// Wakes the agent, once the chat is quiet, to turn a hard turn into a playbook or note,
@@ -649,8 +649,8 @@ pub fn reflect(db: &Connection, run_id: &str, lesson: Lesson, now: Ts) -> Result
     let Lesson::Hard { asked, .. } = &lesson;
     let asked = asked.to_string();
     let payload = match lesson {
-        Lesson::Hard { calls, forced, tools, .. } => json!({
-            "run_id": run_id, "asked": short(&asked, 500), "calls": calls, "forced": forced, "tools": tools,
+        Lesson::Hard { forced, tools, .. } => json!({
+            "run_id": run_id, "asked": short(&asked, 500), "forced": forced, "tools": tools,
             "instruction": "That turn took many tool calls. If the owner is likely to ask this again, save or update a playbook \
                 with the steps that worked (extension_save), so next time it takes a few. If a missing fact sent you the long \
                 way, save a learned note instead. If neither would help, do nothing. Don't message the owner about this.",
@@ -925,7 +925,7 @@ mod tests {
             reflect(
                 &db,
                 "r1",
-                Lesson::Hard { calls: 7, forced: None, tools: &tools, asked: "swap my whole week to evenings" },
+                Lesson::Hard { forced: None, tools: &tools, asked: "swap my whole week to evenings" },
                 now
             )
             .unwrap()
@@ -939,17 +939,11 @@ mod tests {
         assert_eq!(woken("r1")["tools"], json!(tools));
         assert_eq!(woken("r1")["asked"], "swap my whole week to evenings");
         assert!(crate::domain::events::open_issues(&db).unwrap().is_empty());
-        assert!(
-            reflect(&db, "r3", Lesson::Hard { calls: 6, forced: None, tools: &[], asked: "another request" }, now)
-                .unwrap()
-        );
-        assert!(
-            reflect(&db, "r4", Lesson::Hard { calls: 6, forced: None, tools: &[], asked: "yet another" }, now).unwrap()
-        );
+        let hard = |asked| Lesson::Hard { forced: None, tools: &[], asked };
+        assert!(reflect(&db, "r3", hard("another request"), now).unwrap());
+        assert!(reflect(&db, "r4", hard("yet another"), now).unwrap());
         // 3 per day cap: the 4th is dropped.
-        assert!(
-            !reflect(&db, "r5", Lesson::Hard { calls: 6, forced: None, tools: &[], asked: "one more" }, now).unwrap()
-        );
+        assert!(!reflect(&db, "r5", hard("one more"), now).unwrap());
     }
 
     #[test]

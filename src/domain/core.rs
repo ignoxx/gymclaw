@@ -20,9 +20,8 @@ pub fn emit(db: &Connection, kind: &str, now: Ts, payload: Value) -> Result<Agen
     Ok(event)
 }
 
-/// Run `action` once per `request_id`. A retry with the same intent returns the saved result; a
-/// different intent under the same ID fails. Result: `{data, events, user_message_hint}`, where the
-/// hint is `data.instruction` if present.
+/// Run `action` once per `request_id`, recorded as an `operation` event. A retry with the same intent
+/// returns the saved result; a different intent under the same ID fails. Result: `{data}`.
 pub fn mutate(
     db: &Connection,
     operation: &str,
@@ -41,18 +40,15 @@ pub fn mutate(
         }
         return Ok(previous.payload_json["result"].clone());
     }
-    let data = action()?;
-    let mut event = emit(db, operation, now, json!({"request": request}))?;
-    let hint = data.get("instruction").cloned().unwrap_or(Value::Null);
-    let result = json!({"data": data, "events": [{"id": event.id, "type": operation}], "user_message_hint": hint});
-    event.correlation_id = Some(request_id.into());
-    event.payload_json = Json(json!({"request": request, "result": result}));
-    event.update(db)?;
+    let result = json!({"data": action()?});
+    AgentEvent {
+        id: new_id(),
+        r#type: operation.into(),
+        created_at: now,
+        payload_json: Json(json!({"request": request, "result": result})),
+        handled_at: None,
+        correlation_id: Some(request_id.into()),
+    }
+    .insert(db)?;
     Ok(result)
-}
-
-/// Wrap a read or non-idempotent result in the CLI/tool envelope.
-pub fn outcome(data: Value) -> Value {
-    let hint = data.get("instruction").cloned().unwrap_or(Value::Null);
-    json!({"data": data, "events": [], "user_message_hint": hint})
 }

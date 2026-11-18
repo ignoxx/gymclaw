@@ -1,10 +1,9 @@
 //! Goals and training outside the gym. Lift trends need no tool: `sql_query` reads the `lift_history` view.
-use jiff::civil::Date;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Ctx, Tool, ToolDef, def};
+use super::{Ctx, Tool, ToolDef, date, def};
 use crate::db::models::{GoalKind, GoalStatus, Intensity};
 use crate::domain::profile::get_profile;
 use crate::domain::{activities, goals};
@@ -13,10 +12,6 @@ use crate::time::Ts;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![def::<GoalTool>(), def::<ActivityTool>()]
-}
-
-fn date(text: &str) -> Result<Date> {
-    text.trim().parse().map_err(|_| Error::domain("INVALID_DATE", format!("Not a date (YYYY-MM-DD): {text}")))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]

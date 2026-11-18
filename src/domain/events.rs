@@ -6,22 +6,47 @@ use crate::db::models::AgentEvent;
 use crate::error::Result;
 use crate::time::Ts;
 
-/// Events that need the owner's attention. Everything else is an audit record the code already handled
+/// Event types the agent deals with. Everything else is an audit record the code already handled
 /// (state changes, timers, sends, calendar writes). A single failed crowd poll is such a record: the
-/// owner hears about a lasting outage from `crowd::polling_alert`.
-/// A personal-calendar change is not here: it never moves a session, and a conflict it causes arrives as
-/// `planning.attention`, so waking the agent for the change itself only invites an empty reply.
-pub const ACTIONABLE: [&str; 9] = [
-    "notifications.delivery_unknown",
-    "calendar.write_blocked",
-    "planning.attention",
-    "planning.replan_required",
-    "planning.no_show",
-    "workout.missed",
-    "planning.weekly_briefing",
-    "workout.stale",
-    "extension.trigger",
+/// owner hears about a lasting outage from `crowd::polling_alert`. A personal-calendar change is not
+/// here: it never moves a session, and a conflict it causes arrives as `planning.attention`.
+///
+/// Only decisions wake the model. Delivery/permission issues stay open until explicitly resolved;
+/// acknowledging a model wake must not imply the owner granted authority. A no-show is sent by the
+/// outbox as the session's own message; the owner's answer reaches the agent. `extension.trigger` is a
+/// trigger the agent set itself; `agent.reflect` (`extensions::reflect`) asks it to learn from a hard turn,
+/// and is never open, so it runs only once the chat is quiet.
+const KINDS: [Kind; 10] = [
+    Kind { name: "notifications.delivery_unknown", open: true, wake: false },
+    Kind { name: "calendar.write_blocked", open: true, wake: false },
+    Kind { name: "planning.attention", open: true, wake: true },
+    Kind { name: "planning.replan_required", open: true, wake: true },
+    Kind { name: "planning.no_show", open: true, wake: false },
+    Kind { name: "workout.missed", open: true, wake: true },
+    Kind { name: "planning.weekly_briefing", open: true, wake: true },
+    Kind { name: "workout.stale", open: true, wake: true },
+    Kind { name: "extension.trigger", open: true, wake: true },
+    Kind { name: "agent.reflect", open: false, wake: true },
 ];
+
+struct Kind {
+    name: &'static str,
+    /// An open issue in every turn's context until handled.
+    open: bool,
+    /// Wakes the agent for a background turn.
+    wake: bool,
+}
+
+/// The types `which` selects, as a SQL `IN (…)` list.
+fn types(which: fn(&Kind) -> bool) -> String {
+    let names: Vec<String> = KINDS.iter().filter(|k| which(k)).map(|k| format!("'{}'", k.name)).collect();
+    format!("({})", names.join(", "))
+}
+
+/// Whether events of this type wake the agent.
+pub fn wakes(kind: &str) -> bool {
+    KINDS.iter().any(|k| k.wake && k.name == kind)
+}
 
 /// One event per distinct situation, including across restarts and acknowledgement. A quiet timer
 /// never creates a new model turn for the same unchanged conflict.
@@ -37,11 +62,7 @@ pub fn request(db: &Connection, kind: &str, payload: Value, now: Ts) -> Result<(
 }
 
 pub fn pending(db: &Connection, include_all: bool) -> Result<Vec<Value>> {
-    let filter = if include_all {
-        String::new()
-    } else {
-        format!("AND type IN ({})", ACTIONABLE.map(|t| format!("'{t}'")).join(", "))
-    };
+    let filter = if include_all { String::new() } else { format!("AND type IN {}", types(|k| k.open)) };
     Ok(AgentEvent::select(db, &format!("WHERE handled_at IS NULL {filter} ORDER BY created_at, id"), [])?
         .into_iter()
         .map(listed)
@@ -50,7 +71,7 @@ pub fn pending(db: &Connection, include_all: bool) -> Result<Vec<Value>> {
 
 /// An event as `pending` and the wake batch show it.
 fn listed(e: AgentEvent) -> Value {
-    json!({"id": e.id, "type": e.r#type, "created_at": e.created_at, "payload": e.payload_json, "correlation_id": e.correlation_id})
+    json!({"id": e.id, "type": e.r#type, "created_at": e.created_at, "payload": e.payload_json})
 }
 
 pub fn ack(db: &Connection, event_id: &str, now: Ts) -> Result<Value> {
@@ -74,30 +95,12 @@ pub fn outage_open(db: &Connection, lost: &str, restored: &str) -> Result<bool> 
     Ok(latest.is_some_and(|e| e.r#type == lost))
 }
 
-/// Only decisions wake the model. Delivery/permission issues stay in the inbox until explicitly
-/// resolved; acknowledging a model wake must not imply the owner granted authority. A no-show is
-/// sent by the outbox as the session's own message; the owner's answer reaches the agent. A trigger
-/// the agent set itself (`extension.trigger`) wakes it with its own instruction.
-///
-/// `agent.reflect` (`extensions::reflect`) wakes it to learn from a hard turn. It is not
-/// `ACTIONABLE`: an owner turn never sees it as an open issue, so it runs only once the chat is quiet.
-pub const WAKE: [&str; 7] = [
-    "planning.attention",
-    "planning.replan_required",
-    "workout.missed",
-    "planning.weekly_briefing",
-    "workout.stale",
-    "extension.trigger",
-    "agent.reflect",
-];
-
 /// Unhandled wake events, oldest first. The weekly review wakes at once; the Sunday recap waits for it
 /// (`weekly::release_recap`).
 pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
-    let types = WAKE.map(|t| format!("'{t}'")).join(", ");
     Ok(AgentEvent::select(
         db,
-        &format!("WHERE handled_at IS NULL AND type IN ({types}) ORDER BY created_at, id LIMIT 20"),
+        &format!("WHERE handled_at IS NULL AND type IN {} ORDER BY created_at, id LIMIT 20", types(|k| k.wake)),
         [],
     )?
     .into_iter()
@@ -107,10 +110,12 @@ pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
 
 /// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context.
 pub fn open_issues(db: &Connection) -> Result<Vec<AgentEvent>> {
-    let marks = ACTIONABLE.map(|t| format!("'{t}'")).join(", ");
     AgentEvent::select(
         db,
-        &format!("WHERE handled_at IS NULL AND type IN ({marks}) ORDER BY created_at DESC, rowid DESC LIMIT 5"),
+        &format!(
+            "WHERE handled_at IS NULL AND type IN {} ORDER BY created_at DESC, rowid DESC LIMIT 5",
+            types(|k| k.open)
+        ),
         [],
     )
 }
@@ -123,10 +128,9 @@ pub fn mark(db: &Connection) -> Result<i64> {
 /// Unhandled wake events written after `mark`. Inside the transaction that read `mark` these are
 /// that transaction's own: no other connection can commit while it holds its read lock.
 pub fn raised_since(db: &Connection, mark: i64) -> Result<Vec<AgentEvent>> {
-    let types = WAKE.map(|t| format!("'{t}'")).join(", ");
     AgentEvent::select(
         db,
-        &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN ({types}) ORDER BY rowid"),
+        &format!("WHERE rowid > ?1 AND handled_at IS NULL AND type IN {} ORDER BY rowid", types(|k| k.wake)),
         [mark],
     )
 }

@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use super::{Keyboard, Telegram, is_gone};
-use crate::domain::view::{Card, CardKind, Cleanup, CoachView};
+use crate::domain::view::{Card, CardKind, CoachView};
 use crate::error::Result;
 use crate::time::Ts;
 
@@ -62,6 +62,13 @@ struct State {
     next_countdown: u64,
 }
 
+/// "message is not modified" and already-deleted messages are expected.
+fn quietly(result: Result<()>) {
+    if let Err(e) = result {
+        tracing::debug!("coach edit skipped: {e}");
+    }
+}
+
 pub struct Coach {
     tg: Arc<dyn Telegram>,
     chat: i64,
@@ -70,10 +77,6 @@ pub struct Coach {
     record: Option<Record>,
     state: Mutex<State>,
     me: Weak<Coach>,
-}
-
-fn keyboard(card: &Card) -> &Keyboard {
-    &card.buttons
 }
 
 impl Coach {
@@ -99,18 +102,11 @@ impl Coach {
         (self.clock)()
     }
 
-    /// "message is not modified" and already-deleted messages are expected.
-    async fn quietly(&self, result: Result<()>) {
-        if let Err(e) = result {
-            tracing::debug!("coach edit skipped: {e}");
-        }
-    }
-
     async fn send(&self, text: &str, card: &Card) -> Result<i64> {
         let caption = if card.kind == CardKind::Preview { "" } else { text };
         let id = self
             .tg
-            .send(self.chat, caption, card.photo.as_deref().map(Path::new), keyboard(card), card.effect.as_deref())
+            .send(self.chat, caption, card.photo.as_deref().map(Path::new), &card.buttons, card.effect.as_deref())
             .await?;
         if let Some(record) = &self.record {
             record(card, text, id);
@@ -124,7 +120,7 @@ impl Coach {
     }
 
     async fn remove(&self, entry: &Entry) {
-        self.quietly(self.tg.remove(self.chat, entry.message_id).await).await;
+        quietly(self.tg.remove(self.chat, entry.message_id).await);
     }
 
     async fn retire(&self, entry: &Entry, ack: Option<&str>) {
@@ -135,7 +131,7 @@ impl Coach {
             Some(ack) => format!("{}\n{ack}", entry.card.text),
             None => entry.card.text.clone(),
         };
-        self.quietly(self.edit(entry, &text, &vec![]).await).await;
+        quietly(self.edit(entry, &text, &vec![]).await);
     }
 
     async fn clear_extras(&self, state: &mut State) {
@@ -169,7 +165,7 @@ impl Coach {
             let mut state = self.state.lock().await;
             let Some(live) = state.live.clone().filter(|l| l.countdown == id) else { return };
             if live.card.rest_until.is_some_and(|u| u > self.now()) {
-                if let Err(e) = self.edit(&live, &with_rest(&live.card, self.now()), keyboard(&live.card)).await {
+                if let Err(e) = self.edit(&live, &with_rest(&live.card, self.now()), &live.card.buttons).await {
                     if is_gone(&e) {
                         // The countdown is gone, so is its job: stop, and never announce the rest it was showing.
                         state.live = None;
@@ -197,14 +193,14 @@ impl Coach {
         let mut state = self.state.lock().await;
         let now = self.now();
         if let (Some(message), Some(emoji)) = (inbound, &view.react) {
-            self.quietly(self.tg.react(self.chat, message, Some(emoji)).await).await;
+            quietly(self.tg.react(self.chat, message, Some(emoji)).await);
         }
         for edit in &view.edits {
             // Old messages can be gone or unchanged; the change behind the edit is saved either way.
             let card = &edit.card;
             let result =
                 self.tg.edit(self.chat, edit.message_id, &card.text, &card.buttons, card.photo.is_some()).await;
-            self.quietly(result).await;
+            quietly(result);
         }
         if view.standalone {
             // Previews etc. are their own messages; the live workout card stays as it is.
@@ -216,7 +212,7 @@ impl Coach {
         if let Some(buttons) = &view.live_buttons {
             // Swap: the current card's buttons become wait/later, options go below it.
             if let Some(live) = state.live.clone() {
-                self.quietly(self.edit(&live, &with_rest(&live.card, now), buttons).await).await;
+                quietly(self.edit(&live, &with_rest(&live.card, now), buttons).await);
             }
             self.clear_extras(&mut state).await;
             for card in &view.cards {
@@ -230,7 +226,7 @@ impl Coach {
             let live = state.live.as_mut().expect("checked");
             live.card = view.cards[0].clone();
             let live = live.clone();
-            self.quietly(self.edit(&live, &with_rest(&live.card, now), keyboard(&live.card)).await).await;
+            quietly(self.edit(&live, &with_rest(&live.card, now), &live.card.buttons).await);
             if live.card.rest_until.is_some() {
                 self.start_countdown(&mut state);
             }
@@ -242,18 +238,18 @@ impl Coach {
         if view.restore {
             self.clear_extras(&mut state).await;
             if let Some(live) = state.live.clone() {
-                self.quietly(self.edit(&live, &with_rest(&live.card, now), keyboard(&live.card)).await).await;
+                quietly(self.edit(&live, &with_rest(&live.card, now), &live.card.buttons).await);
             }
             return Ok(());
         }
         let entries: Vec<Entry> = state.live.iter().chain(state.extras.iter()).cloned().collect();
         let known = tapped.and_then(|t| entries.iter().find(|e| e.message_id == t.message_id)).cloned();
-        if view.cleanup == Some(Cleanup::Delete) {
+        if view.delete {
             for entry in &entries {
                 self.remove(entry).await;
             }
             if let (Some(t), None) = (tapped, &known) {
-                self.quietly(self.tg.remove(self.chat, t.message_id).await).await;
+                quietly(self.tg.remove(self.chat, t.message_id).await);
             }
         } else {
             let target = known.clone().or_else(|| if tapped.is_some() { None } else { state.live.clone() });
@@ -262,7 +258,7 @@ impl Coach {
                 (None, Some(t), Some(ack)) => {
                     // Message from before a restart: we only know its visible text.
                     let text = format!("{}\n{ack}", t.text.as_deref().unwrap_or(""));
-                    self.quietly(self.tg.edit(self.chat, t.message_id, &text, &vec![], false).await).await;
+                    quietly(self.tg.edit(self.chat, t.message_id, &text, &vec![], false).await);
                 }
                 _ => {}
             }
@@ -282,22 +278,8 @@ impl Coach {
         Ok(())
     }
 
-    /// A one-off warning that leaves the workout cards alone.
-    pub async fn warn(&self, text: &str) {
-        let card = Card { text: format!("⚠️ {text}"), ..Card::default() };
-        if let Err(e) = self
-            .apply(
-                &CoachView { handled: true, standalone: true, cards: vec![card], ..CoachView::default() },
-                None,
-                None,
-            )
-            .await
-        {
-            tracing::warn!("coach warning not sent: {e}");
-        }
-    }
-
-    /// Text of the live card and options, for tests and `/status`.
+    /// The live card's text and how many extras are up.
+    #[cfg(test)]
     pub async fn shown(&self) -> (Option<String>, usize) {
         let state = self.state.lock().await;
         (state.live.as_ref().map(|l| l.card.text.clone()), state.extras.len())
@@ -446,9 +428,7 @@ pub mod tests {
     }
 
     fn next_card(text: &'static str) -> RestOver {
-        Arc::new(move || {
-            Box::pin(async move { Some(CoachView { cleanup: Some(Cleanup::Delete), ..view(vec![card(text)]) }) })
-        })
+        Arc::new(move || Box::pin(async move { Some(CoachView { delete: true, ..view(vec![card(text)]) }) }))
     }
 
     async fn sleep_ms(ms: u64) {
@@ -551,11 +531,7 @@ pub mod tests {
         );
         coach.apply(&swap, Some(&tap(100)), None).await.unwrap();
         coach
-            .apply(
-                &CoachView { cleanup: Some(Cleanup::Delete), ..view(vec![card("Option A · set 1")]) },
-                Some(&tap(104)),
-                None,
-            )
+            .apply(&CoachView { delete: true, ..view(vec![card("Option A · set 1")]) }, Some(&tap(104)), None)
             .await
             .unwrap();
         let removed: Vec<i64> =

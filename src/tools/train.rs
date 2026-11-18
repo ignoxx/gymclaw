@@ -4,11 +4,11 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::{Ctx, Effect, Listed, Tool, ToolDef, def};
-use crate::domain::backfill::{PastSet, log_past};
 use crate::domain::body::{self, WeighIn};
 use crate::domain::coach::{self, Action};
 use crate::domain::illustrations::search;
 use crate::domain::onboarding::{self, Update};
+use crate::domain::past::{PastSet, log_past};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{
     ExerciseEdit, Template, edit_exercise, get_template, import_template, missing_pictures, orphaned_history,
@@ -16,7 +16,6 @@ use crate::domain::templates::{
 use crate::domain::view::CoachView;
 use crate::domain::{audit, workout};
 use crate::error::Result;
-use crate::time::Ts;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
@@ -38,11 +37,6 @@ pub fn tools() -> Vec<ToolDef> {
         def::<BodyList>(),
         def::<BodyDelete>(),
     ]
-}
-
-/// Owner-local time unless the text has an offset.
-fn local(cx: &Ctx, text: &str) -> Result<Ts> {
-    Ts::parse(text, Some(&get_profile(cx.db)?.tz()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -229,7 +223,7 @@ impl Tool for WorkoutLogPast {
         (a missed session that day counts after all). Off-plan exercises don't change the saved plan.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let at = local(cx, &self.at)?;
+        let at = cx.local(&self.at)?;
         log_past(cx.db, &self.sets, at, self.template_id.as_deref(), cx.now, &cx.request_id)
     }
 }
@@ -244,10 +238,10 @@ impl Tool for WorkoutAudit {
     const NAME: &'static str = "workout_audit";
     const LISTED: Listed = Listed::Never;
     const DESCRIPTION: &'static str =
-        "Saved audit of a finished workout: sets, duration, ETA error, progressions, crowd feedback.";
+        "Audit of a finished workout: sets, duration, ETA error, next-weight decisions, crowd feedback.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        audit::get_audit(cx.db, &self.workout_id)
+        audit::report(cx.db, &self.workout_id)
     }
 }
 
@@ -269,7 +263,7 @@ impl Tool for SetCorrect {
         and updates the finished workout's summary card in the chat.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let seconds = self.minutes.map(|m| (m * 60.0).round() as i64);
+        let seconds = self.minutes.map(workout::in_seconds);
         let result = audit::correct_set(
             cx.db,
             &self.set_id,
@@ -509,7 +503,7 @@ pub struct PlanSet {
 impl Tool for PlanSet {
     const NAME: &'static str = "plan_set";
     const DESCRIPTION: &'static str = "Set the owner's training plan: in setup, and whenever the owner changes what they train or how often. \
-        You plan workouts by it; code only gives a newly drafted session a default template, never changes one afterwards.";
+        You plan workouts by it.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         onboarding::update(

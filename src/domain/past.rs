@@ -12,7 +12,7 @@ use crate::domain::core::mutate;
 use crate::domain::profile::get_profile;
 use crate::domain::set_parser::SetInput;
 use crate::domain::templates::pick;
-use crate::domain::workout::{active_workout, exercises, guide_id, log_set, name, start};
+use crate::domain::workout::{active_workout, exercises, guide_id, in_seconds, log_set, name, start};
 use crate::error::{Error, Result};
 use crate::time::Ts;
 
@@ -38,7 +38,7 @@ pub struct PastSet {
 impl PastSet {
     fn value(&self) -> SetInput {
         match (self.minutes, self.meters) {
-            (Some(minutes), _) => SetInput::timed((minutes * 60.0).round() as i64),
+            (Some(minutes), _) => SetInput::timed(in_seconds(minutes)),
             (None, Some(meters)) => SetInput::distance(meters),
             (None, None) => SetInput::reps(self.weight, self.reps, SetType::Working),
         }

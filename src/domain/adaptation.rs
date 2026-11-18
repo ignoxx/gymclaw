@@ -6,17 +6,17 @@
 //! `relabel`), any exercise goes: the plan adapts to what they actually do.
 use std::collections::HashSet;
 
-use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
-use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, search, similar, timed};
-use crate::domain::templates::{ExerciseSpec, Measure, default_load, get_template, pick, remember_swap};
+use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, lookup, similar, timed, unknown};
+use crate::domain::templates::{ExerciseSpec, Measure, catalog_slot, default_load, get_template, pick, remember_swap};
 use crate::domain::workout::{
-    active_exercise, cancel_rest, choose_next, compatible, exercises, guide_id, load_workout, logs, make_exercise,
-    measure, muscle, name, snapshot, touch, transition, unresolved, warmup_pending, working_count,
+    active_exercise, cancel_rest, choose_next, compatible, exercises, field, guide_id, load_workout,
+    logged_exercise_ids, logs, make_exercise, measure, muscle, name, snapshot, touch, transition, unresolved,
+    warmup_pending, working_count,
 };
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -45,14 +45,6 @@ pub fn spec_of(row: &WorkoutExercise) -> Result<ExerciseSpec> {
         fields.remove("warmup_required");
     }
     serde_json::from_value(config).map_err(|e| Error::domain("INVALID_TEMPLATE", format!("Exercise {}: {e}", row.id)))
-}
-
-fn substitutes(row: &WorkoutExercise) -> Vec<String> {
-    row.config_json
-        .get("substitutes")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default()
 }
 
 pub fn machine_busy(
@@ -86,23 +78,7 @@ pub fn machine_busy(
                 // Stay on the same muscle group while the machine is taken.
                 choose_next(db, &mut workout, muscle(&exercise).as_deref())?;
             }
-            let mut result = touch(db, &mut workout, now)?;
-            result["deferred_exercise_id"] = json!(exercise.id);
-            result["substitution_options"] = json!(substitutes(&exercise));
-            let instruction = if result["active_exercise"].is_null() {
-                format!(
-                    "{} still unresolved. Retry equipment, choose substitution, or explicitly skip.",
-                    name(&exercise)
-                )
-            } else {
-                format!(
-                    "{} deferred. {}. Retry deferred equipment later.",
-                    name(&exercise),
-                    result["instruction"].as_str().unwrap_or_default()
-                )
-            };
-            result["instruction"] = json!(instruction);
-            Ok(result)
+            touch(db, &mut workout, now)
         },
     )
 }
@@ -166,7 +142,7 @@ fn replacement_spec(
     if let Some(back) = swapped_away(db, &workout.id)?.iter().find(|e| e.exercise_id == substitute_id) {
         return spec_of(back);
     }
-    if substitutes(original).iter().any(|s| s == substitute_id)
+    if field::<Vec<String>>(original, "substitutes").iter().any(|s| s == substitute_id)
         && let Some(spec) = snapshot(workout)?.alternatives.into_iter().find(|e| e.id == substitute_id)
     {
         return Ok(spec);
@@ -179,24 +155,17 @@ fn replacement_spec(
             "Substitute must be a template alternative or a catalog exercise for the same muscle"
         );
     };
-    let progression = ExerciseProgression::get(db, substitute_id)?;
+    // The row's sets, reps and rest; role, primary, increment, warm-up, measure and superset group
+    // from its spec. Its weight is learned progression (`make_exercise`), else unknown.
     Ok(ExerciseSpec {
-        id: substitute_id.into(),
-        name: item.name.clone(),
-        guide_id: Some(substitute_id.into()),
         working_sets: original.planned_working_sets,
         rep_min: original.rep_min,
         rep_max: original.rep_max,
-        target_weight: progression.map_or(0.0, |p| p.next_weight),
         rest_seconds: Some(original.rest_seconds),
         priority: 0,
         requires_completed: vec![],
         substitutes: vec![],
-        // A catalog exercise's own load; per side is unknown, so off.
-        load: default_load(substitute_id),
-        per_side: false,
-        // role, primary, increment, warm-up, measure and superset group from the original.
-        ..spec_of(original)?
+        ..catalog_slot(&spec_of(original)?, item)
     })
 }
 
@@ -231,14 +200,7 @@ pub fn substitute(
         replacement.substituted_from_exercise_id = Some(original.exercise_id.clone());
         replacement.rest_seconds = original.rest_seconds;
         // Neither original nor replacement prerequisites may be bypassed.
-        let mut required: Vec<String> = original
-            .config_json
-            .get("requires_completed")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
+        let mut required: Vec<String> = field(&original, "requires_completed");
         required.extend(spec.requires_completed.iter().cloned());
         required.sort();
         required.dedup();
@@ -259,26 +221,16 @@ pub fn substitute(
         }
         let mut result = touch(db, &mut workout, now)?;
         result["replacement_exercise_id"] = json!(replacement.id);
-        result["instruction"] =
-            json!(format!("Swapped to {}. {}", spec.name, result["instruction"].as_str().unwrap_or_default()));
         Ok(result)
     })
 }
 
-#[derive(Clone, Debug, Serialize)]
 pub struct SwapOption {
     pub substitute_id: String,
     pub name: String,
     /// "workout" (swapped away earlier: back to it), "template" or "catalog".
     pub source: &'static str,
     pub illustration: Option<Entry>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Alternatives {
-    pub exercise_id: String,
-    pub name: String,
-    pub options: Vec<SwapOption>,
 }
 
 /// Read-only swap options: exercises swapped away from this slot first ("back to A"), then saved template
@@ -289,7 +241,7 @@ pub fn alternatives(
     workout_id: &str,
     exercise_id: Option<&str>,
     limit: usize,
-) -> Result<Alternatives> {
+) -> Result<Vec<SwapOption>> {
     let workout = load_workout(db, workout_id, None)?;
     let exercise = find_exercise(db, workout_id, exercise_id)?;
     let earlier = swapped_away(db, workout_id)?;
@@ -298,7 +250,7 @@ pub fn alternatives(
     let mut used: HashSet<String> =
         rows.iter().flat_map(|e| std::iter::once(e.exercise_id.clone()).chain(guide_id(e).map(String::from))).collect();
     let pictures: HashSet<String> = used.iter().filter(|s| catalog().contains_key(*s)).map(|s| artwork(s)).collect();
-    // exercise_id → row, first-seen order (a later duplicate replaces the row, like a dict).
+    // exercise_id → row, first-seen order; a later duplicate replaces the row.
     let mut back: Vec<(String, &WorkoutExercise)> = vec![];
     for e in earlier.iter().filter(|e| e.position == exercise.position && !used.contains(&e.exercise_id)) {
         match back.iter_mut().find(|(k, _)| *k == e.exercise_id) {
@@ -316,7 +268,7 @@ pub fn alternatives(
         })
         .collect();
     used.extend(back.iter().filter_map(|(_, e)| guide_id(e).map(String::from)));
-    let allowed = substitutes(&exercise);
+    let allowed: Vec<String> = field(&exercise, "substitutes");
     for spec in snapshot(&workout)?.alternatives {
         let guide = spec.guide_id.as_deref();
         let taken = guide.is_some_and(|g| used.contains(g) || pictures.contains(&artwork(g)));
@@ -330,10 +282,7 @@ pub fn alternatives(
         }
     }
     // Exercises the owner has logged before rank first among catalog options.
-    let mut stmt = db.prepare_cached(
-        "SELECT DISTINCT e.exercise_id FROM workout_exercise e JOIN set_log s ON s.workout_exercise_id = e.id",
-    )?;
-    let history: HashSet<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let history = logged_exercise_ids(db)?;
     let mut exclude = used.clone();
     exclude.extend(back.iter().map(|(k, _)| k.clone()));
     exclude.extend(options.iter().filter_map(|o| o.illustration.as_ref().map(|i| i.guide_id.clone())));
@@ -349,7 +298,7 @@ pub fn alternatives(
         }
     }
     options.truncate(limit);
-    Ok(Alternatives { exercise_id: exercise.id.clone(), name: name(&exercise).into(), options })
+    Ok(options)
 }
 
 /// Owner moves on: completes the active exercise with the sets done so far, or skips it if none.
@@ -446,13 +395,7 @@ fn resolve(
     )? {
         return Ok((None, known.swap_remove(i)));
     }
-    let item = catalog().get(&key).or_else(|| catalog().values().find(|i| i.name.to_lowercase() == key));
-    let Some(item) = item else {
-        let options: Vec<String> =
-            search(query, None, None, 5).iter().map(|o| format!("{} ({})", o.guide_id, o.name)).collect();
-        let options = if options.is_empty() { "try catalog search".into() } else { options.join(", ") };
-        crate::bail!("EXERCISE_UNKNOWN", "No exact match for '{query}'. Pass one guide_id: {options}");
-    };
+    let item = lookup(query).ok_or_else(|| unknown(query))?;
     let base = |k: &str| current.and_then(|c| c.config_json.get(k).cloned());
     // A cardio machine or hold is timed; from another timed exercise it keeps that one's sets and time.
     let is_timed = timed(Some(&item.slug));
@@ -490,9 +433,7 @@ pub fn switch_to(
         let (row, spec) = resolve(db, &workout, query, current.as_ref())?;
         let mut replaced: Option<String> = None;
         if current.as_ref().is_some_and(|c| c.exercise_id == spec.id) {
-            let mut result = touch(db, &mut workout, now)?;
-            result["replaced_exercise_id"] = Value::Null;
-            return Ok(result);
+            return touch(db, &mut workout, now);
         }
         let started = match &current {
             Some(c) => working_count(db, &c.id)? > 0,
@@ -536,9 +477,7 @@ pub fn switch_to(
         if remember && let (Some(original), Some(template_id)) = (&replaced, &workout.template_id) {
             remember_swap(db, template_id, original, &spec)?;
         }
-        let mut result = touch(db, &mut workout, now)?;
-        result["replaced_exercise_id"] = json!(replaced);
-        Ok(result)
+        touch(db, &mut workout, now)
     })
 }
 
@@ -638,7 +577,7 @@ mod tests {
     use super::*;
     use crate::db::models::{ExerciseProgression, NotificationJob};
     use crate::db::test::db;
-    use crate::domain::audit::{finish, get_audit};
+    use crate::domain::audit::{finish, report};
     use crate::domain::set_parser::SetInput;
     use crate::domain::templates::{Template, get_template, import_template, orphaned_history};
     use crate::domain::workout::tests::{at, spec};
@@ -711,10 +650,10 @@ mod tests {
         let db = db();
         let id = bench_done(&db);
         let result = machine_busy(&db, &id, None, at(60), "busy").unwrap();
-        let deferred = result["data"]["deferred_exercise_id"].as_str().unwrap().to_string();
         assert_eq!(result["data"]["active_exercise"]["exercise_id"], "raise");
-        assert_eq!(result["data"]["substitution_options"], json!(["db-fly"]));
-        assert_eq!(WorkoutExercise::get(&db, &deferred).unwrap().unwrap().status, ExerciseStatus::Deferred);
+        let fly = result["data"]["queue"].as_array().unwrap().iter().find(|q| q["exercise_id"] == "fly").unwrap();
+        assert_eq!(fly["status"], "DEFERRED");
+        let deferred = fly["id"].as_str().unwrap().to_string();
         // Finishing an exercise starts the next one without a rest timer.
         assert!(NotificationJob::first(&db, "WHERE status = 'PENDING'", []).unwrap().is_none());
         log_set(&db, &id, &set(10.0, 10), at(100), "raise").unwrap();
@@ -733,7 +672,7 @@ mod tests {
         assert_eq!((data["equipment_waits"].as_i64(), data["progression_count"].as_i64()), (Some(1), Some(3)));
         assert_eq!((progression(&db, "bench"), progression(&db, "fly")), (Some(82.5), Some(52.5)));
         assert_eq!(finish(&db, &id, at(310), "finish").unwrap(), result);
-        assert_eq!(get_audit(&db, &id).unwrap(), result["data"]);
+        assert_eq!(report(&db, &id).unwrap(), result["data"]);
         let second = start(&db, Some("adapt"), None, false, at(2 * 86400), "next").unwrap();
         assert_eq!(second["data"]["active_exercise"]["target_weight"], 50.0); // warm-up unchanged
         let row = second["data"]["active_exercise"]["id"].as_str().unwrap();
