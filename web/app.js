@@ -110,11 +110,15 @@ function crowdLabel(session) {
   return session.count !== null && session.count !== undefined ? `~${session.count} ppl` : null;
 }
 
+/* An exercise picture. No picture (or one that fails to load) leaves an empty, quiet space, never a
+   broken-image box. */
 function thumb(url) {
   const image = el('img');
   image.alt = '';
   image.loading = 'lazy';
+  image.addEventListener('error', () => { image.style.visibility = 'hidden'; });
   if (url) image.src = url;
+  else image.style.visibility = 'hidden';
   return image;
 }
 
@@ -447,7 +451,7 @@ function startRest(node, until) {
     const left = Math.max(0, Math.ceil((Date.parse(until) - now()) / 1000));
     node.textContent = left ? `Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'Rest over';
     // Buzz only when the rest runs out on screen, not when the page opens after it.
-    if (!left) { clearInterval(restTimer); if (counting) haptic.done(); }
+    if (!left) { clearInterval(restTimer); if (counting) { haptic.done(); toast('Rest over · next set'); } }
     counting = left > 0;
   };
   tick();
@@ -475,16 +479,28 @@ function stepper(label, value, { step = 1, min = 0, unit = '', base = 90, nullab
     const b = el('button', 'step', text);
     b.type = 'button';
     b.setAttribute('aria-label', `${name} ${label.toLowerCase()}`);
-    b.addEventListener('click', () => {
+    const bump = () => {
       haptic.select();
       // A blank (the server's default) steps from `base`; going under the minimum of a nullable one blanks it.
       const next = value === null || value === undefined ? base : Number(value) + delta;
       commit(nullable && next < Math.max(min, step) ? null : next);
       show(value);
+    };
+    // Tap: one step. Hold: keeps stepping, so 100 → 120 kg is one press, not eight.
+    let hold;
+    const stop = () => { clearTimeout(hold); clearInterval(hold); };
+    b.addEventListener('pointerdown', event => {
+      if (event.button) return;
+      bump();
+      hold = setTimeout(() => { hold = setInterval(bump, 110); }, 450);
     });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(type => b.addEventListener(type, stop));
+    // Keyboard (Enter/Space) still steps once; a pointer press already did.
+    b.addEventListener('click', event => { if (event.detail === 0) bump(); });
     return b;
   };
-  input.addEventListener('focus', () => input.select());
+  // Select on the next frame: select() right in focus pops iOS's cut/copy/paste bubble over the number.
+  input.addEventListener('focus', () => requestAnimationFrame(() => input.setSelectionRange(0, input.value.length)));
   input.addEventListener('keydown', event => { if (event.key === 'Enter') input.blur(); });
   input.addEventListener('input', () => { const v = typed(); if (v !== undefined) commit(v); });
   input.addEventListener('change', () => {
@@ -511,7 +527,7 @@ function toast(text, failed = false) {
   node.classList.toggle('failed', failed);
   node.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { node.hidden = true; }, 3200);
+  toastTimer = setTimeout(() => { node.hidden = true; }, 4500);
 }
 
 /* A coach button from the app: the server runs it like a tap in the chat (`coach::app_tap`), and the bot
@@ -589,7 +605,9 @@ function renderLogger(focus, workout, live, active) {
     words = () => logger.meters ? (logger.meters >= 1000 ? `${logger.meters / 1000} km` : `${logger.meters} m`) : null;
   } else {
     if (!spec.reps_only || logger.weight) {
-      box.append(stepper(spec.added ? 'Added' : 'Weight', logger.weight, { step: logger.weight >= 20 ? 2.5 : 1, base: 20, unit: spec.unit,
+      // Steps the gym's weights come in: barbell plates in pairs (2.5), dumbbells by 2, light stacks by 1.
+      const step = live.equipment === 'Barbell' ? 2.5 : live.equipment === 'Dumbbell' ? 2 : logger.weight >= 20 ? 2.5 : 1;
+      box.append(stepper(spec.added ? 'Added' : 'Weight', logger.weight, { step, base: 20, unit: spec.unit,
         onChange: v => { logger.weight = v; refreshLabel(); } }));
       const plateLine = el('p', 'plates');
       box.append(plateLine);
@@ -691,6 +709,8 @@ function renderWorkout(focus, workout) {
       // Resting: the countdown and the chat's ways to shorten it. The logger below is for the set after.
       const rest = el('div', 'status resting');
       const time = el('strong');
+      // A timer, not a live region: a reader isn't read every second; "Rest over" arrives as a toast.
+      time.setAttribute('role', 'timer');
       rest.append(time);
       const actions = el('div', 'rest-actions');
       for (const b of buttons.filter(b => /^gc:(cut|skip):/.test(b.data))) { used.add(b); actions.append(actionButton(b)); }
@@ -740,6 +760,7 @@ function renderWorkout(focus, workout) {
     const item = el('button', `exercise ${dataClass('status', exercise.status)}${exercise.id === active?.id ? ' current' : ''}`);
     item.type = 'button';
     item.append(thumb(exercise.svg_url), el('span', '', exercise.name), el('small', '', `${exercise.done}/${exercise.sets}`));
+    item.setAttribute('aria-label', `${exercise.name}, ${exercise.done} of ${exercise.sets} sets${exercise.id === active?.id ? ', now' : ''}`);
     item.addEventListener('click', () => openExercise({ id: exercise.exercise_id }));
     queue.append(item);
   }

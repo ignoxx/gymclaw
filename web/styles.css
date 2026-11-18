@@ -14,7 +14,7 @@
    in a browser, when the system is. Exercise pictures are white line art: --art darkens them on light. */
 :root {
   color-scheme: light;
-  --paper: #f1f1eb; --white: #fcfcf8; --ink: #242824; --muted: #5f665b; --faint: #8a9184; --line: #dcdfd4;
+  --paper: #f1f1eb; --white: #fcfcf8; --ink: #242824; --muted: #5f665b; --faint: #6f776a; --line: #dcdfd4;
   --lime: #d7f580; --on-lime: #242824; --olive: #5e7140; --busy: #f3d9a4; --packed: #f2b8a8; --good: #e2efc9;
   --hero: #242824; --on-hero: #f1f1eb;
   --soft: #eef0e5; --soft-line: #d4dac7; --divider: #eceee5; --hover: #f4f5ee; --track: #e4e7dc; --chip: #e2e6d6;
@@ -28,7 +28,7 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --paper: #121412; --white: #1b1e1b; --ink: #e8ebe3; --muted: #8f968a; --faint: #4f564c; --line: #2b302a;
+  --paper: #121412; --white: #1b1e1b; --ink: #e8ebe3; --muted: #8f968a; --faint: #6a7266; --line: #2b302a;
   --olive: #b5cc7a; --busy: #5a4920; --packed: #5e3127; --good: #2f3c1d;
   --hero: #222a19; --on-hero: #eef1e8;
   --soft: #22261f; --soft-line: #353b31; --divider: #252924; --hover: #20241e; --track: #1f231d; --chip: #2a2f27;
@@ -43,7 +43,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --paper: #121412; --white: #1b1e1b; --ink: #e8ebe3; --muted: #8f968a; --faint: #4f564c; --line: #2b302a;
+    --paper: #121412; --white: #1b1e1b; --ink: #e8ebe3; --muted: #8f968a; --faint: #6a7266; --line: #2b302a;
     --olive: #b5cc7a; --busy: #5a4920; --packed: #5e3127; --good: #2f3c1d;
     --hero: #222a19; --on-hero: #eef1e8;
     --soft: #22261f; --soft-line: #353b31; --divider: #252924; --hover: #20241e; --track: #1f231d; --chip: #2a2f27;
@@ -417,6 +417,8 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
 .step-label { font-size: 13px; color: var(--muted); }
 .step { width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); color: var(--ink); font-size: 22px; line-height: 1; touch-action: manipulation; }
 .step:active { background: var(--track); }
+/* Holding a step button repeats; no text selection or callout on the long press. */
+.step { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .step-value { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 4px; font-family: 'Barlow Condensed', sans-serif; font-weight: 600; }
 .step-value input { width: 100%; min-width: 0; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--ink); font: inherit; font-size: 30px; text-align: right; padding: 0; }
 .step-value input:focus { outline: 0; border-bottom-color: var(--lime); }
