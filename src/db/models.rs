@@ -31,12 +31,12 @@ sql_enum!(GoalStatus { Active = "ACTIVE", Done = "DONE", Dropped = "DROPPED" });
 sql_enum!(Intensity { Easy = "easy", Moderate = "moderate", Hard = "hard" });
 
 impl SessionStatus {
-    /// Sessions that take a slot in the week.
-    pub const ACTIVE: [SessionStatus; 4] =
-        [SessionStatus::Tentative, SessionStatus::Committed, SessionStatus::Started, SessionStatus::Completed];
-
+    /// Takes a slot in the week.
     pub fn is_active(self) -> bool {
-        Self::ACTIVE.contains(&self)
+        matches!(
+            self,
+            SessionStatus::Tentative | SessionStatus::Committed | SessionStatus::Started | SessionStatus::Completed
+        )
     }
 
     /// Upcoming and still editable.
@@ -228,7 +228,8 @@ table!(PersonalBusyInterval = "personal_busy_interval" {
 });
 
 table!(
-    /// `enabled` and the two authorities gate the runtime.
+    /// The runtime's switches, created by the first `runtime_resume`: `enabled` gates every send and
+    /// tick, the other two calendar writes and crowd polling. `recipient` is the owner's chat id.
     RuntimeSettings = "runtime_settings" {
     id: i64,
     recipient: String,
@@ -388,6 +389,13 @@ table!(
     removed_at: Option<Ts>,
     created_at: Ts,
 });
+
+impl ChatMessage {
+    /// A new chat history row (SQLite assigns the id on insert).
+    pub fn new(at: Ts, role: ChatRole, text: String, telegram_message_id: Option<i64>, meta: Value) -> ChatMessage {
+        ChatMessage { id: None, at, role, text, telegram_message_id, meta_json: Json(meta) }
+    }
+}
 
 impl PlannedSession {
     /// A new, unplaced session; `replanning::place` sets its times.

@@ -7,7 +7,7 @@
 //!   model). There is no `/new`: the window is the last messages, always current.
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -16,8 +16,7 @@ use tokio::sync::{Mutex, Notify, mpsc};
 use super::{blocking, in_tx};
 use crate::agent::turnlog::{TurnLog, scrub};
 use crate::agent::{Agent, Outcome, TurnInput, media};
-use crate::db::Json;
-use crate::db::models::{AgentButton, AgentEvent, ChatMessage, ChatRole, NotificationJob};
+use crate::db::models::{AgentButton, ChatMessage, ChatRole, NotificationJob};
 use crate::domain::coach;
 use crate::domain::set_parser::looks_like_set;
 use crate::domain::view::Button;
@@ -59,8 +58,8 @@ pub fn route(text: &str) -> Route {
 /// An owner message waiting for the agent.
 #[derive(Clone, Debug)]
 struct Inbound {
-    /// Message that gets 👀 and, if the reply is a reaction, the reaction.
-    message_id: i64,
+    /// Message that gets 👀 and, if the reply is a reaction, the reaction. None: nothing to react to.
+    message_id: Option<i64>,
     key: String,
     images: Vec<Media>,
     /// True for background event batches; false for owner messages and reactions.
@@ -78,14 +77,14 @@ enum Fast {
 }
 
 pub struct Bot {
-    pub owner: i64,
-    pub tg: Arc<dyn Telegram>,
-    pub coach: Arc<Coach>,
-    pub agent: Agent,
-    pub log: TurnLog,
+    owner: i64,
+    tg: Arc<dyn Telegram>,
+    coach: Arc<Coach>,
+    agent: Agent,
+    log: TurnLog,
     /// Wakes the scheduler after anything that may have changed jobs or deliveries.
-    pub wake: Arc<Notify>,
-    pub status: Arc<Mutex<super::Health>>,
+    wake: Arc<Notify>,
+    status: Arc<std::sync::Mutex<super::Health>>,
     inbox: Mutex<Vec<Inbound>>,
     inbox_ready: Notify,
     fast: mpsc::UnboundedSender<Fast>,
@@ -100,7 +99,7 @@ impl Bot {
         agent: Agent,
         log: TurnLog,
         wake: Arc<Notify>,
-        status: Arc<Mutex<super::Health>>,
+        status: Arc<std::sync::Mutex<super::Health>>,
     ) -> Arc<Bot> {
         let (fast, mut lane) = mpsc::unbounded_channel();
         let bot = Arc::new(Bot {
@@ -194,8 +193,8 @@ impl Bot {
         };
         let _ = self.tg.answer_callback(&q.id, None).await;
         // The choice is made: the buttons go, the owner's pick shows as their message in the history.
-        let message_id = q.message.as_ref().map(|m| m.message_id).unwrap_or_default();
-        if message_id != 0 {
+        let message_id = q.message.as_ref().map(|m| m.message_id);
+        if let Some(message_id) = message_id {
             let _ = self.tg.edit_buttons(self.owner, message_id, &vec![]).await;
         }
         self.to_agent(
@@ -244,8 +243,8 @@ impl Bot {
         }
         let meta = if voice.is_some() { json!({"kind": "voice"}) } else { json!({}) };
         let text = self.with_reply(text, message.reply_to_message.as_deref()).await;
-        self.to_agent(message.message_id, format!("tg-{}", message.message_id), text.trim().to_string(), images, meta)
-            .await;
+        let key = format!("tg-{}", message.message_id);
+        self.to_agent(Some(message.message_id), key, text.trim().to_string(), images, meta).await;
     }
 
     /// Transcribe a voice note. Not echoed to the chat: the owner's message row holds the transcript for
@@ -317,7 +316,7 @@ impl Bot {
                     sent.text.clone()
                 };
                 self.to_agent(
-                    0,
+                    None,
                     format!("tg-react:{message_id}-{}", Ts::now().0.as_millisecond()),
                     format!("[reacted 👎 to: \"{reply_preview}\"; find what was wrong, fix it if you can, and save a learned note so it won't repeat]"),
                     vec![],
@@ -399,34 +398,21 @@ impl Bot {
     }
 
     /// Queue an owner message for the agent: 👀, stored in the chat history, collected into the next turn.
-    async fn to_agent(&self, message_id: i64, key: String, text: String, images: Vec<Media>, meta: Value) {
-        if message_id != 0 {
+    async fn to_agent(&self, message_id: Option<i64>, key: String, text: String, images: Vec<Media>, meta: Value) {
+        if let Some(message_id) = message_id {
             let _ = self.tg.react(self.owner, message_id, Some(ACK)).await;
         }
-        self.log.log(json!({"ev": "inbound", "session": SESSION, "channel": "telegram", "msg": message_id.to_string(),
-            "sentAt": Ts::now().0.as_millisecond(), "chars": text.chars().count(), "text": scrub(&text, 4000)}));
-        let stored = text.clone();
-        let saved = blocking(self.db(), move |db| {
-            ChatMessage {
-                id: None,
-                at: Ts::now(),
-                role: ChatRole::Owner,
-                text: stored,
-                telegram_message_id: (message_id != 0).then_some(message_id),
-                meta_json: Json(meta),
-            }
-            .insert(db)
-        })
-        .await;
-        if let Err(e) = saved {
-            tracing::warn!("chat history write failed: {e}");
-        }
+        self.log.log(
+            json!({"ev": "inbound", "session": SESSION, "channel": "telegram", "msg": message_id.map(|m| m.to_string()),
+            "sentAt": Ts::now().0.as_millisecond(), "chars": text.chars().count(), "text": scrub(&text, 4000)}),
+        );
+        self.remember(ChatRole::Owner, text, message_id, meta).await;
         self.inbox.lock().await.push(Inbound { message_id, key, images, background: false });
         self.inbox_ready.notify_one();
     }
 
     async fn send_status(&self) {
-        let health = self.status.lock().await.clone();
+        let health = self.status.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let model = self.agent.chat_model.clone();
         let text = blocking(self.db(), move |db| status_text(db, &health, &model))
             .await
@@ -452,11 +438,8 @@ impl Bot {
     }
 
     async fn remember(&self, role: ChatRole, text: String, message_id: Option<i64>, meta: Value) {
-        let saved = blocking(self.db(), move |db| {
-            ChatMessage { id: None, at: Ts::now(), role, text, telegram_message_id: message_id, meta_json: Json(meta) }
-                .insert(db)
-        })
-        .await;
+        let saved =
+            blocking(self.db(), move |db| ChatMessage::new(Ts::now(), role, text, message_id, meta).insert(db)).await;
         if let Err(e) = saved {
             tracing::warn!("chat history write failed: {e}");
         }
@@ -467,7 +450,7 @@ impl Bot {
         let started = Instant::now();
         let data = q.data.clone().unwrap_or_default();
         let action = data.split(':').nth(1).unwrap_or("").to_string();
-        let message_id = q.message.as_ref().map(|m| m.message_id).unwrap_or_default();
+        let message_id = q.message.as_ref().map(|m| m.message_id);
         let request_id = format!("tg-cb:{}", q.id);
         let result = in_tx(self.db(), move |db| coach::handle_tap(db, &data, Ts::now(), &request_id)).await;
         let cli_ms = started.elapsed().as_millis() as u64;
@@ -482,7 +465,10 @@ impl Bot {
                 Some("COACH_UNHANDLED".into())
             }
             Ok(view) => {
-                let tapped = Tapped { message_id, text: q.message.as_ref().and_then(|m| m.body().map(String::from)) };
+                let tapped = Tapped {
+                    message_id: message_id.unwrap_or_default(),
+                    text: q.message.as_ref().and_then(|m| m.body().map(String::from)),
+                };
                 if let Err(e) = self.coach.apply(&view, Some(&tapped), None).await {
                     tracing::warn!("coach render failed: {e}");
                     self.to_agent(message_id, format!("render:{}", q.id),
@@ -516,7 +502,7 @@ impl Bot {
             Ok(view) if view.handled => {
                 if let Err(e) = self.coach.apply(&view, None, Some(message_id)).await {
                     tracing::warn!("coach render failed: {e}");
-                    self.to_agent(message_id, format!("render:tg-{message_id}"),
+                    self.to_agent(Some(message_id), format!("render:tg-{message_id}"),
                         format!("Typed set {text} was saved successfully, but rendering failed ({}): {e}. Do not log it again; inspect workout status and resend the card.", e.code()),
                         vec![], json!({"kind": "coach_fallback"})).await;
                 }
@@ -537,8 +523,8 @@ impl Bot {
                     _ => text,
                 };
                 let text = self.with_reply(text, reply.as_deref()).await;
-                self.to_agent(message_id, format!("tg-{message_id}"), text, vec![], json!({"kind": "coach_fallback"}))
-                    .await;
+                let key = format!("tg-{message_id}");
+                self.to_agent(Some(message_id), key, text, vec![], json!({"kind": "coach_fallback"})).await;
             }
         }
         entry["ms"] = json!(started.elapsed().as_millis() as u64);
@@ -583,26 +569,26 @@ impl Bot {
         let Some(batch) = batch else {
             return Ok(());
         };
-        // A frozen batch may outlive its events: an owner turn settled them meanwhile.
-        let (tz, handled) = blocking(self.db(), |db| {
-            let handled: Vec<String> =
-                AgentEvent::select(db, "WHERE handled_at IS NOT NULL", [])?.into_iter().map(|e| e.id).collect();
-            Ok((crate::domain::profile::get_profile(db)?.tz(), handled))
+        let mut events = batch.payload_json["events"].clone();
+        let ids: Vec<String> =
+            events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
+        let frozen = json!(ids).to_string();
+        let (tz, settled) = blocking(self.db(), move |db| {
+            let settled: i64 = db.query_row(
+                "SELECT count(*) FROM agent_event WHERE handled_at IS NOT NULL AND id IN (SELECT value FROM json_each(?1))",
+                [frozen],
+                |r| r.get(0),
+            )?;
+            Ok((crate::domain::profile::get_profile(db)?.tz(), settled > 0))
         })
         .await?;
-        let mut events = batch.payload_json["events"].clone();
-        if let Some(list) = events.as_array_mut() {
-            list.retain(|e| e["id"].as_str().is_none_or(|id| !handled.iter().any(|h| h == id)));
-        }
-        // Settled events leave the batch; the rest go out in a fresh batch on the next tick, since a
-        // retry under this batch's request IDs with different intents would hit IDEMPOTENCY_CONFLICT.
-        let frozen = batch.payload_json["events"].as_array().map_or(0, Vec::len);
-        if events.as_array().map_or(0, Vec::len) != frozen {
+        // A frozen batch may outlive its events: an owner turn settled some meanwhile. The batch is
+        // retired and the rest go out in a fresh batch on the next tick, since a retry under this
+        // batch's request IDs with different intents would hit IDEMPOTENCY_CONFLICT.
+        if settled {
             return in_tx(self.db(), move |db| crate::domain::events::ack(db, &batch.id, Ts::now()).map(drop)).await;
         }
         crate::time::localize(&mut events, &tz);
-        let ids: Vec<String> =
-            events.as_array().into_iter().flatten().filter_map(|e| e["id"].as_str().map(String::from)).collect();
         // `tools::Ctx::background` recognises this prefix.
         let key = format!("event-{}", batch.id);
         let text = format!(
@@ -610,19 +596,12 @@ impl Bot {
             json!(events)
         );
         blocking(self.db(), move |db| {
-            ChatMessage {
-                id: None,
-                at: Ts::now(),
-                role: ChatRole::Bot,
-                text: crate::agent::context::name_sessions(db, &text)?,
-                telegram_message_id: None,
-                meta_json: Json(json!({"kind": "agent_event"})),
-            }
-            .insert(db)
+            let text = crate::agent::context::name_sessions(db, &text)?;
+            ChatMessage::new(Ts::now(), ChatRole::Bot, text, None, json!({"kind": "agent_event"})).insert(db)
         })
         .await?;
         let review = events.as_array().into_iter().flatten().any(|e| e["type"] == "planning.weekly_briefing");
-        if self.turn(vec![Inbound { message_id: 0, key, images: vec![], background: true }], review).await {
+        if self.turn(vec![Inbound { message_id: None, key, images: vec![], background: true }], review).await {
             in_tx(self.db(), move |db| {
                 for id in ids {
                     crate::domain::events::ack(db, &id, Ts::now())?;
@@ -662,7 +641,7 @@ impl Bot {
         if background && !self.inbox.lock().await.is_empty() {
             return false;
         }
-        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id != 0) {
+        let delivered = if !outcome.failed || batch.iter().any(|b| b.message_id.is_some()) {
             self.answer(&outcome, &batch).await
         } else {
             false
@@ -702,7 +681,7 @@ impl Bot {
     /// Send the turn's one outcome and clear the 👀 acks. False when the owner may not have got it.
     async fn answer(&self, outcome: &Outcome, batch: &[Inbound]) -> bool {
         let reply = &outcome.reply;
-        let target = batch.iter().rev().find(|b| b.message_id != 0).map(|b| b.message_id);
+        let target = batch.iter().rev().find_map(|b| b.message_id);
         let mut reacted = None;
         let mut delivered = true;
         if let (Some(emoji), Some(message)) = (&reply.react, target) {
@@ -724,8 +703,8 @@ impl Bot {
                 message.buttons.iter().map(|b| (b.label.clone(), b.value.clone())).collect();
             delivered &= self.send_reply(outcome, &message.text, message.photo.as_deref(), &buttons).await;
         }
-        for b in batch.iter().filter(|b| b.message_id != 0 && Some(b.message_id) != reacted) {
-            let _ = self.tg.react(self.owner, b.message_id, None).await;
+        for message in batch.iter().filter_map(|b| b.message_id).filter(|m| Some(*m) != reacted) {
+            let _ = self.tg.react(self.owner, message, None).await;
         }
         delivered
     }
@@ -779,7 +758,7 @@ const QUIET: jiff::SignedDuration = jiff::SignedDuration::from_mins(5);
 /// Whether the owner wrote within `QUIET`: background events then wait for their next turn.
 fn owner_active(db: &crate::db::Connection, now: Ts) -> Result<bool> {
     let last = ChatMessage::first(db, "WHERE role = 'owner' ORDER BY id DESC", [])?;
-    Ok(last.is_some_and(|m| now.0.duration_since(m.at.0) < QUIET))
+    Ok(last.is_some_and(|m| now - m.at < QUIET))
 }
 
 /// `/status`: runtime health in a few lines, no model.
@@ -794,13 +773,7 @@ fn status_text(db: &crate::db::Connection, health: &super::Health, model: &str) 
         format!("**GymClaw** · up {}", super::uptime(health.started.elapsed())),
         format!(
             "Runtime {} · calendar writes {} · crowd polling {}",
-            if authority.enabled {
-                "on"
-            } else if authority.configured {
-                "paused"
-            } else {
-                "not set up"
-            },
+            authority.state(),
             on(authority.calendar_writes_enabled),
             on(authority.crowd_polling_enabled)
         ),
@@ -869,7 +842,7 @@ mod tests {
             coach,
             log: TurnLog::default(),
             wake: Arc::new(Notify::new()),
-            status: Arc::new(Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
+            status: Arc::new(std::sync::Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
             fast,
@@ -990,7 +963,7 @@ mod tests {
         };
 
         // The owner just wrote: the event waits.
-        bot.to_agent(7, "tg-7".into(), "back to 3 a week".into(), vec![], json!({})).await;
+        bot.to_agent(Some(7), "tg-7".into(), "back to 3 a week".into(), vec![], json!({})).await;
         attention("Week 2026-11-02: 4 sessions saved, target 3");
         bot.event_turn().await.unwrap();
         assert_eq!(calls(), 0);
@@ -1009,7 +982,12 @@ mod tests {
 
         // The owner writes while a background turn thinks: it stays silent and settles nothing.
         attention("Session y: skips a rest day");
-        bot.inbox.lock().await.push(Inbound { message_id: 8, key: "tg-8".into(), images: vec![], background: false });
+        bot.inbox.lock().await.push(Inbound {
+            message_id: Some(8),
+            key: "tg-8".into(),
+            images: vec![],
+            background: false,
+        });
         let sent = |tg: &crate::telegram::coach::tests::FakeTelegram| {
             tg.calls().iter().filter(|c| matches!(c, crate::telegram::coach::tests::Call::Send(..))).count()
         };
@@ -1088,16 +1066,7 @@ mod tests {
         for (role, id, meta) in
             [(ChatRole::Assistant, 20, json!({"kind": "reply", "run": "r1"})), (ChatRole::Owner, 21, json!({}))]
         {
-            ChatMessage {
-                id: None,
-                at: Ts::now(),
-                role,
-                text: "x".into(),
-                telegram_message_id: Some(id),
-                meta_json: Json(meta),
-            }
-            .insert(&db)
-            .unwrap();
+            ChatMessage::new(Ts::now(), role, "x".into(), Some(id), meta).insert(&db).unwrap();
         }
         for message in [20, 21] {
             let update = json!({"update_id": 2, "message_reaction": {"chat": {"id": 42, "type": "private"}, "message_id": message,
@@ -1132,16 +1101,7 @@ mod tests {
         crate::domain::workout::start(&db, Some("fixture"), None, false, Ts::now(), "start").unwrap();
         let workout = crate::domain::workout::active_workout(&db).unwrap().unwrap();
         let card = coach::exercise_card(&db, &workout.id, Ts::now()).unwrap();
-        ChatMessage {
-            id: None,
-            at: Ts::now(),
-            role: ChatRole::Bot,
-            text: card.text.clone(),
-            telegram_message_id: Some(300),
-            meta_json: Json(card.meta()),
-        }
-        .insert(&db)
-        .unwrap();
+        ChatMessage::new(Ts::now(), ChatRole::Bot, card.text.clone(), Some(300), card.meta()).insert(&db).unwrap();
         coach::handle_text(&db, "8x40", Ts::now(), "m1").unwrap();
         let set = crate::db::models::SetLog::first(&db, "", []).unwrap().unwrap();
         let message = |id: i64, text: &str| -> Message {

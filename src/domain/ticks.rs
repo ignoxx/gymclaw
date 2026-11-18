@@ -59,19 +59,19 @@ fn watch_with(
     if calendar_error.as_deref() != Some("CALENDAR_UNAVAILABLE")
         && let Some((event_id, message)) = auth_alert(db, calendar_error.is_none(), now)?
     {
-        prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
+        prepare_event_message(db, &event_id, &message, now, recipient)?;
     }
     personal_calendar::refresh(db, now, false, net, false)?;
     if let Some(template) = &authority.template_id {
         weekly::rolling_plan(db, template, now)?;
     }
     for (event_id, _, message) in weekly::no_show_nudges(db, now)? {
-        prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
+        prepare_event_message(db, &event_id, &message, now, recipient)?;
     }
     if authority.crowd_polling_enabled
         && let Some((event_id, message)) = crowd::polling_alert(db, now)?
     {
-        prepare_event_message(db, &event_id, &message, now, recipient, &[])?;
+        prepare_event_message(db, &event_id, &message, now, recipient)?;
     }
     Ok(json!({"calendar_error": calendar_error}))
 }

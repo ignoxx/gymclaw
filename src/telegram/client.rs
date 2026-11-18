@@ -145,7 +145,7 @@ async fn parse<T: DeserializeOwned>(method: &str, response: reqwest::Response) -
     Err(Error::domain("TELEGRAM_ERROR", format!("{method}: {description}")))
 }
 
-pub fn markup(buttons: &Keyboard) -> Value {
+fn markup(buttons: &Keyboard) -> Value {
     json!({"inline_keyboard": buttons.iter().map(|row| row.iter().map(|b| json!({"text": b.text, "callback_data": b.data})).collect::<Vec<_>>()).collect::<Vec<_>>()})
 }
 

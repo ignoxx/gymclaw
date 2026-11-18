@@ -5,9 +5,7 @@ const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 let restTimer = null;
 let state = null;
 let selectedExercise = null;
-// Snapshot clock minus browser clock: the demo is frozen in time, live is ~0.
-let clockOffset = 0;
-const now = () => Date.now() + clockOffset;
+const now = () => Date.now();
 // CSS class from a data value, always prefixed: ('crowd', 'A few') → 'crowd-a-few'. A bare value can
 // collide with a layout class (crowd "Empty" picked up the `.empty` placeholder margin).
 const dataClass = (kind, value) => `${kind}-${String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
@@ -38,7 +36,6 @@ function ago(iso) {
   return minutes < 1440 ? `${Math.floor(minutes / 60)} h ago` : `${Math.floor(minutes / 1440)} d ago`;
 }
 
-const minutesOf = time => { const [h, m] = time.split(':').map(Number); return h * 60 + m; };
 const clock = minutes => `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(Math.round(minutes % 60)).padStart(2, '0')}`;
 const tonnes = kg => kg >= 1000 ? `${(kg / 1000).toFixed(1)} t` : `${Math.round(kg)} kg`;
 const kgs = value => `${Number(value)} kg`;
@@ -1037,9 +1034,8 @@ function showTab() {
 
 let rendered = '';
 function render(data) {
-  if (typeof data.demo !== 'boolean' || data.live_database_accessed !== !data.demo) throw new Error('Invalid state');
   const zone = { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false };
-  document.getElementById('updated').textContent = `${data.demo ? 'Demo · ' : ''}Updated ${new Date(data.captured_at).toLocaleTimeString('en-GB', zone)}`;
+  document.getElementById('updated').textContent = `Updated ${new Date(data.captured_at).toLocaleTimeString('en-GB', zone)}`;
   // Auto-refresh mostly returns the same data: then only the time changes, and open rows, the
   // tooltip and the scroll position stay as they are.
   const content = JSON.stringify({ ...data, captured_at: null });
@@ -1050,14 +1046,11 @@ function render(data) {
   showTab();
 }
 
-let live = false;
 async function refresh() {
   try {
     const response = await fetch('/api/state');
     if (!response.ok) throw new Error('State unavailable');
     const data = await response.json();
-    live = !data.demo;
-    clockOffset = live ? 0 : Date.parse(data.captured_at) - Date.now();
     render(data);
     document.getElementById('load-error').hidden = true;
     return true;
@@ -1083,6 +1076,6 @@ document.getElementById('crowd-prev').addEventListener('click', () => { crowdVie
 document.getElementById('crowd-next').addEventListener('click', () => { crowdView.back = Math.max(-CROWD_AHEAD[crowdView.view], crowdView.back - 1); renderAttendance(state.crowd); });
 refresh();
 // Live state refreshes itself every 10 s while the page is visible (a refresh is ~70 ms server-side),
-// and at once when you come back to the tab. The demo is static.
-setInterval(() => live && !document.hidden && refresh(), 10000);
-document.addEventListener('visibilitychange', () => live && !document.hidden && refresh());
+// and at once when you come back to the tab.
+setInterval(() => !document.hidden && refresh(), 10000);
+document.addEventListener('visibilitychange', () => !document.hidden && refresh());

@@ -102,7 +102,7 @@ enum Command {
         #[command(subcommand)]
         command: IllustrationsCommand,
     },
-    /// Serve the read-only dashboard.
+    /// Serve the dashboard. Its only writes: the agent's notes, its extensions' on/off switch and plan targets.
     Dashboard {
         #[arg(long, default_value = "127.0.0.1:8766")]
         addr: SocketAddr,
@@ -147,22 +147,14 @@ fn call(tool: &str, args: Option<String>, now: Option<String>, request_id: Optio
         Some(text) => serde_json::from_str(&text).map_err(|e| Error::domain("INVALID_JSON", e.to_string()))?,
         None => json!({}),
     };
-    let tx = conn.transaction()?;
-    let profile_tz = gymclaw::domain::profile::get_profile(&tx)?.tz();
-    let now = match now {
-        Some(text) => Ts::parse(&text, Some(&profile_tz))?,
-        None => Ts::now(),
-    };
-    let mut cx = tools::Ctx {
-        db: &tx,
-        now,
-        request_id: request_id.unwrap_or_else(|| format!("cli:{}", db::new_id())),
-        data_dir: &data_dir,
-        effects: vec![],
-    };
-    let result = tools::call(&mut cx, tool, args)?;
-    tx.commit()?;
-    Ok(result)
+    db::in_tx(&mut conn, |tx| {
+        let now = match now {
+            Some(text) => Ts::parse(&text, Some(&gymclaw::domain::profile::get_profile(tx)?.tz()))?,
+            None => Ts::now(),
+        };
+        let request_id = request_id.unwrap_or_else(|| format!("cli:{}", db::new_id()));
+        tools::call(&mut tools::Ctx { db: tx, now, request_id, data_dir: &data_dir, effects: vec![] }, tool, args)
+    })
 }
 
 /// Prints each model step (reasoning, text, tool calls) as it happens.

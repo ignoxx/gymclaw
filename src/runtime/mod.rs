@@ -4,17 +4,17 @@ pub mod outbox;
 pub mod scheduler;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 
 use crate::agent::openrouter::OpenRouter;
 use crate::agent::turnlog::TurnLog;
 use crate::agent::{Agent, ChatModel};
 use crate::config::Config;
+use crate::db::Connection;
 use crate::db::models::{ChatMessage, ChatRole};
-use crate::db::{Connection, Json};
 use crate::domain::coach;
 use crate::domain::view::Card;
 use crate::error::{Error, Result};
@@ -56,18 +56,12 @@ pub async fn blocking<T: Send + 'static>(
     .unwrap_or_else(|e| Err(Error::domain("INTERNAL", format!("worker failed: {e}"))))
 }
 
-/// `blocking` inside one transaction (holding the write lock, see `db::open`), committed when `f` succeeds.
+/// `blocking` inside one transaction (`db::in_tx`).
 pub async fn in_tx<T: Send + 'static>(
     db_path: &Path,
     f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    blocking(db_path, move |db| {
-        let tx = db.transaction()?;
-        let value = f(&tx)?;
-        tx.commit()?;
-        Ok(value)
-    })
-    .await
+    blocking(db_path, move |db| crate::db::in_tx(db, f)).await
 }
 
 /// Run the bot: Telegram long-poll, agent turns, coach, scheduler and outbox, until shutdown.
@@ -113,15 +107,7 @@ pub async fn serve(config: Config) -> Result<()> {
             let (db_path, text, meta) = (db_path.clone(), text.to_string(), card.meta());
             tokio::spawn(async move {
                 let saved = blocking(&db_path, move |db| {
-                    ChatMessage {
-                        id: None,
-                        at: Ts::now(),
-                        role: ChatRole::Bot,
-                        text,
-                        telegram_message_id: Some(message_id),
-                        meta_json: Json(meta),
-                    }
-                    .insert(db)
+                    ChatMessage::new(Ts::now(), ChatRole::Bot, text, Some(message_id), meta).insert(db)
                 })
                 .await;
                 if let Err(e) = saved {

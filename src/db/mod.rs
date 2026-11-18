@@ -51,6 +51,15 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Run `f` in one transaction (holding the write lock, see `open`), committed only when it succeeds:
+/// a failure midway leaves nothing behind. `domain::core::mutate` relies on its caller for this.
+pub fn in_tx<T>(conn: &mut Connection, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    let tx = conn.transaction()?;
+    let value = f(&tx)?;
+    tx.commit()?;
+    Ok(value)
+}
+
 /// A DEFERRED transaction for work that calls the network: it doesn't hold the write lock through the
 /// fetch, so taps and typed sets aren't stalled behind Google. Under WAL its reads never block a writer;
 /// if one commits mid-fetch, this transaction's own write fails and the next tick retries.
@@ -170,7 +179,6 @@ macro_rules! sql_enum {
         pub enum $name { $(#[serde(rename = $text)] $variant),+ }
 
         impl $name {
-            pub const ALL: &[$name] = &[$($name::$variant),+];
             pub fn as_str(self) -> &'static str {
                 match self { $($name::$variant => $text),+ }
             }
@@ -215,9 +223,7 @@ mod tests {
 
     #[test]
     fn migrations_and_restart() {
-        let path = std::env::temp_dir().join(format!("gymclaw-test-{}.db", new_id()));
-        let mut db = open(&path).unwrap();
-        migrate(&mut db).unwrap();
+        let (path, mut db) = test::file();
         migrate(&mut db).unwrap();
         update_profile(&db, json!({"prep_minutes": 23}).as_object().unwrap()).unwrap();
         let at = Ts::parse("2026-10-01T00:00:00+00:00", None).unwrap();
@@ -238,15 +244,14 @@ mod tests {
         assert_eq!(AgentEvent::select(&db, "", []).unwrap()[0].created_at, at);
         let version: String = db.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, BASELINE_MARKER);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// 2026-11-13: a set tap failed with "database is locked" while the calendar sync held its
     /// transaction open across a Google fetch. A tap must commit while a sync waits on the network.
     #[test]
     fn a_tap_commits_while_a_sync_waits_on_the_network() {
-        let path = std::env::temp_dir().join(format!("gymclaw-test-{}.db", new_id()));
-        let mut setup = open(&path).unwrap();
+        let (path, mut setup) = test::file();
         setup.execute_batch("CREATE TABLE t (x INTEGER)").unwrap();
         let sync = open(&path).unwrap();
         let fetching = network_tx(&sync).unwrap();
@@ -259,7 +264,7 @@ mod tests {
         // The sync's own write now fails (its snapshot is stale) and the next tick retries it.
         assert!(fetching.execute("INSERT INTO t VALUES (2)", []).is_err());
         drop(fetching);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// 006 rebuilds set_log, which notification_job references, and turns the owner's cardio Cycling
