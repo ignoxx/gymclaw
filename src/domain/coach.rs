@@ -392,9 +392,7 @@ fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
         }
     }
     lines.push("How busy was the gym?".into());
-    let r = reference(workout_id).to_string();
-    let buttons =
-        LABELS.iter().map(|(value, label)| button(*label, &["crowd", value, &r])).collect::<Result<Vec<_>>>()?;
+    let buttons = crowd_buttons(workout_id)?;
     let effect = h.lifts.iter().any(|l| l.record()).then(|| crate::telegram::EFFECT_CONFETTI.to_string());
     Ok(Card {
         effect,
@@ -405,6 +403,12 @@ fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
 }
 
 /// The ack a crowd answer leaves under the finish card.
+/// "How busy was the gym?" after a workout: one button per rating (the finish card and the Mini App).
+pub fn crowd_buttons(workout_id: &str) -> Result<Vec<Button>> {
+    let r = reference(workout_id);
+    LABELS.iter().map(|(value, label)| button(*label, &["crowd", value, r])).collect()
+}
+
 fn crowd_ack(rating: &str) -> String {
     let label = LABELS.iter().find(|(value, _)| value.eq_ignore_ascii_case(rating)).map_or(rating, |(_, label)| label);
     format!("Saved: {label}. Thanks.")
@@ -672,7 +676,68 @@ pub const APP_VIEW: &str = "coach.app_view";
 /// where its options are cards of their own.
 pub fn app_action(data: &str) -> bool {
     let action = data.strip_prefix("gc:").unwrap_or(data).split(':').next().unwrap_or_default();
-    ["log", "time", "dist", "warm", "nowarm", "skip", "cut", "next", "free", "drop"].contains(&action)
+    ["log", "time", "dist", "warm", "nowarm", "skip", "cut", "next", "free", "drop", "swap", "sub", "later", "crowd"]
+        .contains(&action)
+}
+
+/// A set fixed in the Mini App (`set_correct`): a note in the chat, so the ✅ on the old card isn't the last word.
+pub fn app_fixed(db: &Connection, set_id: &str, now: Ts) -> Result<()> {
+    let Some(set) = crate::db::models::SetLog::get(db, set_id)? else { return Ok(()) };
+    let Some(row) = WorkoutExercise::get(db, &set.workout_exercise_id)? else { return Ok(()) };
+    let text = format!("✏️ Fixed {}: {}", name(&row), kind(&row).set(set.weight, set.reps, set.seconds, set.meters));
+    let note = Card { text: text.clone(), kind: CardKind::Other, ..Card::default() };
+    let view = CoachView { ack: Some(text), cards: vec![note], standalone: true, ..handled() };
+    crate::domain::core::emit(db, APP_VIEW, now, serde_json::to_value(&view)?)?;
+    Ok(())
+}
+
+/// The Mini App's live card: the chat card's buttons, the swap options the chat would send, and what the
+/// set logger starts from, all worded as the chat words them (`SetKind`).
+pub fn app_live(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
+    let buttons: Vec<Button> = exercise_card(db, workout_id, now)
+        .map(|card| card.buttons.into_iter().flatten().filter(|b| app_action(&b.data)).collect())
+        .unwrap_or_default();
+    let data = workout::state(db, workout_id, now)?;
+    let rows = exercises(db, workout_id)?;
+    let Some(active) = data.active_exercise else {
+        // Only machines that were taken are left: the chat asks whether one is free now.
+        let waiting = rows.iter().find(|e| e.status == ExerciseStatus::Deferred).map(name);
+        return Ok(json!({"buttons": buttons, "waiting": waiting}));
+    };
+    let r = reference(&active.id);
+    let row = rows.iter().find(|e| e.id == active.id).expect("active row");
+    let set_kind = active.kind();
+    // The chat card's suggestion, else a guess from a similar exercise, else nothing (the owner enters it).
+    let (weight, reps) = if active.set_type == SetType::Warmup {
+        (Some(active.target_weight), active.rep_max)
+    } else if let Some((weight, reps)) = next_set(db, row, active.bodyweight)? {
+        (Some(weight), reps)
+    } else {
+        guess_set(db, row, active.rep_min)?.map_or((None, active.rep_min), |(w, reps, _)| (Some(w), reps))
+    };
+    let target = match active.measure {
+        Measure::Time => active.seconds.map_or("time it".into(), |s| set_kind.reps(&format_time(s))),
+        Measure::Distance => active.meters.map_or("distance".into(), format_distance),
+        Measure::Reps => set_kind.target(active.rep_min, active.rep_max, weight.unwrap_or(0.0)),
+    };
+    // Before the first set, as in the chat: other exercises for this slot, or doing it later.
+    let swap = if active.new_exercise && active.set_type != SetType::Warmup {
+        let options = adaptation::alternatives(db, workout_id, Some(&active.id), 3)?;
+        let options: Vec<Value> = options
+            .into_iter()
+            .map(|o| json!({"name": o.name, "svg_url": o.illustration.map(|i| i.svg_url), "data": format!("gc:sub:{r}:{}", o.substitute_id)}))
+            .collect();
+        let later = rows.iter().any(|e| e.status == ExerciseStatus::Pending);
+        json!({"options": options, "later": later.then(|| format!("gc:later:{r}"))})
+    } else {
+        Value::Null
+    };
+    Ok(json!({"ref": r, "buttons": buttons, "target": target, "swap": swap,
+        "equipment": active.illustration.as_ref().map(|i| i.equipment.clone()),
+        "logger": {"measure": active.measure, "weight": weight, "reps": reps, "seconds": active.seconds, "meters": active.meters,
+            "unit": set_kind.unit(), "added": set_kind.load == Load::Added, "per_side": set_kind.per_side,
+            // Reps alone make the set (bodyweight): the weight stays out of the way unless there is some.
+            "reps_only": active.bodyweight && weight.unwrap_or(0.0) == 0.0}}))
 }
 
 /// A coach button pressed in the Mini App (a set typed there arrives as `log` with its numbers): the same
@@ -961,18 +1026,24 @@ mod tests {
     }
 
     /// A set typed in the Mini App logs like a chat tap and leaves the view for the bot to render; a button
-    /// from a card the workout has moved past, or a swap (chat only), changes nothing.
+    /// from a card the workout has moved past, or one the app doesn't offer, changes nothing.
     #[test]
     fn app_tap_logs_and_leaves_the_view_for_the_chat() {
         let db = db();
         push(&db);
         let r = &data(&live(&db, at(0)), "🔄 Swap")["swap:".len()..];
+        // No weight known yet: the logger starts empty, and the swap options are there before the first set.
+        let card = app_live(&db, &active_workout(&db).unwrap().unwrap().id, at(0)).unwrap();
+        assert_eq!((card["logger"]["weight"].clone(), card["swap"].is_object()), (Value::Null, true));
         let view = app_tap(&db, &format!("gc:log:{r}:90:12"), at(10), "app-1").unwrap();
         assert_eq!(view.ack.as_deref(), Some("✅ 12 × 90 kg"));
         let events = AgentEvent::select(&db, "WHERE type = ?1", [APP_VIEW]).unwrap();
         let sent: CoachView = serde_json::from_value(events[0].payload_json.0.clone()).unwrap();
         assert_eq!((events.len(), sent), (1, view));
-        assert_eq!(app_tap(&db, &format!("gc:swap:{r}"), at(11), "app-2").unwrap_err().code(), "INVALID_INPUT");
+        assert_eq!(app_tap(&db, &format!("gc:wait:{r}"), at(11), "app-2").unwrap_err().code(), "INVALID_INPUT");
+        // The next set starts from the one just logged.
+        let card = app_live(&db, &active_workout(&db).unwrap().unwrap().id, at(11)).unwrap();
+        assert_eq!((card["logger"]["weight"].as_f64(), card["logger"]["reps"].as_i64()), (Some(90.0), Some(12)));
         // Moved on to the next exercise in the chat: the app's old card can't log onto it.
         handle_tap(&db, &format!("gc:next:{r}"), at(12), "cb-next").unwrap();
         assert_eq!(app_tap(&db, &format!("gc:log:{r}:90:12"), at(13), "app-3").unwrap_err().code(), "COACH_STALE");

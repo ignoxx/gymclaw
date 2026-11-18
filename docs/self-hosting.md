@@ -50,8 +50,8 @@ Every setting is an environment variable; this table is the full list, and `.env
 | `GYMCLAW_ALLOW_DIRECT_EGRESS` | no | `1` lets the container start with direct internet access (`docker run` only; compose never passes it). Local testing only. |
 
 The stack is three containers: GymClaw (one Rust binary: bot, agent, coach, scheduler), an egress
-proxy with a host allowlist, and the dashboard. Coolify steps, backups and moving hosts:
-[deploy/README.md](../deploy/README.md).
+proxy with a host allowlist, and the dashboard, the Mini App behind the bot's "Gym" menu button.
+Coolify steps, backups and moving hosts: [deploy/README.md](../deploy/README.md).
 
 ## First run
 

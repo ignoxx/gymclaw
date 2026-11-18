@@ -94,7 +94,7 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         } else {
             format!("{}–{}", spec.rep_min, spec.rep_max)
         };
-        exercises.push(json!({"name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
+        exercises.push(json!({"id": spec.id, "name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
             "reps": reps, "time": spec.set_seconds().map(workout::format_time),
             "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
@@ -120,6 +120,7 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
             exercises.push(json!({"id": spec.id, "name": spec.name, "guide_id": spec.guide_id, "svg_url": svg(&spec.name, spec.guide_id.as_deref()),
                 "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()).or(spec.muscle.clone()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
+                "measure": spec.measure, "load": spec.load,
                 "time": spec.set_seconds().map(workout::format_time), "target": spec.kind().target(spec.rep_min, spec.rep_max, next)}));
         }
         out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));
@@ -153,7 +154,7 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         workout::exercises(db, &w.id)?.iter().filter(|r| r.status != crate::db::models::ExerciseStatus::Substituted)
     {
         let name = row.config_json["name"].as_str().unwrap_or_default();
-        exercises.push(json!({"id": row.id, "name": name, "svg_url": svg(name, row.config_json["guide_id"].as_str()), "sets": row.planned_working_sets,
+        exercises.push(json!({"id": row.id, "exercise_id": row.exercise_id, "name": name, "svg_url": svg(name, row.config_json["guide_id"].as_str()), "sets": row.planned_working_sets,
             "done": workout::logs(db, &row.id, Some(SetType::Working))?.len(), "status": row.status}));
     }
     let active = &data["active_exercise"];
@@ -166,21 +167,21 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     let active = if active.is_object() {
         json!({"id": active["id"], "name": active["name"], "set_type": active["set_type"], "set_number": active["set_number"], "sets": active["working_sets"],
             "weight": active["target_weight"], "rep_min": active["rep_min"], "rep_max": active["rep_max"],
-            "time": active["seconds"].as_i64().map(workout::format_time), "bodyweight": active["bodyweight"],
-            "measure": active["measure"], "last": active["last_set"]})
+            "time": active["seconds"].as_i64().map(workout::format_time)})
     } else {
         Value::Null
     };
-    // The chat card's buttons, so the app offers exactly what the chat does (`coach::app_tap` runs them).
-    let buttons: Vec<Value> = coach::exercise_card(db, &w.id, now)
-        .map(|card| {
-            card.buttons.into_iter().flatten().filter(|b| coach::app_action(&b.data)).map(|b| json!(b)).collect()
-        })
-        .unwrap_or_default();
+    // The last set, so the app can fix it (`set_correct`).
+    let last = match latest {
+        Some(l) => {
+            json!({"id": l.id, "text": set_text(db, &l)?, "weight": l.weight, "reps": l.reps, "seconds": l.seconds, "meters": l.meters})
+        }
+        None => Value::Null,
+    };
     Ok(
         json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
-        "rest_until": data["rest_job"].get("due_at"), "last_set": latest.map(|l| set_text(db, &l)).transpose()?, "exercises": exercises,
-        "buttons": buttons}),
+        "rest_until": data["rest_job"].get("due_at"), "last_set": last["text"], "last": last, "exercises": exercises,
+        "live": coach::app_live(db, &w.id, now)?}),
     )
 }
 
@@ -299,7 +300,8 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
         }
         result.push(json!({"id": w.id, "date": started_at.local(tz).date().to_string(), "label": fmt(started_at, tz, "%a %-d %b"), "time": fmt(started_at, tz, "%H:%M"),
             "template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "minutes": seconds.div_euclid(60),
-            "sets": sets, "volume": round(volume, 0) as i64, "prs": prs, "crowd": ratings.get(&w.id).map(|r| label(r)), "exercises": exercises}));
+            "sets": sets, "volume": round(volume, 0) as i64, "prs": prs, "crowd": ratings.get(&w.id).map(|r| label(r)), "exercises": exercises,
+            "finished_at": w.completed_at, "rate": if ratings.contains_key(&w.id) { vec![] } else { coach::crowd_buttons(&w.id)? }}));
     }
     result.reverse();
     Ok(result)

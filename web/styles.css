@@ -14,7 +14,7 @@
    in a browser, when the system is. Exercise pictures are white line art: --art darkens them on light. */
 :root {
   color-scheme: light;
-  --paper: #f1f1eb; --white: #fcfcf8; --ink: #242824; --muted: #80867c; --faint: #bbc2b2; --line: #dcdfd4;
+  --paper: #f1f1eb; --white: #fcfcf8; --ink: #242824; --muted: #5f665b; --faint: #8a9184; --line: #dcdfd4;
   --lime: #d7f580; --on-lime: #242824; --olive: #5e7140; --busy: #f3d9a4; --packed: #f2b8a8; --good: #e2efc9;
   --hero: #242824; --on-hero: #f1f1eb;
   --soft: #eef0e5; --soft-line: #d4dac7; --divider: #eceee5; --hover: #f4f5ee; --track: #e4e7dc; --chip: #e2e6d6;
@@ -124,7 +124,7 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .crowd-stats { margin: 8px 0 0; min-height: 15px; font-size: 11px; color: var(--muted); }
 .chart > svg { display: block; width: 100%; height: auto; overflow: visible; }
 .grid { stroke: var(--grid); }
-.label { fill: var(--muted); font-size: 9px; font-family: 'DM Sans', sans-serif; }
+.label { fill: var(--muted); font-size: 10px; font-family: 'DM Sans', sans-serif; }
 .area { fill: var(--lime); fill-opacity: .3; }
 .line { stroke: var(--chart-line); stroke-width: 2; fill: none; stroke-linejoin: round; }
 .typical { stroke: var(--chart-faint); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
@@ -160,19 +160,20 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .status strong { font-size: 14px; font-variant-numeric: tabular-nums; }
 .status span { font-size: 11px; color: var(--olive); }
 .queue { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; margin-top: 18px; }
-.exercise { position: relative; padding: 6px 4px 8px; border: 1px solid var(--line); border-radius: 7px; text-align: center; color: var(--muted); }
+.exercise { position: relative; padding: 6px 4px 8px; border: 1px solid var(--line); border-radius: 7px; text-align: center; color: var(--muted); background: none; font: inherit; }
 .exercise.current { border-color: var(--accent-line); background: var(--accent-soft); color: var(--ink); }
 .exercise.status-completed { opacity: .5; }
 .exercise img { width: 100%; height: 56px; }
-.exercise span { display: block; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.exercise small { position: absolute; top: 5px; right: 6px; font-size: 9px; color: var(--muted); }
+.exercise span { display: block; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.exercise small { position: absolute; top: 5px; right: 6px; font-size: 10px; color: var(--muted); }
 .plan { list-style: none; padding: 0; margin: 18px 0 0; display: flex; flex-direction: column; gap: 2px; }
-.plan li { display: grid; grid-template-columns: 56px 1fr auto; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--divider); }
+.plan li { border-top: 1px solid var(--divider); }
+.plan li > button { width: 100%; display: grid; grid-template-columns: 56px 1fr auto; gap: 12px; align-items: center; padding: 8px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
 .plan li:first-child { border-top: 0; }
 .plan img { width: 56px; height: 56px; }
 .plan div { display: flex; flex-direction: column; gap: 2px; }
 .plan strong { font-size: 13px; font-weight: 600; }
-.plan div span, .plan em { font-size: 11px; color: var(--muted); font-style: normal; }
+.plan div span, .plan em { font-size: 12px; color: var(--muted); font-style: normal; }
 
 /* Tabs and alerts */
 .page-heading { align-items: center; }
@@ -215,21 +216,20 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .bar-label { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bar-track { height: 14px; }
 .bar-fill { height: 100%; background: var(--bar-fill); border-radius: 0 4px 4px 0; }
-.bar-row:hover .bar-fill { background: var(--bar-met); }
 .bar-value { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .heatmap { display: grid; grid-template-columns: 32px repeat(var(--hours), 1fr); gap: 2px; margin-top: 18px; font-size: 9px; }
 .hm-hour { color: var(--muted); text-align: left; }
 .hm-day { color: var(--muted); align-self: center; }
 .hm-cell { height: 20px; border-radius: 3px; background: color-mix(in oklab, var(--hm-lo), var(--hm-hi) calc(var(--t) * 100%)); }
 .hm-cell.none { background: var(--hm-none); }
-.hm-cell:not(.none):hover { outline: 2px solid var(--ink); outline-offset: -1px; }
 
 /* History */
 .workout { border-top: 1px solid var(--divider); }
 .workout:first-of-type { border-top: 0; margin-top: 10px; }
 .workout summary { list-style: none; display: grid; grid-template-columns: 110px 1fr auto; gap: 12px; align-items: center; padding: 12px 0; cursor: pointer; }
 .workout summary::-webkit-details-marker { display: none; }
-.workout summary:hover strong { text-decoration: underline; text-underline-offset: 3px; }
+.workout summary .tags::after { content: '›'; margin-left: 4px; color: var(--muted); font-size: 16px; transition: transform .15s; }
+.workout[open] summary .tags::after { transform: rotate(90deg); }
 .when, .what { display: flex; flex-direction: column; gap: 1px; }
 .when strong, .what strong { font-size: 13px; font-weight: 600; }
 .when span, .what span { font-size: 11px; color: var(--muted); }
@@ -298,11 +298,10 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .note { display: flex; align-items: baseline; gap: 10px; padding: 9px 0; border-top: 1px solid var(--divider); font-size: 13px; }
 .note:first-child { border-top: 0; }
 .note-text { flex: 1; min-width: 0; padding: 2px 6px; margin: 0 -6px; border-radius: 5px; outline: 0; cursor: text; }
-.note-text:hover { background: var(--hover); }
 .note-text:focus { background: var(--soft); box-shadow: inset 0 0 0 1px var(--soft-line); }
 .note-text:empty::before { content: attr(data-placeholder); color: var(--faint); }
 .note time { color: var(--muted); font-size: 10px; white-space: nowrap; }
-.forget { border: 0; background: none; color: var(--faint); font-size: 15px; line-height: 1; padding: 0 2px; }
+.forget { min-width: 44px; min-height: 44px; margin: -12px -8px -12px 0; border: 0; background: none; color: var(--muted); font-size: 17px; line-height: 1; padding: 0 2px; }
 .forget:hover, .note.armed .forget { color: var(--danger); }
 .note.armed .forget { font-size: 11px; font-weight: 600; }
 .note.add { border-top: 1px dashed var(--line); }
@@ -314,7 +313,8 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
 /* Exercises: plans, everything logged, the catalog; tap one for its detail */
 .ex-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
 #ex-search { flex: 1; min-width: 180px; font: inherit; font-size: 13px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 99px; background: var(--white); color: var(--ink); }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.chips { display: flex; gap: 6px; margin-bottom: 14px; overflow-x: auto; scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
 .chip { border: 1px solid var(--line); background: var(--white); color: var(--muted); border-radius: 99px; padding: 4px 11px; font-size: 11px; white-space: nowrap; }
 .chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--white); }
 /* Columns, not a grid: a short card (Cardio) leaves no hole, the next one stacks right under it. */
@@ -323,7 +323,6 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
 .ex-group .section-heading { margin-bottom: 8px; }
 .ex-row { width: 100%; display: grid; grid-template-columns: 48px 1fr auto; gap: 12px; align-items: center; padding: 8px 4px; border: 0; border-top: 1px solid var(--divider); background: none; color: var(--ink); text-align: left; border-radius: 0; }
 .ex-row:first-of-type { border-top: 0; }
-.ex-row:hover { background: var(--hover); }
 .ex-row img { width: 48px; height: 48px; }
 .ex-row div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ex-row strong { font-size: 13px; font-weight: 600; }
@@ -331,15 +330,14 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
 .ex-row em { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ex-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
 .ex-tile { position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 8px 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--white); color: var(--ink); }
-.ex-tile:hover { border-color: var(--accent-line); }
 .ex-tile.yours { border-color: var(--accent-line); background: var(--accent-soft); }
 .ex-tile img { width: 100%; height: 78px; }
 .ex-tile span { font-size: 11px; font-weight: 600; text-align: center; line-height: 1.25; }
 .ex-tile small { font-size: 10px; color: var(--muted); }
-.ex-tile .tag { position: absolute; top: 6px; right: 6px; background: var(--lime); color: var(--on-lime); }
+.ex-tile .tag { background: var(--lime); color: var(--on-lime); }
 .ex-detail { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--white); color: var(--ink); }
 .ex-detail::backdrop { background: rgba(0, 0, 0, .4); }
-.ex-sheet { position: relative; padding: 22px 24px 26px; }
+.ex-sheet { position: relative; padding: 22px 24px calc(26px + var(--safe-bottom)); }
 .ex-sheet h3 { font-size: 12px; font-weight: 600; margin: 22px 0 8px; }
 .ex-close { position: absolute; top: 12px; right: 14px; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 50%; background: var(--white); color: var(--ink); font-size: 17px; line-height: 1; }
 .ex-head { display: flex; gap: 16px; align-items: center; padding-right: 30px; }
@@ -382,9 +380,9 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
 .tg body { overscroll-behavior-y: none; -webkit-tap-highlight-color: transparent; }
 .tg .header, .tg h1 { display: none; }
 .tg .dashboard { padding-top: 12px; }
-.tg .page-heading { padding: 0; }
-.tg .ex-close, .tg .ex-actions .save { display: none; }
-.tg .ex-head { padding-right: 0; }
+.tg .ex-actions .save { display: none; }
+@media (max-width: 760px) { .tg .page-heading { padding: 0; } }
+@media (min-width: 761px) { .tg .page-heading { padding: 4px 0 18px; } }
 
 /* Tabs: pills on wide screens, a bottom bar within thumb reach on phones (and Telegram on a phone). */
 .tabs svg { display: none; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -414,15 +412,16 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
 .live-actions .log-button { order: -1; }
 .tg .log-button { display: none; }
 /* Stepper: label, − value +. 48 px targets; the value types on tap, no spinner arrows. */
-.stepper { display: grid; grid-template-columns: 1fr 48px minmax(96px, auto) 48px; align-items: center; gap: 8px; }
+/* A fixed value column: every row's − and + line up whatever the unit. */
+.stepper { display: grid; grid-template-columns: 1fr 48px 124px 48px; align-items: center; gap: 8px; }
 .step-label { font-size: 13px; color: var(--muted); }
 .step { width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); color: var(--ink); font-size: 22px; line-height: 1; touch-action: manipulation; }
 .step:active { background: var(--track); }
-.step-value { display: flex; align-items: baseline; justify-content: center; gap: 4px; font-family: 'Barlow Condensed', sans-serif; font-weight: 600; }
-.step-value input { width: 3.6ch; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--ink); font: inherit; font-size: 30px; text-align: right; padding: 0; }
+.step-value { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 4px; font-family: 'Barlow Condensed', sans-serif; font-weight: 600; }
+.step-value input { width: 100%; min-width: 0; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--ink); font: inherit; font-size: 30px; text-align: right; padding: 0; }
 .step-value input:focus { outline: 0; border-bottom-color: var(--lime); }
 .step-value input::placeholder { color: var(--faint); font-size: 18px; }
-.step-value span { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 400; color: var(--muted); }
+.step-value span { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 400; color: var(--muted); text-align: left; white-space: nowrap; }
 .ex-fields { display: flex; flex-direction: column; gap: 8px; }
 .toast { position: fixed; left: 50%; bottom: calc(96px + var(--safe-bottom)); z-index: 30; transform: translateX(-50%); max-width: calc(100vw - 32px);
   padding: 10px 16px; border-radius: 99px; background: var(--ink); color: var(--paper); font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, .2); }
@@ -436,4 +435,49 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 8px; font-w
   .queue .exercise { flex: 0 0 92px; }
   .ex-stats { gap: 8px; }
   .ex-stats .kpi { padding: 10px; }
+}
+
+@media (hover: hover) {
+  .bar-row:hover .bar-fill { background: var(--bar-met); }
+  .hm-cell:not(.none):hover { outline: 2px solid var(--ink); outline-offset: -1px; }
+  .workout summary:hover strong { text-decoration: underline; text-underline-offset: 3px; }
+  .note-text:hover { background: var(--hover); }
+  .ex-row:hover { background: var(--hover); }
+  .ex-tile:hover { border-color: var(--accent-line); }
+}
+
+/* Round 2: live workout details. */
+.live-head .pose { border: 0; background: none; padding: 0; cursor: pointer; }
+.live-head .subtitle.last { display: flex; align-items: baseline; gap: 6px; }
+.link { border: 0; background: none; padding: 6px 2px; color: var(--olive); font: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+#load-error .link { color: inherit; }
+.logger.fixing { outline: 2px solid var(--lime); }
+.logger-note { margin: 0; font-size: 13px; font-weight: 600; }
+.plates { margin: -4px 0 0; min-height: 16px; font-size: 12px; color: var(--muted); text-align: right; }
+.plates:empty { display: none; }
+.stepper.invalid .step-value input { animation: invalid .6s; }
+@keyframes invalid { from { border-bottom-color: var(--danger); color: var(--danger); } }
+.swap { margin-top: 12px; }
+.swap summary { cursor: pointer; font-weight: 600; color: var(--olive); padding: 8px 0; }
+.swap-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 4px 0 10px; }
+.records { margin: 8px 0 0; font-weight: 600; color: var(--olive); }
+.ask { margin: 18px 0 8px; font-size: 13px; }
+.live-more { display: none; gap: 16px; justify-content: center; margin-top: 14px; font-size: 13px; }
+@media (max-width: 900px) {
+  /* Mid-workout the gym's check-ins can wait too: you're there. */
+  .layout.live .gym-panel { display: none; }
+}
+@media (max-width: 760px) {
+  /* Telegram on a phone mid-workout: the tab bar steps aside so the main button below it can't be missed
+     for a tab; the live card links to the other tabs instead. */
+  .tg.live-mode .tabs { display: none; }
+  .tg.live-mode .live-more { display: flex; }
+  .tg.live-mode .dashboard { padding-bottom: calc(24px + var(--safe-bottom)); }
+  /* 16 px fields: iOS zooms the page into anything smaller. */
+  #ex-search, #exercise-select, .note-text { font-size: 16px; }
+  .segmented button { min-height: 38px; }
+  .pager button { width: 44px; height: 44px; }
+  .day { flex: 0 0 68px; }
+  .set-list { white-space: pre-wrap; }
+  .ex-detail { max-height: min(92vh, var(--tg-viewport-stable-height, 100dvh)); }
 }

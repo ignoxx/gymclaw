@@ -45,8 +45,9 @@ services:
     mem_limit: 1536m
     pids_limit: 512
 
-  # Dashboard: reads the DB; its writes are DASHBOARD_TOOLS in src/web/mod.rs. No internet and no published port:
-  # only the reverse proxy reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
+  # Dashboard (the Mini App): reads the DB; its writes are DASHBOARD_TOOLS and the live workout's steps
+  # (`POST /api/coach`) in src/web/mod.rs. No internet and no published port: only the reverse proxy
+  # reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
   dashboard:
     image: *image
     pull_policy: always

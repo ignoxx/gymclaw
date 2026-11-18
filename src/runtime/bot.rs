@@ -547,13 +547,16 @@ impl Bot {
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             timer.tick().await;
+            // A plain read first: the write lock is taken only when there is a step to claim.
+            const PENDING: &str = "WHERE type = ?1 AND handled_at IS NULL ORDER BY created_at, id";
+            let waiting =
+                blocking(self.db(), |db| Ok(AgentEvent::first(db, PENDING, [coach::APP_VIEW])?.is_some())).await;
+            if !matches!(waiting, Ok(true)) {
+                continue;
+            }
             let claimed = in_tx(self.db(), |db| {
                 let now = Ts::now();
-                let events = AgentEvent::select(
-                    db,
-                    "WHERE type = ?1 AND handled_at IS NULL ORDER BY created_at, id",
-                    [coach::APP_VIEW],
-                )?;
+                let events = AgentEvent::select(db, PENDING, [coach::APP_VIEW])?;
                 for event in &events {
                     AgentEvent { handled_at: Some(now), ..event.clone() }.update(db)?;
                 }
@@ -1137,9 +1140,10 @@ mod tests {
             bot.handle(serde_json::from_value(update).unwrap()).await;
         }
         let mut all = vec![];
+        // The label and the routed message are logged separately: wait for both, not just the first line.
         for _ in 0..100 {
             all = crate::agent::turnlog::read(&turns).unwrap_or_default();
-            if !all.is_empty() {
+            if all.iter().any(|e| e["ev"] == "label") && all.iter().any(|e| e["ev"] == "inbound") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
