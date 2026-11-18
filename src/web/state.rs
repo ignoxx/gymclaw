@@ -109,13 +109,13 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
             "target": target(spec, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight)),
             "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
     }
-    // Only today's session can be started from the app (`begin`, as the reminder's button): a Start on
-    // tomorrow's card reads as "go now". "leave" only means today too.
+    // Start shows from the session's "get ready" reminder on (the reminders' own Start button follows),
+    // not all day: earlier it reads as "go now". "leave" only means today.
     let today = row.planned_start_at.local(tz).date() == now.local(tz).date();
     Ok(
         json!({"template": template.name, "when": fmt(row.planned_start_at, tz, "%a %H:%M"), "leave": fmt(row.leave_home_at, tz, "%H:%M"),
         "today": today,
-        "begin": (today && workout::startable(db, &row, now)?).then(|| coach::begin_data(&row.id)),
+        "begin": (now >= row.prep_start_at && workout::startable(db, &row, now)?).then(|| coach::begin_data(&row.id)),
         "crowd": forecast.get("feel"), "count": forecast.get("count"), "exercises": exercises}),
     )
 }
@@ -509,5 +509,22 @@ mod tests {
     #[test]
     fn one_rep_max_makes_different_rep_counts_comparable() {
         assert_eq!((one_rep_max(50.0, 8), one_rep_max(100.0, 1), one_rep_max(0.0, 15)), (63.5, 100.0, 0.0));
+    }
+
+    /// 2026-11-19: "Start Cardio" showed all day for an evening session. It shows from get-ready time on.
+    #[test]
+    fn start_shows_from_get_ready_time() {
+        use crate::db::models::{PlannedSession, SessionStatus};
+        use crate::domain::workout::tests::at;
+        let db = crate::db::test::with_short_template();
+        let start = at(6 * 3600);
+        let mut plan = PlannedSession::new("2026-10-12".into(), Some("short".into()), false);
+        plan.status = SessionStatus::Committed;
+        (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at) =
+            (start, start.mins(60), start.mins(-45), start.mins(-20));
+        plan.insert(&db).unwrap();
+        let begin = |now| next_session(&db, &TimeZone::UTC, now).unwrap()["begin"].clone();
+        assert_eq!(begin(start.mins(-46)), Value::Null);
+        assert_eq!(begin(start.mins(-45)), json!(coach::begin_data(&plan.id)));
     }
 }
