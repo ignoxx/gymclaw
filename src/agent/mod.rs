@@ -317,6 +317,20 @@ impl Agent {
         let mut calls_log = vec![];
         let mut settles = vec![];
         let mut actions = vec![];
+        // Snapshot the owner's message that started this turn, before the model runs (the owner
+        // may send more messages while we're working, e.g. "thanks"). Background turns skip this.
+        let asked_text = if !input.background {
+            blocking(&self.db_path, |db| {
+                Ok::<String, crate::error::Error>(
+                    crate::db::models::ChatMessage::first(db, "WHERE role = 'owner' ORDER BY id DESC", [])?
+                        .map_or_else(String::new, |m| m.text),
+                )
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let result = tokio::time::timeout(
             DEADLINE,
             self.run(&input, &run_id, &mut state, &mut calls_log, &mut settles, &mut actions),
@@ -353,12 +367,18 @@ impl Agent {
         if failed {
             settles.clear();
         }
-        // A hard owner turn is worth a playbook; background turns (wakes, reflections) aren't.
-        if !input.background && (state.tool_calls >= REFLECT_AFTER || forced.is_some()) {
-            let (run, calls, tools, forced, now) =
-                (run_id.clone(), state.tool_calls, state.ran.clone(), forced.map(String::from), (self.clock)());
+        // A hard owner turn is worth a playbook; background and failed turns (model/network errors) aren't.
+        if !input.background && !failed && (state.tool_calls >= REFLECT_AFTER || forced.is_some()) {
+            let (run, calls, tools, forced, now, asked) = (
+                run_id.clone(),
+                state.tool_calls,
+                state.ran.clone(),
+                forced.map(String::from),
+                (self.clock)(),
+                asked_text,
+            );
             let raised = blocking(&self.db_path, move |db| {
-                let lesson = Lesson::Hard { calls, forced: forced.as_deref(), tools: &tools };
+                let lesson = Lesson::Hard { calls, forced: forced.as_deref(), tools: &tools, asked: &asked };
                 crate::domain::extensions::reflect(db, &run, lesson, now)
             })
             .await;

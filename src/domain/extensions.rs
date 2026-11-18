@@ -301,8 +301,9 @@ impl Extension {
     }
 }
 
-/// Creates the extension, or saves a new version of the one with this kind and name. Saving never
-/// turns an extension back on: one the owner turned off stays off.
+/// Creates the extension, or saves a new version of the one with this kind and name. A spent one-off
+/// trigger (auto-disabled after firing) is re-enabled when saved with a new future time; one the
+/// owner turned off stays off.
 pub fn save(db: &Connection, name: &str, spec: Spec, author: Author, now: Ts) -> Result<Extension> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 40 {
@@ -329,7 +330,27 @@ pub fn save(db: &Connection, name: &str, spec: Spec, author: Author, now: Ts) ->
     let kind = spec.kind();
     let mut ext = match Extension::first(db, "WHERE kind = ?1 AND name = ?2", (kind, name))? {
         Some(ext) if *ext.spec_json == spec => return Ok(ext),
-        Some(ext) => Extension { spec_json: Json(spec), ..ext },
+        Some(mut ext) => {
+            ext.spec_json = Json(spec);
+            // A one-off that fired auto-disables itself (Author::Agent). Saving a new future time
+            // re-enables it, but one the owner turned off stays off. We find the version that
+            // actually turned it off: the first disabled version after the last enabled one.
+            if !ext.enabled
+                && let Spec::Trigger { when, .. } = &*ext.spec_json
+                && matches!(when.slot(), Ok(Slot::Once(_)))
+            {
+                let turned_off: Option<Author> = db.query_row(
+                    "SELECT author FROM extension_version                      WHERE extension_id = ?1 AND NOT enabled                        AND version > COALESCE((SELECT MAX(version) FROM extension_version WHERE extension_id = ?1 AND enabled), 0)                      ORDER BY version ASC LIMIT 1",
+                    [ext.id()],
+                    |r| r.get(0),
+                ).ok();
+                if turned_off == Some(Author::Agent) {
+                    check_room(db)?;
+                    ext.enabled = true;
+                }
+            }
+            ext
+        }
         None => {
             check_room(db)?;
             let ext = Extension {
@@ -500,14 +521,17 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
                 if since <= slot && slot <= now {
                     due.push((at.to_string(), json!({})));
                 }
-                spent = slot <= now;
+                // Only switch off after the event is actually emitted (below), not when the daily
+                // cap blocks it. If the grace period has passed without firing, give up.
+                spent = slot + GRACE < now;
             }
             Slot::BeforeSession { minutes, workout } => {
                 let lead = SignedDuration::from_mins(*minutes);
+                // Only fire for sessions that haven't started yet: planned_start_at > now.
                 for s in PlannedSession::select(
                     db,
-                    "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 AND planned_start_at <= ?2 ORDER BY planned_start_at",
-                    [since + lead, now + lead],
+                    "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at > ?1 AND planned_start_at <= ?2 AND planned_start_at > ?3 ORDER BY planned_start_at",
+                    (since + lead, now + lead, now),
                 )? {
                     if workout.as_ref().is_some_and(|w| s.workout_template_id.as_ref() != Some(w)) {
                         continue;
@@ -527,8 +551,8 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
                 }
             }
         }
-        for (slot, extra) in due {
-            let key = format!("trigger:{}:{slot}", trigger.id());
+        for (slot_key, extra) in due {
+            let key = format!("trigger:{}:{slot_key}", trigger.id());
             if fired_today >= DAILY_FIRES {
                 return Ok(fired);
             }
@@ -544,6 +568,9 @@ pub fn fire_due(db: &Connection, now: Ts) -> Result<usize> {
             event.update(db)?;
             fired_today += 1;
             fired += 1;
+            if matches!(&slot, Slot::Once(_)) {
+                spent = true;
+            }
         }
         if spent {
             set_enabled(db, trigger.id(), false, Author::Agent, now)?;
@@ -604,12 +631,10 @@ const REFLECTS_PER_DAY: i64 = 3;
 /// Why a turn is worth learning from.
 pub enum Lesson<'a> {
     /// It took many tool calls or ran out of room; `tools` are the calls it made, in order.
-    Hard { calls: usize, forced: Option<&'a str>, tools: &'a [String] },
-    /// The owner reacted 👎 to its reply (`chat_message` row `id`), which saved `saved`.
-    Disliked { id: i64, reply: &'a str, saved: &'a [String] },
+    Hard { calls: usize, forced: Option<&'a str>, tools: &'a [String], asked: &'a str },
 }
 
-/// Wakes the agent, once the chat is quiet, to turn a hard or disliked turn into a playbook or note,
+/// Wakes the agent, once the chat is quiet, to turn a hard turn into a playbook or note,
 /// so the same request goes right next time. Hermes-style self-written skills, through the same
 /// extension layer. At most `REFLECTS_PER_DAY`; returns whether it raised one.
 pub fn reflect(db: &Connection, run_id: &str, lesson: Lesson, now: Ts) -> Result<bool> {
@@ -621,30 +646,14 @@ pub fn reflect(db: &Connection, run_id: &str, lesson: Lesson, now: Ts) -> Result
     if recent >= REFLECTS_PER_DAY {
         return Ok(false);
     }
-    // What the owner asked: before the disliked reply, or the latest message for a turn that just ended.
-    let before = match lesson {
-        Lesson::Disliked { id, .. } => id,
-        Lesson::Hard { .. } => i64::MAX,
-    };
-    let asked: String = db
-        .query_row(
-            "SELECT text FROM chat_message WHERE role = 'owner' AND id < ?1 ORDER BY id DESC LIMIT 1",
-            [before],
-            |r| r.get(0),
-        )
-        .unwrap_or_default();
+    let Lesson::Hard { asked, .. } = &lesson;
+    let asked = asked.to_string();
     let payload = match lesson {
-        Lesson::Hard { calls, forced, tools } => json!({
+        Lesson::Hard { calls, forced, tools, .. } => json!({
             "run_id": run_id, "asked": short(&asked, 500), "calls": calls, "forced": forced, "tools": tools,
             "instruction": "That turn took many tool calls. If the owner is likely to ask this again, save or update a playbook \
                 with the steps that worked (extension_save), so next time it takes a few. If a missing fact sent you the long \
                 way, save a learned note instead. If neither would help, do nothing. Don't message the owner about this.",
-        }),
-        Lesson::Disliked { reply, saved, .. } => json!({
-            "run_id": run_id, "asked": short(&asked, 500), "reply": short(reply, 1000), "saved": saved,
-            "instruction": "The owner reacted 👎 to this reply. Work out what was wrong from the chat and what it saved. If \
-                something is still wrong, fix it and tell the owner in one line what you corrected. Then save a learned note, or \
-                fix the playbook you followed, so it won't happen again.",
         }),
     };
     let before = crate::domain::events::mark(db)?;
@@ -892,7 +901,7 @@ mod tests {
     /// A hard turn wakes the agent to save a playbook, but only once the chat is quiet: it is never an
     /// open issue of an owner turn. A 👎 names what the owner asked before that reply. Capped per day.
     #[test]
-    fn hard_and_disliked_turns_wake_a_reflection() {
+    fn hard_turns_wake_a_reflection() {
         let db = crate::db::test::db();
         let now = at("2026-11-15T09:00:00Z");
         let say = |role, text: &str| {
@@ -909,24 +918,38 @@ mod tests {
             db.last_insert_rowid()
         };
         say(ChatRole::Owner, "swap my whole week to evenings");
-        let reply = say(ChatRole::Assistant, "Done, all evenings.");
+        say(ChatRole::Assistant, "Done, all evenings.");
         say(ChatRole::Owner, "thanks");
         let tools = ["get_week".to_string(), "session_update (failed)".into()];
-        assert!(reflect(&db, "r1", Lesson::Hard { calls: 7, forced: None, tools: &tools }, now).unwrap());
-        let saved = ["session_update …".to_string()];
-        let disliked = Lesson::Disliked { id: reply, reply: "Done, all evenings.", saved: &saved };
-        assert!(reflect(&db, "r2", disliked, now).unwrap());
+        assert!(
+            reflect(
+                &db,
+                "r1",
+                Lesson::Hard { calls: 7, forced: None, tools: &tools, asked: "swap my whole week to evenings" },
+                now
+            )
+            .unwrap()
+        );
+        // A 👎 is now routed as an owner message, not a reflection (see bot.rs::reaction).
         let woken = |run: &str| {
             let events = crate::domain::events::wake_pending(&db).unwrap();
             events.into_iter().find(|e| e["type"] == REFLECT_EVENT && e["payload"]["run_id"] == run).unwrap()["payload"]
                 .clone()
         };
         assert_eq!(woken("r1")["tools"], json!(tools));
-        assert_eq!(woken("r1")["asked"], "thanks");
-        assert_eq!(woken("r2")["asked"], "swap my whole week to evenings");
+        assert_eq!(woken("r1")["asked"], "swap my whole week to evenings");
         assert!(crate::domain::events::open_issues(&db).unwrap().is_empty());
-        assert!(reflect(&db, "r3", Lesson::Hard { calls: 6, forced: None, tools: &[] }, now).unwrap());
-        assert!(!reflect(&db, "r4", Lesson::Hard { calls: 6, forced: None, tools: &[] }, now).unwrap());
+        assert!(
+            reflect(&db, "r3", Lesson::Hard { calls: 6, forced: None, tools: &[], asked: "another request" }, now)
+                .unwrap()
+        );
+        assert!(
+            reflect(&db, "r4", Lesson::Hard { calls: 6, forced: None, tools: &[], asked: "yet another" }, now).unwrap()
+        );
+        // 3 per day cap: the 4th is dropped.
+        assert!(
+            !reflect(&db, "r5", Lesson::Hard { calls: 6, forced: None, tools: &[], asked: "one more" }, now).unwrap()
+        );
     }
 
     #[test]
