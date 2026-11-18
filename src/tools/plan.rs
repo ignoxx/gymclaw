@@ -10,7 +10,6 @@ use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
 use crate::domain::{
     activities, availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling,
-    weekly,
 };
 use crate::error::Result;
 use crate::providers::google::google_provider;
@@ -192,36 +191,24 @@ impl Tool for PlanWeek {
             json!({"week": week.to_string(), "template_id": self.template_id}),
             cx.now,
             || {
-                let before: std::collections::BTreeSet<_> =
-                    PlannedSession::select(cx.db, "", [])?.into_iter().map(|s| s.id).collect();
-                let template = match &self.template_id {
-                    Some(id) => Some(id.clone()),
+                let rotate = self.template_id.is_none();
+                let template = match self.template_id {
+                    Some(id) => Some(id),
                     None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id,
                 };
-                let mut planned = scheduling::schedule_week(cx.db, week, cx.now, None, template.as_deref(), &[])?;
-                if self.template_id.is_none() {
-                    // Before the lock below, or every new slot keeps the one template.
-                    let new: Vec<String> = PlannedSession::select(cx.db, "", [])?
-                        .into_iter()
-                        .map(|s| s.id)
-                        .filter(|id| !before.contains(id))
-                        .collect();
-                    weekly::assign_rotation(cx.db, cx.now, &new)?;
-                }
-                replanning::commit_upcoming(cx.db, cx.now)?;
-                let mut saved = Vec::new();
-                for data in planned["sessions"].as_array().into_iter().flatten() {
-                    if let Some(mut session) = PlannedSession::get(cx.db, data["id"].as_str().unwrap_or_default())? {
-                        if !before.contains(&session.id) {
-                            session.user_locked = true;
-                            session.save(cx.db)?;
-                        }
-                        calendar_writes::queue_session_write(cx.db, &session, cx.now, false)?;
-                        saved.push(scheduling::session_data(&session));
+                let draft = scheduling::draft_week(cx.db, week, cx.now, None, template.as_deref(), rotate, &[])?;
+                // The agent placed these, like a session it creates: lock them.
+                for id in &draft.created {
+                    if let Some(mut session) = PlannedSession::get(cx.db, id)? {
+                        session.user_locked = true;
+                        session.save(cx.db)?;
                     }
                 }
-                planned["sessions"] = json!(saved);
-                Ok(planned)
+                let mut data = get_week(cx.db, week)?;
+                data["created_count"] = json!(draft.created.len());
+                data["minimum_met"] = json!(draft.minimum_met);
+                data["shortfall"] = json!(draft.shortfall);
+                Ok(data)
             },
         )?;
         Ok(result["data"].clone())
@@ -249,12 +236,12 @@ pub struct ProfileUpdate {
 
 impl Tool for ProfileUpdate {
     const NAME: &'static str = "profile_update";
-    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Existing sessions stay saved; `replanning.warnings` lists conflicts for you to resolve with session_update.";
+    const DESCRIPTION: &'static str = "Change profile fields (validated as a whole). Existing sessions stay saved; `warnings` lists conflicts for you to resolve with session_update.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let mut data = serde_json::to_value(update_profile(cx.db, &self.changes)?)?;
         let weeks = availability::affected_weeks(cx.db, cx.now)?;
-        data["replanning"] = replanning::inspect_weeks(cx.db, &weeks, cx.now)?;
+        data["warnings"] = json!(replanning::inspect_weeks(cx.db, &weeks, cx.now)?);
         Ok(data)
     }
 }
@@ -274,14 +261,11 @@ pub struct AvailabilityAdd {
     /// Last whole day (YYYY-MM-DD), inclusive, instead of `end`.
     #[serde(default)]
     pub through: Option<String>,
-    /// Also cancel sessions the owner placed themselves in that time.
-    #[serde(default)]
-    pub cancel_locked: bool,
 }
 
 impl Tool for AvailabilityAdd {
     const NAME: &'static str = "availability_add";
-    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no sessions or reminders then; conflicts are reported for your decision.";
+    const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no reminders then. Sessions in that time are kept and returned as warnings; cancel or move them with session_update.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         if self.start.is_some() && self.from_date.is_some() || self.end.is_some() && self.through.is_some() {
@@ -299,7 +283,7 @@ impl Tool for AvailabilityAdd {
             (None, Some(d)) => midnight(date(d)?.tomorrow()?)?,
             (None, None) => crate::bail!("INVALID_ARGUMENTS", "Missing end or inclusive through"),
         };
-        availability::add(cx.db, start, end, self.kind, cx.now, &cx.request_id, self.cancel_locked)
+        availability::add(cx.db, start, end, self.kind, cx.now, &cx.request_id)
     }
 }
 
@@ -389,8 +373,7 @@ pub struct EventsPending {
 impl Tool for EventsPending {
     const NAME: &'static str = "events_pending";
     const LISTED: Listed = Listed::Never;
-    const DESCRIPTION: &'static str =
-        "Unhandled events that need attention (unknown deliveries, blocked calendar writes, crowd source down).";
+    const DESCRIPTION: &'static str = "Open issues (the same as the Now snapshot); `all` adds handled audit records.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         Ok(json!({"events": events::pending(cx.db, self.all)?}))
@@ -430,6 +413,7 @@ pub struct CalendarSync {}
 
 impl Tool for CalendarSync {
     const NAME: &'static str = "calendar_sync";
+    const LISTED: Listed = Listed::Never;
     const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and report conflicts for your decision. Runs every minute anyway.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
@@ -646,8 +630,7 @@ mod tests {
         let updated =
             call(&db, "profile_update", json!({"changes": {"earliest_workout_start": "11:00"}}), sunday(), "p")
                 .unwrap();
-        assert_eq!(updated["replanning"]["changed"], json!([]));
-        assert!(!updated["replanning"]["warnings"].as_array().unwrap().is_empty());
+        assert!(!updated["warnings"].as_array().unwrap().is_empty());
         for row in before {
             assert_eq!(
                 PlannedSession::get(&db, row["id"].as_str().unwrap()).unwrap().unwrap().planned_start_at.iso(),
@@ -670,8 +653,7 @@ mod tests {
         assert_eq!((ts(first["end"].as_str().unwrap()) - ts(first["start"].as_str().unwrap())).as_hours(), 25);
         assert_eq!(call(&db, "availability_add", args, sunday(), "dst-trip").unwrap()["data"], first);
         assert_eq!(AvailabilityBlock::select(&db, "", []).unwrap().len(), 1);
-        let conflict =
-            json!({"kind": "TRAVEL", "from_date": "2026-10-25", "through": "2026-10-25", "cancel_locked": true});
+        let conflict = json!({"kind": "TRAVEL", "from_date": "2026-10-26", "through": "2026-10-26"});
         assert_eq!(
             call(&db, "availability_add", conflict, sunday(), "dst-trip").unwrap_err().code(),
             "IDEMPOTENCY_CONFLICT"

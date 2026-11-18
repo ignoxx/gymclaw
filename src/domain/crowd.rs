@@ -11,7 +11,7 @@ use crate::db::models::{CrowdFeedback, CrowdObservation, CrowdSourceState};
 use crate::db::{Connection, Json, new_id};
 use crate::domain::core::{emit, mutate};
 use crate::domain::events::outage_open;
-use crate::domain::planning::SlotSignal;
+use crate::domain::planning::{STEP_MINUTES, SlotSignal};
 use crate::domain::profile::get_profile;
 use crate::error::Result;
 use crate::providers::crowd::{CrowdProvider, METRIC};
@@ -263,8 +263,7 @@ impl CrowdModel {
             "Crowd estimate uses available signals and user labels; confidence is heuristic."
         };
         let json = json!({"at": at, "score": score, "confidence": confidence, "score_kind": "personal_perceived_crowd_proxy",
-            "label_evidence": self.labels.len(), "slot_label_evidence": slot_labels.len(), "features": features,
-            "forecast_accuracy_established": false, "instruction": instruction});
+            "label_evidence": self.labels.len(), "slot_label_evidence": slot_labels.len(), "features": features, "instruction": instruction});
         Prediction { score, confidence, json }
     }
 }
@@ -340,7 +339,7 @@ pub fn poll(db: &Connection, provider: &dyn CrowdProvider, now: Option<Ts>) -> R
         _ => Value::Null,
     };
     let metadata = json!({"provider_id": provider.provider_id(), "metric": METRIC, "retrieved_at": now,
-        "provider_timestamp": null, "freshness_known": reading.freshness_seconds.is_some(),
+        "freshness_known": reading.freshness_seconds.is_some(),
         "changed_since_previous": if previous_at.is_some() { json!(changed) } else { Value::Null },
         "unchanged_for_seconds": unchanged_for, "possible_change_window": window});
     let row = CrowdObservation {
@@ -501,7 +500,7 @@ pub fn polling_alert(db: &Connection, now: Ts) -> Result<Option<(String, String)
 }
 
 /// Per-slot crowd forecast plus learned time-of-day habit (see `habits`). Empty without either.
-pub fn planning_signals(db: &Connection, week_start: Date, now: Ts, step_minutes: i64) -> Result<Vec<SlotSignal>> {
+pub fn planning_signals(db: &Connection, week_start: Date, now: Ts) -> Result<Vec<SlotSignal>> {
     let model = CrowdModel::new(db, now)?;
     let has_crowd = model.has_data();
     let habits = crate::domain::habits::evidence(db, now, &model.zone)?;
@@ -535,7 +534,7 @@ pub fn planning_signals(db: &Connection, week_start: Date, now: Ts, step_minutes
                     preferred_time: preferred,
                 });
             }
-            start = start.mins(step_minutes);
+            start = start.mins(STEP_MINUTES);
         }
     }
     Ok(result)
@@ -632,7 +631,6 @@ mod tests {
         let prediction = CrowdModel::new(&db, now(60)).unwrap().predict(now(7 * 24 * 60));
         assert!((prediction.score.unwrap() - 2.0 / 3.0).abs() < 1e-9);
         assert!(0.0 < prediction.confidence && prediction.confidence < 0.5);
-        assert!(prediction.json["forecast_accuracy_established"] == false);
         assert!(
             record_feedback(&db, &workout, "EMPTY", now(120), "different")
                 .unwrap_err()
@@ -714,20 +712,12 @@ mod tests {
             let workout = visit(&db, at);
             record_feedback(&db, &workout, rating, at.mins(60), &format!("label-{hour}")).unwrap();
         }
-        let plan = crate::domain::scheduling::schedule_week(
-            &db,
-            Date::constant(2026, 10, 19),
-            now(0),
-            Some("future-week"),
-            None,
-            &[],
-        )
-        .unwrap();
-        assert_eq!(plan["created_count"], 1);
-        assert_eq!(
-            Ts::parse(plan["sessions"][0]["start"].as_str().unwrap(), None).unwrap().0.strftime("%H").to_string(),
-            "18"
-        );
+        let week = Date::constant(2026, 10, 19);
+        let draft =
+            crate::domain::scheduling::draft_week(&db, week, now(0), Some("future-week"), None, false, &[]).unwrap();
+        let [id] = draft.created.as_slice() else { panic!("{draft:?}") };
+        let session = crate::db::models::PlannedSession::get(&db, id).unwrap().unwrap();
+        assert_eq!(session.planned_start_at.0.strftime("%H").to_string(), "18");
     }
 
     #[test]

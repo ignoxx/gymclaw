@@ -10,7 +10,7 @@ use crate::db::{Connection, Json, new_id};
 use crate::domain::calendar::{persist_snapshot, reconcile_event, tombstone};
 use crate::domain::core::emit;
 use crate::domain::profile::get_profile;
-use crate::domain::replanning::inspect_weeks;
+use crate::domain::replanning::{expanded, inspect_weeks};
 use crate::error::Result;
 use crate::providers::calendar::{CalendarProvider, WRITE_CONFLICT};
 use crate::providers::google::bind_calendar;
@@ -50,7 +50,7 @@ pub fn event_body(db: &Connection, session: &PlannedSession) -> Result<Value> {
     let tz = profile.tz();
     let name = session.plan("template").and_then(|t| t.get("name")).and_then(Value::as_str).unwrap_or("Workout");
     let crowd = describe_crowd(session.plan("crowd_forecast"), &session.planned_start_at.local(&tz));
-    let home = session.planned_end_at.mins(profile.commute_home_minutes);
+    let (_, home) = expanded(session, &profile);
     let hm = |t: Ts| t.local(&tz).strftime("%H:%M").to_string();
     let mut lines = vec![
         format!("Expected crowd: {crowd}"),
@@ -96,7 +96,8 @@ pub fn event_body(db: &Connection, session: &PlannedSession) -> Result<Value> {
     Ok(Value::Object(body))
 }
 
-fn cancel_pending(db: &Connection, session_id: &str, now: Ts) -> Result<()> {
+/// Drop a session's unsent calendar writes.
+pub fn cancel_pending(db: &Connection, session_id: &str, now: Ts) -> Result<()> {
     for mut old in
         CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [session_id])?
     {

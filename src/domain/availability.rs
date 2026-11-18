@@ -4,11 +4,10 @@ use std::collections::BTreeSet;
 use jiff::civil::Date;
 use serde_json::{Value, json};
 
-use crate::db::models::{AvailabilityBlock, BlockKind, BlockStatus, PlannedSession, SessionStatus};
+use crate::db::models::{AvailabilityBlock, BlockKind, BlockStatus, PlannedSession};
 use crate::db::{Connection, new_id};
 use crate::domain::calendar::week_of;
-use crate::domain::calendar_writes::queue_session_write;
-use crate::domain::core::{emit, mutate};
+use crate::domain::core::mutate;
 use crate::domain::notifications::cancel_session_jobs;
 use crate::domain::planning::Interval;
 use crate::domain::profile::get_profile;
@@ -51,21 +50,13 @@ pub fn affected_weeks(db: &Connection, now: Ts) -> Result<BTreeSet<Date>> {
     Ok(weeks)
 }
 
-/// Owner is away/sick/busy over [start, end): sessions in it lose their reminders and report conflicts;
-/// owner-locked ones stay unless `cancel_locked`.
-pub fn add(
-    db: &Connection,
-    start: Ts,
-    end: Ts,
-    kind: BlockKind,
-    now: Ts,
-    request_id: &str,
-    cancel_locked: bool,
-) -> Result<Value> {
+/// Owner is away/sick/busy over [start, end): sessions in it stay saved but lose their reminders, and
+/// come back as warnings for the agent to resolve (cancel or move with `session_update`).
+pub fn add(db: &Connection, start: Ts, end: Ts, kind: BlockKind, now: Ts, request_id: &str) -> Result<Value> {
     if start >= end {
         crate::bail!("INVALID_INTERVAL", "Interval end must follow start");
     }
-    let intent = json!({"start": start, "end": end, "kind": kind, "cancel_locked": cancel_locked});
+    let intent = json!({"start": start, "end": end, "kind": kind});
     mutate(db, "availability.added", request_id, intent, now, || {
         let profile = get_profile(db)?;
         let row = AvailabilityBlock {
@@ -78,45 +69,18 @@ pub fn add(
             retracted_at: None,
         };
         row.insert(db)?;
-        let mut locked = Vec::new();
-        for mut plan in PlannedSession::select(
+        for plan in PlannedSession::select(
             db,
             "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_start_at >= ?1 ORDER BY rowid",
             [now],
         )? {
             let (prep, home) = expanded(&plan, &profile);
-            if prep >= end || home <= start {
-                continue;
-            }
-            cancel_session_jobs(db, &plan.id, now)?;
-            if plan.user_locked {
-                if !cancel_locked {
-                    locked.push(plan.id.clone());
-                    continue;
-                }
-                // Explicit later user cancellation supersedes earlier calendar lock.
-                plan.user_locked = false;
-                plan.status = SessionStatus::Cancelled;
-                plan.source_revision += 1;
-                plan.merge_plan(json!({"deleted_by_user": true, "manual_lock_cancelled_by_request": request_id}));
-                plan.save(db)?;
-                queue_session_write(db, &plan, now, false)?;
-                emit(
-                    db,
-                    "availability.locked_session_cancelled",
-                    now,
-                    json!({"session_id": plan.id, "block_id": row.id, "request_id": request_id}),
-                )?;
+            if prep < end && home > start {
+                cancel_session_jobs(db, &plan.id, now)?;
             }
         }
-        let repaired = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
-        let instruction = if locked.is_empty() {
-            "Unavailability saved. Existing sessions kept; resolve reported conflicts with session_update."
-        } else {
-            "Pause saved. Reminders suppressed; manually locked calendar slots need explicit cancellation."
-        };
-        Ok(json!({"block_id": row.id, "kind": kind, "start": start, "end": end, "locked_conflicts": locked,
-            "replanning": repaired, "remote_events_changed": false, "instruction": instruction}))
+        let warnings = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
+        Ok(json!({"block_id": row.id, "kind": kind, "start": start, "end": end, "warnings": warnings}))
     })
 }
 
@@ -132,9 +96,9 @@ pub fn retract(db: &Connection, block_id: &str, now: Ts, request_id: &str) -> Re
         row.status = BlockStatus::Retracted;
         row.retracted_at = Some(now);
         row.update(db)?;
-        let repaired = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
+        let warnings = inspect_weeks(db, &affected_weeks(db, now)?, now)?;
         commit_upcoming(db, now)?;
-        Ok(json!({"block_id": row.id, "status": row.status, "replanning": repaired, "remote_events_changed": false,
+        Ok(json!({"block_id": row.id, "status": row.status, "warnings": warnings,
             "instruction": "Availability override removed. Valid future planning resumed."}))
     })
 }
@@ -178,9 +142,8 @@ mod tests {
         let db = db();
         weekly_plan(&db, "short", sunday(0)).unwrap();
         let end = sunday(6 * 24 * 60);
-        let result = add(&db, sunday(0), end, BlockKind::Sick, sunday(0), "pause", false).unwrap();
-        assert_eq!(result["data"]["replanning"]["changed"], json!([]));
-        assert!(!result["data"]["replanning"]["warnings"].as_array().unwrap().is_empty());
+        let result = add(&db, sunday(0), end, BlockKind::Sick, sunday(0), "pause").unwrap();
+        assert!(!result["data"]["warnings"].as_array().unwrap().is_empty());
         assert!(PlannedSession::select(&db, "", []).unwrap().iter().all(|s| s.status.is_open()));
         assert_eq!(pending_jobs(&db, None), 0);
         let blocked = start(&db, Some("short"), None, false, sunday(60), "blocked-start").unwrap_err();
@@ -201,8 +164,12 @@ mod tests {
     fn locked_slot_preserved_but_reminders_suppressed_until_explicit_removal() {
         let db = db();
         let row = first_session_locked(&db);
-        let block = add(&db, sunday(0), sunday(2 * 24 * 60), BlockKind::Travel, sunday(0), "travel", false).unwrap();
-        assert_eq!(block["data"]["locked_conflicts"], json!([row.id]));
+        let block = add(&db, sunday(0), sunday(2 * 24 * 60), BlockKind::Travel, sunday(0), "travel").unwrap();
+        let warnings = block["data"]["warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w.as_str().unwrap().starts_with(&format!("Session {}:", row.id))),
+            "{warnings:?}"
+        );
         assert_eq!(PlannedSession::get(&db, &row.id).unwrap().unwrap().planned_start_at, row.planned_start_at);
         schedule_session_jobs(&db, &PlannedSession::get(&db, &row.id).unwrap().unwrap(), sunday(0)).unwrap();
         assert_eq!(pending_jobs(&db, Some(&row.id)), 0);
@@ -210,16 +177,5 @@ mod tests {
         assert!(pending_jobs(&db, Some(&row.id)) > 0);
         let after = PlannedSession::get(&db, &row.id).unwrap().unwrap();
         assert!(after.user_locked && after.planned_start_at == row.planned_start_at);
-    }
-
-    #[test]
-    fn explicit_cancel_locked_records_later_user_intent() {
-        let db = db();
-        let row = first_session_locked(&db);
-        add(&db, sunday(0), sunday(7 * 24 * 60), BlockKind::Sick, sunday(0), "cancel-too", true).unwrap();
-        let row = PlannedSession::get(&db, &row.id).unwrap().unwrap();
-        assert!(row.status == SessionStatus::Cancelled && !row.user_locked);
-        assert_eq!(row.workout_plan_json["manual_lock_cancelled_by_request"], "cancel-too");
-        assert_eq!(row.workout_plan_json["deleted_by_user"], true);
     }
 }

@@ -11,15 +11,15 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde_json::{Value, json};
 
-use crate::db::models::{CalendarEventSnapshot, CalendarWrite, PlannedSession, SessionStatus, WriteStatus};
+use crate::db::models::{CalendarEventSnapshot, PlannedSession, SessionStatus};
 use crate::db::{Connection, Json};
-use crate::domain::calendar_writes::{event_id_for, queue_session_write};
+use crate::domain::calendar_writes::{cancel_pending, event_id_for, queue_session_write};
 use crate::domain::compression::compress_template;
 use crate::domain::core::emit;
 use crate::domain::events::outage_open;
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
 use crate::domain::profile::get_profile;
-use crate::domain::replanning::{commit_upcoming, inspect_weeks};
+use crate::domain::replanning::{commit_upcoming, inspect_weeks, place, retire_session};
 use crate::domain::scheduling::session_data;
 use crate::domain::templates::{Template, get_template};
 use crate::domain::workout::historical_set_duration;
@@ -187,17 +187,6 @@ pub fn persist_snapshot(
     Ok(row)
 }
 
-fn cancel_writes(db: &Connection, session_id: &str, now: Ts) -> Result<()> {
-    for mut write in
-        CalendarWrite::select(db, "WHERE planned_session_id = ?1 AND status = 'PENDING' ORDER BY rowid", [session_id])?
-    {
-        write.status = WriteStatus::Cancelled;
-        write.handled_at = Some(now);
-        write.update(db)?;
-    }
-    Ok(())
-}
-
 /// Apply one remote event: owner deletes/moves/resizes of gym sessions become locked intent; other
 /// events are blockers. Own-write echoes are ignored. → (weeks to inspect, emitted events).
 pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Result<(BTreeSet<Date>, Vec<Value>)> {
@@ -229,20 +218,14 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
         let old_week = week_of(session.planned_start_at, &tz);
         if event.cancelled() {
             if !is_closed(session.status) {
-                session.status = SessionStatus::Cancelled;
-                session.user_locked = true;
-                session.merge_plan(json!({"deleted_by_user": true}));
-                session.source_revision += 1;
-                session.save(db)?;
-                cancel_session_jobs(db, &session.id, now)?;
-                cancel_writes(db, &session.id, now)?;
+                retire_session(db, session, SessionStatus::Cancelled, now)?;
                 let log = emit(
                     db,
                     "calendar.gym_event_deleted",
                     now,
                     json!({"session_id": session.id, "event_id": event.id}),
                 )?;
-                emitted.push(json!({"id": log.id, "type": log.r#type}));
+                emitted.push(json!({"id": log.id, "type": log.r#type, "session_id": session.id}));
                 weeks.insert(old_week);
             }
         } else {
@@ -259,15 +242,7 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
             };
             if times_changed && !own_echo && !is_closed(session.status) {
                 let old_duration = session.planned_end_at - session.planned_start_at;
-                if start != session.planned_start_at {
-                    // The old slot's forecast says nothing about the new one; the next tick fills it again.
-                    session.workout_plan_json.0 = session.crowd_keys(false);
-                }
-                session.planned_start_at = start;
-                session.planned_end_at = end;
-                session.prep_start_at = start.mins(-(profile.prep_minutes + profile.commute_to_gym_minutes));
-                session.leave_home_at = start.mins(-profile.commute_to_gym_minutes);
-                session.week_id = week_of(start, &tz).to_string();
+                place(session, start, end, &profile);
                 session.user_locked = true;
                 manual_update = true;
                 if session.status != SessionStatus::Started {
@@ -277,7 +252,7 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
                 allocation(db, session)?;
                 session.save(db)?;
                 cancel_session_jobs(db, &session.id, now)?;
-                cancel_writes(db, &session.id, now)?;
+                cancel_pending(db, &session.id, now)?;
                 schedule_session_jobs(db, session, now)?;
                 let kind = if old_duration != end - start {
                     "calendar.gym_event_resized"
@@ -317,6 +292,11 @@ pub fn reconcile_event(db: &Connection, event: &CalendarEvent, now: Ts) -> Resul
     Ok((weeks, emitted))
 }
 
+/// An owner edit of a gym session in Google Calendar, as `reconcile_event` emits it.
+fn is_gym_edit(kind: &str) -> bool {
+    matches!(kind, "calendar.gym_event_changed" | "calendar.gym_event_resized" | "calendar.gym_event_deleted")
+}
+
 /// Pull calendar changes, reconcile owner edits, inspect affected weeks and describe conflicts. Never
 /// writes remotely; queued writes go through `apply_write`.
 pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: Ts) -> Result<Value> {
@@ -351,19 +331,17 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     state.sync_token = Some(batch.next_sync_token.clone());
     state.last_synced_at = Some(now);
     state.update(db)?;
-    let replanned =
-        if affected.is_empty() { json!({"changed": [], "warnings": []}) } else { inspect_weeks(db, &affected, now)? };
+    let warnings = if affected.is_empty() { vec![] } else { inspect_weeks(db, &affected, now)? };
     commit_upcoming(db, now)?;
-    let changes = replanned["changed"].as_array().cloned().unwrap_or_default();
-    let warnings: Vec<String> =
-        replanned["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect();
-    if !emitted.is_empty() || !changes.is_empty() || !warnings.is_empty() {
-        let event = emit(
-            db,
-            "planning.replan_required",
-            now,
-            json!({"reason": "calendar_changed", "handled_locally": false, "changes": changes, "warnings": warnings}),
-        )?;
+    // The owner moved, resized or deleted a gym session: the agent decides what that means for the plan.
+    // Blocker changes don't wake it; the conflicts they cause arrive as `planning.attention`.
+    let edits: Vec<Value> = emitted
+        .iter()
+        .filter(|e| e["type"].as_str().is_some_and(is_gym_edit))
+        .map(|e| json!({"type": e["type"], "session_id": e["session_id"]}))
+        .collect();
+    if !edits.is_empty() {
+        let event = emit(db, "planning.replan_required", now, json!({"reason": "calendar_changed", "edits": edits}))?;
         emitted.push(json!({"id": event.id, "type": event.r#type}));
     }
     let tz = get_profile(db)?.tz();
@@ -390,8 +368,8 @@ pub fn sync_calendar(db: &Connection, provider: &mut dyn CalendarProvider, now: 
     let queued: i64 = db.query_row("SELECT count(*) FROM calendar_write WHERE status = 'PENDING'", [], |r| r.get(0))?;
     Ok(json!({
         "data": {"calendar_id": provider.calendar_id(), "source": provider.source(), "full_sync": batch.full, "events_received": batch.events.len(),
-            "changes": changes, "warnings": warnings, "weeks": affected.iter().map(Date::to_string).collect::<Vec<_>>(),
-            "calendar_writes_queued": queued, "remote_events_changed": false},
+            "warnings": warnings, "weeks": affected.iter().map(Date::to_string).collect::<Vec<_>>(),
+            "calendar_writes_queued": queued},
         "events": emitted,
         "user_message_hint": if parts.is_empty() { Value::Null } else { json!(parts.join(" ")) },
     }))
@@ -420,11 +398,11 @@ mod tests {
     use serde_json::{Map, json};
 
     use super::*;
-    use crate::db::models::{CalendarSyncState, NotificationJob, WorkoutExercise};
+    use crate::db::models::{CalendarSyncState, CalendarWrite, NotificationJob, WorkoutExercise, WriteStatus};
     use crate::domain::calendar_writes::{apply_write, pending_writes};
     use crate::domain::planning::SlotSignal;
     use crate::domain::profile::update_profile;
-    use crate::domain::scheduling::schedule_week;
+    use crate::domain::scheduling::draft_week;
     use crate::domain::templates::import_template;
     use crate::domain::workout::start;
     use crate::providers::calendar::SyncBatch;
@@ -482,13 +460,8 @@ mod tests {
         import_template(&db, &template).unwrap();
         sync_calendar(&db, &mut provider, now(0)).unwrap();
         let signal = SlotSignal { start: at(14, 20, 0), crowd: Some(0.0), confidence: 1.0, preferred_time: 0.0 };
-        let result = schedule_week(&db, Date::constant(2026, 10, 12), now(0), None, Some("long"), &[signal]).unwrap();
-        commit_upcoming(&db, now(0)).unwrap();
-        let ids: Vec<String> =
-            result["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap().to_string()).collect();
-        for id in &ids {
-            queue_session_write(&db, &session(&db, id), now(0), false).unwrap();
-        }
+        let week = Date::constant(2026, 10, 12);
+        let ids = draft_week(&db, week, now(0), None, Some("long"), false, &[signal]).unwrap().created;
         publish(&db, &mut provider, now(1));
         sync_calendar(&db, &mut provider, now(2)).unwrap();
         assert!(ids.iter().all(|id| !session(&db, id).user_locked));
@@ -527,7 +500,6 @@ mod tests {
         assert!(friday.status == SessionStatus::Tentative && !friday.user_locked);
         assert!(result["user_message_hint"].as_str().unwrap().starts_with("Long moved to Thu 19:00."));
         assert!(result["user_message_hint"].as_str().unwrap().contains("skips a rest day"));
-        assert_eq!(result["data"]["remote_events_changed"], false);
         publish(&db, &mut provider, now(4));
         let result = sync_calendar(&db, &mut provider, now(5)).unwrap();
         assert_eq!(session(&db, &ids[1]).planned_start_at, at(15, 19, 0));
@@ -630,7 +602,8 @@ mod tests {
                 .any(|w| w.as_str().unwrap().contains("overlaps a calendar event"))
         );
         let events = crate::domain::events::wake_pending(&db).unwrap();
-        assert!(!events.is_empty());
+        // The conflicts wake the agent; the new blocker itself doesn't.
+        assert!(!events.is_empty() && events.iter().all(|e| e["type"] == "planning.attention"), "{events:?}");
         let count = events.len();
         for event in events {
             crate::domain::events::ack(&db, event["id"].as_str().unwrap(), now(3)).unwrap();
@@ -681,9 +654,9 @@ mod tests {
     #[test]
     fn write_retry_after_remote_success_no_duplicate_events() {
         let (db, mut provider, _) = setup();
-        let result = schedule_week(&db, Date::constant(2026, 10, 19), now(3), None, Some("long"), &[]).unwrap();
-        let next = session(&db, result["sessions"][0]["id"].as_str().unwrap());
-        let write = queue_session_write(&db, &next, now(3), false).unwrap().unwrap();
+        let week = Date::constant(2026, 10, 19);
+        let created = draft_week(&db, week, now(3), None, Some("long"), false, &[]).unwrap().created;
+        let write = queue_session_write(&db, &session(&db, &created[0]), now(3), false).unwrap().unwrap();
         let count = provider.event_count();
         provider.create_gym_event(&write.body_json).unwrap(); // Crash after Google accepted, before our ack.
         assert_eq!(apply_write(&db, &mut provider, &write.id, now(4), false).unwrap()["status"], "APPLIED");

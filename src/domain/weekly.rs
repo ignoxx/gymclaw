@@ -19,7 +19,7 @@ use crate::domain::core::emit;
 use crate::domain::crowd::CrowdModel;
 use crate::domain::profile::get_profile;
 use crate::domain::replanning::{commit_upcoming, inspect_weeks, retire_session};
-use crate::domain::scheduling::schedule_week;
+use crate::domain::scheduling::draft_week;
 use crate::domain::templates::get_template;
 use crate::domain::workout::{format_time, g};
 use crate::domain::{activities, goals, highlights, trends};
@@ -176,57 +176,6 @@ fn workout_outcomes(plans: &[PlannedSession], completed: &[&WorkoutSession], rot
     outcomes.into_iter().map(|(workout, outcome)| json!({"workout": workout, "outcome": outcome})).collect()
 }
 
-/// Give each `new` session the default workout: the split template (e.g. Push / Pull / Legs) trained least
-/// recently, counting started workouts (a running one too) and the sessions before it. Only a default for
-/// fresh slots: every other session keeps its workout, since which workout goes where is the agent's call
-/// (re-rotating every tick undid its picks after a skip).
-pub fn assign_rotation(db: &Connection, now: Ts, new: &[String]) -> Result<Vec<Value>> {
-    let split = OnboardingState::get(db, 1)?.map(|o| o.split_json.0).unwrap_or_default();
-    if split.len() < 2 {
-        return Ok(vec![]);
-    }
-    let mut last: HashMap<String, Ts> = HashMap::new();
-    for workout in WorkoutSession::select(db, "WHERE template_id IS NOT NULL AND started_at IS NOT NULL", [])? {
-        let (Some(template), Some(at)) = (workout.template_id, workout.started_at) else { continue };
-        let entry = last.entry(template).or_insert(at);
-        *entry = (*entry).max(at);
-    }
-    let mut changed = Vec::new();
-    for mut session in
-        PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY planned_start_at, id", [])?
-    {
-        // Never-trained workouts go first (None < Some), ties in split order.
-        let wanted = split
-            .iter()
-            .enumerate()
-            .min_by_key(|(i, t)| (last.get(*t).copied(), *i))
-            .map(|(_, t)| t.clone())
-            .expect("split has entries");
-        if session.user_locked || !new.contains(&session.id) {
-            if let Some(template) = &session.workout_template_id {
-                last.insert(template.clone(), session.planned_start_at);
-            }
-            continue;
-        }
-        last.insert(wanted.clone(), session.planned_start_at);
-        if session.workout_template_id.as_deref() == Some(wanted.as_str()) {
-            continue;
-        }
-        session.workout_template_id = Some(wanted.clone());
-        // Drop the old template snapshot so allocation uses the rotated template.
-        session.workout_plan_json.0 = session.crowd_keys(true);
-        session.source_revision += 1;
-        allocation(db, &mut session)?;
-        session.save(db)?;
-        queue_session_write(db, &session, now, false)?;
-        changed.push(json!({"session_id": session.id, "template_id": wanted}));
-    }
-    if !changed.is_empty() {
-        emit(db, "planning.rotation_assigned", now, json!({"changes": changed}))?;
-    }
-    Ok(changed)
-}
-
 /// Flag an idle workout once; the agent decides whether the owner paused or finished. Logged
 /// sets and unfinished movements stay intact until that decision.
 pub fn detect_stale_workouts(db: &Connection, now: Ts) -> Result<Vec<String>> {
@@ -366,14 +315,9 @@ pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(changed)
 }
 
-/// Ids of the sessions a `schedule_week` result created.
-fn session_ids(data: &Value) -> Vec<String> {
-    data["sessions"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str().map(String::from)).collect()
-}
-
 /// Deterministic upkeep: mark elapsed slots missed, close elapsed STARTED slots, inspect conflicts,
-/// draft the current week when it is empty, rotate defaults, refresh unlocked plan snapshots/crowd, and
-/// reconcile reminder jobs.
+/// draft the current week when it is empty, refresh unlocked plan snapshots/crowd, and reconcile reminder
+/// jobs.
 /// Next week is planned only by the Sunday run (`weekly_plan`); if that run never happened, the
 /// current week is drafted here once it starts.
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
@@ -383,55 +327,31 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let next_week = current_week.checked_add(days(7))?;
     let missed = mark_missed(db, now)?;
     let closed = close_started_slots(db, now)?;
-    let repaired = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
+    let warnings = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
-        session_ids(&schedule_week(db, current_week, now, Some(&key), Some(template_id), &[])?)
+        draft_week(db, current_week, now, Some(&key), Some(template_id), true, &[])?.created
     } else {
         vec![]
     };
-    for id in &created {
-        if let Some(session) = PlannedSession::get(db, id)? {
-            queue_session_write(db, &session, now, false)?;
-        }
-    }
     let stale = detect_stale_workouts(db, now)?;
-    let rotation = assign_rotation(db, now, &created)?;
     let plans = refresh_plans(db, now)?;
     let crowd = refresh_crowd(db, now)?;
     commit_upcoming(db, now)?;
-    let mut result = json!({"missed": missed, "closed_started": closed, "created": created, "rotation": rotation, "crowd": crowd, "stale_workouts": stale, "refreshed_plans": plans});
-    result.as_object_mut().expect("object").extend(repaired.as_object().cloned().unwrap_or_default());
-    Ok(result)
+    Ok(json!({"missed": missed, "closed_started": closed, "created": created, "crowd": crowd,
+        "stale_workouts": stale, "refreshed_plans": plans, "warnings": warnings}))
 }
 
-/// The Sunday run: rolling plan and next week's plan. `announce` tells the owner and
-/// the agent once the calendar is published.
+/// The Sunday run: rolling plan, then a draft of next week when it is still empty. `announce` wakes the
+/// agent for its review once the calendar is published.
 pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
-    let tz = get_profile(db)?.tz();
-    let current_week = week_of(now, &tz);
-    let next_week = current_week.checked_add(days(7))?;
-    let rolling = rolling_plan(db, template_id, now)?;
+    let next_week = week_of(now, &get_profile(db)?.tz()).checked_add(days(7))?;
+    rolling_plan(db, template_id, now)?;
     if PlannedSession::first(db, "WHERE week_id = ?1", [next_week.to_string()])?.is_none() {
-        let data = schedule_week(
-            db,
-            next_week,
-            now,
-            Some(&format!("weekly-plan:{next_week}:{template_id}")),
-            Some(template_id),
-            &[],
-        )?;
-        assign_rotation(db, now, &session_ids(&data))?;
+        let key = format!("weekly-plan:{next_week}:{template_id}");
+        draft_week(db, next_week, now, Some(&key), Some(template_id), true, &[])?;
     }
-    commit_upcoming(db, now)?;
-    for session in PlannedSession::select(
-        db,
-        "WHERE week_id = ?1 AND status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid",
-        [next_week.to_string()],
-    )? {
-        queue_session_write(db, &session, now, false)?;
-    }
-    Ok(json!({"week_start": next_week.to_string(), "rolling": rolling, "plan": get_week(db, next_week)?}))
+    Ok(json!({"week_start": next_week.to_string(), "plan": get_week(db, next_week)?}))
 }
 
 /// After the Sunday run and the calendar publish: wake the agent for its weekly review, once per week.
@@ -1022,11 +942,11 @@ mod tests {
         db.execute("INSERT INTO workout_session (id, status, started_at, completed_at, waited_for_equipment_count, template_snapshot) VALUES (?1, 'PLAN_UPDATED', ?2, ?3, 0, '{\"id\": \"visit\"}')",
             (&visit, ts("2026-10-07T18:00:00+00:00"), ts("2026-10-07T19:00:00+00:00"))).unwrap();
         record_feedback(&db, &visit, "EMPTY", sunday(1), "quiet-visit").unwrap();
-        let result = rolling_plan(&db, "short", sunday(2)).unwrap();
+        rolling_plan(&db, "short", sunday(2)).unwrap();
         let id = original["id"].as_str().unwrap();
         let mut updated = PlannedSession::get(&db, id).unwrap().unwrap();
         assert_eq!(updated.planned_start_at.0.strftime("%H").to_string(), "17"); // Saved time stays; the agent decides.
-        assert!(result["changed"].as_array().unwrap().is_empty() && updated.status == SessionStatus::Tentative);
+        assert_eq!(updated.status, SessionStatus::Tentative);
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty()); // The owner already answered.
         updated.user_locked = true;
         updated.save(&db).unwrap();
@@ -1102,30 +1022,22 @@ mod tests {
                 (new_id(), template, status, at)).unwrap();
         };
         workout("push", "PLAN_UPDATED", base.mins(-3 * 24 * 60));
-        let mut ids = Vec::new();
-        for day in 0..4 {
-            let mut session =
-                row(&db, "2026-10-05", Some("push"), SessionStatus::Tentative, base.mins(day * 2 * 24 * 60), 60);
-            if day == 1 {
-                session.user_locked = true; // The owner pinned Push here.
-                session.save(&db).unwrap();
-            }
-            ids.push(session.id);
-        }
-        let templates = |db: &Connection| {
-            ids.iter()
-                .map(|id| PlannedSession::get(db, id).unwrap().unwrap().workout_template_id.unwrap())
-                .collect::<Vec<_>>()
-        };
-        assign_rotation(&db, base.mins(-24 * 60), &ids).unwrap();
-        // Last done: Push → Pull, then the locked Push, then Legs (never trained), then Pull.
-        assert_eq!(templates(&db), ["pull", "push", "legs", "pull"]);
-        assert_eq!(PlannedSession::get(&db, &ids[0]).unwrap().unwrap().workout_plan_json["template"]["id"], "pull");
-        assert!(assign_rotation(&db, base.mins(-24 * 60), &ids).unwrap().is_empty());
-        // Drafted workouts are the agent's from then on: a Legs workout or a later tick moves nothing.
-        workout("legs", "PLAN_UPDATED", base.mins(-60));
-        assert!(assign_rotation(&db, base.mins(-24 * 60), &[]).unwrap().is_empty());
-        assert_eq!(templates(&db), ["pull", "push", "legs", "pull"]);
+        // The owner pinned Push on day 2; fresh slots around it get the default rotation.
+        let mut pinned = row(&db, "2026-10-05", Some("push"), SessionStatus::Tentative, base.mins(2 * 24 * 60), 60);
+        pinned.user_locked = true;
+        pinned.save(&db).unwrap();
+        let mut new: Vec<PlannedSession> = [0, 4, 6]
+            .iter()
+            .map(|day| {
+                let mut session = PlannedSession::new("2026-10-05".into(), Some("push".into()), false);
+                session.planned_start_at = base.mins(day * 24 * 60);
+                session
+            })
+            .collect();
+        crate::domain::scheduling::rotation(&db, &mut new).unwrap();
+        // Last done: Push → Pull, then the pinned Push, then Legs (never trained), then Pull.
+        let templates: Vec<_> = new.iter().map(|s| s.workout_template_id.clone().unwrap()).collect();
+        assert_eq!(templates, ["pull", "legs", "pull"]);
     }
 
     #[test]
