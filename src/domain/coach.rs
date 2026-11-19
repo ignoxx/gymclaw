@@ -982,6 +982,12 @@ pub fn handle_action(
         if action == Action::Rest && remember {
             return Ok(acked(format!("Rest is {seconds}s from now on."), vec![]));
         }
+        // Ending what just finished is done, not an error: the last set already ended it and sent the
+        // finish card (prod 2026-11-19: a failed end read as "nothing wrapped up" and the reply asked
+        // the crowd question a second time).
+        if action == Action::End && WorkoutSession::first(db, "WHERE completed_at > ?1", [now.mins(-60)])?.is_some() {
+            return Ok(acked("Already finished: its finish card is the wrap-up, crowd question included.", vec![]));
+        }
         crate::bail!("NO_ACTIVE_WORKOUT", "No workout running; start one first");
     };
     let tap = match action {
@@ -1322,6 +1328,22 @@ mod tests {
         assert!(first.text.contains("Set 1/2 · 8–10 × 25 kg"), "{}", first.text);
         data(&first, "✅ 8 × 25 kg");
         assert_eq!(handle_text(&db, "8x25", at(1010), "m3").unwrap().ack.as_deref(), Some("✅ 8 × 25 kg"));
+    }
+
+    /// Prod 2026-11-19: the agent logged the last set and called end in the same step. The set
+    /// finished the workout; an end right after must say so, not claim nothing ran.
+    #[test]
+    fn ending_a_workout_that_just_finished_is_not_an_error() {
+        let db = db();
+        push(&db);
+        handle_text(&db, "10x90", at(10), "m1").unwrap();
+        handle_rest_over(&db, at(101)).unwrap();
+        handle_tap(&db, &data(&live(&db, at(110)), "⏭ Next exercise"), at(112), "cb-1").unwrap();
+        handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
+        let again = handle_action(&db, Action::End, None, None, None, false, at(610), "end-again").unwrap();
+        assert!(again.cards.is_empty() && again.ack.unwrap().starts_with("Already finished"));
+        let later = handle_action(&db, Action::End, None, None, None, false, at(600 + 3601), "end-later");
+        assert_eq!(later.unwrap_err().code(), "NO_ACTIVE_WORKOUT");
     }
 
     #[test]
