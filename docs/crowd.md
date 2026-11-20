@@ -91,9 +91,9 @@ or future attendance.
 
 The forecast (`src/domain/crowd.rs`) is deliberately simple. A slot's typical count comes from the
 last 90 days of readings at that weekday and hour, one mean per day so repeated polls don't count as
-more evidence. Each crowd answer is paired with a reading from the 30 minutes before arrival, and
-those pairs turn a count into a felt-crowd score: with under 10 pairs a weighted average of the
-nearest three, from 10 on a monotonic fit (more people never feels emptier). That score is blended
-with the owner's own answers for the slot. Confidence is how much evidence there is, never measured
-accuracy; no signal means no score. Holidays and weather aren't modelled, and no model calls are
-involved.
+more evidence, recency-weighted with a 21-day half-life so recent weeks lead as schedules shift.
+Each crowd answer is paired with a reading from the 30 minutes before arrival, and those pairs turn
+a count into a felt-crowd score: with under 10 pairs a weighted average of the nearest three, from
+10 on a monotonic fit (more people never feels emptier). That score is blended with the owner's own
+answers for the slot. Confidence is how much evidence there is, never measured accuracy; no signal
+means no score. Holidays and weather aren't modelled, and no model calls are involved.
