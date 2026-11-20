@@ -116,6 +116,11 @@ fn apply(conn: &mut Connection) -> Result<()> {
                     "Database has baseline marker {marker}, expected {BASELINE_MARKER}; it predates the baseline and can't be upgraded"
                 );
             }
+        } else if version == 0 {
+            crate::bail!(
+                "SCHEMA_MISMATCH",
+                "Database has existing tables with user_version = 0 and no baseline marker"
+            );
         }
     }
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;

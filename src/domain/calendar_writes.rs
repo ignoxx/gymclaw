@@ -227,8 +227,8 @@ pub fn apply_write(
         Ok(()) => {
             write.status = WriteStatus::Applied;
             db.execute(
-                "UPDATE agent_event SET handled_at = ?1 WHERE type = 'calendar.write_blocked' AND handled_at IS NULL",
-                [now],
+                "UPDATE agent_event SET handled_at = ?1 WHERE type = 'calendar.write_blocked' AND handled_at IS NULL AND payload_json ->> 'session_id' = ?2",
+                (now, &write.planned_session_id),
             )?;
             write.handled_at = Some(now);
             write.update(db)?;

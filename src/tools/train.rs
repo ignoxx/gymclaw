@@ -336,7 +336,6 @@ fn refresh_finish_card(cx: &mut Ctx, workout_id: &str, mut result: Value) -> Res
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TemplateGet {
     pub template_id: String,
 }
@@ -352,7 +351,6 @@ impl Tool for TemplateGet {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TemplateImport {
     /// The whole plan. guide_id: the catalog_search match's picture (keep the owner's name); if none, omit it and set muscle.
     /// The first primary exercise needs warmup_weight.
@@ -390,7 +388,6 @@ fn warn_orphans(cx: &Ctx, before: Option<Template>, template_id: &str, mut resul
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TemplateEditExercise {
     pub template_id: String,
     /// The exercise: ID, guide_id or name.
@@ -426,7 +423,6 @@ impl Tool for TemplateEditExercise {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TemplateAddExercise {
     pub template_id: String,
     /// Catalog guide_id or exact catalog name (see catalog_search). With no catalog match, a fields.id
@@ -455,7 +451,6 @@ impl Tool for TemplateAddExercise {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TemplateRemoveExercise {
     pub template_id: String,
     /// The exercise: ID, guide_id or name.
@@ -584,7 +579,6 @@ impl Tool for OnboardingFinish {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct BodyLog {
     /// One weigh-in, or a whole backfill batch.
     pub entries: Vec<WeighIn>,
@@ -618,7 +612,6 @@ impl Tool for BodyList {
 }
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct BodyDelete {
     pub entry_id: String,
 }
