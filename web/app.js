@@ -1767,6 +1767,76 @@ function openSetEditor(exercise, set) {
   clearDirty();
 }
 
+/* Edit profile timezone in a sheet with device-zone shortcut and IANA autocomplete. */
+function openTimezoneEditor(current, browserTz) {
+  const dialog = document.getElementById('ex-detail');
+  const sheet = el('div', 'ex-sheet');
+  dialog.replaceChildren(sheet);
+  const close = el('button', 'ex-close', '×');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close');
+  close.addEventListener('click', closeSheet);
+  const title = el('h2', 'title', 'Timezone');
+  title.id = 'ex-detail-title';
+  sheet.append(close, title, el('p', 'subtitle', `Currently ${current}`));
+
+  const form = el('form', 'ex-edit');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'tz-input';
+  input.value = current;
+  input.placeholder = 'e.g. America/New_York';
+  input.autocomplete = 'off';
+  input.autocapitalize = 'none';
+  input.spellcheck = false;
+  if (typeof Intl.supportedValuesOf === 'function') {
+    const listId = 'tz-options';
+    const list = document.createElement('datalist');
+    list.id = listId;
+    for (const tz of Intl.supportedValuesOf('timeZone')) {
+      const opt = document.createElement('option');
+      opt.value = tz;
+      list.append(opt);
+    }
+    input.setAttribute('list', listId);
+    form.append(list);
+  }
+  form.append(input);
+
+  const actions = el('div', 'ex-actions');
+  if (browserTz && browserTz !== current) {
+    const useDevice = el('button', 'chip sm', `Use ${browserTz}`);
+    useDevice.type = 'button';
+    useDevice.addEventListener('click', () => { input.value = browserTz; });
+    actions.append(useDevice);
+  }
+  const save = el('button', 'save log-button in-sheet', 'Save timezone');
+  save.type = 'submit';
+  actions.append(save);
+  form.append(actions);
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const tz = input.value.trim();
+    if (!tz) { toast('Enter an IANA timezone', true); return; }
+    save.disabled = true;
+    try {
+      await toolCall('profile_update', { changes: { timezone: tz } });
+      haptic.done();
+      dialog.close();
+      toast(`Timezone set to ${tz}`);
+    } catch (error) {
+      save.disabled = false;
+      haptic.done(false);
+      toast(error.message, true);
+    }
+  });
+  sheet.append(form);
+  if (!dialog.open) dialog.showModal();
+  syncBack();
+  clearDirty();
+}
+
 /* Settings panel on the rebranded Settings + Memory tab. */
 let restSaveTimer = null;
 let restSaving = false;
@@ -1869,7 +1939,26 @@ function renderSettings(data) {
   }
   rows.append(row('Reminders & plan', `${data.profile.weekly_target_sessions}/wk · ${data.profile.earliest_workout_start}–${data.profile.latest_workout_finish}`, remSeg));
 
-  // 4. Calendar ICS subscription URL
+  // 4. Timezone (show current IANA zone; 1-tap device sync when different, or edit in sheet)
+  const browserTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; } })();
+  const tzCtrl = document.createDocumentFragment();
+  if (browserTz && browserTz !== data.profile.timezone) {
+    const sync = el('button', 'chip sm', 'Use device');
+    sync.type = 'button';
+    sync.addEventListener('click', async () => {
+      haptic.select();
+      try { await toolCall('profile_update', { changes: { timezone: browserTz } }); haptic.done(); toast(`Timezone set to ${browserTz}`); }
+      catch (e) { haptic.done(false); toast(e.message, true); }
+    });
+    tzCtrl.append(sync);
+  }
+  const tzEdit = el('button', 'chip sm', 'Change');
+  tzEdit.type = 'button';
+  tzEdit.addEventListener('click', () => openTimezoneEditor(data.profile.timezone, browserTz));
+  tzCtrl.append(tzEdit);
+  rows.append(row('Timezone', data.profile.timezone, tzCtrl));
+
+  // 5. Calendar ICS subscription URL
   if (data.ics_path) {
     const copy = el('button', 'chip sm', 'Copy');
     copy.type = 'button';

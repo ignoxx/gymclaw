@@ -529,7 +529,9 @@ img[data-missing] { visibility: hidden; }
 .setting-meta { flex: 1; min-width: 0; }
 .setting-label { display: block; font-size: 14px; font-weight: 500; color: var(--ink); line-height: 1.3; }
 .setting-meta small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
-.setting-control { flex-shrink: 0; display: flex; align-items: center; }
+.setting-control { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+.tz-input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1.5px solid var(--divider); border-radius: 10px; background: var(--soft); color: var(--ink); font: inherit; font-size: 15px; }
+.tz-input:focus { outline: 0; border-color: var(--lime); }
 .setting-control .segmented button { min-height: 36px; padding: 6px 14px; font-size: 13px; }
 .mini-stepper { display: inline-flex; align-items: center; gap: 2px; padding: 2px; background: var(--soft); border-radius: 99px; }
 .mini-stepper button { width: 38px; height: 38px; border: 0; border-radius: 99px; background: var(--white); color: var(--ink); font: inherit; font-size: 18px; line-height: 1; cursor: pointer; box-shadow: 0 1px 2px var(--shadow); touch-action: manipulation; }

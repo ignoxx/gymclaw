@@ -116,7 +116,12 @@ fn is_db_text(text: &str) -> bool {
 }
 
 pub fn zone(name: &str) -> Result<TimeZone> {
-    TimeZone::get(name).map_err(|_| Error::domain("INVALID_TIMEZONE", format!("Unknown timezone: {name}")))
+    TimeZone::get(name).map_err(|_| {
+        Error::domain(
+            "INVALID_TIMEZONE",
+            format!("Unknown timezone: {name} (use an IANA name like America/New_York or Europe/Berlin)"),
+        )
+    })
 }
 
 impl fmt::Display for Ts {

@@ -512,7 +512,7 @@ pub struct OnboardingAnswer {
     /// Question key → the owner's words, e.g. {"goal": "Build muscle, 2 years"}. Keys: goal, schedule,
     /// where, preferences, limitations.
     pub answers: Map<String, Value>,
-    /// Profile fields backing those answers (schedule, where and preferences need them; gym_address is optional).
+    /// Profile fields backing those answers (schedule, where and preferences need them; gym_address is optional; timezone must be an IANA name like "America/New_York").
     pub profile: Option<Map<String, Value>>,
 }
 
