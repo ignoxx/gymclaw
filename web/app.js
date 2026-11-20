@@ -922,7 +922,7 @@ function renderNext(focus, next) {
 }
 
 function renderStartPicker(focus, plans) {
-  const box = el('details', 'swap');
+  const box = el('details', 'swap start-picker');
   box.append(el('summary', '', 'Start a workout now'));
   const actions = el('div', 'live-actions');
   for (const plan of plans) {
@@ -1778,7 +1778,7 @@ function renderSettings(data) {
     });
     unitSeg.append(b);
   }
-  rows.append(row('Weight unit', 'Cards, charts & steppers', unitSeg));
+  rows.append(row('Weight unit', null, unitSeg));
 
   // 2. Default rest (compact inline stepper with hold-to-repeat and poll-safe auto-save)
   let restVal = data.profile.rest_seconds;
