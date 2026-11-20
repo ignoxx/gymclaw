@@ -29,6 +29,44 @@ sql_enum!(NoteKind { Owner = "owner", Learned = "learned" });
 sql_enum!(GoalKind { Lift = "lift", BodyWeight = "body_weight", CardioMinutesWeek = "cardio_minutes_week", SessionsWeek = "sessions_week", Other = "other" });
 sql_enum!(GoalStatus { Active = "ACTIVE", Done = "DONE", Dropped = "DROPPED" });
 sql_enum!(Intensity { Easy = "easy", Moderate = "moderate", Hard = "hard" });
+sql_enum!(
+    /// Owner display/input weight unit. Database and tool boundaries always store canonical kg.
+    WeightUnit { Kg = "kg", Lb = "lb" }
+);
+
+#[expect(clippy::derivable_impls, reason = "sql_enum! does not emit #[default]")]
+impl Default for WeightUnit {
+    fn default() -> Self {
+        WeightUnit::Kg
+    }
+}
+
+impl WeightUnit {
+    const KG_PER_LB: f64 = 0.453_592_37;
+
+    /// Convert a value entered in this unit to canonical kg (2 decimals for lb, matching `import::Unit`).
+    pub fn to_kg(self, value: f64) -> f64 {
+        match self {
+            WeightUnit::Kg => value,
+            WeightUnit::Lb => (value * Self::KG_PER_LB * 100.0).round() / 100.0,
+        }
+    }
+
+    /// Convert canonical kg to this display unit (nearest 0.5 lb so 0.5 lb steps round-trip cleanly).
+    pub fn to_display(self, kg: f64) -> f64 {
+        match self {
+            WeightUnit::Kg => kg,
+            WeightUnit::Lb => (kg / Self::KG_PER_LB * 2.0).round() / 2.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WeightUnit::Kg => "kg",
+            WeightUnit::Lb => "lb",
+        }
+    }
+}
 
 impl SessionStatus {
     /// Takes a slot in the week.
@@ -63,6 +101,7 @@ table!(UserProfile = "user_profile" {
     rest_seconds: i64,
     crowd_preference_weight: f64,
     gym_address: Option<String>,
+    weight_unit: WeightUnit,
     created_at: Ts,
     updated_at: Ts,
 });

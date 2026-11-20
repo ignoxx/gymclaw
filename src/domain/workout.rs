@@ -176,7 +176,7 @@ pub fn measure(exercise: &WorkoutExercise) -> Measure {
 
 /// How the exercise's sets read (load, per side).
 pub fn kind(exercise: &WorkoutExercise) -> SetKind {
-    SetKind { load: field(exercise, "load"), per_side: field(exercise, "per_side") }
+    SetKind { load: field(exercise, "load"), per_side: field(exercise, "per_side"), ..SetKind::default() }
 }
 
 /// Reps alone make a set: a catalog bodyweight move, or weight added to bodyweight (none added is
@@ -462,7 +462,7 @@ pub struct Active {
 
 impl Active {
     pub fn kind(&self) -> SetKind {
-        SetKind { load: self.load, per_side: self.per_side }
+        SetKind { load: self.load, per_side: self.per_side, ..SetKind::default() }
     }
 }
 
@@ -1060,7 +1060,14 @@ pub(crate) mod tests {
         assert_eq!(initial.active_exercise.unwrap().set_type, SetType::Warmup);
         assert_eq!(initial.eta, at(220));
         log_set(&db, &id, &set(50.0, 8, SetType::Warmup), at(30), "warmup").unwrap();
-        let first = log_set(&db, &id, &parse_set("9x80", None, false).unwrap(), at(60), "set-1").unwrap();
+        let first = log_set(
+            &db,
+            &id,
+            &parse_set("9x80", None, false, crate::db::models::WeightUnit::Kg).unwrap(),
+            at(60),
+            "set-1",
+        )
+        .unwrap();
         let job_id = first["data"]["rest_job"]["id"].as_str().unwrap().to_string();
         assert_eq!(first["data"]["status"], "RESTING");
         assert_eq!(first["data"]["active_exercise"]["set_number"], 2);

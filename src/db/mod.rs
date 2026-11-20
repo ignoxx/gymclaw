@@ -35,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/009_extensions.sql"),
     include_str!("migrations/010_gym_locations.sql"),
     include_str!("migrations/011_dead_state.sql"),
+    include_str!("migrations/012_weight_unit.sql"),
 ];
 
 /// Read-write connection. WAL lets readers (the dashboard, a sync waiting on Google) run alongside a

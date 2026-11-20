@@ -37,8 +37,7 @@ impl Tool for HistoryImport {
     const NAME: &'static str = "history_import";
     const DESCRIPTION: &'static str = "Import past workouts from another app (CSV, screenshots, pasted logs) so weights and trends start from real numbers. \
         Dry run first; ask once about unmatched names (buttons: closest matches + \"keep my name\"). Already logged workouts are skipped.";
-    // Hidden after setup to save context: a CSV's summary names it, and calling it by name still works.
-    const LISTED: Listed = Listed::InSetup;
+    const LISTED: Listed = Listed::Always;
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let zone = get_profile(cx.db)?.tz();

@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::db::Connection;
 use crate::db::Json;
-use crate::db::models::UserProfile;
+use crate::db::models::{UserProfile, WeightUnit};
 use crate::error::{Error, Result};
 use crate::time::{Ts, zone};
 
@@ -38,6 +38,8 @@ pub struct Profile {
     pub crowd_preference_weight: f64,
     /// Calendar event location: calendar apps derive travel time / time-to-leave from it.
     pub gym_address: Option<String>,
+    /// Preferred display/input unit (kg or lb); stored weights remain canonical kg.
+    pub weight_unit: WeightUnit,
 }
 
 impl Default for Profile {
@@ -59,6 +61,7 @@ impl Default for Profile {
             rest_seconds: 90,
             crowd_preference_weight: 1.0,
             gym_address: None,
+            weight_unit: WeightUnit::Kg,
         }
     }
 }
@@ -135,6 +138,7 @@ impl Profile {
             rest_seconds: row.rest_seconds,
             crowd_preference_weight: row.crowd_preference_weight,
             gym_address: row.gym_address.clone(),
+            weight_unit: row.weight_unit,
         })
     }
 
@@ -155,6 +159,7 @@ impl Profile {
         row.rest_seconds = self.rest_seconds;
         row.crowd_preference_weight = self.crowd_preference_weight;
         row.gym_address = self.gym_address.clone();
+        row.weight_unit = self.weight_unit;
     }
 }
 
@@ -183,6 +188,7 @@ pub fn get_profile(db: &Connection) -> Result<Profile> {
         rest_seconds: 0,
         crowd_preference_weight: 0.0,
         gym_address: None,
+        weight_unit: WeightUnit::Kg,
         created_at: now,
         updated_at: now,
     };

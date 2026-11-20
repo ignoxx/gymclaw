@@ -18,7 +18,7 @@ use crate::domain::core::mutate;
 use crate::domain::crowd::{LABELS, record_feedback};
 use crate::domain::highlights::{self, Change};
 use crate::domain::illustrations::{catalog, timed};
-use crate::domain::profile::update_profile;
+use crate::domain::profile::{get_profile, update_profile};
 use crate::domain::set_parser::{SetInput, parse_block, parse_set};
 use crate::domain::templates::{Load, Measure, SetKind, remember_swap};
 use crate::domain::view::{Button, Card, CardKind, CoachView, Edit};
@@ -65,6 +65,7 @@ fn next_set(db: &Connection, row: &WorkoutExercise, bodyweight: bool) -> Result<
 
 /// Card for whatever the owner should do next. Every set card carries the illustration.
 pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card> {
+    let unit = get_profile(db)?.weight_unit;
     let data = workout::state(db, workout_id, now)?;
     let rows = exercises(db, workout_id)?;
     let deferred: Vec<&WorkoutExercise> = rows.iter().filter(|e| e.status == ExerciseStatus::Deferred).collect();
@@ -100,11 +101,11 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
         } else if active.measure == Measure::Distance {
             active.meters.map_or("distance".into(), format_distance)
         } else if weight > 0.0 {
-            active.kind().weight(weight)
+            active.kind().in_unit(unit).weight(weight)
         } else if active.bodyweight {
             "Bodyweight".into()
         } else {
-            "? kg".into()
+            format!("? {}", unit.label())
         };
         // Shorter or longer: a cut by a negative number adds time (a hard set needs more rest).
         return Ok(Card {
@@ -128,7 +129,7 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     }
     let head =
         format!("**{}**{}", active.name, active.primary_muscle.as_ref().map(|m| format!(" · {m}")).unwrap_or_default());
-    let set_kind = active.kind();
+    let set_kind = active.kind().in_unit(unit);
     let (lines, mut buttons) = if active.set_type == SetType::Warmup {
         (
             vec![head, format!("Warm-up · {}", set_kind.target(active.rep_min, active.rep_max, active.target_weight))],
@@ -171,8 +172,10 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
         } else {
             // Unknown weight: the gap is the headline and the reply format is impossible to miss.
             let guess = guess_set(db, row, active.rep_min)?;
-            let example =
-                guess.as_ref().map_or(format!("{}x40", active.rep_min), |(w, reps, _)| format!("{reps}x{}", g(*w)));
+            let example = guess.as_ref().map_or(
+                format!("{}x{}", active.rep_min, if unit == crate::db::models::WeightUnit::Lb { 90 } else { 40 }),
+                |(w, reps, _)| format!("{reps}x{}", g(unit.to_display(*w))),
+            );
             let reps = set_kind.target(active.rep_min, active.rep_max, 0.0);
             lines.push(format!("{set_line} · {} × **? {}**", reps.trim_end_matches(" reps"), set_kind.unit()));
             lines.push(format!("✍️ **Reply reps × weight:** `{example}`"));
@@ -237,9 +240,12 @@ fn guess_set(db: &Connection, row: &WorkoutExercise, reps: i64) -> Result<Option
     Ok(None)
 }
 
-/// "6.2 t" from kilograms.
-fn tonnes(kg: f64) -> String {
-    format!("{:.1} t", kg / 1000.0)
+/// "6.2 t" (kg) or "13.7k lb" (lb) from canonical kilograms.
+fn tonnes(kg: f64, unit: crate::db::models::WeightUnit) -> String {
+    match unit {
+        crate::db::models::WeightUnit::Kg => format!("{:.1} t", kg / 1000.0),
+        crate::db::models::WeightUnit::Lb => format!("{:.1}k lb", unit.to_display(kg) / 1000.0),
+    }
 }
 
 /// One exercise's working sets for the details quote: "Bench 85 kg: 8 · 8 · 7" when the weight held,
@@ -302,7 +308,7 @@ fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
     let h = highlights::workout(db, workout_id)?;
     let profile = crate::domain::profile::get_profile(db)?;
     let tz = profile.tz();
-    let volume = if h.volume > 0.0 { format!(" · {}", tonnes(h.volume)) } else { String::new() };
+    let volume = if h.volume > 0.0 { format!(" · {}", tonnes(h.volume, profile.weight_unit)) } else { String::new() };
     let sets = match h.sets {
         // Only timed work (a bike session): its minutes are the next lines, not "0 sets".
         0 if !h.timed.is_empty() => String::new(),
@@ -360,7 +366,9 @@ fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
     let kinds: Vec<SetKind> = exercises
         .iter()
         .map(|e| {
-            Ok(WorkoutExercise::get(db, e["id"].as_str().unwrap_or_default())?.map(|r| kind(&r)).unwrap_or_default())
+            Ok(WorkoutExercise::get(db, e["id"].as_str().unwrap_or_default())?
+                .map(|r| kind(&r).in_unit(profile.weight_unit))
+                .unwrap_or_default())
         })
         .collect::<Result<_>>()?;
     let targets: Vec<String> = exercises
@@ -471,7 +479,8 @@ pub fn card_context(db: &Connection, telegram_message_id: i64) -> Result<Option<
     let Some(workout) = meta["workout_id"].as_str().map(|id| WorkoutSession::get(db, id)).transpose()?.flatten() else {
         return Ok(None);
     };
-    let tz = crate::domain::profile::get_profile(db)?.tz();
+    let profile = get_profile(db)?;
+    let tz = profile.tz();
     let when = workout.started_at.map(|t| format!(", {}", t.local(&tz).strftime("%a %-d %b"))).unwrap_or_default();
     let about =
         format!("workout {} ({}{when})", workout.id, workout.template_snapshot["name"].as_str().unwrap_or("Workout"));
@@ -480,7 +489,7 @@ pub fn card_context(db: &Connection, telegram_message_id: i64) -> Result<Option<
         let card = if meta["card"] == "finish" { "finish card" } else { "card" };
         return Ok(Some(format!("the {card} of {about}")));
     };
-    let shown = kind(&exercise);
+    let shown = kind(&exercise).in_unit(profile.weight_unit);
     let sets: Vec<String> = logs(db, &exercise.id, None)?
         .iter()
         .map(|s| {
@@ -529,7 +538,8 @@ pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: 
         return Ok((CoachView::default(), Value::Null));
     };
     let active = exercises(db, &workout.id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
-    let set_kind = active.as_ref().map(kind).unwrap_or_default();
+    let unit = get_profile(db)?.weight_unit;
+    let set_kind = active.as_ref().map(|r| kind(r).in_unit(unit)).unwrap_or_default();
     let value = match &active {
         // A time or distance counts on an exercise done for one, or a catalog cardio machine still stored
         // as reps; until its first set either one goes (it decides): on a lift, "5 min" is talk, not a set.
@@ -551,7 +561,7 @@ pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: 
             let reps_alone = active.as_ref().is_some_and(workout::reps_alone);
             // The weight the card offers decides an unclear order.
             let expected = active.as_ref().map(|row| workout::next_working_set(db, row)).transpose()?.flatten();
-            match parse_set(text, expected.map(|(weight, _)| weight), reps_alone) {
+            match parse_set(text, expected.map(|(weight, _)| weight), reps_alone, unit) {
                 Ok(value) => value,
                 Err(Error::Domain { .. }) => return Ok((CoachView::default(), Value::Null)),
                 Err(other) => return Err(other),
@@ -611,7 +621,7 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
     let next = |ack: Option<String>| -> Result<CoachView> {
         Ok(CoachView { ack, cards: after_change(db, id, now, request_id)?, ..handled() })
     };
-    let set_kind = kind(&row);
+    let set_kind = kind(&row).in_unit(get_profile(db)?.weight_unit);
     match action {
         "log" => {
             let weight: f64 = arg(1)?.parse().map_err(|_| invalid("Bad weight"))?;
@@ -730,7 +740,12 @@ pub fn app_action(data: &str) -> bool {
 pub fn app_fixed(db: &Connection, set_id: &str, now: Ts) -> Result<()> {
     let Some(set) = crate::db::models::SetLog::get(db, set_id)? else { return Ok(()) };
     let Some(row) = WorkoutExercise::get(db, &set.workout_exercise_id)? else { return Ok(()) };
-    let text = format!("✏️ Fixed {}: {}", name(&row), kind(&row).set(set.weight, set.reps, set.seconds, set.meters));
+    let unit = get_profile(db)?.weight_unit;
+    let text = format!(
+        "✏️ Fixed {}: {}",
+        name(&row),
+        kind(&row).in_unit(unit).set(set.weight, set.reps, set.seconds, set.meters)
+    );
     let note = Card { text: text.clone(), kind: CardKind::Other, ..Card::default() };
     let view = CoachView { ack: Some(text), cards: vec![note], standalone: true, ..handled() };
     crate::domain::core::emit(db, APP_VIEW, now, serde_json::to_value(&view)?)?;
@@ -755,7 +770,7 @@ pub fn app_last(db: &Connection, workout_id: &str) -> Result<Value> {
         return Ok(Value::Null);
     };
     let Some(row) = WorkoutExercise::get(db, &set.workout_exercise_id)? else { return Ok(Value::Null) };
-    let set_kind = kind(&row);
+    let set_kind = kind(&row).in_unit(get_profile(db)?.weight_unit);
     Ok(json!({"id": set.id, "exercise": name(&row), "workout_exercise_id": row.id,
         "text": set_kind.set(set.weight, set.reps, set.seconds, set.meters),
         "weight": set.weight, "reps": set.reps, "seconds": set.seconds, "meters": set.meters,
@@ -804,7 +819,7 @@ pub fn app_live(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
     };
     let r = reference(&active.id);
     let row = rows.iter().find(|e| e.id == active.id).expect("active row");
-    let set_kind = active.kind();
+    let set_kind = active.kind().in_unit(get_profile(db)?.weight_unit);
     // The chat card's suggestion, else a guess from a similar exercise, else nothing (the owner enters it).
     let (weight, reps) = if active.set_type == SetType::Warmup {
         (Some(active.target_weight), active.rep_max)

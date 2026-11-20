@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::db::models::SetType;
+use crate::db::models::{SetType, WeightUnit};
 use crate::domain::templates::Measure;
 use crate::error::Result;
 
@@ -70,10 +70,11 @@ impl SetInput {
 
 const NUMBER: &str = r"\d+(?:[.,]\d+)?";
 static PAIR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"^(\+\s*)?({NUMBER})\s*(kg|reps?)?\s*[x×*]\s*(\+\s*)?({NUMBER})\s*(kg|reps?)?$")).unwrap()
+    Regex::new(&format!(r"^(\+\s*)?({NUMBER})\s*(kg|lbs?|reps?)?\s*[x×*]\s*(\+\s*)?({NUMBER})\s*(kg|lbs?|reps?)?$"))
+        .unwrap()
 });
 static AT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!(r"^(\d+)\s*reps?\s*(?:at|@)\s*({NUMBER})\s*(?:kg)?$")).unwrap());
+    LazyLock::new(|| Regex::new(&format!(r"^(\d+)\s*reps?\s*(?:at|@)\s*({NUMBER})\s*(kg|lbs?)?$")).unwrap());
 static REPS_ONLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)\s*(?:reps?|[x×*])?$").unwrap());
 const MAX_PLAUSIBLE_REPS: f64 = 30.0;
 static DURATION: LazyLock<Regex> = LazyLock::new(|| {
@@ -139,10 +140,22 @@ fn number(text: &str) -> f64 {
     text.replace(',', ".").parse().unwrap_or(f64::NAN)
 }
 
-/// A working set of reps and weight. Order is decided by unit words or "+", then rep plausibility (only one side above 30 is the weight), then closeness to `expected_weight`, then reps-first.
-pub fn parse_set(text: &str, expected_weight: Option<f64>, bodyweight: bool) -> Result<SetInput> {
+/// A working set of reps and weight (returned in canonical kg). Order is decided by unit words or "+",
+/// then rep plausibility (only one side above 30 is the weight), then closeness to `expected_weight`
+/// (in canonical kg, compared in the input unit), then reps-first.
+pub fn parse_set(
+    text: &str,
+    expected_weight: Option<f64>,
+    bodyweight: bool,
+    default_unit: WeightUnit,
+) -> Result<SetInput> {
     let clean = PER_SIDE.replace_all(&text.trim().to_lowercase(), "").trim().to_string();
     let set = |weight: f64, reps: i64| Ok(SetInput::reps(weight, reps, SetType::Working));
+    let explicit_unit = |u: Option<&str>| match u {
+        Some("kg") => Some(WeightUnit::Kg),
+        Some("lb" | "lbs") => Some(WeightUnit::Lb),
+        _ => None,
+    };
     if bodyweight
         && let Some(m) = REPS_ONLY.captures(&clean)
         && let Ok(reps) = m[1].parse::<i64>()
@@ -151,27 +164,31 @@ pub fn parse_set(text: &str, expected_weight: Option<f64>, bodyweight: bool) -> 
         return set(0.0, reps);
     }
     if let Some(m) = AT.captures(&clean) {
-        return set(number(&m[2]), m[1].parse().unwrap_or(0));
+        let unit = explicit_unit(m.get(3).map(|u| u.as_str())).unwrap_or(default_unit);
+        return set(unit.to_kg(number(&m[2])), m[1].parse().unwrap_or(0));
     }
     let Some(m) = PAIR.captures(&clean) else { return ambiguous() };
     let (a, b) = (number(&m[2]), number(&m[5]));
-    // "+" marks the weight like "kg" does: "+10x8" is 8 reps with 10 kg added.
-    let unit = |plus: usize, unit: usize| m.get(unit).map(|u| u.as_str()).or(m.get(plus).map(|_| "kg"));
+    // "+" marks the weight like a unit word does: "+10x8" is 8 reps with 10 added.
+    let unit = |plus: usize, unit: usize| m.get(unit).map(|u| u.as_str()).or(m.get(plus).map(|_| "+"));
     let (left, right) = (unit(1, 3), unit(4, 6));
+    let weight_unit = |u: Option<&str>| matches!(u, Some("kg" | "lb" | "lbs" | "+"));
     let rep_unit = |u: Option<&str>| u.is_some_and(|u| u.starts_with("rep"));
-    if left.is_some() && left == right {
+    if (weight_unit(left) && weight_unit(right)) || (rep_unit(left) && rep_unit(right)) {
         return ambiguous();
     }
+    let parsed_unit = explicit_unit(left).or_else(|| explicit_unit(right)).unwrap_or(default_unit);
+    let expected_display = expected_weight.map(|kg| parsed_unit.to_display(kg));
     let integer = |v: f64| v.fract() == 0.0;
-    let (weight, reps) = if left == Some("kg") || rep_unit(right) {
+    let (weight, reps) = if weight_unit(left) || rep_unit(right) {
         (a, b)
-    } else if right == Some("kg") || rep_unit(left) {
+    } else if weight_unit(right) || rep_unit(left) {
         (b, a)
     } else if !integer(a) || !integer(b) {
         if !integer(a) { (a, b) } else { (b, a) }
     } else if (a > MAX_PLAUSIBLE_REPS) != (b > MAX_PLAUSIBLE_REPS) {
         if a > MAX_PLAUSIBLE_REPS { (a, b) } else { (b, a) }
-    } else if let Some(expected) = expected_weight.filter(|e| (a - e).abs() != (b - e).abs()) {
+    } else if let Some(expected) = expected_display.filter(|e| (a - e).abs() != (b - e).abs()) {
         if (a - expected).abs() < (b - expected).abs() { (a, b) } else { (b, a) }
     } else {
         (b, a)
@@ -179,7 +196,7 @@ pub fn parse_set(text: &str, expected_weight: Option<f64>, bodyweight: bool) -> 
     if !integer(reps) || reps <= 0.0 {
         return ambiguous();
     }
-    set(weight, reps as i64)
+    set(parsed_unit.to_kg(weight), reps as i64)
 }
 
 #[cfg(test)]
@@ -187,7 +204,7 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Result<SetInput> {
-        parse_set(text, None, false)
+        parse_set(text, None, false, WeightUnit::Kg)
     }
 
     fn set(weight: f64, reps: i64) -> SetInput {
@@ -213,7 +230,7 @@ mod tests {
 
     #[test]
     fn uses_expected_weight_when_order_is_unclear() {
-        assert_eq!(parse_set("12x10", Some(10.0), false).unwrap(), set(10.0, 12));
+        assert_eq!(parse_set("12x10", Some(10.0), false, WeightUnit::Kg).unwrap(), set(10.0, 12));
         assert_eq!(parse("12x10").unwrap(), set(10.0, 12)); // reps first by default
         assert_eq!(parse("8x22,5").unwrap(), set(22.5, 8));
     }
@@ -221,14 +238,14 @@ mod tests {
     #[test]
     fn implausible_reps_beat_a_stale_expected_weight() {
         // Expected 10 kg (a stale target) must not turn "49x10" into 49 reps at 10 kg.
-        assert_eq!(parse_set("49x10", Some(10.0), false).unwrap(), set(49.0, 10));
-        assert_eq!(parse_set("59x7", Some(7.0), false).unwrap(), set(59.0, 7));
+        assert_eq!(parse_set("49x10", Some(10.0), false, WeightUnit::Kg).unwrap(), set(49.0, 10));
+        assert_eq!(parse_set("59x7", Some(7.0), false, WeightUnit::Kg).unwrap(), set(59.0, 7));
     }
 
     #[test]
     fn bodyweight_set_is_reps_alone() {
         for text in ["13", "13 reps", "13x", "13 ×"] {
-            assert_eq!(parse_set(text, None, true).unwrap(), set(0.0, 13), "{text}");
+            assert_eq!(parse_set(text, None, true, WeightUnit::Kg).unwrap(), set(0.0, 13), "{text}");
         }
     }
 
@@ -251,7 +268,7 @@ mod tests {
             assert_eq!(parse(text).unwrap(), set(10.0, 8), "{text}");
         }
         for text in ["8/side", "8 per side", "8 each"] {
-            assert_eq!(parse_set(text, None, true).unwrap(), set(0.0, 8), "{text}");
+            assert_eq!(parse_set(text, None, true, WeightUnit::Kg).unwrap(), set(0.0, 8), "{text}");
         }
     }
 
@@ -268,9 +285,20 @@ mod tests {
 
     #[test]
     fn ambiguous_set_rejected() {
-        for text in ["80x9 then 80x10", "80", "9 reps", "-80x9", "80x9?", "80/9", "80kg x 9kg", "+8x+10"] {
+        for text in ["80x9 then 80x10", "80", "9 reps", "-80x9", "80x9?", "80/9", "80kg x 9kg", "80lb x 9kg", "+8x+10"]
+        {
             let error = parse(text).unwrap_err();
             assert!(error.to_string().contains("How many reps"), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn lb_explicit_and_default_unit_convert_to_kg() {
+        for text in ["135lb x 8", "135 lbs × 8", "8x135lb", "8 reps at 135 lb"] {
+            assert_eq!(parse_set(text, None, false, WeightUnit::Kg).unwrap(), set(61.23, 8), "{text}");
+        }
+        assert_eq!(parse_set("8x135", None, false, WeightUnit::Lb).unwrap(), set(61.23, 8));
+        // Explicit kg still stays kg even when default unit is lb.
+        assert_eq!(parse_set("8x60kg", None, false, WeightUnit::Lb).unwrap(), set(60.0, 8));
     }
 }

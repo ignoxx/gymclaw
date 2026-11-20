@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::db::models::{ExerciseProgression, WorkoutExercise, WorkoutTemplate};
+use crate::db::models::{ExerciseProgression, WeightUnit, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
 use crate::domain::illustrations::{Item, catalog, lookup, muscles, suggestions, timed, unknown};
 use crate::domain::workout::{format_distance, format_time, g, in_seconds};
@@ -55,18 +55,30 @@ pub enum Load {
 pub struct SetKind {
     pub load: Load,
     pub per_side: bool,
+    pub unit: WeightUnit,
 }
 
 impl SetKind {
-    /// A weight as a number with its sign: "80", "+10" (added), "20" (assistance).
-    pub fn number(self, weight: f64) -> String {
-        let number = g(weight);
+    /// Format weights in `unit` (converting from canonical kg).
+    pub fn in_unit(mut self, unit: WeightUnit) -> Self {
+        self.unit = unit;
+        self
+    }
+
+    /// A weight (canonical kg) as a display number with its sign: "80", "+10" (added), "20" (assistance).
+    pub fn number(self, weight_kg: f64) -> String {
+        let number = g(self.unit.to_display(weight_kg));
         if self.load == Load::Added { format!("+{number}") } else { number }
     }
 
-    /// The unit after `number`: "kg", or "kg assist" for a counterweight.
+    /// The unit after `number`: "kg"/"lb", or "kg assist"/"lb assist" for a counterweight.
     pub fn unit(self) -> &'static str {
-        if self.load == Load::Assisted { "kg assist" } else { "kg" }
+        match (self.load == Load::Assisted, self.unit) {
+            (true, WeightUnit::Kg) => "kg assist",
+            (true, WeightUnit::Lb) => "lb assist",
+            (false, WeightUnit::Kg) => "kg",
+            (false, WeightUnit::Lb) => "lb",
+        }
     }
 
     /// "80 kg", "+10 kg", "20 kg assist".
@@ -301,7 +313,7 @@ impl ExerciseSpec {
     }
 
     pub fn kind(&self) -> SetKind {
-        SetKind { load: self.load, per_side: self.per_side }
+        SetKind { load: self.load, per_side: self.per_side, unit: WeightUnit::Kg }
     }
 }
 

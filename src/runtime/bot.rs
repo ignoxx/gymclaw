@@ -38,6 +38,8 @@ const APP_STALE: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
 
 #[derive(Debug, PartialEq)]
 pub enum Route {
+    Start,
+    Help,
     Status,
     Extensions,
     /// Try the coach first.
@@ -46,12 +48,17 @@ pub enum Route {
 }
 
 /// The "/" menu Telegram shows; `route` handles each. Set on startup.
-pub const COMMANDS: &[(&str, &str)] =
-    &[("status", "Bot health and what's running"), ("extensions", "What the agent built; turn things off")];
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("status", "Bot health and what's running"),
+    ("help", "What gymclaw can do and how to use it"),
+    ("extensions", "What the agent built; turn things off"),
+];
 
 pub fn route(text: &str) -> Route {
     let command = text.split_whitespace().next().unwrap_or("").split('@').next().unwrap_or("");
     match command {
+        "/start" => Route::Start,
+        "/help" => Route::Help,
         "/status" => Route::Status,
         "/extensions" => Route::Extensions,
         // Cheap pre-check so ordinary chat never pays for a coach lookup. Reps alone ("13 reps") only
@@ -91,6 +98,7 @@ pub struct Bot {
     /// Wakes the scheduler after anything that may have changed jobs or deliveries.
     wake: Arc<Notify>,
     status: Arc<std::sync::Mutex<super::Health>>,
+    last_ignored: std::sync::Mutex<Option<Instant>>,
     inbox: Mutex<Vec<Inbound>>,
     inbox_ready: Notify,
     fast: mpsc::UnboundedSender<Fast>,
@@ -116,6 +124,7 @@ impl Bot {
             log,
             wake,
             status,
+            last_ignored: std::sync::Mutex::new(None),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
             fast,
@@ -179,6 +188,15 @@ impl Bot {
             || message.chat.id != self.owner
             || message.from.as_ref().is_none_or(|f| f.id != self.owner)
         {
+            if message.chat.kind == "private"
+                && let Some(from) = message.from.as_ref()
+            {
+                let mut last = self.last_ignored.lock().unwrap_or_else(PoisonError::into_inner);
+                if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                    *last = Some(Instant::now());
+                    tracing::warn!("ignoring DM from non-owner Telegram user id {}", from.id);
+                }
+            }
             return;
         }
         self.message(message).await;
@@ -228,6 +246,8 @@ impl Bot {
         let export = self.export(&message).await;
         if images.is_empty() && export.is_none() {
             match route(&text) {
+                Route::Start => return self.send_start().await,
+                Route::Help => return self.send_help().await,
                 Route::Status => return self.send_status().await,
                 Route::Extensions => return self.extensions(&text).await,
                 Route::Set => {
@@ -417,6 +437,52 @@ impl Bot {
         self.remember(ChatRole::Owner, text, message_id, meta).await;
         self.inbox.lock().await.push(Inbound { message_id, key, images, background: false });
         self.inbox_ready.notify_one();
+    }
+
+    async fn send_start(&self) {
+        let done = blocking(self.db(), |db| crate::domain::onboarding::finished(db)).await.unwrap_or(false);
+        if done {
+            self.send_bot("You're already set up. Message me anytime, or send `/help` for tips.", "start").await;
+            return;
+        }
+        let text = "**Welcome to gymclaw.** Quick 5-question setup so I can plan your week and coach your workouts.
+
+**1/5** What's your main goal, and how long have you been training?";
+        let choices = [
+            ("Build muscle", "My main goal is to build muscle"),
+            ("Get stronger", "My main goal is to get stronger"),
+            ("Lose fat", "My main goal is to lose fat"),
+            ("General fitness", "My main goal is general fitness"),
+        ];
+        let rows: Vec<(String, String, String)> = choices
+            .iter()
+            .map(|(label, value)| (crate::db::new_id()[..8].to_string(), (*label).into(), (*value).into()))
+            .collect();
+        let stored = rows.clone();
+        let _ = blocking(self.db(), move |db| {
+            for (id, label, value) in stored {
+                AgentButton { id, label, value, created_at: Ts::now() }.insert(db)?;
+            }
+            Ok(())
+        })
+        .await;
+        let keyboard: Vec<Vec<Button>> =
+            rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
+        if let Ok(id) = self.tg.send(self.owner, text, None, &keyboard, None).await {
+            // Recorded as assistant so the agent sees the question it asked when the owner answers.
+            self.remember(ChatRole::Assistant, text.into(), Some(id), json!({"kind": "start"})).await;
+        }
+    }
+
+    async fn send_help(&self) {
+        let text = "**gymclaw tips**
+            • **During a workout:** tap the card button, type a set (`10x80`, `135lb x 8`, `25 min`), or send a voice note.
+            • **Fix a set:** reply to any exercise card with the right numbers, or tap Fix in the **Gym** app.
+            • **Body weight:** send a photo of your scale (as a file for old photos to keep the date).
+            • **History:** send a Strong or Hevy CSV export anytime to import past workouts.
+            • **Feedback:** react 👎 on my last reply if I got something wrong and I'll fix it.
+            • **Commands:** `/status` (health), `/extensions` (toggle playbooks/triggers), `/help`.";
+        self.send_bot(text, "help").await;
     }
 
     async fn send_status(&self) {
@@ -910,6 +976,7 @@ mod tests {
             log: TurnLog::default(),
             wake: Arc::new(Notify::new()),
             status: Arc::new(std::sync::Mutex::new(super::super::Health { started: Instant::now(), last_tick: None })),
+            last_ignored: std::sync::Mutex::new(None),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
             fast,
@@ -1225,7 +1292,26 @@ mod tests {
         }
         assert_eq!(route("/new"), Route::Agent);
         assert_eq!(route("/status@gymclaw_bot"), Route::Status);
+        assert_eq!(route("/start"), Route::Start);
+        assert_eq!(route("/help"), Route::Help);
         // The menu only offers commands the bot handles.
-        assert!(COMMANDS.iter().all(|(c, _)| matches!(route(&format!("/{c}")), Route::Status | Route::Extensions)));
+        assert!(
+            COMMANDS
+                .iter()
+                .all(|(c, _)| matches!(route(&format!("/{c}")), Route::Status | Route::Help | Route::Extensions))
+        );
+    }
+
+    #[tokio::test]
+    async fn start_before_setup_records_question_in_chat_history() {
+        let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, _tg) = fixture(model.clone());
+        bot.send_start().await;
+        assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let msg = ChatMessage::first(&db, "WHERE role = 'assistant'", []).unwrap().unwrap();
+        assert!(msg.text.contains("1/5") && msg.meta_json["kind"] == "start");
+        let buttons: i64 = db.query_row("SELECT count(*) FROM agent_button", [], |r| r.get(0)).unwrap();
+        assert_eq!(buttons, 4);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

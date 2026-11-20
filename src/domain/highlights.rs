@@ -127,7 +127,7 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
             continue;
         }
         // Compared on signed weights, so less help on an assisted machine ranks as heavier.
-        let set_kind = workout::kind(&row);
+        let set_kind = workout::kind(&row).in_unit(crate::domain::profile::get_profile(db)?.weight_unit);
         let signed = |sets: Vec<SetLog>| -> Vec<SetLog> {
             sets.into_iter().map(|s| SetLog { weight: set_kind.signed(s.weight), ..s }).collect()
         };

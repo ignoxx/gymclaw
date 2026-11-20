@@ -108,8 +108,16 @@ function ago(iso) {
 }
 
 const clock = minutes => `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(Math.round(minutes % 60)).padStart(2, '0')}`;
-const tonnes = kg => kg >= 1000 ? `${(kg / 1000).toFixed(1)} t` : `${Math.round(kg)} kg`;
-const kgs = value => `${Number(value)} kg`;
+const KG_PER_LB = 0.45359237;
+const isLb = () => state?.unit === 'lb';
+const weightUnit = () => isLb() ? 'lb' : 'kg';
+const toDisplay = kg => kg === null || kg === undefined ? kg : isLb() ? Math.round((kg / KG_PER_LB) * 2) / 2 : kg;
+const toKg = v => v === null || v === undefined ? v : isLb() ? Math.round(v * KG_PER_LB * 100) / 100 : v;
+const tonnes = kg => {
+  if (isLb()) { const lb = kg / KG_PER_LB; return lb >= 1000 ? `${(lb / 1000).toFixed(1)}k lb` : `${Math.round(lb)} lb`; }
+  return kg >= 1000 ? `${(kg / 1000).toFixed(1)} t` : `${Math.round(kg)} kg`;
+};
+const kgs = value => `${Number(toDisplay(value))} ${weightUnit()}`;
 
 function crowdLabel(session) {
   if (session.crowd) return session.crowd;
@@ -606,6 +614,7 @@ const label = text => text.replace(/^[^\p{L}\p{N}+−-]+/u, '');
 
 // Plates per side for a barbell weight on a 20 kg bar: "20 + 10 + 2.5". Empty when it doesn't add up.
 function plates(weight) {
+  if (isLb()) return '';
   let left = (weight - 20) / 2;
   if (left <= 0) return '';
   const out = [];
@@ -625,7 +634,7 @@ const progressOf = active => {
 };
 
 // Steps the gym's weights come in: barbell plates in pairs (2.5), dumbbells by 2, light stacks by 1.
-const weightStep = (equipment, weight) => equipment === 'Barbell' ? 2.5 : equipment === 'Dumbbell' ? 2 : weight >= 20 ? 2.5 : 1;
+const weightStep = (equipment, weight) => isLb() ? 5 : equipment === 'Barbell' ? 2.5 : equipment === 'Dumbbell' ? 2 : weight >= 20 ? 2.5 : 1;
 
 /* The set logger: reps × weight, a time or a distance, starting from the chat card's suggestion. Logging
    is the main button (Telegram's, or the page's own in a browser). Fixing, it corrects `last` (its own
@@ -636,7 +645,7 @@ function renderLogger(focus, live, active, last) {
   const spec = fixing ? { ...last, measure: last.seconds ? 'time' : last.meters ? 'distance' : 'reps', reps_only: !last.weight } : live.logger;
   const equipment = fixing ? last.equipment : live.equipment;
   const key = fixing ? `fix:${last.id}` : `${active.id}:${active.set_number}:${active.set_type}`;
-  if (logger.key !== key) Object.assign(logger, { key, weight: spec.weight ?? null, reps: spec.reps ?? null, seconds: spec.seconds ?? null, meters: spec.meters ?? null });
+  if (logger.key !== key) Object.assign(logger, { key, weight: spec.weight !== null && spec.weight !== undefined ? toDisplay(spec.weight) : null, reps: spec.reps ?? null, seconds: spec.seconds ?? null, meters: spec.meters ?? null });
   const box = el('div', `logger${fixing ? ' fixing' : ''}`);
   if (fixing) box.append(el('p', 'logger-note', `Fixing ${last.exercise} · ${last.text}`));
   const measure = spec.measure;
@@ -662,7 +671,7 @@ function renderLogger(focus, live, active, last) {
       box.plates = el('p', 'plates');
       box.append(box.plates);
     }
-    if (!spec.added && spec.unit === 'kg') { box.best = el('p', 'best'); }
+    if (!spec.added && (spec.unit === 'kg' || spec.unit === 'lb')) { box.best = el('p', 'best'); }
     box.append(stepper(spec.per_side ? 'Reps / side' : 'Reps', logger.reps, { min: 1, base: 8, unit: 'reps', onChange: v => { logger.reps = v; refreshLabel(); } }));
     if (box.best) box.append(box.best);
     words = () => {
@@ -679,12 +688,12 @@ function renderLogger(focus, live, active, last) {
     // Nothing to log yet (a new exercise's weight, an open time): say what's missing instead of sending it.
     if (!words()) { toast(`Enter the ${missing()} first`, true); haptic.done(false); return; }
     if (fixing) {
-      const fix = measure === 'time' ? { minutes: logger.seconds / 60 } : measure === 'distance' ? { meters: logger.meters } : { weight: logger.weight || 0, reps: logger.reps };
+      const fix = measure === 'time' ? { minutes: logger.seconds / 60 } : measure === 'distance' ? { meters: logger.meters } : { weight: toKg(logger.weight || 0), reps: logger.reps };
       logger.fixing = false;
       send('/api/set_edit', { set_id: last.id, ...fix }, () => `Fixed: ${words()} · in the chat too`);
       return;
     }
-    const data = measure === 'time' ? `gc:time:${live.ref}:${logger.seconds}` : measure === 'distance' ? `gc:dist:${live.ref}:${logger.meters}` : `gc:log:${live.ref}:${logger.weight || 0}:${logger.reps}`;
+    const data = measure === 'time' ? `gc:time:${live.ref}:${logger.seconds}` : measure === 'distance' ? `gc:dist:${live.ref}:${logger.meters}` : `gc:log:${live.ref}:${toKg(logger.weight || 0)}:${logger.reps}`;
     coachTap(data);
   };
   function refreshLabel() {
@@ -697,8 +706,8 @@ function renderLogger(focus, live, active, last) {
     if (box.best) {
       // About to beat the best estimated 1RM: say so before the set, not only in the chat's confetti after.
       const best = Math.max(0, ...(progressOf(active)?.points || []).map(p => p.e1rm));
-      const next = what ? oneRepMax(logger.weight || 0, logger.reps || 0) : 0;
-      box.best.textContent = !fixing && best && next > best ? `New best: ≈ ${next} kg 1RM (was ${best})` : '';
+      const next = what ? oneRepMax(toKg(logger.weight || 0), logger.reps || 0) : 0;
+      box.best.textContent = !fixing && best && next > best ? `New best: ≈ ${kgs(next)} 1RM (was ${kgs(best)})` : '';
     }
     liveAction = { text: submit.textContent, run };
     syncMain();
@@ -917,10 +926,15 @@ function renderFinished(focus, workout, next) {
 
 /* Nothing planned: where the week stands, and the chat to plan more. */
 function renderNothing(focus, data) {
-  const k = data.insights.kpis;
-  focus.append(el('h2', 'title', 'Nothing planned'));
-  focus.append(el('p', 'subtitle', `${k.this_week ?? 0} of ${data.insights.target} sessions this week${data.history[0] ? ` · last: ${data.history[0].template}, ${data.history[0].label}` : ''}`));
-  focus.append(el('p', 'subtitle', 'Tell gymclaw in the chat when you want to train, and it plans the session.'));
+  if (data.setup_done === false) {
+    focus.append(el('h2', 'title', 'Finish setup in Telegram'));
+    focus.append(el('p', 'subtitle', 'Answer a few quick questions in the chat so gymclaw can build your plan.'));
+  } else {
+    const k = data.insights.kpis;
+    focus.append(el('h2', 'title', 'Nothing planned'));
+    focus.append(el('p', 'subtitle', `${k.this_week ?? 0} of ${data.insights.target} sessions this week${data.history[0] ? ` · last: ${data.history[0].template}, ${data.history[0].label}` : ''}`));
+    focus.append(el('p', 'subtitle', 'Tell gymclaw in the chat when you want to train, and it plans the session.'));
+  }
   if (tg) {
     const chat = el('button', 'chip', 'Back to the chat');
     chat.type = 'button';
@@ -1027,7 +1041,7 @@ function renderProgress(insights) {
 function drawProgress(box, points) {
   // Bodyweight exercises have no weight to estimate from: plot reps instead.
   const bodyweight = points.every(p => !p.weight);
-  const value = p => bodyweight ? p.reps : p.e1rm;
+  const value = p => bodyweight ? p.reps : toDisplay(p.e1rm);
   const values = points.map(value);
   const low = Math.max(0, Math.floor((Math.min(...values) * 0.9) / 5) * 5);
   const top = Math.ceil(Math.max(...values) * 1.05 / 5) * 5 || 5;
@@ -1111,7 +1125,7 @@ function renderWeight(insights) {
     box.replaceChildren(el('p', 'empty', 'Send gymclaw a photo of your scale to start tracking.'));
     return;
   }
-  const values = points.flatMap(p => [p.kg, p.avg]);
+  const values = points.flatMap(p => [toDisplay(p.kg), toDisplay(p.avg)]);
   const low = Math.floor(Math.min(...values) - 0.5), top = Math.ceil(Math.max(...values) + 0.5);
   const chart = frame(box, top - low, { label: 'Body weight: weigh-ins and 7-day average' });
   chart.svg.querySelectorAll('text.label').forEach((label, i) => { label.textContent = low + [0, (top - low) / 2, top - low][i]; });
@@ -1124,10 +1138,10 @@ function renderWeight(insights) {
     const at = new Date((first + span * i / ticks) * 864e5);
     chart.svg.append(svgText(x(at.toISOString().slice(0, 10)), chart.H - 6, `${at.getUTCDate()} ${at.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' })}`, { 'text-anchor': 'middle' }));
   }
-  points.forEach(p => chart.svg.append(svgEl('circle', { cx: x(p.date), cy: y(p.kg), r: 3, class: 'weigh-in' })));
-  chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(p.avg).toFixed(1)}`).join(' ') }));
+  points.forEach(p => chart.svg.append(svgEl('circle', { cx: x(p.date), cy: y(toDisplay(p.kg)), r: 3, class: 'weigh-in' })));
+  chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(toDisplay(p.avg)).toFixed(1)}`).join(' ') }));
   crosshair(chart, points.map(p => x(p.date)), i => ({ title: points[i].label,
-    rows: [[kgs(points[i].kg), 'weigh-in', 'weigh-in'], [kgs(points[i].avg), '7-day average', 'today']], y: y(points[i].avg) }));
+    rows: [[kgs(points[i].kg), 'weigh-in', 'weigh-in'], [kgs(points[i].avg), '7-day average', 'today']], y: y(toDisplay(points[i].avg)) }));
 }
 
 function renderInsights(data) {
@@ -1442,7 +1456,7 @@ function planEditor(plan, exercise) {
   fields.push(['rest_seconds', 'Rest', exercise.rest_seconds, 15, 's']);
   const load = exercise.load || 'external';
   if (reps && (!exercise.bodyweight || load !== 'external')) {
-    fields.unshift(['target_weight', load === 'added' ? 'Added' : 'Weight', exercise.weight, weightStep(exercise.equipment, exercise.weight), load === 'assisted' ? 'kg assist' : 'kg']);
+    fields.unshift(['target_weight', load === 'added' ? 'Added' : 'Weight', toDisplay(exercise.weight), weightStep(exercise.equipment, exercise.weight), load === 'assisted' ? `${weightUnit()} assist` : weightUnit()]);
   }
   const was = Object.fromEntries(fields.map(([name, , value]) => [name, value ?? null]));
   const values = { ...was };
@@ -1459,7 +1473,7 @@ function planEditor(plan, exercise) {
   form.append(grid, actions);
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    const changes = Object.fromEntries(Object.entries(values).filter(([name, value]) => value !== was[name] && (value !== null || name === 'rest_seconds')));
+    const changes = Object.fromEntries(Object.entries(values).filter(([name, value]) => value !== was[name] && (value !== null || name === 'rest_seconds')).map(([name, value]) => [name, name === 'target_weight' ? toKg(value) : value]));
     if (!Object.keys(changes).length) { message.textContent = 'Nothing changed'; clearDirty(); return; }
     save.disabled = true;
     message.textContent = 'Saving…';
@@ -1550,7 +1564,7 @@ function openExercise(of) {
       ['Best', setText(bestSet(all)), bestNote(bestSet(all))], ['Sessions', logged.sessions.length, `${all.length} sets`]]) {
       const stat = el('div', 'kpi');
       // "10 × 86.5 kg": the unit goes small so the number fits on one line.
-      const units = / (kg assist|kg|reps|min|km|m|s)$/;
+      const units = / (kg assist|lb assist|kg|lb|reps|min|km|m|s)$/;
       const strong = el('strong', '', String(value).replace(units, ''));
       const unit = String(value).match(units);
       if (unit) strong.append(el('small', '', unit[1]));
