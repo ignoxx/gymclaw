@@ -226,6 +226,10 @@ pub fn apply_write(
     match send(db, provider, &write, &mut session, now) {
         Ok(()) => {
             write.status = WriteStatus::Applied;
+            db.execute(
+                "UPDATE agent_event SET handled_at = ?1 WHERE type = 'calendar.write_blocked' AND handled_at IS NULL",
+                [now],
+            )?;
             write.handled_at = Some(now);
             write.update(db)?;
             let event = emit(

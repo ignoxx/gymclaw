@@ -37,6 +37,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/011_dead_state.sql"),
     include_str!("migrations/012_weight_unit.sql"),
     include_str!("migrations/013_ics_token.sql"),
+    include_str!("migrations/014_drop_alembic_version.sql"),
 ];
 
 /// Read-write connection. WAL lets readers (the dashboard, a sync waiting on Google) run alongside a
@@ -95,19 +96,26 @@ fn apply(conn: &mut Connection) -> Result<()> {
         Ok(tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?)
     };
     let before = broken(&tx)?;
-    let has_baseline: bool =
-        tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
-    if !has_baseline {
+    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let tables: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version == 0 && tables == 0 {
         tx.execute_batch(SCHEMA)?;
-        tx.execute("INSERT INTO alembic_version (version_num) VALUES (?1)", [BASELINE_MARKER])?;
         tx.execute_batch(&format!("PRAGMA user_version = {}", MIGRATIONS.len()))?;
     } else {
-        let marker: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
-        if marker != BASELINE_MARKER {
-            crate::bail!(
-                "SCHEMA_MISMATCH",
-                "Database has baseline marker {marker}, expected {BASELINE_MARKER}; it predates the baseline and can't be upgraded"
-            );
+        let has_alembic: bool =
+            tx.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))?;
+        if has_alembic {
+            let marker: String = tx.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0))?;
+            if marker != BASELINE_MARKER {
+                crate::bail!(
+                    "SCHEMA_MISMATCH",
+                    "Database has baseline marker {marker}, expected {BASELINE_MARKER}; it predates the baseline and can't be upgraded"
+                );
+            }
         }
     }
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -247,8 +255,10 @@ mod tests {
         migrate(&mut db).unwrap();
         assert_eq!(get_profile(&db).unwrap().prep_minutes, 23);
         assert_eq!(AgentEvent::select(&db, "", []).unwrap()[0].created_at, at);
-        let version: String = db.query_row("SELECT version_num FROM alembic_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, BASELINE_MARKER);
+        let has_alembic: i64 = db
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_alembic, 0);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

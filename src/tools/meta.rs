@@ -4,13 +4,13 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Ctx, Tool, ToolDef, def};
+use super::{Ctx, Listed, Tool, ToolDef, def};
 use crate::db::Connection;
 use crate::db::models::{AgentNote, NoteKind};
 use crate::error::Result;
 
 pub fn tools() -> Vec<ToolDef> {
-    vec![def::<SqlQuery>(), def::<NoteAdd>(), def::<NoteEdit>(), def::<NoteDelete>()]
+    vec![def::<SqlQuery>(), def::<Note>(), def::<NoteAdd>(), def::<NoteEdit>(), def::<NoteDelete>()]
 }
 
 /// Tables holding OAuth tokens and the private feed URL stay outside model access and turn-log changesets.
@@ -107,7 +107,7 @@ Your chat only shows the latest messages; chat_message holds every one (role own
 pub fn schema(db: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = db.prepare(
         "SELECT m.name, group_concat(p.name, ', ') FROM sqlite_master m JOIN pragma_table_info(m.name) p
-         WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%' AND m.name != 'alembic_version' GROUP BY m.name ORDER BY m.name",
+         WHERE m.type IN ('table', 'view') AND m.name NOT LIKE 'sqlite_%' GROUP BY m.name ORDER BY m.name",
     )?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
@@ -141,6 +141,7 @@ pub struct NoteAdd {
 }
 
 impl Tool for NoteAdd {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "note_add";
     const DESCRIPTION: &'static str = "Remember something for every future conversation (it goes into your instructions). Each kind \
 has a character budget, shown with the notes; when it's full, merge, shorten or delete notes first and keep what matters most.";
@@ -166,6 +167,7 @@ pub struct NoteEdit {
 }
 
 impl Tool for NoteEdit {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "note_edit";
     const DESCRIPTION: &'static str = "Rewrite a note (ids are shown with the notes in your instructions).";
 
@@ -187,6 +189,7 @@ pub struct NoteDelete {
 }
 
 impl Tool for NoteDelete {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "note_delete";
     const DESCRIPTION: &'static str = "Forget a note that is wrong or outdated.";
 
@@ -236,6 +239,27 @@ fn label(kind: NoteKind) -> &'static str {
     match kind {
         NoteKind::Owner => "Owner notes",
         NoteKind::Learned => "Learned notes",
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Note {
+    Add(NoteAdd),
+    Edit(NoteEdit),
+    Delete(NoteDelete),
+}
+
+impl Tool for Note {
+    const NAME: &'static str = "note";
+    const DESCRIPTION: &'static str = "Add, edit or delete a remembered note included in every prompt (kind owner or learned; ids are shown with the notes in your instructions).";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            Note::Add(t) => t.run(cx),
+            Note::Edit(t) => t.run(cx),
+            Note::Delete(t) => t.run(cx),
+        }
     }
 }
 

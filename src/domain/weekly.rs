@@ -344,7 +344,14 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
 
 /// The Sunday run: rolling plan, then a draft of next week when it is still empty. `announce` wakes the
 /// agent for its review once the calendar is published.
+/// Remove stale `agent_button` lookup rows older than 14 days (never touches Telegram messages).
+pub fn prune_agent_buttons(db: &Connection, now: Ts) -> Result<usize> {
+    let cutoff = now - SignedDuration::from_hours(24 * 14);
+    Ok(db.execute("DELETE FROM agent_button WHERE created_at < ?1", [cutoff])?)
+}
+
 pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
+    let _ = prune_agent_buttons(db, now)?;
     let next_week = week_of(now, &get_profile(db)?.tz()).checked_add(days(7))?;
     rolling_plan(db, template_id, now)?;
     if PlannedSession::first(db, "WHERE week_id = ?1", [next_week.to_string()])?.is_none() {
@@ -1203,5 +1210,22 @@ mod tests {
         assert_eq!(PlannedSession::get(&db, &slot.id).unwrap().unwrap().status, SessionStatus::Completed);
         let linked = WorkoutSession::get(&db, &workout).unwrap().unwrap().planned_session_id;
         assert_eq!(linked.as_deref(), Some(slot.id.as_str()));
+    }
+
+    #[test]
+    fn prune_agent_buttons_removes_rows_older_than_14_days() {
+        let db = crate::db::test::db();
+        let now = Ts::parse("2026-11-20T22:00:00Z", None).unwrap();
+        let old = now - SignedDuration::from_hours(24 * 15);
+        let fresh = now - SignedDuration::from_hours(24 * 3);
+        crate::db::models::AgentButton { id: "old1".into(), label: "A".into(), value: "A".into(), created_at: old }
+            .insert(&db)
+            .unwrap();
+        crate::db::models::AgentButton { id: "new1".into(), label: "B".into(), value: "B".into(), created_at: fresh }
+            .insert(&db)
+            .unwrap();
+        assert_eq!(prune_agent_buttons(&db, now).unwrap(), 1);
+        assert!(crate::db::models::AgentButton::get(&db, "old1").unwrap().is_none());
+        assert!(crate::db::models::AgentButton::get(&db, "new1").unwrap().is_some());
     }
 }

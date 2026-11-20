@@ -77,7 +77,7 @@ card per exercise, edited in place; one message per planned session, each remind
 | Where does an inbound message go? | `src/runtime/bot.rs` |
 | What runs when? | `src/runtime/scheduler.rs`, `src/domain/ticks.rs` |
 | A message is missing or sent twice | `src/runtime/outbox.rs` |
-| Taps, typed sets, rest timer | `src/domain/coach.rs`, `src/telegram/coach.rs`, `src/domain/set_parser.rs` |
+| Taps, typed sets, rest timer | `src/domain/coach/mod.rs`, `src/telegram/coach.rs`, `src/domain/set_parser.rs` |
 | Next weights | `src/domain/progression.rs`, `src/domain/audit.rs`, `src/domain/trends.rs` |
 | Week planning | `src/domain/planning.rs`, `src/domain/scheduling.rs`, `src/domain/replanning.rs` |
 | The agent's own layer (playbooks, triggers) | `src/domain/extensions.rs` |

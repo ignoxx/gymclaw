@@ -24,6 +24,8 @@ pub fn tools() -> Vec<ToolDef> {
         def::<WorkoutLogPast>(),
         def::<WorkoutAudit>(),
         def::<SetEdit>(),
+        def::<TemplateTool>(),
+        def::<Body>(),
         def::<TemplateGet>(),
         def::<TemplateImport>(),
         def::<TemplateEditExercise>(),
@@ -340,6 +342,7 @@ pub struct TemplateGet {
 }
 
 impl Tool for TemplateGet {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "template_get";
     const DESCRIPTION: &'static str = "A saved workout plan (template) with its exercises, targets and alternatives.";
 
@@ -357,6 +360,7 @@ pub struct TemplateImport {
 }
 
 impl Tool for TemplateImport {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "template_import";
     const DESCRIPTION: &'static str = "Save a whole workout plan (new, or replacing one with the same id). For small changes use template_edit_exercise.";
 
@@ -402,6 +406,7 @@ pub struct TemplateEditExercise {
 }
 
 impl Tool for TemplateEditExercise {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "template_edit_exercise";
     const DESCRIPTION: &'static str = "Change one exercise or alternative of a saved plan: name, picture (guide_id), weight, sets, reps, time, distance, rest, superset group, or its place in the order. \
         History and next weight follow the exercise id: to rename or fix the picture, keep the id.";
@@ -437,6 +442,7 @@ pub struct TemplateAddExercise {
 }
 
 impl Tool for TemplateAddExercise {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "template_add_exercise";
     const DESCRIPTION: &'static str = "Add an exercise to a saved plan. The catalog entry only gives the picture: a machine variant the catalog lacks (a second leg press) reuses the closest guide_id under its own id and name, and keeps its own weights.";
 
@@ -457,6 +463,7 @@ pub struct TemplateRemoveExercise {
 }
 
 impl Tool for TemplateRemoveExercise {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "template_remove_exercise";
     const DESCRIPTION: &'static str = "Remove an exercise or alternative from a saved plan. Its logged history stays.";
 
@@ -584,6 +591,7 @@ pub struct BodyLog {
 }
 
 impl Tool for BodyLog {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "body_log";
     const DESCRIPTION: &'static str = "Save weigh-ins (from a scale photo or typed). Old photos sent as files: pass the photo path and its capture date is used. \
         The same time twice is skipped as a duplicate. Echo the number back so a misread scale gets caught.";
@@ -616,10 +624,55 @@ pub struct BodyDelete {
 }
 
 impl Tool for BodyDelete {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "body_delete";
     const DESCRIPTION: &'static str = "Remove a misread or mistyped weigh-in.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         body::delete(cx.db, &self.entry_id, cx.now, &cx.request_id)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum TemplateTool {
+    Get(TemplateGet),
+    Import(TemplateImport),
+    EditExercise(TemplateEditExercise),
+    AddExercise(TemplateAddExercise),
+    RemoveExercise(TemplateRemoveExercise),
+}
+
+impl Tool for TemplateTool {
+    const NAME: &'static str = "template";
+    const DESCRIPTION: &'static str = "Read, import, or edit saved workout templates (get, import, edit_exercise, add_exercise, remove_exercise). History follows the exercise id.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            TemplateTool::Get(t) => t.run(cx),
+            TemplateTool::Import(t) => t.run(cx),
+            TemplateTool::EditExercise(t) => t.run(cx),
+            TemplateTool::AddExercise(t) => t.run(cx),
+            TemplateTool::RemoveExercise(t) => t.run(cx),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Body {
+    Log(BodyLog),
+    Delete(BodyDelete),
+}
+
+impl Tool for Body {
+    const NAME: &'static str = "body";
+    const DESCRIPTION: &'static str = "Log weigh-ins (from scale photos or typed) or delete a misread weigh-in.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            Body::Log(t) => t.run(cx),
+            Body::Delete(t) => t.run(cx),
+        }
     }
 }

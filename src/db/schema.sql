@@ -1,4 +1,4 @@
--- Generated from baseline.sql plus every migration (user_version 13); don't edit. When a
+-- Generated from baseline.sql plus every migration (user_version 14); don't edit. When a
 -- migration changes the schema, `cargo test schema_snapshot` rewrites this file: review and
 -- commit it. Fresh databases are created from this file.
 
@@ -53,11 +53,6 @@ CREATE TABLE "agent_note" (
 	text TEXT NOT NULL,
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL
-);
-
-CREATE TABLE alembic_version (
-	version_num VARCHAR(32) NOT NULL, 
-	CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
 );
 
 CREATE TABLE availability_block (

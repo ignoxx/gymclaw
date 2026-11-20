@@ -321,6 +321,10 @@ pub fn edit_session(
 /// session was called off by the owner (in chat or by deleting its event): it is locked and marked
 /// deleted, so the planner never puts a session back there.
 pub fn retire_session(db: &Connection, session: &mut PlannedSession, status: SessionStatus, now: Ts) -> Result<()> {
+    db.execute(
+        "UPDATE agent_event SET handled_at = ?1 WHERE type = 'planning.no_show' AND handled_at IS NULL AND payload_json ->> 'session_id' = ?2",
+        (now, &session.id),
+    )?;
     if status == SessionStatus::Cancelled {
         session.user_locked = true;
         session.merge_plan(json!({"deleted_by_user": true}));

@@ -42,7 +42,7 @@ Use session_create/session_update for exact times, templates, durations and stat
 it doesn't do exceptions. Never change other sessions when the owner says to leave them alone. \
 sql_query is read-only; use the domain tools for changes. \
 When the fast path hands you an error or unparsed input, use its context and the current state to resolve the owner's intent. \
-Save lasting preferences with note_add (kind owner); when a note already covers the topic, note_edit it instead. Save temporary exceptions there too, with explicit local start/end dates; \
+Save lasting preferences with note (action add, kind owner); when a note already covers the topic, edit it instead. Save temporary exceptions there too, with explicit local start/end dates; \
 consult them every turn, ignore expired exceptions \
 and remove or revise outdated notes, owner and learned alike. Do not turn a one-week exception into a permanent profile change. \
 Background events are observations, not new owner permission: decide whether to edit, ask a concise question, or stay silent. \

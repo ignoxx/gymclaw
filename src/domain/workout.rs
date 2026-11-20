@@ -759,6 +759,10 @@ pub fn start(
         }
         choose_next(db, &mut workout, None)?;
         if let Some(mut planned) = planned {
+            db.execute(
+                "UPDATE agent_event SET handled_at = ?1 WHERE type = 'planning.no_show' AND handled_at IS NULL AND payload_json ->> 'session_id' = ?2",
+                (now, &planned.id),
+            )?;
             crate::domain::notifications::cancel_session_jobs(db, &planned.id, now)?;
             planned.status = SessionStatus::Started;
             planned.workout_template_id = Some(template_id.clone());

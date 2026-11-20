@@ -264,6 +264,7 @@ pub struct AvailabilityAdd {
 }
 
 impl Tool for AvailabilityAdd {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "availability_add";
     const DESCRIPTION: &'static str = "The owner is away, sick or busy for a while: no reminders then. Sessions in that time are kept and returned as warnings; cancel or move them with session_update.";
 
@@ -306,6 +307,7 @@ pub struct AvailabilityRemove {
 }
 
 impl Tool for AvailabilityRemove {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "availability_remove";
     const DESCRIPTION: &'static str = "Remove an away/sick/busy block; planning around it resumes.";
 
@@ -322,6 +324,7 @@ pub struct CrowdFeedback {
 }
 
 impl Tool for CrowdFeedback {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "crowd_feedback";
     const DESCRIPTION: &'static str =
         "Record how busy the gym felt during a workout. Future crowd estimates learn from it.";
@@ -335,6 +338,7 @@ impl Tool for CrowdFeedback {
 pub struct CrowdStatus {}
 
 impl Tool for CrowdStatus {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "crowd_status";
     const DESCRIPTION: &'static str = "Whether gym check-in data is flowing, and source health.";
 
@@ -353,6 +357,7 @@ pub struct CrowdForecast {
 }
 
 impl Tool for CrowdForecast {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "crowd_forecast";
     const DESCRIPTION: &'static str = "Expected crowd at a time: typical check-ins and the owner's felt crowd (Empty/A few/Busy/Packed) with confidence.";
 
@@ -386,6 +391,7 @@ pub struct EventAck {
 }
 
 impl Tool for EventAck {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "event_ack";
     const DESCRIPTION: &'static str =
         "Mark an open issue handled (id from its Open issue line) once the owner knows about it.";
@@ -430,6 +436,7 @@ pub struct PersonalCalendarConnect {
 }
 
 impl Tool for PersonalCalendarConnect {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "personal_calendar_connect";
     const DESCRIPTION: &'static str = "Use the owner's personal calendar feed as read-only busy time. Fetches it now and reports affected sessions. Never repeat the URL back.";
 
@@ -442,6 +449,7 @@ impl Tool for PersonalCalendarConnect {
 pub struct PersonalCalendarStatus {}
 
 impl Tool for PersonalCalendarStatus {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "personal_calendar_status";
     const DESCRIPTION: &'static str =
         "Whether a personal calendar feed is connected, its host, last fetch and blocker count.";
@@ -455,12 +463,75 @@ impl Tool for PersonalCalendarStatus {
 pub struct PersonalCalendarDisconnect {}
 
 impl Tool for PersonalCalendarDisconnect {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "personal_calendar_disconnect";
     const DESCRIPTION: &'static str =
         "Stop using the personal calendar feed; its blockers are dropped; existing sessions stay saved.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         personal_calendar::disconnect(cx.db, cx.now)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Availability {
+    Add(AvailabilityAdd),
+    Remove(AvailabilityRemove),
+}
+
+impl Tool for Availability {
+    const NAME: &'static str = "availability";
+    const DESCRIPTION: &'static str = "Add or remove an away, sick or busy block (suppresses reminders; conflicting sessions are returned as warnings for session_update).";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            Availability::Add(t) => t.run(cx),
+            Availability::Remove(t) => t.run(cx),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Crowd {
+    Feedback(CrowdFeedback),
+    Status(CrowdStatus),
+    Forecast(CrowdForecast),
+}
+
+impl Tool for Crowd {
+    const NAME: &'static str = "crowd";
+    const DESCRIPTION: &'static str =
+        "Record felt crowd feedback, check gym check-in polling health, or forecast expected crowd at a time.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            Crowd::Feedback(t) => t.run(cx),
+            Crowd::Status(t) => t.run(cx),
+            Crowd::Forecast(t) => t.run(cx),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum PersonalCalendar {
+    Connect(PersonalCalendarConnect),
+    Status(PersonalCalendarStatus),
+    Disconnect(PersonalCalendarDisconnect),
+}
+
+impl Tool for PersonalCalendar {
+    const NAME: &'static str = "personal_calendar";
+    const DESCRIPTION: &'static str = "Connect, inspect or disconnect the owner's read-only personal ICS calendar feed (busy time only; never repeat the URL back).";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            PersonalCalendar::Connect(t) => t.run(cx),
+            PersonalCalendar::Status(t) => t.run(cx),
+            PersonalCalendar::Disconnect(t) => t.run(cx),
+        }
     }
 }
 
