@@ -125,9 +125,9 @@ pub struct RuntimeResume {
     /// Also let gymclaw write workouts to its Google calendar (needs the owner's explicit OK).
     #[serde(default)]
     pub calendar_writes: bool,
-    /// Also poll the gym's live check-in count every 15 minutes.
+    /// Turn polling the gym's live check-in count on (true) or off (false); omit to leave unchanged.
     #[serde(default)]
-    pub crowd_polling: bool,
+    pub crowd_polling: Option<bool>,
 }
 
 impl Tool for RuntimeResume {
@@ -157,7 +157,9 @@ impl Tool for RuntimeResume {
         };
         settings.enabled = true;
         settings.calendar_writes_enabled |= self.calendar_writes;
-        settings.crowd_polling_enabled |= self.crowd_polling;
+        if let Some(poll) = self.crowd_polling {
+            settings.crowd_polling_enabled = poll;
+        }
         settings.update(cx.db)?;
         Ok(serde_json::to_value(outbox::runtime_authority(cx.db)?)?)
     }
@@ -212,10 +214,20 @@ mod tests {
             call(&db, "runtime_resume", json!({"owner_asked": false})).unwrap_err().code(),
             "RUNTIME_NOT_APPROVED"
         );
-        let resumed = call(&db, "runtime_resume", json!({"owner_asked": true})).unwrap();
+        let resumed = call(&db, "runtime_resume", json!({"owner_asked": true, "crowd_polling": true})).unwrap();
         assert_eq!(
-            (resumed["enabled"].as_bool(), resumed["calendar_writes_enabled"].as_bool()),
-            (Some(true), Some(false))
+            (
+                resumed["enabled"].as_bool(),
+                resumed["calendar_writes_enabled"].as_bool(),
+                resumed["crowd_polling_enabled"].as_bool(),
+            ),
+            (Some(true), Some(false), Some(true))
+        );
+        // Omitting crowd_polling leaves it on; passing false turns it off.
+        assert_eq!(call(&db, "runtime_resume", json!({"owner_asked": true})).unwrap()["crowd_polling_enabled"], true);
+        assert_eq!(
+            call(&db, "runtime_resume", json!({"owner_asked": true, "crowd_polling": false})).unwrap()["crowd_polling_enabled"],
+            false
         );
     }
 }

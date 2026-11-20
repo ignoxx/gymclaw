@@ -16,6 +16,7 @@ const dataClass = (kind, value) => `${kind}-${String(value || '').toLowerCase().
    load), and every Telegram call is skipped. Features are gated on the client's Bot API version. */
 const tg = window.Telegram?.WebApp?.initData ? window.Telegram.WebApp : null;
 const tgHas = version => Boolean(tg?.isVersionAtLeast(version));
+const apiHeaders = (extra = {}) => (tg?.initData ? { ...extra, 'X-Telegram-Init-Data': tg.initData } : extra);
 const haptic = {
   // A light tick when a choice changes: tabs, toggles, scrubbing a chart.
   select: () => tgHas('6.1') && tg.HapticFeedback.selectionChanged(),
@@ -585,7 +586,7 @@ async function send(url, payload, said) {
   document.querySelectorAll('.focus button').forEach(b => { b.disabled = true; });
   try {
     // No connection (a dead zone): say what didn't happen, not the browser's "Failed to fetch".
-    const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    const response = await fetch(url, { method: 'POST', headers: apiHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(payload) })
       .catch(() => { throw new Error('No connection. Check the last set before trying again.'); });
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new Error(body?.error?.message?.split('\n')[0] || 'Didn\'t go through. Try again.');
@@ -1207,7 +1208,7 @@ const PLACEHOLDER = { owner: 'Add something gymclaw should know', learned: 'Add 
 /* Runs one gymclaw tool (the server allows a few), then reloads the state; true if that reload
    worked. A refused call throws with the domain's message, e.g. why a plan edit is invalid. */
 async function toolCall(tool, args) {
-  const response = await fetch(`/api/${tool}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
+  const response = await fetch(`/api/${tool}`, { method: 'POST', headers: apiHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(args) });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     // The first line is the reason; the rest is retry advice for the agent.
@@ -1380,7 +1381,7 @@ function group(title, note, children) {
 async function loadCatalog() {
   if (catalog) return;
   try {
-    const response = await fetch('/api/catalog');
+    const response = await fetch('/api/catalog', { headers: apiHeaders() });
     if (!response.ok) throw new Error('catalog');
     catalog = await response.json();
   } catch { catalog = []; }
@@ -1641,7 +1642,7 @@ function render(data) {
 let failures = 0;
 async function refresh() {
   try {
-    const response = await fetch('/api/state');
+    const response = await fetch('/api/state', { headers: apiHeaders() });
     if (!response.ok) throw new Error('State unavailable');
     const data = await response.json();
     render(data);
@@ -1687,9 +1688,11 @@ document.querySelectorAll('.tabs button').forEach(button => button.addEventListe
 document.getElementById('ex-detail').addEventListener('close', () => { clearDirty(); syncBack(); });
 // In Telegram the client downloads the CSV itself; a download link in its web view does nothing on iOS.
 document.getElementById('export').addEventListener('click', event => {
-  if (!tgHas('8.0')) return;
+  const url = new URL('/export.csv', location.href);
+  if (tg?.initData) url.searchParams.set('init_data', tg.initData);
+  if (!tgHas('8.0')) { if (tg?.initData) event.currentTarget.href = url.href; return; }
   event.preventDefault();
-  tg.downloadFile({ url: new URL('/export.csv', location.href).href, file_name: 'gymclaw-sets.csv' });
+  tg.downloadFile({ url: url.href, file_name: 'gymclaw-sets.csv' });
 });
 document.getElementById('exercise-select').addEventListener('change', event => { selectedExercise = event.target.value; renderProgress(state.insights); });
 window.addEventListener('hashchange', showTab);

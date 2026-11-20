@@ -1,0 +1,10 @@
+# Copy to `docker-compose.override.yaml` (ignored by git) to publish the dashboard on localhost
+# behind your own reverse proxy (Caddy, nginx, Traefik, etc.).
+#
+# Set GYMCLAW_DASHBOARD_HOST=gym.example.com in .env so the Telegram "Gym" menu button opens it
+# and the Host allowlist matches. All /api/* endpoints require valid Telegram Mini App initData
+# on non-loopback hosts; /calendar/<token>.ics is readable with its secret token.
+services:
+  dashboard:
+    ports:
+      - "127.0.0.1:8766:8766"

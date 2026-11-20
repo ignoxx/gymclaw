@@ -34,9 +34,9 @@ scheduler runs calendar sync, crowd polling, reminders and the Sunday plan.
 
 ## Running your own
 
-You need a Telegram bot, an OpenRouter key, a Google calendar and, for crowd-aware planning, your
-gym's check-in count ([crowd data](docs/crowd.md)). Then `docker compose up` and follow
-[self-hosting](docs/self-hosting.md).
+You need a Telegram bot and an OpenRouter key. Calendar sync (read-only ICS feed or Google
+Calendar) and gym check-in counts ([crowd data](docs/crowd.md)) are optional. Then
+`docker compose up -d` and follow [self-hosting](docs/self-hosting.md).
 
 ## License
 

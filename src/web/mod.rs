@@ -50,9 +50,181 @@ fn targets_only(args: &serde_json::Value) -> bool {
             .is_some_and(|c| c.keys().all(|k| TARGET_FIELDS.contains(&k.as_str())))
 }
 
+/// Optional Telegram Mini App auth (`TELEGRAM_BOT_TOKEN` + `GYMCLAW_TELEGRAM_USER_ID`).
+/// Enforced on every `/api/*` and `/export.csv` request whenever configured (`None` only for local dev).
+#[derive(Clone)]
+pub struct WebAuth {
+    pub bot_token: String,
+    pub owner_id: i64,
+}
+
 struct App {
     db_path: PathBuf,
     hosts: Vec<String>,
+    auth: Option<WebAuth>,
+}
+
+/// RFC 2104 HMAC-SHA256 over `sha2::Sha256` (no extra crate).
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        let h = Sha256::digest(key);
+        k[..32].copy_from_slice(&h);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex_str = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                out.push(u8::from_str_radix(hex_str, 16).ok()?);
+                i += 3;
+            }
+            b'%' => return None,
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Verify Telegram Mini App `initData` (HMAC-SHA256 with `WebAppData` + bot token, auth_date <= 24h,
+/// and matching `owner_id` when configured).
+pub fn verify_telegram_init_data(init_data: &str, auth: &WebAuth, now: Ts, max_age_secs: i64) -> bool {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut hash_hex: Option<String> = None;
+    for part in init_data.split('&').filter(|p| !p.is_empty()) {
+        let Some((k, v)) = part.split_once('=') else { return false };
+        let (Some(k), Some(v)) = (percent_decode(k), percent_decode(v)) else { return false };
+        if k == "hash" {
+            hash_hex = Some(v);
+        } else {
+            pairs.push((k, v));
+        }
+    }
+    let Some(hash_bytes) = hash_hex.and_then(|h| hex::decode(h).ok()) else { return false };
+    let auth_date: i64 = match pairs.iter().find(|(k, _)| k == "auth_date").and_then(|(_, v)| v.parse().ok()) {
+        Some(d) => d,
+        None => return false,
+    };
+    let age = now.0.as_second() - auth_date;
+    if !(-300..=max_age_secs).contains(&age) {
+        return false;
+    }
+    let user_id = pairs
+        .iter()
+        .find(|(k, _)| k == "user")
+        .and_then(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok())
+        .and_then(|u| u["id"].as_i64());
+    if user_id != Some(auth.owner_id) {
+        return false;
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let check_string = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
+    let secret = hmac_sha256(b"WebAppData", auth.bot_token.as_bytes());
+    let expected = hmac_sha256(&secret, check_string.as_bytes());
+    ct_eq(&expected, &hash_bytes)
+}
+
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    query?.split('&').find_map(|p| {
+        let (k, v) = p.split_once('=')?;
+        (k == key).then(|| percent_decode(v)).flatten()
+    })
+}
+
+fn authorized(app: &App, headers: &HeaderMap, query: Option<&str>, allow_query: bool) -> bool {
+    let Some(auth) = &app.auth else { return true };
+    if let Some(data) = headers.get("x-telegram-init-data").and_then(|v| v.to_str().ok()) {
+        return verify_telegram_init_data(data, auth, Ts::now(), 86_400);
+    }
+    // Query-param auth (CSV download) uses a shorter 5-min window to limit URL log exposure.
+    if allow_query && let Some(data) = query_param(query, "init_data") {
+        return verify_telegram_init_data(&data, auth, Ts::now(), 300);
+    }
+    false
+}
+
+fn ics_escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace('\n', "\\n")
+}
+
+fn ics_utc(ts: Ts) -> String {
+    ts.0.strftime("%Y%m%dT%H%M%SZ").to_string()
+}
+
+/// Read-only RFC 5545 calendar feed of non-cancelled planned sessions (past 30 days through future).
+fn render_ics(db: &crate::db::Connection, now: Ts) -> Result<String> {
+    use crate::db::models::PlannedSession;
+    use crate::domain::calendar::workout_name;
+    let profile = crate::domain::profile::get_profile(db)?;
+    let cutoff = now - jiff::SignedDuration::from_hours(24 * 30);
+    let sessions = PlannedSession::select(
+        db,
+        "WHERE status NOT IN ('CANCELLED', 'SKIPPED', 'MISSED') AND planned_end_at >= ?1 ORDER BY planned_start_at",
+        [cutoff],
+    )?;
+    let stamp = ics_utc(now);
+    let mut lines = vec![
+        "BEGIN:VCALENDAR".to_string(),
+        "VERSION:2.0".into(),
+        "PRODID:-//gymclaw//Workouts//EN".into(),
+        "X-WR-CALNAME:gymclaw".into(),
+        "METHOD:PUBLISH".into(),
+    ];
+    for s in sessions {
+        let summary = workout_name(&s);
+        let plan_lines = crate::domain::preview::plan_lines(db, &s).unwrap_or_default();
+        lines.push("BEGIN:VEVENT".into());
+        lines.push(format!("UID:{}@gymclaw", s.id));
+        lines.push(format!("DTSTAMP:{stamp}"));
+        lines.push(format!("DTSTART:{}", ics_utc(s.planned_start_at)));
+        lines.push(format!("DTEND:{}", ics_utc(s.planned_end_at)));
+        lines.push(format!("SUMMARY:{}", ics_escape(&summary)));
+        if let Some(addr) = profile.gym_address.as_deref().filter(|a| !a.is_empty()) {
+            lines.push(format!("LOCATION:{}", ics_escape(addr)));
+        }
+        if !plan_lines.is_empty() {
+            lines.push(format!("DESCRIPTION:{}", ics_escape(&plan_lines.join("\n"))));
+        }
+        lines.push("END:VEVENT".into());
+    }
+    lines.push("END:VCALENDAR".into());
+    Ok(format!("{}\r\n", lines.join("\r\n")))
 }
 
 fn reply(status: StatusCode, body: Vec<u8>, mime: &str) -> Response {
@@ -87,6 +259,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         return error(StatusCode::FORBIDDEN);
     }
     if request.method() == Method::POST {
+        if !authorized(&app, headers, request.uri().query(), false) {
+            return error(StatusCode::UNAUTHORIZED);
+        }
         let Some(tool) = request
             .uri()
             .path()
@@ -157,6 +332,29 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         return error(StatusCode::METHOD_NOT_ALLOWED);
     }
     let path = request.uri().path();
+    let query = request.uri().query();
+    if let Some(token) = path.strip_prefix("/calendar/").and_then(|p| p.strip_suffix(".ics")) {
+        let token = token.to_string();
+        let db_path = app.db_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let db = crate::db::open_readonly(&db_path)?;
+            let Some(expected) = crate::domain::profile::ics_token(&db)? else { return Ok(None) };
+            if !ct_eq(expected.as_bytes(), token.as_bytes()) {
+                return Ok(None);
+            }
+            Ok::<_, crate::error::Error>(Some(render_ics(&db, Ts::now())?))
+        })
+        .await;
+        return match result {
+            Ok(Ok(Some(ics))) => reply(StatusCode::OK, ics.into_bytes(), "text/calendar"),
+            Ok(Ok(None)) => error(StatusCode::NOT_FOUND),
+            _ => error(StatusCode::SERVICE_UNAVAILABLE),
+        };
+    }
+    if (path.starts_with("/api/") || path == "/export.csv") && !authorized(&app, headers, query, path == "/export.csv")
+    {
+        return error(StatusCode::UNAUTHORIZED);
+    }
     if path == "/api/state" {
         let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -230,10 +428,10 @@ fn asset(route: &str, embedded: &[u8]) -> Vec<u8> {
 
 /// Serve the dashboard: reads from a read-only connection, `DASHBOARD_TOOLS` writes through a writable one.
 /// Requests whose Host isn't `allowed_host` are rejected.
-pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String) -> Result<()> {
+pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String, auth: Option<WebAuth>) -> Result<()> {
     let port = addr.port();
     let hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), allowed_host];
-    let app = Router::new().fallback(handle).with_state(Arc::new(App { db_path, hosts }));
+    let app = Router::new().fallback(handle).with_state(Arc::new(App { db_path, hosts, auth }));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("gymclaw dashboard: http://{addr}");
     axum::serve(listener, app).await?;
@@ -246,7 +444,7 @@ mod tests {
 
     fn app() -> Arc<App> {
         let (path, _) = crate::db::test::file();
-        Arc::new(App { db_path: path, hosts: vec!["gym.example".into()] })
+        Arc::new(App { db_path: path, hosts: vec!["gym.example".into()], auth: None })
     }
 
     async fn post(app: &Arc<App>, path: &str, body: &str, site: &str) -> Response {
@@ -371,5 +569,70 @@ mod tests {
         assert!(String::from_utf8_lossy(&body).contains("disk full"));
         assert_eq!(crate::domain::templates::get_template(&db, "legs").unwrap().exercises[1].target_weight, 150.0);
         let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
+    }
+
+    fn sign_init_data(bot_token: &str, user_id: i64, auth_date: i64) -> String {
+        let user = format!(r#"{{"id":{user_id}}}"#);
+        let check = format!("auth_date={auth_date}\nuser={user}");
+        let secret = hmac_sha256(b"WebAppData", bot_token.as_bytes());
+        let hash = hex::encode(hmac_sha256(&secret, check.as_bytes()));
+        let encoded_user = user.replace('{', "%7B").replace('}', "%7D").replace('"', "%22").replace(':', "%3A");
+        format!("auth_date={auth_date}&user={encoded_user}&hash={hash}")
+    }
+
+    #[tokio::test]
+    async fn telegram_init_data_auth_and_ics_export() {
+        let (path, db) = crate::db::test::file();
+        let _ = crate::domain::profile::get_profile(&db).unwrap();
+        let token = crate::domain::profile::ics_token(&db).unwrap().unwrap();
+        let mut session = crate::db::models::PlannedSession::new("2026-11-16".into(), None, false);
+        session.planned_start_at = Ts::now();
+        session.planned_end_at = Ts::now().mins(60);
+        session.merge_plan(serde_json::json!({"template": {"name": "Push"}}));
+        session.insert(&db).unwrap();
+
+        let auth = WebAuth { bot_token: "123:secret".into(), owner_id: 42 };
+        let app = Arc::new(App { db_path: path.clone(), hosts: vec!["gym.example".into()], auth: Some(auth) });
+        // Without initData, /api/state is 401.
+        assert_eq!(get(&app, Method::GET, "/api/state", "gym.example").await.status(), StatusCode::UNAUTHORIZED);
+        // With valid initData for owner 42, /api/state is 200.
+        let valid = sign_init_data("123:secret", 42, Ts::now().0.as_second());
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/state")
+            .header(header::HOST, "gym.example")
+            .header("x-telegram-init-data", &valid)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(handle(State(app.clone()), req).await.status(), StatusCode::OK);
+        // Wrong user id is 401.
+        let wrong_user = sign_init_data("123:secret", 99, Ts::now().0.as_second());
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/state")
+            .header(header::HOST, "gym.example")
+            .header("x-telegram-init-data", &wrong_user)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(handle(State(app.clone()), req).await.status(), StatusCode::UNAUTHORIZED);
+        // Loopback Host header cannot bypass auth when WebAuth is configured.
+        let app_lb = Arc::new(App {
+            db_path: path.clone(),
+            hosts: vec!["127.0.0.1:8766".into(), "gym.example".into()],
+            auth: Some(WebAuth { bot_token: "123:secret".into(), owner_id: 42 }),
+        });
+        assert_eq!(get(&app_lb, Method::GET, "/api/state", "127.0.0.1:8766").await.status(), StatusCode::UNAUTHORIZED);
+        // Expired and tampered initData are rejected.
+        let expired = sign_init_data("123:secret", 42, Ts::now().0.as_second() - 90_000);
+        assert!(!verify_telegram_init_data(&expired, app.auth.as_ref().unwrap(), Ts::now(), 86_400));
+        let tampered = valid.replace("42", "43");
+        assert!(!verify_telegram_init_data(&tampered, app.auth.as_ref().unwrap(), Ts::now(), 86_400));
+        // ICS export works without initData for the right token, and 404s for a wrong token.
+        assert_eq!(get(&app, Method::GET, "/calendar/wrong.ics", "gym.example").await.status(), StatusCode::NOT_FOUND);
+        let ics = get(&app, Method::GET, &format!("/calendar/{token}.ics"), "gym.example").await;
+        assert_eq!(ics.status(), StatusCode::OK);
+        let body = String::from_utf8(axum::body::to_bytes(ics.into_body(), 65536).await.unwrap().to_vec()).unwrap();
+        assert!(body.contains("BEGIN:VCALENDAR") && body.contains("SUMMARY:Push"), "{body}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

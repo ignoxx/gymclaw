@@ -20,7 +20,7 @@ pub struct Config {
     pub model_audio: String,
     /// OpenRouter provider pin, e.g. `inference-net/fp4`.
     pub provider: Option<String>,
-    /// Dashboard hostname behind Traefik; the Telegram menu button opens it.
+    /// Public HTTPS hostname of the dashboard; the Telegram menu button opens it.
     pub dashboard_host: Option<String>,
     /// Where full agent turns are logged, if anywhere.
     pub turn_log_dir: Option<PathBuf>,
@@ -39,6 +39,16 @@ pub fn model() -> String {
 /// The OpenRouter provider pin (`GYMCLAW_PROVIDER`), if any.
 pub fn provider() -> Option<String> {
     var("GYMCLAW_PROVIDER")
+}
+
+/// Optional Telegram bot token (for `dashboard` Mini App auth and `doctor`).
+pub fn telegram_token() -> Option<String> {
+    var("TELEGRAM_BOT_TOKEN")
+}
+
+/// Optional OpenRouter API key (for `doctor`).
+pub fn openrouter_key() -> Option<String> {
+    var("OPENROUTER_API_KEY")
 }
 
 /// The owner's Telegram user id, for code that runs without a full `Config` (tools, CLI).

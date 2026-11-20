@@ -16,3 +16,5 @@ config/gymclaw-*-policy.yaml
 *.bak
 /target
 .claude
+
+docker-compose.override.yaml

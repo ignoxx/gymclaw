@@ -111,6 +111,12 @@ enum Command {
         #[arg(long, default_value = "gymclaw.localhost")]
         allowed_host: String,
     },
+    /// Verify environment, database, Telegram token, OpenRouter key and optional integrations.
+    Doctor,
+    /// Test the configured gym crowd source once and print the count without writing to the DB.
+    CrowdTest,
+    /// Clear the bound gym crowd source so a different gym/source config can be used without a fresh DB.
+    CrowdReset,
 }
 
 #[derive(Subcommand)]
@@ -132,6 +138,74 @@ fn calendar_auth(calendar_id: &str, client_file: &std::path::Path) -> Result<Val
     std::io::stdin().read_line(&mut pasted)?;
     let conn = db::open(&Config::paths().1)?;
     consent.finish(&conn, calendar_id, &pasted, &gymclaw::providers::http::Net::new()?, Ts::now())
+}
+
+fn crowd_test() -> Result<Value> {
+    let net = gymclaw::providers::http::Net::new()?;
+    let provider = gymclaw::providers::crowd::from_environment(&net, &gymclaw::providers::crowd::run_command)?;
+    let reading = provider.get_reading()?;
+    Ok(json!({
+        "ok": true,
+        "provider_id": provider.provider_id(),
+        "count": reading.raw_value,
+        "freshness_seconds": reading.freshness_seconds,
+    }))
+}
+
+async fn doctor() -> Value {
+    let (_, db_path) = Config::paths();
+    let db_check = if !db_path.exists() {
+        json!({"ok": false, "path": db_path, "error": "database file does not exist (run `gymclaw migrate`)"})
+    } else {
+        match db::open_readonly(&db_path) {
+            Ok(conn) => {
+                let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+                let setup_done = gymclaw::domain::onboarding::finished(&conn).unwrap_or(false);
+                let runtime = gymclaw::runtime::outbox::runtime_authority(&conn).ok();
+                let google = gymclaw::db::models::CalendarSyncState::get(&conn, 1)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.source == "google");
+                let ics =
+                    gymclaw::domain::personal_calendar::status(&conn).ok().is_some_and(|s| s["connected"] == true);
+                json!({
+                    "ok": version > 0, "path": db_path, "schema_version": version, "setup_done": setup_done,
+                    "runtime_enabled": runtime.as_ref().is_some_and(|r| r.enabled),
+                    "google_calendar": google, "personal_ics": ics,
+                })
+            }
+            Err(e) => json!({"ok": false, "path": db_path, "error": e.to_string()}),
+        }
+    };
+    let owner = config::owner_id();
+    let tg_check = match config::telegram_token() {
+        None => json!({"ok": false, "error": "TELEGRAM_BOT_TOKEN not set"}),
+        Some(token) => match reqwest::Client::new()
+            .get(format!("https://api.telegram.org/bot{token}/getMe"))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                json!({"ok": body["ok"] == true, "username": body.pointer("/result/username")})
+            }
+            Ok(resp) => json!({"ok": false, "status": resp.status().as_u16()}),
+            Err(e) => json!({"ok": false, "error": e.without_url().to_string()}),
+        },
+    };
+    let openrouter = json!({"ok": config::openrouter_key().is_some()});
+    let crowd_path = config::crowd_config();
+    let crowd = json!({"configured": crowd_path.exists(), "path": crowd_path});
+    let ok = db_check["ok"] == true && owner.is_ok() && tg_check["ok"] == true && openrouter["ok"] == true;
+    json!({
+        "ok": ok,
+        "owner_id_set": owner.is_ok(),
+        "db": db_check,
+        "telegram": tg_check,
+        "openrouter": openrouter,
+        "crowd": crowd,
+    })
 }
 
 fn print(value: &Value) {
@@ -286,7 +360,32 @@ async fn main() -> ExitCode {
             .and_then(|conn| gymclaw::domain::illustrations::missing(&conn))
             .map(|missing| Some(json!(missing))),
         Command::Dashboard { addr, allowed_host } => {
-            gymclaw::web::dashboard(Config::paths().1, addr, allowed_host).await.map(|_| None)
+            let auth = match config::telegram_token() {
+                Some(bot_token) => match config::owner_id() {
+                    Ok(owner_id) => Some(gymclaw::web::WebAuth { bot_token, owner_id }),
+                    Err(msg) => {
+                        return {
+                            print(&Error::domain("CONFIG", msg).to_json());
+                            ExitCode::FAILURE
+                        };
+                    }
+                },
+                None => None,
+            };
+            gymclaw::web::dashboard(Config::paths().1, addr, allowed_host, auth).await.map(|_| None)
+        }
+        Command::Doctor => {
+            let report = doctor().await;
+            let ok = report["ok"] == true;
+            print(&report);
+            return if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        }
+        Command::CrowdTest => tokio::task::spawn_blocking(crowd_test).await.expect("crowd test thread").map(Some),
+        Command::CrowdReset => {
+            let (_, path) = Config::paths();
+            db::open(&path)
+                .and_then(|mut conn| db::in_tx(&mut conn, gymclaw::domain::crowd::reset_source))
+                .map(|cleared| Some(json!({"ok": true, "cleared": cleared})))
         }
     };
     match result {

@@ -8,14 +8,16 @@ One Docker Compose stack. `gymclaw` and `dashboard` run the same image, which Gi
   (OpenRouter), the coach, the scheduler and the outbox. No ports are published.
 - **egress**: a Squid proxy that allows HTTPS `CONNECT` to an allowlist only
   (Telegram, OpenRouter, Google Calendar/OAuth, MySports, plus `EGRESS_EXTRA_HOSTS`).
-- **dashboard**: the web dashboard. It reads the DB through a read-only connection; its only
-  writes are the tools in `DASHBOARD_TOOLS` (`src/web/mod.rs`): the agent's notes, its
-  extensions' on/off switch and plan targets. No internet access and no published port.
+- **dashboard**: the web dashboard / Telegram Mini App. Reads the DB through a read-only
+  connection; writes go through `DASHBOARD_TOOLS` and `POST /api/coach` in `src/web/mod.rs`.
+  On non-loopback hosts every `/api/*` and `/export.csv` request is authenticated via Telegram
+  Mini App `initData` HMAC-SHA256 (verified against `TELEGRAM_BOT_TOKEN` and
+  `GYMCLAW_TELEGRAM_USER_ID`). `/calendar/<token>.ics` serves a read-only workout calendar feed
+  gated by its secret token.
 
-`gymclaw` sits only on an internal network, so the proxy is its single way out. It
-refuses to start if a direct connection to the internet works. The container runs
-as a non-root user with a read-only root filesystem, no capabilities and
-`no-new-privileges`.
+`gymclaw` sits only on an internal network, so the proxy is its single way out. It refuses to
+start if a direct connection to the internet works. The container runs as a non-root user with a
+read-only root filesystem, no capabilities and `no-new-privileges`.
 
 ## State
 
@@ -24,59 +26,30 @@ as a non-root user with a read-only root filesystem, no capabilities and
 | `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, chat history, agent notes, Google OAuth token), crowd config, inbound `media/`, `turns/` turn logs (JSONL, format in [`src/agent/turnlog.rs`](../src/agent/turnlog.rs)), `heartbeat` |
 | `gymclaw-backups` | `/backups` | `backup.sh` archives |
 
-## Coolify
-
-1. Create a **Docker Compose** application from this repo (compose file
-   `/docker-compose.yaml`). Don't deploy yet.
-2. On the server, pre-create the application's network as **internal**. Coolify
-   attaches every compose service to a network named after the application UUID,
-   and only creates it if it's missing:
-
-   ```bash
-   docker network create --internal --attachable <application-uuid>
-   ```
-
-   Without this, `gymclaw` would have direct internet access, and it refuses to
-   start.
-3. Set the environment variables ([the list](../docs/self-hosting.md#deploy)), including
-   `GYMCLAW_DASHBOARD_HOST`.
-4. Turn off **Escape special characters in labels** (Advanced settings) so the
-   dashboard's Traefik labels get `GYMCLAW_DASHBOARD_HOST` filled in.
-5. Add a scheduled task on the `gymclaw` service: `backup.sh`, daily (for example
-   `30 3 * * *`).
-6. Set a spending limit on the OpenRouter key.
-7. Deploy from CI instead of on push, so Coolify never pulls an image that isn't built yet:
-   - Turn off **Auto Deploy** (Advanced settings) on the application.
-   - Create an API token (Keys & Tokens, deploy permission) and copy the app's **Deploy
-     Webhook** URL (Webhooks).
-   - Add them as GitHub Actions secrets `COOLIFY_TOKEN` and `COOLIFY_DEPLOY_WEBHOOK`.
-   - After the first image push, make the `gymclaw` GHCR package public (package settings),
-     or add a GHCR registry login on the server.
-
-   Roll back by setting `GYMCLAW_IMAGE_TAG` to an older commit sha and redeploying.
-
-Plain Docker works the same way: `docker compose up -d` with an `.env` file. To run a
-local build instead, `docker build -f deploy/Dockerfile -t ghcr.io/ignoxx/gymclaw:local .` and
-set `GYMCLAW_IMAGE_TAG=local` plus `--pull never`. Compose creates the internal network itself.
-
-## Dashboard on your tailnet
-
-Traefik serves the dashboard at `GYMCLAW_DASHBOARD_HOST` with a normal Let's Encrypt
-certificate, but only to Tailscale source addresses (`100.64.0.0/10`); everyone else
-gets a 403. The name resolves publicly to the server's public IP, which keeps the
-certificate's HTTP challenge working. Tailnet devices reach that IP through
-Tailscale, by having the server advertise its own public IP as a subnet route:
+## Plain Docker Compose
 
 ```bash
-tailscale set --advertise-routes=<public-ip>/32 --advertise-exit-node   # keep existing flags
+cp .env.example .env          # fill TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, GYMCLAW_TELEGRAM_USER_ID
+docker compose up -d
+docker compose exec gymclaw gymclaw doctor
 ```
 
-Approve the route in the Tailscale admin console. Linux clients also need
-`--accept-routes`; macOS, iOS and Android accept routes by default.
+To expose the dashboard behind your own reverse proxy (Caddy, nginx, Traefik, etc.), copy
+`docker-compose.override.example.yaml` to `docker-compose.override.yaml`, set
+`GYMCLAW_DASHBOARD_HOST` to your HTTPS hostname, and proxy HTTPS traffic to `127.0.0.1:8766`.
 
-The bot's **Dashboard** menu button opens the same URL as a Telegram Mini App, so the phone
-needs Tailscale on too. Only web.telegram.org may frame the dashboard
-(`frame-ancestors https://web.telegram.org`); the mobile and desktop apps use a native webview.
+To run a local build instead of pulling GHCR:
+
+```bash
+docker build -f deploy/Dockerfile -t ghcr.io/ignoxx/gymclaw:local .
+GYMCLAW_IMAGE_TAG=local docker compose up -d --pull never
+```
+
+Roll back by setting `GYMCLAW_IMAGE_TAG` to an older commit sha and redeploying.
+
+Note for PaaS / Compose orchestrators that attach every service to a shared default network:
+make sure `gymclaw` stays on an `--internal` network so it cannot bypass `egress` (otherwise
+`entrypoint.sh` refuses to start).
 
 ## Moving hosts
 
@@ -98,22 +71,24 @@ two runtimes would send every reminder twice.
 3. Resume (the scheduler runs in-process, there are no jobs to recreate):
 
    ```bash
-   docker exec <gymclaw container> gymclaw call runtime_resume '{"owner_asked": true, "crowd_polling": true}'
+   docker exec <gymclaw container> gymclaw call runtime_resume '{"owner_asked": true}'
    ```
 
-   `pause` revokes calendar writes; add `"calendar_writes": true` to grant them again if wanted.
+   `runtime_pause` keeps your existing calendar-write and crowd-polling grants; pass
+   `"calendar_writes": true` or `"crowd_polling": true` if you want to enable them now.
 
-4. Check: message the bot, send `/status`, and `gymclaw call deliveries`.
+4. Check: `gymclaw doctor`, message the bot, send `/status`, and `gymclaw call deliveries`.
 
-Google auth travels with the DB. If it's gone (`CALENDAR_AUTH_REQUIRED`), re-run
+Google auth (if used) travels with the DB. If it is gone (`CALENDAR_AUTH_REQUIRED`), re-run
 `docker compose exec -it gymclaw gymclaw calendar-auth --calendar-id <id>`
-([setup](../docs/self-hosting.md#google-calendar)).
+([setup](../docs/self-hosting.md#google-calendar-optional)).
 
 ## Backups
 
+Schedule `docker compose exec -T gymclaw backup.sh` daily (e.g. via cron or systemd timer).
 `backup.sh` writes a consistent `/backups/gymclaw-<UTC>.tar.gz` (`gymclaw backup` of the DB,
-`data/`) and keeps the newest 14. Archives contain the
-Google OAuth token and chat history, so copy them off-host only to private storage:
+`data/`) and keeps the newest 14. Archives contain the Google OAuth token and chat history, so copy
+them off-host only to private storage:
 
 ```bash
 docker cp <gymclaw container>:/backups/<archive> .

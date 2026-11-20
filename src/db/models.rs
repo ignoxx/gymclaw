@@ -102,6 +102,7 @@ table!(UserProfile = "user_profile" {
     crowd_preference_weight: f64,
     gym_address: Option<String>,
     weight_unit: WeightUnit,
+    ics_token: Option<String>,
     created_at: Ts,
     updated_at: Ts,
 });
