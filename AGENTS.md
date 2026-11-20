@@ -27,7 +27,7 @@ One Rust binary: Telegram bot, agent loop, scheduler and training domain over on
 
 - **owner**: the one Telegram user (`GYMCLAW_TELEGRAM_USER_ID`). **bot**: the whole binary
   (`gymclaw serve`). **agent**: the LLM loop in `src/agent/`. **coach**: the model-free workout
-  loop (taps, typed sets, rest timer) in `src/domain/coach.rs` + `src/telegram/coach.rs`.
+  loop (taps, typed sets, rest timer) in `src/domain/coach/mod.rs` + `src/telegram/coach.rs`.
 - **session**: a planned slot, `planned_session`. **workout**: what's actually done and logged,
   `workout_session` (+ `workout_exercise`, `set_log`).
 - **workout plan / template**: one workout's exercises and targets, `workout_template`. **the plan**:

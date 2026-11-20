@@ -113,6 +113,35 @@ pub fn schema<T: JsonSchema>() -> Value {
         }
     }
     strip(&mut schema);
+    // Flatten root tagged-enum `oneOf` into a standard `type: "object"` schema so Anthropic/OpenRouter
+    // accept it and `guide()` prints its fields.
+    if let Some(variants) = schema.get("oneOf").and_then(Value::as_array).cloned() {
+        let mut actions: Vec<Value> = Vec::new();
+        let mut props = serde_json::Map::new();
+        for variant in variants {
+            if let Some(vp) = variant.get("properties").and_then(Value::as_object) {
+                for (k, v) in vp {
+                    if k == "action" {
+                        if let Some(c) = v.get("const") {
+                            actions.push(c.clone());
+                        } else if let Some(es) = v.get("enum").and_then(Value::as_array) {
+                            actions.extend(es.iter().cloned());
+                        }
+                    } else {
+                        props.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+        }
+        if !actions.is_empty() {
+            props.insert("action".into(), serde_json::json!({"type": "string", "enum": actions}));
+            schema = serde_json::json!({
+                "type": "object",
+                "required": ["action"],
+                "properties": props,
+            });
+        }
+    }
     schema
 }
 
@@ -280,5 +309,50 @@ mod tests {
             }
         }
         assert!(stale.is_empty(), "fix these docs:\n{}", stale.join("\n"));
+    }
+
+    /// Every offered tool must have a root `type: "object"` schema (no top-level `oneOf` that
+    /// Anthropic rejects), and every consolidated action tool must deserialize and dispatch cleanly.
+    #[test]
+    fn offered_tools_have_object_schemas_and_consolidated_dispatch_works() {
+        for setup_done in [false, true] {
+            for spec in crate::agent::tool_specs(setup_done) {
+                let name = spec["function"]["name"].as_str().unwrap();
+                let params = &spec["function"]["parameters"];
+                assert_eq!(params["type"], "object", "{name} schema must be type: object, got {params}");
+                assert!(params.get("oneOf").is_none(), "{name} has top-level oneOf: {params}");
+            }
+        }
+        let offered: Vec<&str> = crate::agent::tool_specs(true)
+            .into_iter()
+            .filter_map(|s| s["function"]["name"].as_str().map(String::from))
+            .collect::<Vec<_>>()
+            .leak()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        for required in [
+            "note",
+            "delivery",
+            "runtime",
+            "extension",
+            "data",
+            "availability",
+            "crowd",
+            "personal_calendar",
+            "template",
+            "body",
+        ] {
+            assert!(offered.contains(&required), "missing consolidated tool {required}");
+        }
+        // Smoke-test serde tag dispatch on structs that live behind consolidated enums.
+        let db = crate::db::test::with_short_template();
+        let dir = std::env::temp_dir();
+        let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "t1".into(), data_dir: &dir, effects: vec![] };
+        assert!(call(&mut cx, "template", serde_json::json!({"action": "get", "template_id": "short"})).is_ok());
+        assert!(call(&mut cx, "body", serde_json::json!({"action": "log", "entries": [{"kg": 80.0}]})).is_ok());
+        assert!(call(&mut cx, "note", serde_json::json!({"action": "add", "kind": "owner", "text": "test"})).is_ok());
+        assert!(call(&mut cx, "crowd", serde_json::json!({"action": "status"})).is_ok());
+        assert!(call(&mut cx, "personal_calendar", serde_json::json!({"action": "status"})).is_ok());
     }
 }

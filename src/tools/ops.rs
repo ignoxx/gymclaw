@@ -10,6 +10,8 @@ use crate::runtime::outbox;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
+        def::<Delivery>(),
+        def::<Runtime>(),
         def::<Deliveries>(),
         def::<DeliveryResolve>(),
         def::<RuntimeStatus>(),
@@ -33,6 +35,7 @@ pub struct Deliveries {
 }
 
 impl Tool for Deliveries {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "deliveries";
     const DESCRIPTION: &'static str = "Proactive messages (reminders, briefings, alerts) and whether they reached Telegram, newest last (at most 30).";
 
@@ -65,6 +68,7 @@ pub struct DeliveryResolve {
 }
 
 impl Tool for DeliveryResolve {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "delivery_resolve";
     const DESCRIPTION: &'static str = "Settle an UNKNOWN delivery after the owner checked Telegram.";
 
@@ -106,6 +110,7 @@ impl Tool for RuntimeStatus {
 pub struct RuntimePause {}
 
 impl Tool for RuntimePause {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "runtime_pause";
     const DESCRIPTION: &'static str = "Stop all reminders, briefings, planning ticks and calendar writes until the owner \
 explicitly resumes. Resuming restores calendar writes if they were granted.";
@@ -131,6 +136,7 @@ pub struct RuntimeResume {
 }
 
 impl Tool for RuntimeResume {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "runtime_resume";
     const DESCRIPTION: &'static str = "Turn reminders, briefings and planning ticks back on (or grant calendar writes / crowd polling). Needs the owner's explicit request.";
 
@@ -169,6 +175,7 @@ impl Tool for RuntimeResume {
 pub struct CalendarWritesRevoke {}
 
 impl Tool for CalendarWritesRevoke {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "calendar_writes_revoke";
     const DESCRIPTION: &'static str =
         "Stop writing to the Google calendar (plans stay local until the owner grants it again).";
@@ -178,6 +185,47 @@ impl Tool for CalendarWritesRevoke {
         settings.calendar_writes_enabled = false;
         settings.update(cx.db)?;
         Ok(serde_json::to_value(outbox::runtime_authority(cx.db)?)?)
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Delivery {
+    List(Deliveries),
+    Resolve(DeliveryResolve),
+}
+
+impl Tool for Delivery {
+    const NAME: &'static str = "delivery";
+    const DESCRIPTION: &'static str =
+        "Inspect proactive Telegram sends or settle an UNKNOWN delivery after the owner checked Telegram.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            Delivery::List(t) => t.run(cx),
+            Delivery::Resolve(t) => t.run(cx),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Runtime {
+    Pause(RuntimePause),
+    Resume(RuntimeResume),
+    RevokeCalendarWrites(CalendarWritesRevoke),
+}
+
+impl Tool for Runtime {
+    const NAME: &'static str = "runtime";
+    const DESCRIPTION: &'static str = "Pause reminders/planning ticks, resume them (or grant calendar writes / toggle crowd polling with owner_asked: true), or revoke calendar writes.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            Runtime::Pause(t) => t.run(cx),
+            Runtime::Resume(t) => t.run(cx),
+            Runtime::RevokeCalendarWrites(t) => t.run(cx),
+        }
     }
 }
 

@@ -3,12 +3,14 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Ctx, Tool, ToolDef, def};
+use super::{Ctx, Listed, Tool, ToolDef, def};
 use crate::domain::extensions::{self as ext, Author, GapSource, Spec};
 use crate::error::Result;
 
 pub fn tools() -> Vec<ToolDef> {
     vec![
+        def::<ExtensionTool>(),
+        def::<DataTool>(),
         def::<ExtensionSave>(),
         def::<ExtensionEdit>(),
         def::<DataAdd>(),
@@ -38,6 +40,7 @@ pub struct ExtensionSave {
 }
 
 impl Tool for ExtensionSave {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "extension_save";
     const DESCRIPTION: &'static str = "Extend yourself when the owner wants something recurring your tools don't do on their own: \
 a playbook (steps for a request that keeps coming back), a collection (your own log) or a trigger (wakes you with an instruction daily/weekly \
@@ -64,6 +67,7 @@ pub struct ExtensionEdit {
 }
 
 impl Tool for ExtensionEdit {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "extension_edit";
     const DESCRIPTION: &'static str = "Turn one of your extensions off or on, or roll it back to an earlier version.";
 
@@ -99,6 +103,7 @@ pub struct DataAdd {
 }
 
 impl Tool for DataAdd {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "data_add";
     const DESCRIPTION: &'static str = "Log a row into one of your collections.";
 
@@ -119,6 +124,7 @@ pub struct DataDelete {
 }
 
 impl Tool for DataDelete {
+    const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "data_delete";
     const DESCRIPTION: &'static str = "Delete a collection row logged by mistake.";
 
@@ -146,5 +152,43 @@ then offer the owner the closest thing you can do.";
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let id = ext::log_gap(cx.db, GapSource::Agent, &self.asked, &self.tried, &self.why, None, cx.now)?;
         Ok(json!({"id": id}))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ExtensionTool {
+    Save(ExtensionSave),
+    Edit(ExtensionEdit),
+}
+
+impl Tool for ExtensionTool {
+    const NAME: &'static str = "extension";
+    const DESCRIPTION: &'static str = "Save a playbook, collection or trigger (daily/weekly/once/session/workout_finished), or edit an extension to toggle or roll back versions.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            ExtensionTool::Save(t) => t.run(cx),
+            ExtensionTool::Edit(t) => t.run(cx),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DataTool {
+    Add(DataAdd),
+    Delete(DataDelete),
+}
+
+impl Tool for DataTool {
+    const NAME: &'static str = "data";
+    const DESCRIPTION: &'static str = "Log a row into one of your collections or delete a row logged by mistake.";
+
+    fn run(self, cx: &mut Ctx) -> Result<Value> {
+        match self {
+            DataTool::Add(t) => t.run(cx),
+            DataTool::Delete(t) => t.run(cx),
+        }
     }
 }
