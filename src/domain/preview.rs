@@ -38,6 +38,7 @@ pub fn last_set(db: &Connection, exercise_id: &str) -> Result<Option<SetLog>> {
 /// One line per planned exercise ('1. Barbell row · 2 sets of 8–12 · last 10 × 60 kg', '2. Cycling · 25 min'), from the
 /// current template; used in previews and calendar event bodies.
 pub fn plan_lines(db: &Connection, session: &PlannedSession) -> Result<Vec<String>> {
+    let unit = get_profile(db)?.weight_unit;
     let template = get_template(db, session.workout_template_id.as_deref().unwrap_or_default())?;
     let sets = session.workout_plan_json.get("sets");
     let mut lines = vec![];
@@ -57,7 +58,7 @@ pub fn plan_lines(db: &Connection, session: &PlannedSession) -> Result<Vec<Strin
             continue;
         }
         let last = last
-            .map(|l| format!(" · last {}", spec.kind().set(l.weight, l.reps, l.seconds, l.meters)))
+            .map(|l| format!(" · last {}", spec.kind().in_unit(unit).set(l.weight, l.reps, l.seconds, l.meters)))
             .unwrap_or_default();
         let reps = spec.kind().reps(&reps);
         let plan = match spec.meters.filter(|_| spec.measure == Measure::Distance) {

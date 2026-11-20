@@ -182,7 +182,8 @@ impl Tool for Workout {
                     let result = audit::add_set(db, &workout_id, which, text, set_type, now, &rid)?;
                     return after_edit(cx, &workout_id, result);
                 }
-                let (view, logged) = coach::log_text(db, text, self.warmup, now, &rid)?;
+                let (view, logged) =
+                    coach::log_text(db, text, self.warmup, crate::db::models::WeightUnit::Kg, now, &rid)?;
                 if !view.handled {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
                     crate::bail!(
@@ -506,10 +507,10 @@ impl Tool for OnboardingStatus {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingAnswer {
-    /// Question key → the owner's words, e.g. {"experience": "2 years"}. Keys: goal, experience, schedule,
-    /// session_length, time_window, travel, equipment, limitations.
+    /// Question key → the owner's words, e.g. {"goal": "Build muscle, 2 years"}. Keys: goal, schedule,
+    /// where, preferences, limitations.
     pub answers: Map<String, Value>,
-    /// Profile fields backing those answers (schedule, session_length, time_window and travel need them).
+    /// Profile fields backing those answers (schedule, where and preferences need them; gym_address is optional).
     pub profile: Option<Map<String, Value>>,
 }
 
@@ -565,10 +566,12 @@ pub struct OnboardingFinish {
 impl Tool for OnboardingFinish {
     const NAME: &'static str = "onboarding_finish";
     const LISTED: Listed = Listed::InSetup;
-    const DESCRIPTION: &'static str =
-        "Finish setup after the owner confirmed the summary. Grants no calendar or runtime authority.";
+    const DESCRIPTION: &'static str = "Finish setup after the owner confirmed the summary. Turns on reminders and weekly planning (calendar writes stay opt-in).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
+        if cx.background() {
+            crate::bail!("ONBOARDING_OWNER_REQUIRED", "Finishing setup requires the owner's confirmation");
+        }
         onboarding::update(cx.db, Update::Finish(Some(&self.fingerprint)), cx.now, &cx.request_id)
     }
 }

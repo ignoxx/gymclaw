@@ -26,7 +26,7 @@ Formatting: **bold**, *italic*, ~~strike~~, `code`, lines starting with \"> \" (
 Praise PRs and other earned wins; keep it specific. Never a yes-man: if the owner skips, bails or is about to do something dumb, \
 call it out in one line, then do what they asked. Humor and swearing are welcome when they fit the moment (\"holy shit, 100kg\", \"skipped legs again, really?\"). \
 Ask one question at a time; put choices in buttons under a short message, not typed lists. If a reaction says it (👍 got it, 👌 noted), react instead of writing. \
-Times are always the owner's local time. During a workout the cards do the talking: after a tool showed a card, stay silent unless the owner asked something. \
+Times are always the owner's local time. Database and tool weights are always in kg; show and read the owner's preferred unit from Profile. During a workout the cards do the talking: after a tool showed a card, stay silent unless the owner asked something. \
 A finished workout's summary card is the whole wrap-up: add nothing about the workout unless the owner asks. \
 Start a workout only once the owner is at the gym or asks; on the way (\"there in 5\"), send a Start button (value e.g. \"Start Pull\").
 
@@ -113,10 +113,10 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     let days: Vec<&str> = profile.weekdays_allowed.iter().filter_map(|d| DAYS.get(*d as usize).copied()).collect();
     writeln!(
         out,
-        "Profile: {}–{} sessions/week (target {}), days {}, window {}–{}, {} min sessions, commute {}+{} min, prep {} min.",
+        "Profile: {}–{} sessions/week (target {}), days {}, window {}–{}, {} min sessions, commute {}+{} min, prep {} min, weights in {}.",
         profile.weekly_min_sessions, profile.weekly_max_sessions, profile.weekly_target_sessions, days.join(" "),
         profile.earliest_workout_start.strftime("%H:%M"), profile.latest_workout_finish.strftime("%H:%M"), profile.preferred_workout_minutes,
-        profile.commute_to_gym_minutes, profile.commute_home_minutes, profile.prep_minutes,
+        profile.commute_to_gym_minutes, profile.commute_home_minutes, profile.prep_minutes, profile.weight_unit.label(),
     )
     .unwrap();
     let onboarding = OnboardingState::get(db, 1)?;
@@ -148,8 +148,8 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
             .collect();
         writeln!(out, "Last completed per workout, longest ago first: {}.", done.join(", ")).unwrap();
     }
-    if !crate::domain::onboarding::finished(db)? {
-        writeln!(out, "Setup: not finished. Check onboarding status before planning; never interrupt a running workout with setup.").unwrap();
+    if let Some(setup) = crate::domain::onboarding::prompt_summary(db)? {
+        writeln!(out, "{setup} Never interrupt a running workout with setup.").unwrap();
     }
     let authority = runtime_authority(db)?;
     writeln!(
@@ -461,5 +461,15 @@ mod tests {
         let named: Vec<&str> =
             crate::tools::all().iter().map(|t| t.name).filter(|n| !offered.contains(n) && text.contains(n)).collect();
         assert!(named.is_empty(), "hidden but named: {named:?}");
+    }
+
+    #[test]
+    fn snapshot_inlines_setup_step_and_weight_unit() {
+        let db = crate::db::test::db();
+        crate::domain::profile::update_profile(&db, serde_json::json!({"weight_unit": "lb"}).as_object().unwrap())
+            .unwrap();
+        let (text, _) = snapshot(&db, Ts::parse("2026-11-13T14:00:00+01:00", None).unwrap()).unwrap();
+        assert!(text.contains("weights in lb."), "{text}");
+        assert!(text.contains("Setup: INTERVIEW (0/5 done) · next: goal"), "{text}");
     }
 }

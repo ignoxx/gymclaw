@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{
     AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession,
-    RuntimeSettings, SetType, UserProfile, WorkoutSession, WorkoutTemplate,
+    RuntimeSettings, SetType, UserProfile, WeightUnit, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
 use crate::domain::templates::{ExerciseSpec, Load, Measure, get_template};
@@ -75,15 +75,15 @@ fn days(db: &Connection, tz: &TimeZone, today: Date) -> Result<Vec<Value>> {
 }
 
 /// A plan exercise's target as the chat words it: "8–10 × 80 kg", "25 min", "2 km".
-fn target(spec: &ExerciseSpec, weight: f64) -> String {
+fn target(spec: &ExerciseSpec, weight: f64, unit: WeightUnit) -> String {
     match spec.measure {
         Measure::Time => spec.set_seconds().map_or("timed".into(), |s| spec.kind().reps(&workout::format_time(s))),
         Measure::Distance => spec.meters.map_or("distance".into(), workout::format_distance),
-        Measure::Reps => spec.kind().target(spec.rep_min, spec.rep_max, weight),
+        Measure::Reps => spec.kind().in_unit(unit).target(spec.rep_min, spec.rep_max, weight),
     }
 }
 
-fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
+fn next_session(db: &Connection, tz: &TimeZone, now: Ts, unit: WeightUnit) -> Result<Value> {
     let Some(row) = PlannedSession::first(
         db,
         "WHERE status IN ('TENTATIVE', 'COMMITTED') AND planned_end_at > ?1 AND workout_template_id IS NOT NULL ORDER BY planned_start_at",
@@ -106,8 +106,8 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
         exercises.push(json!({"id": spec.id, "name": spec.name, "svg_url": svg(&spec.name, spec.guide_id.as_deref()), "sets": sets.get(&spec.id).cloned().unwrap_or(json!(spec.working_sets)),
             "reps": reps, "time": spec.set_seconds().map(workout::format_time),
             // The target with this session's weight (progression included), worded like the plan list.
-            "target": target(spec, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight)),
-            "last": last.map(|l| spec.kind().set(l.weight, l.reps, l.seconds, l.meters))}));
+            "target": target(spec, ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight), unit),
+            "last": last.map(|l| spec.kind().in_unit(unit).set(l.weight, l.reps, l.seconds, l.meters))}));
     }
     // Start shows from the session's "get ready" reminder on (the reminders' own Start button follows),
     // not all day: earlier it reads as "go now". "leave" only means today.
@@ -122,7 +122,7 @@ fn next_session(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
 
 /// The owner's workout plans (demo fixtures only when there are no others), each exercise with
 /// the weight it will get next: the learned progression, else the plan's target.
-fn plans(db: &Connection) -> Result<Vec<Value>> {
+fn plans(db: &Connection, unit: WeightUnit) -> Result<Vec<Value>> {
     let mut templates = WorkoutTemplate::select(db, "ORDER BY id", [])?;
     if templates.iter().any(|t| t.definition_json.get("source").and_then(Value::as_str) != Some("demo_fixture")) {
         templates.retain(|t| t.definition_json.get("source").and_then(Value::as_str) != Some("demo_fixture"));
@@ -138,7 +138,7 @@ fn plans(db: &Connection) -> Result<Vec<Value>> {
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
                 "measure": spec.measure, "load": spec.load,
                 "equipment": spec.guide_id.as_deref().and_then(|g| illustrations::catalog().get(g)).map(|i| i.equipment.clone()),
-                "time": spec.set_seconds().map(workout::format_time), "target": target(spec, next)}));
+                "time": spec.set_seconds().map(workout::format_time), "target": target(spec, next, unit)}));
         }
         out.push(json!({"id": template.id, "name": template.name, "exercises": exercises}));
     }
@@ -241,7 +241,7 @@ fn present(s: Option<&str>) -> Option<&str> {
 
 /// Finished workouts, newest first, with every working set. PRs: a heavier top set than any earlier
 /// session of that exercise.
-fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
+fn history(db: &Connection, tz: &TimeZone, unit: WeightUnit) -> Result<Vec<Value>> {
     let workouts = WorkoutSession::select(
         db,
         "WHERE status = 'PLAN_UPDATED' AND completed_at IS NOT NULL ORDER BY completed_at",
@@ -269,7 +269,7 @@ fn history(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
             let done = workout::logs(db, &row.id, Some(SetType::Working))?;
             let Some(last) = done.last() else { continue };
             last_log = Some(last_log.map_or(last.logged_at, |l| l.max(last.logged_at)));
-            let kind = workout::kind(&row);
+            let kind = workout::kind(&row).in_unit(unit);
             // Only kilograms lifted chart and count: not an assisted machine's help, a time or a distance.
             let lifted = workout::measure(&row) == Measure::Reps && kind.load != Load::Assisted;
             let top = done.iter().map(|s| kind.signed(s.weight)).fold(f64::MIN, f64::max);
@@ -486,17 +486,18 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let settings = RuntimeSettings::get(db, 1)?;
     let marks = ACTIVITY.iter().map(|(t, _)| format!("'{t}'")).collect::<Vec<_>>().join(", ");
     let events = AgentEvent::select(db, &format!("WHERE type IN ({marks}) ORDER BY created_at DESC LIMIT 12"), [])?;
-    let done = history(db, &tz)?;
+    let done = history(db, &tz, profile.weight_unit)?;
     let mut insights = insights(db, &tz, now, &profile, &done)?;
     insights["weight"] = json!(body_weight(db, &tz, now)?);
     let polling = settings.is_some_and(|s| s.enabled && s.crowd_polling_enabled);
     let mut crowd = crowd_state(db, &tz, now, polling)?;
     crowd["sessions"] = json!(crowd_sessions(db, &tz, now)?);
     Ok(json!({
-        "captured_at": now.iso(), "timezone": profile.timezone,
+        "captured_at": now.iso(), "timezone": profile.timezone, "unit": profile.weight_unit,
+        "setup_done": crate::domain::onboarding::finished(db)?,
         "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
-        "days": days(db, &tz, today)?, "next": next_session(db, &tz, now)?, "workout": active_workout(db, &tz, now)?,
-        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db)?,
+        "days": days(db, &tz, today)?, "next": next_session(db, &tz, now, profile.weight_unit)?, "workout": active_workout(db, &tz, now)?,
+        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db, profile.weight_unit)?,
         "activity": events.iter().map(|e| json!({"time": fmt(e.created_at, &tz, "%H:%M"), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
     }))
@@ -523,7 +524,7 @@ mod tests {
         (plan.planned_start_at, plan.planned_end_at, plan.prep_start_at, plan.leave_home_at) =
             (start, start.mins(60), start.mins(-45), start.mins(-20));
         plan.insert(&db).unwrap();
-        let begin = |now| next_session(&db, &TimeZone::UTC, now).unwrap()["begin"].clone();
+        let begin = |now| next_session(&db, &TimeZone::UTC, now, WeightUnit::Kg).unwrap()["begin"].clone();
         assert_eq!(begin(start.mins(-46)), Value::Null);
         assert_eq!(begin(start.mins(-45)), json!(coach::begin_data(&plan.id)));
     }

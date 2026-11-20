@@ -1,4 +1,4 @@
--- Generated from baseline.sql plus every migration (user_version 11); don't edit. When a
+-- Generated from baseline.sql plus every migration (user_version 12); don't edit. When a
 -- migration changes the schema, `cargo test schema_snapshot` rewrites this file: review and
 -- commit it. Fresh databases are created from this file.
 
@@ -397,7 +397,7 @@ CREATE TABLE user_profile (
 	rest_seconds INTEGER NOT NULL, 
 	crowd_preference_weight DOUBLE NOT NULL, 
 	created_at DATETIME NOT NULL, 
-	updated_at DATETIME NOT NULL, gym_address VARCHAR, 
+	updated_at DATETIME NOT NULL, gym_address VARCHAR, weight_unit VARCHAR NOT NULL DEFAULT 'kg' CHECK (weight_unit IN ('kg', 'lb')), 
 	PRIMARY KEY (id), 
 	CHECK (id = 1), 
 	CHECK (weekly_min_sessions >= 0 AND weekly_min_sessions <= weekly_target_sessions AND weekly_target_sessions <= weekly_max_sessions)

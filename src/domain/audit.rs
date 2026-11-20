@@ -261,7 +261,12 @@ pub fn add_set(
         let mut row = find_exercise(db, workout_id, which)?;
         let value = match parse_block(text, measure(&row)) {
             Some(value) => value,
-            None => parse_set(text, Some(row.target_weight), reps_alone(&row))?,
+            None => parse_set(
+                text,
+                Some(row.target_weight),
+                reps_alone(&row),
+                crate::domain::profile::get_profile(db)?.weight_unit,
+            )?,
         };
         let value = SetInput { set_type, ..value };
         value.validate()?;

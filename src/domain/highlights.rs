@@ -107,6 +107,7 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
     };
     let Some(start) = session.started_at else { crate::bail!("WORKOUT_NOT_STARTED", "Workout has no start time") };
     let name = session.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
+    let unit = crate::domain::profile::get_profile(db)?.weight_unit;
     let (mut lifts, mut timed, mut distances, mut sets) = (Vec::new(), Vec::new(), Vec::new(), 0);
     for row in WorkoutExercise::select(db, "WHERE workout_session_id = ?1 ORDER BY position", [workout_id])? {
         let logged = SetLog::select(db, "WHERE set_type = 'WORKING' AND workout_exercise_id = ?1", [&row.id])?;
@@ -127,7 +128,7 @@ pub fn workout(db: &Connection, workout_id: &str) -> Result<Highlights> {
             continue;
         }
         // Compared on signed weights, so less help on an assisted machine ranks as heavier.
-        let set_kind = workout::kind(&row);
+        let set_kind = workout::kind(&row).in_unit(unit);
         let signed = |sets: Vec<SetLog>| -> Vec<SetLog> {
             sets.into_iter().map(|s| SetLog { weight: set_kind.signed(s.weight), ..s }).collect()
         };

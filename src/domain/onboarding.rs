@@ -2,8 +2,9 @@
 //!
 //! Steps: INTERVIEW (one question at a time) → PLAN (owner's plan from a photo, or one gymclaw builds from
 //! the catalog) → REVIEW (one summary, owner confirms) → READY. Defaults never count as answers. Ready
-//! stays ready: later profile or template edits don't send the owner back into setup. Grants no runtime
-//! or calendar authority.
+//! stays ready: later profile, template or question changes don't send the owner back into setup.
+//! Finishing turns on reminders and weekly planning (if runtime isn't configured yet); calendar writes
+//! and crowd polling remain opt-in.
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
@@ -18,27 +19,31 @@ use crate::domain::templates::get_template;
 use crate::error::Result;
 use crate::time::Ts;
 
-/// Asked in this order. Profile-backed answers must also write these profile fields.
-pub const QUESTIONS: [(&str, &str, &[&str]); 8] = [
-    ("goal", "What's your main goal: build muscle, get stronger, lose fat, or general fitness?", &[]),
-    ("experience", "How long have you been training consistently?", &[]),
+/// Asked in this order (5 compact questions). Profile-backed answers also write their profile fields.
+/// `gym_address` is optional (home trainers set `commute_to_gym_minutes: 0` with no address).
+pub const QUESTIONS: [(&str, &str, &[&str]); 5] = [
+    (
+        "goal",
+        "What's your main goal (build muscle, get stronger, lose fat, or general fitness) and how long have you been training?",
+        &[],
+    ),
     (
         "schedule",
-        "How many days a week do you want to train, and which days work?",
-        &["weekly_target_sessions", "weekdays_allowed"],
+        "How many days a week do you want to train, which days, how long per session, and what time window works?",
+        &[
+            "weekly_target_sessions",
+            "weekdays_allowed",
+            "preferred_workout_minutes",
+            "earliest_workout_start",
+            "latest_workout_finish",
+        ],
     ),
-    ("session_length", "How long can one gym session be?", &["preferred_workout_minutes"]),
     (
-        "time_window",
-        "When can you train: earliest start and latest finish?",
-        &["earliest_workout_start", "latest_workout_finish"],
+        "where",
+        "Where do you train (full gym, basic gym, or at home)? If a gym, how long to get ready and get there (address optional)?",
+        &["prep_minutes", "commute_to_gym_minutes"],
     ),
-    (
-        "travel",
-        "Which gym (address), and how long do you need to get ready and to get there?",
-        &["gym_address", "prep_minutes", "commute_to_gym_minutes"],
-    ),
-    ("equipment", "Where do you train: full gym, basic gym, or at home?", &[]),
+    ("preferences", "Do you use kg or lb, and what's your timezone?", &["weight_unit", "timezone"]),
     ("limitations", "Any injuries or exercises you want to avoid?", &[]),
 ];
 
@@ -110,35 +115,76 @@ fn missing(row: &OnboardingState) -> Vec<&'static str> {
     QUESTIONS.iter().map(|q| q.0).filter(|key| row.interview_json.get(*key).is_none()).collect()
 }
 
+fn step_and_instruction(
+    row: &OnboardingState,
+    missing: &[&'static str],
+    runtime_enabled: bool,
+) -> (&'static str, &'static str) {
+    // Once finished, stay READY regardless of later question or profile changes.
+    if row.completed_fingerprint.is_some() {
+        return (
+            "READY",
+            if runtime_enabled {
+                "Setup done; reminders and weekly planning are on (the week drafts within a minute). \
+                 Give one short wrap-up with a few tips (voice notes, scale photos, Strong/Hevy CSV import, Gym app button, /help). \
+                 Calendar writes stay opt-in."
+            } else {
+                "Setup done. Runtime reminders are currently off; turn them on when the owner asks. \
+                 Calendar writes stay opt-in."
+            },
+        );
+    }
+    if !missing.is_empty() {
+        let prompt = QUESTIONS.iter().find(|q| q.0 == missing[0]).map_or("", |q| q.1);
+        return ("INTERVIEW", prompt);
+    }
+    if row.split_json.is_empty() {
+        return ("PLAN", "Do you have a workout plan? Send a photo, CSV export, or I'll build one for you.");
+    }
+    ("REVIEW", "Summarise the answers and split in one short message; finish when the owner confirms.")
+}
+
 /// Where setup stands: step, next question, answers, profile, split and the review fingerprint.
 /// Setup is done once the owner confirmed the summary; it never restarts.
 pub fn finished(db: &Connection) -> Result<bool> {
     Ok(OnboardingState::get(db, 1)?.is_some_and(|o| o.completed_fingerprint.is_some()))
 }
 
+/// Lightweight setup summary for `context::snapshot` (None once finished). Avoids loading templates or hashing.
+pub fn prompt_summary(db: &Connection) -> Result<Option<String>> {
+    let row = state(db)?;
+    if row.completed_fingerprint.is_some() {
+        return Ok(None);
+    }
+    let missing = missing(&row);
+    let (step, instruction) = step_and_instruction(&row, &missing, false);
+    let line = match step {
+        "INTERVIEW" => format!(
+            "Setup: INTERVIEW ({}/{} done) · next: {} (\"{instruction}\") · missing: {}.",
+            QUESTIONS.len() - missing.len(),
+            QUESTIONS.len(),
+            missing[0],
+            missing.join(", ")
+        ),
+        "PLAN" => format!("Setup: PLAN · {instruction}"),
+        _ => format!(
+            "Setup: REVIEW · {instruction} (call onboarding_status for review_fingerprint before onboarding_finish)"
+        ),
+    };
+    Ok(Some(line))
+}
+
 pub fn status(db: &Connection) -> Result<Value> {
     let row = state(db)?;
     let missing = missing(&row);
-    let ready = missing.is_empty() && !row.split_json.is_empty() && row.completed_fingerprint.is_some();
-    let step = if ready {
-        "READY"
-    } else if !missing.is_empty() {
-        "INTERVIEW"
-    } else if row.split_json.is_empty() {
-        "PLAN"
-    } else {
-        "REVIEW"
-    };
-    let instruction = match step {
-        "INTERVIEW" => QUESTIONS.iter().find(|q| q.0 == missing[0]).map_or("", |q| q.1),
-        "PLAN" => "Do you have a workout plan? Send a photo, or I'll build one for you.",
-        "REVIEW" => "Summarise the answers and split in one short message; finish when the owner confirms.",
-        _ => "Setup done. Plan the week; calendar publication still needs its own approval.",
-    };
+    let ready = row.completed_fingerprint.is_some();
     let settings = RuntimeSettings::get(db, 1)?;
+    let runtime_enabled = settings.as_ref().is_some_and(|s| s.enabled);
+    let (step, instruction) = step_and_instruction(&row, &missing, runtime_enabled);
     let fingerprint = if row.split_json.is_empty() { None } else { Some(review_fingerprint(db, &row)?) };
     Ok(json!({
-        "step": step, "ready": ready, "next_question": missing.first(), "missing": missing,
+        "step": step, "ready": ready, "next_question": (!ready).then(|| missing.first().copied()).flatten(),
+        "missing": if ready { vec![] } else { missing },
         "answers": row.interview_json.0, "profile": get_profile(db)?, "split": row.split_json.0, "plan": row.plan_text, "templates": template_options(db)?,
         "review_fingerprint": fingerprint,
         "calendar_writes_enabled": settings.as_ref().is_some_and(|s| s.calendar_writes_enabled),
@@ -168,6 +214,25 @@ fn apply_profile(db: &Connection, changes: &Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
+/// Enable reminders and weekly planning on the first transition to finished, only when no runtime row
+/// exists yet (never overrides a later pause). Calendar writes and crowd polling stay off.
+fn enable_runtime_once(db: &Connection) -> Result<()> {
+    if RuntimeSettings::get(db, 1)?.is_some() {
+        return Ok(());
+    }
+    if let Ok(owner) = crate::config::owner_id() {
+        RuntimeSettings {
+            id: 1,
+            recipient: owner.to_string(),
+            enabled: true,
+            calendar_writes_enabled: false,
+            crowd_polling_enabled: false,
+        }
+        .insert(db)?;
+    }
+    Ok(())
+}
+
 /// Answer questions, confirm the plan or finish. Mutation result envelope with the new `status`.
 pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Result<Value> {
     let (operation, intent) = match &update {
@@ -184,6 +249,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
     };
     mutate(db, &format!("onboarding.{operation}"), request_id, intent, now, || {
         let mut row = state(db)?;
+        let mut needs_profile: Map<String, Value> = Map::new();
         match &update {
             Update::Answer { answers, profile } => {
                 if answers.is_empty() {
@@ -201,24 +267,37 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                 if answers.values().any(|v| v.as_str().is_none_or(|s| !(1..=300).contains(&s.trim().chars().count()))) {
                     crate::bail!("ONBOARDING_ANSWER_REQUIRED", "Answers are short owner-stated text (1–300 chars)");
                 }
-                let needed: BTreeSet<&str> = QUESTIONS
-                    .iter()
-                    .filter(|q| answers.contains_key(q.0))
-                    .flat_map(|q| q.2.iter().copied())
-                    .filter(|f| !profile.is_some_and(|p| p.contains_key(*f)))
-                    .collect();
-                if !needed.is_empty() {
+                // Save every answer whose required profile fields were supplied; report any incomplete
+                // ones instead of rejecting the whole batch (#114).
+                let mut accepted: Vec<(&String, &Value)> = Vec::new();
+                for (key, value) in answers.iter() {
+                    let required = QUESTIONS.iter().find(|q| q.0 == key.as_str()).map_or(&[][..], |q| q.2);
+                    let lacking: Vec<&str> =
+                        required.iter().copied().filter(|f| !profile.is_some_and(|p| p.contains_key(*f))).collect();
+                    if lacking.is_empty() {
+                        accepted.push((key, value));
+                    } else {
+                        needs_profile.insert(key.clone(), json!(lacking));
+                    }
+                }
+                if accepted.is_empty() {
+                    let fields: BTreeSet<&str> = needs_profile
+                        .values()
+                        .filter_map(Value::as_array)
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
                     crate::bail!(
                         "ONBOARDING_PROFILE_REQUIRED",
                         "Also set profile fields: {}",
-                        needed.into_iter().collect::<Vec<_>>().join(", ")
+                        fields.into_iter().collect::<Vec<_>>().join(", ")
                     );
                 }
                 if let Some(profile) = profile.filter(|p| !p.is_empty()) {
                     apply_profile(db, profile)?;
                 }
                 if let Some(interview) = row.interview_json.as_object_mut() {
-                    for (key, value) in answers.iter() {
+                    for (key, value) in accepted {
                         interview.insert(key.clone(), json!(value.as_str().unwrap_or_default().trim()));
                     }
                 }
@@ -257,17 +336,26 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                         "Finish the interview and confirm a plan, then use the current review fingerprint"
                     );
                 }
+                let first_finish = row.completed_fingerprint.is_none();
                 row.completed_fingerprint = fingerprint.map(String::from);
+                if first_finish {
+                    enable_runtime_once(db)?;
+                }
             }
         }
         row.update(db)?;
-        status(db)
+        let mut out = status(db)?;
+        if !needs_profile.is_empty() {
+            out["needs_profile"] = Value::Object(needs_profile);
+        }
+        Ok(out)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::WeightUnit;
     use crate::db::test::db;
     use crate::domain::templates::{Template, import_template};
     use crate::domain::workout::tests::{at, spec};
@@ -298,24 +386,38 @@ mod tests {
     fn interview_plan_review_finish() {
         let db = db();
         assert_eq!(status(&db).unwrap()["next_question"], "goal");
-        let schedule = object(
-            json!({"schedule": "3x, Mon/Wed/Fri", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"}),
-        );
-        let err = update(&db, Update::Answer { answers: &schedule, profile: None }, at(0), "no-profile").unwrap_err();
+        // Batch with one missing profile answer still saves valid answers (#114).
+        let mixed = object(json!({"goal": "Build muscle, 2 years", "schedule": "3x, Mon/Wed/Fri"}));
+        let partial = update(&db, Update::Answer { answers: &mixed, profile: None }, at(0), "mixed").unwrap();
+        assert_eq!(partial["data"]["answers"]["goal"], "Build muscle, 2 years");
+        assert!(partial["data"]["needs_profile"]["schedule"].is_array());
+        // Purely missing profile fields with no valid answer fails.
+        let sched_only = object(json!({"schedule": "3x, Mon/Wed/Fri"}));
+        let err = update(&db, Update::Answer { answers: &sched_only, profile: None }, at(0), "no-profile").unwrap_err();
         assert_eq!(err.code(), "ONBOARDING_PROFILE_REQUIRED");
-        let basics = object(
-            json!({"goal": "Build muscle", "experience": "2 years", "equipment": "full gym", "limitations": "none"}),
-        );
-        update(&db, Update::Answer { answers: &basics, profile: None }, at(0), "basics").unwrap();
-        let profile = object(
-            json!({"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60, "earliest_workout_start": "10:30",
-            "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15, "gym_address": "Example Str. 1, Berlin"}),
-        );
-        let result =
-            update(&db, Update::Answer { answers: &schedule, profile: Some(&profile) }, at(0), "schedule").unwrap();
+        // Home gym needs no gym_address and zeros commute.
+        let rest = object(json!({
+            "schedule": "3x, Mon/Wed/Fri, 60 min, 10:30-22:00",
+            "where": "at home",
+            "preferences": "lb, America/New_York",
+            "limitations": "none"
+        }));
+        let profile = object(json!({
+            "weekly_target_sessions": 3,
+            "weekdays_allowed": [0, 2, 4],
+            "preferred_workout_minutes": 60,
+            "earliest_workout_start": "10:30",
+            "latest_workout_finish": "22:00",
+            "prep_minutes": 5,
+            "commute_to_gym_minutes": 0,
+            "weight_unit": "lb",
+            "timezone": "America/New_York"
+        }));
+        let result = update(&db, Update::Answer { answers: &rest, profile: Some(&profile) }, at(0), "rest").unwrap();
         assert_eq!(result["data"]["step"], "PLAN");
         let p = get_profile(&db).unwrap();
-        assert_eq!((p.weekly_max_sessions, p.minimum_workout_minutes, p.commute_home_minutes), (3, 45, 15));
+        assert_eq!((p.weekly_max_sessions, p.minimum_workout_minutes, p.commute_home_minutes), (3, 45, 0));
+        assert_eq!((p.weight_unit, p.timezone.as_str(), p.gym_address), (WeightUnit::Lb, "America/New_York", None));
         template(&db, "demo", "demo");
         assert_eq!(
             update(&db, Update::ConfirmPlan { templates: &["demo".into()], plan: None }, at(0), "demo")
@@ -337,73 +439,51 @@ mod tests {
             (done["data"]["ready"].as_bool(), done["data"]["calendar_writes_enabled"].as_bool()),
             (Some(true), Some(false))
         );
-        // Later edits don't send the owner back into setup.
-        template(&db, "push", "user-edited");
+        // Later edits or old interview_json keys don't send the owner back into setup.
+        db.execute("UPDATE onboarding_state SET interview_json = '{\"legacy\": \"yes\"}' WHERE id = 1", []).unwrap();
         assert_eq!(status(&db).unwrap()["step"], "READY");
+        assert!(prompt_summary(&db).unwrap().is_none());
     }
 
     #[test]
-    fn interview_is_mandatory_idempotent_and_finish_grants_no_authority() {
+    fn finish_never_overrides_paused_runtime_and_is_idempotent() {
         let db = db();
-        let current = status(&db).unwrap();
-        assert_eq!(current["step"], "INTERVIEW");
-        assert_eq!(current["missing"].as_array().unwrap().len(), QUESTIONS.len());
-        assert!(current["instruction"].as_str().unwrap().starts_with("What's your main goal"));
-        assert!(
-            update(&db, Update::Finish(None), at(0), "too-soon")
-                .unwrap_err()
-                .to_string()
-                .contains("Finish the interview")
-        );
-        let goal = object(json!({"goal": "Fitness"}));
-        let first = update(&db, Update::Answer { answers: &goal, profile: None }, at(0), "one").unwrap();
-        assert_eq!(update(&db, Update::Answer { answers: &goal, profile: None }, at(0), "one").unwrap(), first);
-        let events: i64 = db.query_row("SELECT count(*) FROM agent_event", [], |r| r.get(0)).unwrap();
-        assert_eq!(events, 1);
-        let other = object(json!({"goal": "Strength"}));
+        // Pre-seed a paused runtime row: finishing must never unpause it.
+        RuntimeSettings { enabled: false, ..crate::db::test::authority() }.insert(&db).unwrap();
+        let answers = object(json!({
+            "goal": "Fitness",
+            "schedule": "3x",
+            "where": "full gym",
+            "preferences": "kg, Europe/Berlin",
+            "limitations": "none"
+        }));
+        let profile = object(json!({
+            "weekly_target_sessions": 3,
+            "weekdays_allowed": [0, 2, 4],
+            "preferred_workout_minutes": 60,
+            "earliest_workout_start": "10:30",
+            "latest_workout_finish": "22:00",
+            "prep_minutes": 10,
+            "commute_to_gym_minutes": 15,
+            "weight_unit": "kg",
+            "timezone": "Europe/Berlin"
+        }));
+        let first = update(&db, Update::Answer { answers: &answers, profile: Some(&profile) }, at(0), "one").unwrap();
         assert_eq!(
-            update(&db, Update::Answer { answers: &other, profile: None }, at(0), "one").unwrap_err().code(),
+            update(&db, Update::Answer { answers: &answers, profile: Some(&profile) }, at(0), "one").unwrap(),
+            first
+        );
+        assert_eq!(
+            update(&db, Update::Answer { answers: &object(json!({"goal": "Strength"})), profile: None }, at(0), "one")
+                .unwrap_err()
+                .code(),
             "IDEMPOTENCY_CONFLICT"
         );
-        let rest = object(
-            json!({"experience": "2 years", "equipment": "full gym", "limitations": "none", "schedule": "3x", "session_length": "60 min", "time_window": "10:30 to 22:00", "travel": "10 min prep, 15 min drive"}),
-        );
-        let profile = object(
-            json!({"weekly_target_sessions": 3, "weekdays_allowed": [0, 2, 4], "preferred_workout_minutes": 60, "earliest_workout_start": "10:30", "latest_workout_finish": "22:00", "prep_minutes": 10, "commute_to_gym_minutes": 15, "gym_address": "Example Str. 1, Berlin"}),
-        );
-        update(&db, Update::Answer { answers: &rest, profile: Some(&profile) }, at(0), "rest").unwrap();
         template(&db, "push", "user");
-        template(&db, "pull", "user");
-        let review =
-            update(&db, Update::ConfirmPlan { templates: &["push".into(), "pull".into()], plan: None }, at(0), "plan")
-                .unwrap()["data"]
-                .clone();
-        assert_eq!(review["split"], json!(["push", "pull"]));
-        update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
-        let settings: i64 = db.query_row("SELECT count(*) FROM runtime_settings", [], |r| r.get(0)).unwrap();
-        let workouts: i64 = db.query_row("SELECT count(*) FROM workout_session", [], |r| r.get(0)).unwrap();
-        assert_eq!((settings, workouts), (0, 0));
-        // A later profile tweak (e.g. a sleep floor) doesn't send the owner back into setup.
-        crate::domain::profile::update_profile(&db, &object(json!({"earliest_workout_start": "11:00"}))).unwrap();
-        assert_eq!(status(&db).unwrap()["step"], "READY");
-        // The owner changes their plan later: still ready, and a template change keeps the words.
-        template(&db, "cardio", "user");
-        let words = "3 a week, one always cardio, the others rotate push/pull";
-        update(
-            &db,
-            Update::ConfirmPlan { templates: &["push".into(), "pull".into(), "cardio".into()], plan: Some(words) },
-            at(0),
-            "replan",
-        )
-        .unwrap();
-        let later = update(
-            &db,
-            Update::ConfirmPlan { templates: &["push".into(), "cardio".into()], plan: None },
-            at(0),
-            "drop-pull",
-        )
-        .unwrap()["data"]
+        let review = update(&db, Update::ConfirmPlan { templates: &["push".into()], plan: None }, at(0), "plan")
+            .unwrap()["data"]
             .clone();
-        assert_eq!((later["step"].as_str(), later["plan"].as_str()), (Some("READY"), Some(words)));
+        update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
+        assert!(!RuntimeSettings::get(&db, 1).unwrap().unwrap().enabled);
     }
 }

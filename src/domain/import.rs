@@ -47,8 +47,8 @@ pub enum Unit {
 impl Unit {
     fn kg(self, weight: f64) -> f64 {
         match self {
-            Unit::Kg => weight,
-            Unit::Lb => (weight * 0.453_592_37 * 100.0).round() / 100.0,
+            Unit::Kg => crate::db::models::WeightUnit::Kg.to_kg(weight),
+            Unit::Lb => crate::db::models::WeightUnit::Lb.to_kg(weight),
         }
     }
 }
