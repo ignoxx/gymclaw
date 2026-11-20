@@ -132,6 +132,7 @@ pub async fn serve(config: Config) -> Result<()> {
         db_path: db_path.clone(),
         data_dir: config.data_dir.clone(),
         recipient: config.owner_id.to_string(),
+        crowd_config: config.crowd_config.clone(),
         tg: tg.clone(),
         wake: wake.clone(),
         health: health.clone(),

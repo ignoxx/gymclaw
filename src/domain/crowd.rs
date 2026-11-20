@@ -35,6 +35,19 @@ fn rating_score(rating: &str) -> Option<f64> {
     RATINGS.iter().find(|(r, _)| *r == rating).map(|(_, s)| *s)
 }
 
+/// Whether post-workout cards should ask "How busy was the gym?".
+/// Home trainers (0 commute, no gym address) with crowd polling off skip the prompt;
+/// gym-goers and anyone with crowd polling enabled still see it.
+pub fn should_ask_feedback(db: &Connection) -> Result<bool> {
+    if crate::db::models::RuntimeSettings::get(db, 1)?.is_some_and(|s| s.crowd_polling_enabled) {
+        return Ok(true);
+    }
+    let Some(row) = crate::db::models::UserProfile::get(db, 1)? else {
+        return Ok(true);
+    };
+    Ok(row.commute_to_gym_minutes > 0 || row.gym_address.is_some())
+}
+
 /// Owner-facing word for a 0–1 crowd score.
 pub fn feel(score: Option<f64>) -> Option<&'static str> {
     let score = score?;
@@ -716,6 +729,32 @@ mod tests {
         assert_eq!(calibrated_count(30.0, &pairs).2, "personalized_isotonic");
         assert!(calibrated_count(500.0, &pairs).1 < calibrated_count(50.0, &pairs).1);
         assert_eq!(calibrated_count(100.0, &[]).0, None);
+    }
+
+    #[test]
+    fn should_ask_feedback_skips_home_trainers_unless_crowd_used() {
+        let db = crate::db::test::db();
+        // Default profile has commute_to_gym_minutes = 20 -> gym-goer, ask.
+        assert!(should_ask_feedback(&db).unwrap());
+
+        // Home trainer (0 commute, no address, polling off, no crowd data) -> skip.
+        let home = json!({"commute_to_gym_minutes": 0, "gym_address": null}).as_object().unwrap().clone();
+        crate::domain::profile::update_profile(&db, &home).unwrap();
+        assert!(!should_ask_feedback(&db).unwrap());
+
+        // Setting a gym address turns it back on.
+        let with_addr = json!({"gym_address": "Main St 1"}).as_object().unwrap().clone();
+        crate::domain::profile::update_profile(&db, &with_addr).unwrap();
+        assert!(should_ask_feedback(&db).unwrap());
+
+        // Clearing address again + enabling crowd polling -> ask.
+        let no_addr = json!({"gym_address": null}).as_object().unwrap().clone();
+        crate::domain::profile::update_profile(&db, &no_addr).unwrap();
+        assert!(!should_ask_feedback(&db).unwrap());
+        let mut auth = crate::db::test::authority();
+        auth.crowd_polling_enabled = true;
+        auth.insert(&db).unwrap();
+        assert!(should_ask_feedback(&db).unwrap());
     }
 
     #[test]

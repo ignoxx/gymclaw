@@ -9,7 +9,9 @@ use crate::domain::calendar::{auth_alert, sync_calendar};
 use crate::domain::calendar_writes::{apply_write, pending_writes};
 use crate::domain::{crowd, personal_calendar, weekly};
 use crate::error::Result;
-use crate::providers::crowd::{from_environment, run_command};
+use std::path::Path;
+
+use crate::providers::crowd::{from_path, run_command};
 use crate::providers::google::google_provider;
 use crate::providers::http::{Net, Transport};
 use crate::runtime::outbox::{prepare_event_message, runtime_authority};
@@ -91,11 +93,11 @@ pub fn weekly(db: &Connection, now: Ts) -> Result<Value> {
     weekly::weekly_plan(db, &template, now)
 }
 
-/// Every 15 min when crowd polling is enabled: read the gym's live count. A failed read is returned,
-/// not raised, so its failure health commits (the stale alert in `watch` tells the owner).
-pub fn poll_crowd(db: &Connection, _now: Ts) -> Result<Value> {
+/// Every 15 min when crowd polling is enabled: read the gym's live count from `config_path`.
+/// A failed read is returned, not raised, so its failure health commits (the stale alert in `watch` tells the owner).
+pub fn poll_crowd(db: &Connection, config_path: &Path, _now: Ts) -> Result<Value> {
     let net = Net::new()?;
-    let provider = from_environment(&net, &run_command)?;
+    let provider = from_path(config_path, &net, &run_command)?;
     // Retrieval time is taken after the response.
     crowd::poll(db, provider.as_ref(), None)
 }

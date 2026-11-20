@@ -347,15 +347,24 @@ impl CrowdProvider for CommandCountProvider<'_> {
     }
 }
 
-/// The configured crowd provider, or GYM_API_NOT_CONFIGURED. Config values never appear in errors.
-/// Production: `from_environment(&Net::new()?, &run_command)`.
-pub fn from_environment<'a>(transport: &'a dyn Transport, run: &'a Runner) -> Result<Box<dyn CrowdProvider + 'a>> {
-    let path = crate::config::crowd_config();
+/// Load a crowd provider from a JSON config file, or GYM_API_NOT_CONFIGURED.
+/// Config values never appear in errors.
+pub fn from_path<'a>(
+    path: &std::path::Path,
+    transport: &'a dyn Transport,
+    run: &'a Runner,
+) -> Result<Box<dyn CrowdProvider + 'a>> {
     let not_configured =
         || Error::domain("GYM_API_NOT_CONFIGURED", "No valid crowd source configured; see docs/crowd.md");
     let values: Value =
-        std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).ok_or_else(not_configured)?;
+        std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).ok_or_else(not_configured)?;
     from_config(values, transport, run)
+}
+
+/// The configured crowd provider, or GYM_API_NOT_CONFIGURED. Config values never appear in errors.
+/// Production: `from_environment(&Net::new()?, &run_command)`.
+pub fn from_environment<'a>(transport: &'a dyn Transport, run: &'a Runner) -> Result<Box<dyn CrowdProvider + 'a>> {
+    from_path(&crate::config::crowd_config(), transport, run)
 }
 
 /// The provider a crowd-config JSON value describes (see the module docs).
@@ -480,6 +489,17 @@ mod tests {
             id(json!({"kind": "command", "argv": ["python3", "data/crowd-source.py"]})).unwrap(),
             "command:python3 data/crowd-source.py"
         );
+        let dir = std::env::temp_dir().join(format!("gymclaw-crowd-path-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("crowd.json");
+        std::fs::write(&cfg, r#"{"kind": "mysports", "studio_id": "42", "tenant": "demo"}"#).unwrap();
+        let loaded = from_path(&cfg, &transport, &run).unwrap();
+        assert_eq!(loaded.provider_id(), "mysports:demo:42");
+        assert_eq!(
+            from_path(&dir.join("missing.json"), &transport, &run).err().unwrap().code(),
+            "GYM_API_NOT_CONFIGURED"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
         for bad in [
             json!({"studio_id": "private-invalid-value", "tenant": "fixture-tenant"}),
             json!({"kind": "mysports", "studio_id": "1", "tenant": "t", "note": "x"}),

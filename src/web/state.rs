@@ -247,6 +247,7 @@ fn history(db: &Connection, tz: &TimeZone, unit: WeightUnit) -> Result<Vec<Value
         "WHERE status = 'PLAN_UPDATED' AND completed_at IS NOT NULL ORDER BY completed_at",
         [],
     )?;
+    let ask_crowd = crowd::should_ask_feedback(db)?;
     let ratings: HashMap<String, String> =
         CrowdFeedback::select(db, "", [])?.into_iter().map(|f| (f.workout_session_id, f.rating)).collect();
     // Early workouts predate guide_ids; current templates know each exercise's illustration/muscle.
@@ -304,7 +305,7 @@ fn history(db: &Connection, tz: &TimeZone, unit: WeightUnit) -> Result<Vec<Value
         result.push(json!({"id": w.id, "date": started_at.local(tz).date().to_string(), "label": fmt(started_at, tz, "%a %-d %b"), "time": fmt(started_at, tz, "%H:%M"),
             "template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "minutes": seconds.div_euclid(60),
             "sets": sets, "volume": round(volume, 0) as i64, "prs": prs, "crowd": ratings.get(&w.id).map(|r| label(r)), "exercises": exercises,
-            "finished_at": w.completed_at, "rate": if ratings.contains_key(&w.id) { vec![] } else { coach::crowd_buttons(&w.id)? }}));
+            "finished_at": w.completed_at, "rate": if !ask_crowd || ratings.contains_key(&w.id) { vec![] } else { coach::crowd_buttons(&w.id)? }}));
     }
     // The newest workout's last set can still be fixed from its "done" card.
     if let Some(newest) = result.last_mut() {

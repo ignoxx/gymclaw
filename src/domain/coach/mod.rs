@@ -407,14 +407,18 @@ fn summary_card(db: &Connection, report: &Value, now: Ts) -> Result<Card> {
             lines.push(format!(">> {}", sets_line(name, set_kind, &sets)));
         }
     }
-    lines.push("How busy was the gym?".into());
-    let buttons = crowd_buttons(workout_id)?;
+    let buttons = if crate::domain::crowd::should_ask_feedback(db)? {
+        lines.push("How busy was the gym?".into());
+        vec![crowd_buttons(workout_id)?]
+    } else {
+        vec![]
+    };
     let effect = h.lifts.iter().any(|l| l.record()).then(|| crate::telegram::EFFECT_CONFETTI.to_string());
     Ok(Card {
         effect,
         kind: CardKind::Finish,
         workout_id: Some(workout_id.to_string()),
-        ..card(lines.join("\n"), vec![buttons])
+        ..card(lines.join("\n"), buttons)
     })
 }
 
@@ -1304,6 +1308,15 @@ mod tests {
         assert_eq!(stored.text, card.text, "the agent's view of the chat shows the corrected sets");
 
         // Answered since: the card keeps the answer and has no buttons, as the tap left it.
+        // Home trainer (0 commute, no gym address) does not get asked how busy the gym was.
+        let home = json!({"commute_to_gym_minutes": 0, "gym_address": null}).as_object().unwrap().clone();
+        crate::domain::profile::update_profile(&db, &home).unwrap();
+        let home_card = summary_card(&db, &audit::report(&db, &workout_id).unwrap(), at(710)).unwrap();
+        assert!(!home_card.text.contains("How busy was the gym?"), "{}", home_card.text);
+        assert!(home_card.buttons.is_empty());
+        let gym = json!({"commute_to_gym_minutes": 20}).as_object().unwrap().clone();
+        crate::domain::profile::update_profile(&db, &gym).unwrap();
+
         db.execute("UPDATE workout_session SET crowd_feedback = 'BUSY'", []).unwrap();
         let card = finish_card_edits(&db, &workout_id, at(710)).unwrap().remove(0).card;
         assert!(card.text.ends_with("How busy was the gym?\nSaved: Busy. Thanks."), "{}", card.text);

@@ -36,6 +36,7 @@ pub struct Scheduler {
     pub db_path: PathBuf,
     pub data_dir: PathBuf,
     pub recipient: String,
+    pub crowd_config: Option<PathBuf>,
     pub tg: Arc<dyn Telegram>,
     pub wake: Arc<Notify>,
     pub health: Arc<Mutex<Health>>,
@@ -119,11 +120,14 @@ impl Scheduler {
         let r = recipient.clone();
         let recap = in_tx(&self.db_path, move |db| crate::domain::weekly::release_recap(db, &r, Ts::now(), false));
         note(&mut first_error, "recap", recap.await);
-        if authority.crowd_polling_enabled && last_crowd.is_none_or(|t| t.elapsed() >= CROWD_EVERY) {
+        if authority.crowd_polling_enabled
+            && let Some(crowd_path) = self.crowd_config.clone()
+            && last_crowd.is_none_or(|t| t.elapsed() >= CROWD_EVERY)
+        {
             *last_crowd = Some(Instant::now());
-            let poll = blocking(&self.db_path, |db| {
+            let poll = blocking(&self.db_path, move |db| {
                 let tx = crate::db::network_tx(db)?;
-                let data = ticks::poll_crowd(&tx, Ts::now())?;
+                let data = ticks::poll_crowd(&tx, &crowd_path, Ts::now())?;
                 tx.commit()?;
                 Ok(data)
             });
