@@ -26,7 +26,7 @@ DEST="${DEST:-gymclaw-turns}"
 umask 077
 mkdir -p "$DEST"
 
-# The bot's container: named or built as gymclaw (Coolify names images by app ID), not the dashboard
+# The bot's container: named or built as gymclaw, not the dashboard
 # or the egress proxy.
 if [ -z "${CONTAINER:-}" ]; then
   # shellcheck disable=SC2016 # expanded by awk on this side, not by the shell

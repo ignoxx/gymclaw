@@ -189,6 +189,7 @@ pub fn get_profile(db: &Connection) -> Result<Profile> {
         crowd_preference_weight: 0.0,
         gym_address: None,
         weight_unit: WeightUnit::Kg,
+        ics_token: Some(crate::db::new_id().replace('-', "")),
         created_at: now,
         updated_at: now,
     };
@@ -236,4 +237,9 @@ pub mod local_time {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Time, D::Error> {
         parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
+}
+
+/// Secret token for the read-only `/calendar/<token>.ics` feed, if initialized.
+pub fn ics_token(db: &Connection) -> Result<Option<String>> {
+    Ok(UserProfile::get(db, 1)?.and_then(|r| r.ics_token).filter(|t| !t.is_empty()))
 }

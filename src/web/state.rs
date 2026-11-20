@@ -495,6 +495,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     Ok(json!({
         "captured_at": now.iso(), "timezone": profile.timezone, "unit": profile.weight_unit,
         "setup_done": crate::domain::onboarding::finished(db)?,
+        "ics_path": crate::domain::profile::ics_token(db)?.map(|t| format!("/calendar/{t}.ics")),
         "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now, profile.weight_unit)?, "workout": active_workout(db, &tz, now)?,
         "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db, profile.weight_unit)?,

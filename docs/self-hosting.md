@@ -8,8 +8,8 @@ gymclaw is a single-owner app: one deployment, one Telegram user, one gym. Run y
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric Telegram user ID
   (for example from [@userinfobot](https://t.me/userinfobot)).
 - An [OpenRouter](https://openrouter.ai) API key. Set a spending limit on it.
-- A Google account with a **dedicated** calendar for workouts, plus a Google Cloud OAuth client
-  ([Google Calendar](#google-calendar)).
+- Optional: a read-only workout calendar subscription (`/calendar/<token>.ics` from the dashboard),
+  a read-only personal calendar ICS feed, or two-way [Google Calendar](#google-calendar-optional).
 - Optional: a live check-in count for your gym ([crowd data](crowd.md)). Without it, gymclaw
   still plans and coaches; it just can't pick quiet hours from data.
 
@@ -40,7 +40,7 @@ Every setting is an environment variable; this table is the full list, and `.env
 | `GYMCLAW_MODEL_VISION` | no | Reads photos (scale, plan screenshots). Default: `GYMCLAW_MODEL`. |
 | `GYMCLAW_MODEL_AUDIO` | no | Transcribes voice notes; needs audio input. Default `google/gemini-3.5-flash-lite`. Adds ~1–3 s before a spoken set is logged. |
 | `GOOGLE_CALENDAR_ID` | no | Read only by `calendar-auth` when `--calendar-id` isn't passed. |
-| `GYMCLAW_DASHBOARD_HOST` | no | Docker: the dashboard's hostname behind Traefik. The bot's Telegram menu button opens it as a Mini App. |
+| `GYMCLAW_DASHBOARD_HOST` | no | Public HTTPS hostname of the dashboard behind your reverse proxy. The bot's Telegram menu button opens it as a Mini App. |
 | `EGRESS_EXTRA_HOSTS` | no | Docker: extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
 | `GYMCLAW_IMAGE_TAG` | no | Docker: image tag to run. Default `main`; a commit sha rolls back. |
 | `GYMCLAW_DATA_DIR`, `GYMCLAW_DB` | no | Data directory (default `data`) and DB (default `<data dir>/gymclaw.db`). |
@@ -51,18 +51,19 @@ Every setting is an environment variable; this table is the full list, and `.env
 
 The stack is three containers: gymclaw (one Rust binary: bot, agent, coach, scheduler), an egress
 proxy with a host allowlist, and the dashboard, the Mini App behind the bot's "Gym" menu button.
-Coolify steps, backups and moving hosts: [deploy/README.md](../deploy/README.md).
+Reverse-proxy setup, backups and moving hosts: [deploy/README.md](../deploy/README.md).
 
 ## First run
 
-1. **Connect Google Calendar** ([below](#google-calendar)).
-2. **Say hi to your bot.** It runs a short setup interview: goal, experience, days, time window, gym
-   and travel time, equipment, injuries. Then send a photo of your plan or let it build one. Every
-   exercise is mapped to an illustrated catalog entry; unknown weights start at 0 and are learned
-   from the first session.
-3. **Turn on the runtime** ([below](#runtime-authority)).
+1. **Verify the stack:** `docker compose exec gymclaw gymclaw doctor`
+2. **Open your bot in Telegram and tap Start.** It runs a short 5-question setup interview (goal,
+   schedule, gym/home, kg/lb & timezone, limitations). Send a photo of your plan, a Strong/Hevy CSV
+   export, or let it build one. Finishing setup turns on reminders and weekly planning automatically.
+3. **Optional integrations:** subscribe to your workouts from any calendar app via the dashboard's
+   read-only `/calendar/<token>.ics` feed, connect a read-only [personal calendar](#personal-calendar-read-only)
+   so gymclaw avoids your meetings, or enable two-way [Google Calendar](#google-calendar-optional).
 
-## Google Calendar
+## Google Calendar (optional)
 
 Use one dedicated Google calendar for gymclaw's workouts. Blockers you add there count, and so does
 an optional read-only [personal calendar](#personal-calendar-read-only). Moving, resizing or

@@ -269,6 +269,12 @@ impl CrowdModel {
 }
 
 /// The crowd source row, created on first use. A DB bound to another gym/provider refuses to mix data.
+/// Clear the bound gym crowd source so a different gym/source config can be used without a fresh DB.
+pub fn reset_source(db: &Connection) -> Result<bool> {
+    let removed = db.execute("DELETE FROM crowd_source_state WHERE source = ?1", [SOURCE])?;
+    Ok(removed > 0)
+}
+
 fn bind_source(db: &Connection, source: &str, provider_id: &str) -> Result<CrowdSourceState> {
     match CrowdSourceState::get(db, source)? {
         Some(state) if state.provider_id != provider_id => {

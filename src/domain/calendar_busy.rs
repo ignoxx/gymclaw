@@ -16,7 +16,10 @@ use crate::providers::recurrence::{self, When};
 use crate::time::{Ts, zone};
 
 pub fn busy_intervals(db: &Connection, start: Ts, end: Ts) -> Result<Vec<Interval>> {
-    let calendar_zone = CalendarSyncState::get(db, 1)?.map(|s| s.timezone).unwrap_or_else(|| "Europe/Berlin".into());
+    let calendar_zone = match CalendarSyncState::get(db, 1)? {
+        Some(s) => s.timezone,
+        None => crate::domain::profile::get_profile(db)?.timezone,
+    };
     let snapshots = CalendarEventSnapshot::select(db, "ORDER BY rowid", [])?;
     let own_ids: HashSet<String> = PlannedSession::select(db, "WHERE calendar_event_id IS NOT NULL", [])?
         .into_iter()

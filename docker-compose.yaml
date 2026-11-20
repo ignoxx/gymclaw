@@ -1,6 +1,7 @@
-# gymclaw on a single host (Coolify "Docker Compose" build pack, or plain `docker compose up`).
+# gymclaw on a single host (`docker compose up -d`).
 # gymclaw sits on an internal network with no internet route; `egress` is its only way out.
-# Setup and migration: deploy/README.md
+# To expose the dashboard locally or behind your reverse proxy, see docker-compose.override.example.yaml
+# and deploy/README.md.
 services:
   gymclaw:
     # Built once by .github/workflows/image.yml; the host only pulls. Local build: deploy/README.md.
@@ -12,7 +13,7 @@ services:
       GYMCLAW_TELEGRAM_USER_ID: ${GYMCLAW_TELEGRAM_USER_ID:?}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?}
-      # Only `gymclaw calendar-auth` reads it; afterwards the DB stays bound to that calendar.
+      # Optional: only `gymclaw calendar-auth` reads it; afterwards the DB stays bound to that calendar.
       GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-}
       # Empty means unset: defaults live in src/config.rs (list: docs/self-hosting.md).
       GYMCLAW_MODEL: ${GYMCLAW_MODEL:-}
@@ -45,15 +46,19 @@ services:
     mem_limit: 1536m
     pids_limit: 512
 
-  # Dashboard (the Mini App): reads the DB; its writes are DASHBOARD_TOOLS and the live workout's steps
-  # (`POST /api/coach`) in src/web/mod.rs. No internet and no published port: only the reverse proxy
-  # reaches it, and only for Tailscale clients (100.64.0.0/10). See deploy/README.md.
+  # Dashboard (the Mini App): serves the UI, authenticates /api/* with Telegram Mini App initData
+  # (HMAC with TELEGRAM_BOT_TOKEN for GYMCLAW_TELEGRAM_USER_ID) on non-loopback hosts, and serves
+  # the read-only /calendar/<token>.ics subscription feed. No internet access; attach your reverse
+  # proxy or publish 127.0.0.1:8766 via docker-compose.override.yaml.
   dashboard:
     image: *image
     pull_policy: always
     restart: unless-stopped
     entrypoint: ["tini", "-s", "--"]
     command: ["gymclaw", "dashboard", "--addr", "0.0.0.0:8766", "--allowed-host", "${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}"]
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
+      GYMCLAW_TELEGRAM_USER_ID: ${GYMCLAW_TELEGRAM_USER_ID:?}
     healthcheck:
       test: [CMD, curl, -fsS, -o, /dev/null, "http://127.0.0.1:8766/"]
       interval: 60s
@@ -66,19 +71,6 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.gymclaw-dashboard.rule=Host(`${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}`)
-      - traefik.http.routers.gymclaw-dashboard.entrypoints=https
-      - traefik.http.routers.gymclaw-dashboard.tls=true
-      - traefik.http.routers.gymclaw-dashboard.tls.certresolver=letsencrypt
-      - traefik.http.routers.gymclaw-dashboard.middlewares=gymclaw-tailnet
-      - traefik.http.routers.gymclaw-dashboard-http.rule=Host(`${GYMCLAW_DASHBOARD_HOST:-gymclaw.localhost}`)
-      - traefik.http.routers.gymclaw-dashboard-http.entrypoints=http
-      - traefik.http.routers.gymclaw-dashboard-http.middlewares=gymclaw-tailnet,gymclaw-https
-      - traefik.http.middlewares.gymclaw-tailnet.ipallowlist.sourcerange=100.64.0.0/10,fd7a:115c:a1e0::/48
-      - traefik.http.middlewares.gymclaw-https.redirectscheme.scheme=https
-      - traefik.http.services.gymclaw-dashboard.loadbalancer.server.port=8766
 
   egress:
     build: deploy/egress

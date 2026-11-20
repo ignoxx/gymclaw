@@ -27,10 +27,9 @@ Only GET, HTTPS, no redirects. The count must be a whole nonnegative number; any
 recorded as a failed read, never stored. Errors never echo the config or response.
 
 Enable polling by asking the bot, or with
-`gymclaw call runtime_resume '{"owner_asked": true, "crowd_polling": true}'`. There is no dry-run
-read: after the next poll (at most 15 minutes), `gymclaw call crowd_status` shows whether readings
-arrive and the source health. The DB binds to the first source it reads from; switching
-sources later needs a fresh DB.
+`gymclaw call runtime_resume '{"owner_asked": true, "crowd_polling": true}'`. Run `gymclaw crowd-test` to verify your config immediately without waiting 15 minutes or writing
+to the DB. The DB binds to the first source it reads from; if you switch gyms, run
+`gymclaw crowd-reset` to clear the old source binding.
 
 **Docker:** the egress proxy only allows known hosts. Add your source's host(s) to
 `EGRESS_EXTRA_HOSTS` and redeploy. Put command scripts in `data/` so they live in the persistent

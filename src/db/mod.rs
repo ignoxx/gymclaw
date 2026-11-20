@@ -36,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/010_gym_locations.sql"),
     include_str!("migrations/011_dead_state.sql"),
     include_str!("migrations/012_weight_unit.sql"),
+    include_str!("migrations/013_ics_token.sql"),
 ];
 
 /// Read-write connection. WAL lets readers (the dashboard, a sync waiting on Google) run alongside a
@@ -118,6 +119,9 @@ fn apply(conn: &mut Connection) -> Result<()> {
     if after > before {
         crate::bail!("SCHEMA_MISMATCH", "Migrations broke {} foreign keys", after - before);
     }
+    // Seed an ICS export token for existing profiles that predate migration 013.
+    let token = new_id().replace('-', "");
+    tx.execute("UPDATE user_profile SET ics_token = ?1 WHERE ics_token IS NULL", [&token])?;
     tx.commit()?;
     Ok(())
 }
