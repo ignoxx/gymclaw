@@ -430,6 +430,10 @@ function workoutMarkers(chart, x, sessions, { start, end, now, view }) {
 }
 
 function renderGym(crowd) {
+  const panel = document.querySelector('.gym-panel');
+  const empty = !crowd.polling && !(crowd.series && crowd.series.length);
+  if (panel) panel.hidden = empty;
+  if (empty) { document.getElementById('polling-alert').hidden = true; return; }
   const health = crowd.health || { status: 'unknown' };
   document.getElementById('count').textContent = crowd.now ? crowd.now.count : '—';
   document.getElementById('count-time').textContent = crowd.now ? `${crowd.now.time} · ${ago(crowd.now.at)}` : 'No readings yet';
@@ -838,12 +842,20 @@ function renderWorkout(focus, workout) {
   focus.append(queue);
   // The rest of the app, one tap away; the tab bar steps aside mid-workout in Telegram.
   const more = el('nav', 'live-more');
-  for (const [tab, name] of [['progress', 'Progress'], ['history', 'History'], ['exercises', 'Exercises'], ['memory', 'Memory']]) {
+  for (const [tab, name] of [['progress', 'Progress'], ['history', 'History'], ['exercises', 'Exercises'], ['memory', 'Settings']]) {
     const link = el('button', 'link', name);
     link.type = 'button';
     link.addEventListener('click', () => goTab(tab));
     more.append(link);
   }
+  const end = el('button', 'link danger', 'End workout');
+  end.type = 'button';
+  end.addEventListener('click', () => {
+    const ask = 'End this workout now and save logged sets?';
+    if (tgHas('6.2')) tg.showConfirm(ask, ok => ok && coachTap('gc:end'));
+    else if (window.confirm(ask)) coachTap('gc:end');
+  });
+  more.append(end);
   focus.append(more);
   syncMain();
 }
@@ -905,6 +917,21 @@ function renderNext(focus, next) {
     list.append(row);
   }
   focus.append(list);
+  if (!next.begin && state?.plans?.length) renderStartPicker(focus, state.plans);
+}
+
+function renderStartPicker(focus, plans) {
+  const box = el('details', 'swap');
+  box.append(el('summary', '', 'Start a workout now'));
+  const actions = el('div', 'live-actions');
+  for (const plan of plans) {
+    const b = el('button', 'chip', `Start ${plan.name}`);
+    b.type = 'button';
+    b.addEventListener('click', () => send('/api/coach', { start_template: plan.id }, body => body?.ack || `Started ${plan.name}`));
+    actions.append(b);
+  }
+  box.append(actions);
+  focus.append(box);
 }
 
 /* A workout finished in the last 3 hours: its numbers, and "how busy was it?" until rated (the same
@@ -938,6 +965,7 @@ function renderNothing(focus, data) {
     focus.append(el('p', 'subtitle', `${k.this_week ?? 0} of ${data.insights.target} sessions this week${data.history[0] ? ` · last: ${data.history[0].template}, ${data.history[0].label}` : ''}`));
     focus.append(el('p', 'subtitle', 'Tell gymclaw in the chat when you want to train, and it plans the session.'));
   }
+  if (data.setup_done !== false && data.plans?.length) renderStartPicker(focus, data.plans);
   if (tg) {
     const chat = el('button', 'chip', 'Back to the chat');
     chat.type = 'button';
@@ -1084,9 +1112,15 @@ function renderMuscles(insights) {
 
 function renderHeatmap(insights) {
   const box = document.getElementById('heatmap');
+  const panel = box.closest('section');
   box.replaceChildren();
   const cells = insights.heatmap;
   const label = document.getElementById('quiet-label');
+  if (!cells.length && !state?.crowd?.polling) {
+    if (panel) panel.hidden = true;
+    return;
+  }
+  if (panel) panel.hidden = false;
   if (!cells.length) {
     label.textContent = '';
     box.append(el('p', 'empty', 'Collecting check-ins…'));
@@ -1126,6 +1160,7 @@ function renderWeight(insights) {
   document.getElementById('weight-legend').hidden = !points.length;
   if (!points.length) {
     box.replaceChildren(el('p', 'empty', 'Send gymclaw a photo of your scale to start tracking.'));
+    renderWeightLog([]);
     return;
   }
   const values = points.flatMap(p => [toDisplayBody(p.kg), toDisplayBody(p.avg)]);
@@ -1145,6 +1180,31 @@ function renderWeight(insights) {
   chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(toDisplayBody(p.avg)).toFixed(1)}`).join(' ') }));
   crosshair(chart, points.map(p => x(p.date)), i => ({ title: points[i].label,
     rows: [[bodyWeightText(points[i].kg), 'weigh-in', 'weigh-in'], [bodyWeightText(points[i].avg), '7-day average', 'today']], y: y(toDisplayBody(points[i].avg)) }));
+  renderWeightLog(points);
+}
+
+function renderWeightLog(points) {
+  const host = document.getElementById('weight-log');
+  if (!host || host.contains(document.activeElement)) return;
+  host.replaceChildren();
+  const last = points.at(-1)?.kg;
+  let value = last !== undefined ? toDisplayBody(last) : (isLb() ? 165 : 75);
+  host.append(stepper('Log weight', value, { step: 0.1, min: isLb() ? 45 : 20, base: isLb() ? 165 : 75, unit: weightUnit(), decimal: true, onChange: v => { value = v; } }));
+  const save = el('button', 'save', 'Log');
+  save.type = 'button';
+  save.addEventListener('click', async () => {
+    if (!value) { toast('Enter a weight first', true); return; }
+    save.disabled = true;
+    try {
+      await toolCall('body_log', { entries: [{ kg: toKg(value) }] });
+      haptic.done();
+      toast(`Logged ${value} ${weightUnit()}`);
+    } catch (error) {
+      haptic.done(false);
+      toast(error.message, true);
+    } finally { save.disabled = false; }
+  });
+  host.append(save);
 }
 
 function renderInsights(data) {
@@ -1193,7 +1253,15 @@ function renderHistory(history) {
       name.type = 'button';
       name.addEventListener('click', () => openExercise({ id: exercise.id, name: exercise.name, svg_url: exercise.svg_url }));
       if (workout.prs.includes(exercise.name)) name.append(el('em', 'tag pr', 'PR'));
-      row.append(name, el('span', 'set-list', exercise.sets.map(s => s.text || (s.seconds ? duration(s.seconds) : `${s.reps}×${s.weight}`)).join('   ')));
+      const list = el('span', 'set-list');
+      for (const s of exercise.sets) {
+        const chip = el('button', 'set-chip', s.text || (s.seconds ? duration(s.seconds) : `${s.reps}×${s.weight}`));
+        chip.type = 'button';
+        chip.title = 'Tap to edit set';
+        chip.addEventListener('click', () => openSetEditor(exercise, s));
+        list.append(chip);
+      }
+      row.append(name, list);
       table.append(row);
     }
     item.append(summary, table);
@@ -1599,6 +1667,147 @@ function openExercise(of) {
   if (points.length > 1) drawProgress(chart, points);
 }
 
+/* Edit any logged set's numbers (never delete/retype) via set_edit. */
+function openSetEditor(exercise, set) {
+  const dialog = document.getElementById('ex-detail');
+  const sheet = el('div', 'ex-sheet');
+  dialog.replaceChildren(sheet);
+  const close = el('button', 'ex-close', '×');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close');
+  close.addEventListener('click', closeSheet);
+  const title = el('h2', 'title', `Edit ${exercise.name}`);
+  title.id = 'ex-detail-title';
+  sheet.append(close, title, el('p', 'subtitle', `Currently ${set.text}`));
+  const form = el('form', 'ex-edit');
+  const grid = el('div', 'ex-fields');
+  const draft = { weight: toDisplay(set.weight), reps: set.reps, seconds: set.seconds, meters: set.meters };
+  if (set.seconds) {
+    const long = set.seconds >= 120;
+    grid.append(stepper(long ? 'Time' : 'Seconds', long ? set.seconds / 60 : set.seconds,
+      { step: long ? 1 : 5, min: long ? 1 : 5, unit: long ? 'min' : 's', decimal: long,
+        onChange: v => { draft.seconds = v === null ? null : Math.round(long ? v * 60 : v); markDirty(form, 'Save set'); } }));
+  } else if (set.meters) {
+    const km = set.meters >= 1000;
+    grid.append(stepper('Distance', km ? set.meters / 1000 : set.meters,
+      { step: km ? 0.1 : 50, min: km ? 0.1 : 50, unit: km ? 'km' : 'm', decimal: km,
+        onChange: v => { draft.meters = v === null ? null : Math.round(km ? v * 1000 : v); markDirty(form, 'Save set'); } }));
+  } else {
+    if (set.weight || exercise.added) {
+      grid.append(stepper(exercise.added ? 'Added' : 'Weight', draft.weight,
+        { step: weightStep(exercise.equipment, set.weight), min: 0, unit: exercise.unit || weightUnit(), decimal: true,
+          onChange: v => { draft.weight = v; markDirty(form, 'Save set'); } }));
+    }
+    grid.append(stepper(exercise.per_side ? 'Reps / side' : 'Reps', draft.reps,
+      { step: 1, min: 1, unit: 'reps', onChange: v => { draft.reps = v; markDirty(form, 'Save set'); } }));
+  }
+  const save = el('button', 'save', 'Save set');
+  save.type = 'submit';
+  const actions = el('div', 'ex-actions');
+  actions.append(save);
+  form.append(grid, actions);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const payload = { set_id: set.id };
+    if (set.seconds) payload.minutes = draft.seconds / 60;
+    else if (set.meters) payload.meters = draft.meters;
+    else { payload.weight = toKg(draft.weight || 0); payload.reps = draft.reps; }
+    save.disabled = true;
+    try {
+      await toolCall('set_edit', payload);
+      clearDirty();
+      haptic.done();
+      dialog.close();
+      toast('Set updated');
+    } catch (error) {
+      save.disabled = false;
+      haptic.done(false);
+      toast(error.message, true);
+    }
+  });
+  sheet.append(form);
+  if (!dialog.open) dialog.showModal();
+  syncBack();
+  clearDirty();
+}
+
+/* Settings panel on the rebranded Settings + Memory tab. */
+function renderSettings(data) {
+  const host = document.getElementById('settings');
+  if (!host || host.contains(document.activeElement) || !data.profile) return;
+  host.replaceChildren();
+  const badge = document.getElementById('runtime-badge');
+  const on = Boolean(data.runtime?.enabled);
+  if (badge) badge.textContent = on ? 'Reminders on' : 'Reminders paused';
+  const rows = el('div', 'settings-rows');
+
+  // Weight unit toggle
+  const unitRow = el('div', 'setting-row');
+  unitRow.append(el('span', 'setting-label', 'Weight unit'));
+  const seg = el('div', 'segmented');
+  for (const u of ['kg', 'lb']) {
+    const b = el('button', '', u);
+    b.type = 'button';
+    b.setAttribute('aria-pressed', String(data.profile.weight_unit === u));
+    b.addEventListener('click', async () => {
+      if (data.profile.weight_unit === u) return;
+      try { await toolCall('profile_update', { fields: { weight_unit: u } }); haptic.done(); toast(`Weights set to ${u}`); }
+      catch (e) { haptic.done(false); toast(e.message, true); }
+    });
+    seg.append(b);
+  }
+  unitRow.append(seg);
+  rows.append(unitRow);
+
+  // Default rest stepper
+  let restVal = data.profile.rest_seconds;
+  const restRow = el('div', 'setting-row');
+  const restStep = stepper('Default rest', restVal, { step: 15, min: 15, unit: 's', onChange: v => { restVal = v; } });
+  const restSave = el('button', 'chip', 'Save');
+  restSave.type = 'button';
+  restSave.addEventListener('click', async () => {
+    if (!restVal || restVal === data.profile.rest_seconds) return;
+    try { await toolCall('profile_update', { fields: { rest_seconds: restVal } }); haptic.done(); toast(`Default rest ${restVal}s`); }
+    catch (e) { haptic.done(false); toast(e.message, true); }
+  });
+  restRow.append(restStep, restSave);
+  rows.append(restRow);
+
+  // Reminders pause/resume toggle
+  const remRow = el('div', 'setting-row');
+  const remLabel = el('span', 'setting-label', 'Reminders & weekly plan');
+  remLabel.append(el('small', '', `${data.profile.weekly_target_sessions}/wk · ${data.profile.earliest_workout_start}–${data.profile.latest_workout_finish}`));
+  const remBtn = el('button', 'chip', on ? 'Pause' : 'Resume');
+  remBtn.type = 'button';
+  remBtn.addEventListener('click', async () => {
+    try {
+      if (on) await toolCall('runtime_pause', {});
+      else await toolCall('runtime_resume', { owner_asked: true });
+      haptic.done();
+      toast(on ? 'Reminders paused' : 'Reminders resumed');
+    } catch (e) { haptic.done(false); toast(e.message, true); }
+  });
+  remRow.append(remLabel, remBtn);
+  rows.append(remRow);
+
+  // Calendar ICS subscription URL
+  if (data.ics_path) {
+    const icsRow = el('div', 'setting-row');
+    const icsLabel = el('span', 'setting-label', 'Calendar feed (read-only)');
+    icsLabel.append(el('small', '', 'Subscribe from Apple or Google Calendar'));
+    const copy = el('button', 'chip', 'Copy link');
+    copy.type = 'button';
+    copy.addEventListener('click', async () => {
+      const url = new URL(data.ics_path, location.href).href;
+      try { await navigator.clipboard.writeText(url); haptic.done(); toast('Calendar link copied'); }
+      catch { window.prompt('Calendar subscription URL:', url); }
+    });
+    icsRow.append(icsLabel, copy);
+    rows.append(icsRow);
+  }
+  host.append(rows);
+}
+
 /* ---------- Shell ---------- */
 
 function activeTab() {
@@ -1616,14 +1825,14 @@ function showTab() {
   // Today decides it (renderToday); any other tab has its tab bar.
   if (tab !== 'today') document.documentElement.classList.remove('live-mode');
   // The browser's title line names the tab; in Telegram it's hidden.
-  document.querySelector('h1').textContent = { today: 'Today', progress: 'Progress', history: 'History', exercises: 'Exercises', memory: 'Memory' }[tab];
+  document.querySelector('h1').textContent = { today: 'Today', progress: 'Progress', history: 'History', exercises: 'Exercises', memory: 'Settings' }[tab];
   if (!state) return;
   // Charts measure their container, so draw a tab only once it's visible.
   if (tab === 'today') renderToday(state);
   if (tab === 'progress') renderInsights(state);
   if (tab === 'history') renderHistory(state.history);
   if (tab === 'exercises') renderExercises();
-  if (tab === 'memory') { renderMemory(state.memory); renderExtensions(state.extensions); }
+  if (tab === 'memory') { renderSettings(state); renderMemory(state.memory); renderExtensions(state.extensions); }
 }
 
 let rendered = '';
@@ -1719,11 +1928,31 @@ if (tgHas('8.0')) {
   tg.onEvent('activated', () => { active = true; refresh(); });
   tg.onEvent('deactivated', () => { active = false; });
 }
-// Mid-workout every 3 s, so a set logged in the chat shows here at once.
+async function refreshLive() {
+  try {
+    const response = await fetch('/api/live', { headers: apiHeaders() });
+    if (!response.ok) throw new Error('Live unavailable');
+    const live = await response.json();
+    // If a workout ended or started, pull full state so History/KPIs catch up too.
+    if (Boolean(live.workout) !== Boolean(state?.workout)) return refresh();
+    render({ ...state, ...live });
+    failures = 0;
+    document.getElementById('load-error').hidden = true;
+    return true;
+  } catch {
+    failures += 1;
+    document.getElementById('load-error').hidden = failures < 2 && Boolean(state);
+    return false;
+  }
+}
+
+// Mid-workout every 3 s via lightweight /api/live; otherwise full /api/state every 10 s.
 let lastPoll = Date.now();
 setInterval(() => {
-  if (!active || document.hidden || Date.now() - lastPoll < (state?.workout ? 3000 : 10000)) return;
+  const live = Boolean(state?.workout && activeTab() === 'today');
+  if (!active || document.hidden || Date.now() - lastPoll < (live ? 3000 : 10000)) return;
   lastPoll = Date.now();
-  refresh();
+  if (live) refreshLive();
+  else refresh();
 }, 1000);
 document.addEventListener('visibilitychange', () => !document.hidden && refresh());

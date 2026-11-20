@@ -27,7 +27,7 @@
         <button data-tab="progress"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19l5-6 4 3 7-9"/></svg><span>Progress</span></button>
         <button data-tab="history"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg><span>History</span></button>
         <button data-tab="exercises"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3M18 12h3M6 8v8M18 8v8M9 10v4M15 10v4M9 12h6"/></svg><span>Exercises</span></button>
-        <button data-tab="memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a6 6 0 0 0-3.5 10.9V18h7v-3.1A6 6 0 0 0 12 4zM9.5 21h5"/></svg><span>Memory</span></button>
+        <button data-tab="memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="11" cy="17" r="2"/></svg><span>Settings</span></button>
       </nav></div>
     <div id="load-error" role="alert" hidden>Can't reach gymclaw right now; showing what it last said. <button type="button" id="retry" class="link">Retry</button></div>
     <div id="polling-alert" class="alert" role="alert" hidden></div>
@@ -61,7 +61,7 @@
         <section class="panel"><div class="section-heading"><h2>Volume by muscle</h2><span>Last 4 weeks</span></div><div id="muscle-chart" class="bars"></div></section>
         <section class="panel"><div class="section-heading"><h2>When the gym is quiet</h2><span id="quiet-label"></span></div><div id="heatmap" class="heatmap"></div></section>
       </div>
-      <section class="panel weight"><div class="section-heading"><h2>Body weight</h2><span class="legend" id="weight-legend"><span class="key">7-day average</span><span class="key weigh-in">Weigh-in</span></span></div><div class="chart" id="weight-chart"></div></section>
+      <section class="panel weight"><div class="section-heading"><h2>Body weight</h2><span class="legend" id="weight-legend"><span class="key">7-day average</span><span class="key weigh-in">Weigh-in</span></span></div><div class="chart" id="weight-chart"></div><div class="weight-log" id="weight-log"></div></section>
     </div>
     <div class="tab" id="tab-history" hidden>
       <section class="panel"><div class="section-heading"><h2>Workouts</h2><span><span id="history-count"></span> · <a href="/export.csv" id="export" download>Export CSV</a></span></div><div id="history"></div></section>
@@ -76,6 +76,7 @@
     </div>
     <dialog class="ex-detail" id="ex-detail" aria-labelledby="ex-detail-title"></dialog>
     <div class="tab" id="tab-memory" hidden>
+      <section class="panel settings-panel" id="settings-panel"><div class="section-heading"><h2>Settings</h2><span id="runtime-badge"></span></div><div id="settings"></div></section>
       <div class="grid-2">
         <section class="panel"><div class="section-heading"><h2>About you</h2><span>Read before every reply<span class="usage" data-kind="owner"></span></span></div><ul class="notes" data-kind="owner"></ul></section>
         <section class="panel"><div class="section-heading"><h2>Learned</h2><span>Patterns it noticed in your training<span class="usage" data-kind="learned"></span></span></div><ul class="notes" data-kind="learned"></ul></section>

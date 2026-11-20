@@ -519,3 +519,15 @@ img[data-missing] { visibility: hidden; }
   .live-head .pose, .live-head .pose img { width: 84px; height: 84px; }
   .rest-actions .chip { padding: 8px 8px; font-size: 12px; }
 }
+
+/* PR 3: Settings + Memory, quick body-weight log, tappable history sets */
+.settings-panel { margin-bottom: 14px; }
+.settings-rows { display: grid; gap: 12px; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.setting-row label, .setting-row .setting-label { font-size: 14px; color: var(--ink); font-weight: 500; }
+.setting-row small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+.weight-log { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.weight-log .stepper { flex: 1; min-width: 190px; }
+.set-chip { background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 5px; margin: -2px 2px -2px 0; font: inherit; color: inherit; cursor: pointer; }
+.set-chip:hover, .set-chip:focus-visible { border-color: var(--line); background: var(--paper); }
+.live-more .danger { color: var(--danger); }

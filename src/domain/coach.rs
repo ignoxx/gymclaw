@@ -738,7 +738,7 @@ pub fn app_action(data: &str) -> bool {
     let action = data.strip_prefix("gc:").unwrap_or(data).split(':').next().unwrap_or_default();
     [
         "log", "time", "dist", "warm", "nowarm", "skip", "cut", "next", "free", "drop", "sub", "later", "crowd",
-        "begin", "now",
+        "begin", "now", "end",
     ]
     .contains(&action)
 }
@@ -854,6 +854,16 @@ pub fn app_live(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
 /// A coach button pressed in the Mini App (a set typed there arrives as `log` with its numbers): the same
 /// step as a tap in the chat, plus an `APP_VIEW` event so the chat's card moves on too. A button the
 /// workout has moved past fails with `COACH_STALE` instead of acting on whatever is current.
+/// Start any saved workout template directly from the Mini App (no 64-byte callback limit).
+pub fn app_start_template(db: &Connection, template_id: &str, now: Ts, request_id: &str) -> Result<CoachView> {
+    workout::start(db, Some(template_id), None, true, now, request_id)?;
+    let workout = active_workout(db)?.ok_or_else(|| Error::domain("NO_WORKOUT", "Workout did not start"))?;
+    let name = workout.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
+    let view = acked(format!("▶️ Started {name}"), vec![exercise_card(db, &workout.id, now)?]);
+    crate::domain::core::emit(db, APP_VIEW, now, serde_json::to_value(&view)?)?;
+    Ok(view)
+}
+
 pub fn app_tap(db: &Connection, data: &str, now: Ts, request_id: &str) -> Result<CoachView> {
     if !app_action(data) {
         return Err(invalid("Not a coach button the app offers"));

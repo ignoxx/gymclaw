@@ -35,8 +35,18 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
 /// Tools the dashboard may call: note edits and turning the agent's extensions off, on or back
 /// (Memory), plan targets (Exercises) and fixing a logged set (the live workout). They run exactly as
 /// the agent's calls do, with the same validation; extension changes are recorded as the owner's.
-const DASHBOARD_TOOLS: [&str; 6] =
-    ["note_add", "note_edit", "note_delete", "extension_edit", "template_edit_exercise", "set_edit"];
+const DASHBOARD_TOOLS: [&str; 10] = [
+    "note_add",
+    "note_edit",
+    "note_delete",
+    "extension_edit",
+    "template_edit_exercise",
+    "set_edit",
+    "body_log",
+    "profile_update",
+    "runtime_pause",
+    "runtime_resume",
+];
 /// The only exercise fields the dashboard may change. An id, name or picture change would cut an
 /// exercise off from its history, so those stay with the agent.
 const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];
@@ -293,14 +303,31 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         if tool == "set_edit" && ["warmup", "exercise", "delete"].iter().any(|k| args.get(k).is_some()) {
             return error(StatusCode::FORBIDDEN);
         }
+        // The app logs typed weigh-ins only, never arbitrary filesystem photo paths.
+        if tool == "body_log"
+            && args
+                .get("entries")
+                .and_then(|e| e.as_array())
+                .is_some_and(|es| es.iter().any(|e| e.get("photo").is_some_and(|v| !v.is_null())))
+        {
+            return error(StatusCode::FORBIDDEN);
+        }
+        // The app toggles reminders only; calendar writes stay an explicit chat grant.
+        if tool == "runtime_resume" && args.get("calendar_writes").is_some_and(|v| v == true) {
+            return error(StatusCode::FORBIDDEN);
+        }
         let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             let data_dir = db_path.parent().unwrap_or(Path::new("."));
             crate::db::in_tx(&mut crate::db::open(&db_path)?, |db| {
                 let request_id = format!("dashboard:{}", crate::db::new_id());
                 if tool == "coach" {
-                    let data = args["data"].as_str().unwrap_or_default();
-                    let view = crate::domain::coach::app_tap(db, data, Ts::now(), &request_id)?;
+                    let view = if let Some(template_id) = args["start_template"].as_str() {
+                        crate::domain::coach::app_start_template(db, template_id, Ts::now(), &request_id)?
+                    } else {
+                        let data = args["data"].as_str().unwrap_or_default();
+                        crate::domain::coach::app_tap(db, data, Ts::now(), &request_id)?
+                    };
                     return Ok(serde_json::json!({"ack": view.ack}));
                 }
                 let mut cx = crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, effects: vec![] };
@@ -354,6 +381,26 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
     if (path.starts_with("/api/") || path == "/export.csv") && !authorized(&app, headers, query, path == "/export.csv")
     {
         return error(StatusCode::UNAUTHORIZED);
+    }
+    if path == "/api/live" {
+        let db_path = app.db_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let db = crate::db::open_readonly(&db_path)?;
+            let snapshot = state::live_snapshot(&db, Ts::now())?;
+            Ok::<_, crate::error::Error>(serde_json::to_vec(&snapshot)?)
+        })
+        .await;
+        return match result {
+            Ok(Ok(body)) => reply(StatusCode::OK, body, "application/json"),
+            Ok(Err(e)) => {
+                tracing::warn!("dashboard live: {} {e}", e.code());
+                error(StatusCode::SERVICE_UNAVAILABLE)
+            }
+            Err(e) => {
+                tracing::warn!("dashboard live panicked: {e}");
+                error(StatusCode::SERVICE_UNAVAILABLE)
+            }
+        };
     }
     if path == "/api/state" {
         let db_path = app.db_path.clone();
@@ -634,5 +681,35 @@ mod tests {
         let body = String::from_utf8(axum::body::to_bytes(ics.into_body(), 65536).await.unwrap().to_vec()).unwrap();
         assert!(body.contains("BEGIN:VCALENDAR") && body.contains("SUMMARY:Push"), "{body}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn live_endpoint_and_dashboard_guards() {
+        let app = app();
+        // /api/live returns lightweight snapshot without history or crowd series.
+        let live = get(&app, Method::GET, "/api/live", "gym.example").await;
+        assert_eq!(live.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(live.into_body(), 16384).await.unwrap()).unwrap();
+        assert!(body.get("workout").is_some() && body.get("history").is_none() && body.get("crowd").is_none());
+        // body_log forbids photo paths; typed kg works.
+        assert_eq!(
+            post(&app, "/api/body_log", r#"{"entries":[{"kg":80,"photo":"/etc/passwd"}]}"#, "same-origin")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post(&app, "/api/body_log", r#"{"entries":[{"kg":80.5}]}"#, "same-origin").await.status(),
+            StatusCode::OK
+        );
+        // runtime_resume forbids granting calendar_writes from dashboard.
+        assert_eq!(
+            post(&app, "/api/runtime_resume", r#"{"owner_asked":true,"calendar_writes":true}"#, "same-origin")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
     }
 }
