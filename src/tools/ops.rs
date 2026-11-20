@@ -147,12 +147,12 @@ impl Tool for RuntimeResume {
         let mut settings = match RuntimeSettings::get(cx.db, 1)? {
             Some(s) => s,
             None => {
-                let Ok(owner) = crate::config::owner_id() else {
-                    crate::bail!("RUNTIME_NOT_CONFIGURED", "GYMCLAW_TELEGRAM_USER_ID is not set")
+                let Some(recipient) = cx.recipient.as_deref() else {
+                    crate::bail!("RUNTIME_NOT_CONFIGURED", "No delivery recipient configured")
                 };
                 let row = RuntimeSettings {
                     id: 1,
-                    recipient: owner.to_string(),
+                    recipient: recipient.to_string(),
                     enabled: true,
                     calendar_writes_enabled: false,
                     crowd_polling_enabled: false,
@@ -241,6 +241,7 @@ mod tests {
             now: Ts::parse("2026-10-11T17:00:00+00:00", None).unwrap(),
             request_id: "r".into(),
             data_dir: &dir,
+            recipient: Some("99".into()),
             effects: vec![],
         };
         crate::tools::call(&mut cx, tool, args)
@@ -277,5 +278,11 @@ mod tests {
             call(&db, "runtime_resume", json!({"owner_asked": true, "crowd_polling": false})).unwrap()["crowd_polling_enabled"],
             false
         );
+
+        // Fresh DB without RuntimeSettings initializes from cx.recipient without reading env vars.
+        let fresh = crate::db::test::db();
+        let created = call(&fresh, "runtime_resume", json!({"owner_asked": true})).unwrap();
+        assert_eq!(created["enabled"], true);
+        assert_eq!(RuntimeSettings::get(&fresh, 1).unwrap().unwrap().recipient, "99");
     }
 }

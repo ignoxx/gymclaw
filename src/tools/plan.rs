@@ -569,7 +569,7 @@ mod tests {
     /// One tool call, like `gymclaw call <tool> '<json>' --now <now> --request-id <id>` minus the transaction.
     fn call(db: &Connection, tool: &str, args: Value, now: Ts, request_id: &str) -> Result<Value> {
         let dir = std::env::temp_dir();
-        let mut cx = Ctx { db, now, request_id: request_id.into(), data_dir: &dir, effects: vec![] };
+        let mut cx = Ctx { db, now, request_id: request_id.into(), data_dir: &dir, recipient: None, effects: vec![] };
         crate::tools::call(&mut cx, tool, args)
     }
 

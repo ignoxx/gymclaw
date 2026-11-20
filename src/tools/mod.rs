@@ -26,6 +26,8 @@ pub struct Ctx<'a> {
     /// Idempotency key for mutations, derived by the caller (Telegram message id + call index, or CLI).
     pub request_id: String,
     pub data_dir: &'a Path,
+    /// Delivery recipient (Telegram chat id) for initializing runtime settings without reading env vars.
+    pub recipient: Option<String>,
     /// Messages the tool wants shown (coach cards); rendered after the transaction commits.
     pub effects: Vec<Effect>,
 }
@@ -348,7 +350,8 @@ mod tests {
         // Smoke-test serde tag dispatch on structs that live behind consolidated enums.
         let db = crate::db::test::with_short_template();
         let dir = std::env::temp_dir();
-        let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "t1".into(), data_dir: &dir, effects: vec![] };
+        let mut cx =
+            Ctx { db: &db, now: Ts::now(), request_id: "t1".into(), data_dir: &dir, recipient: None, effects: vec![] };
         assert!(call(&mut cx, "template", serde_json::json!({"action": "get", "template_id": "short"})).is_ok());
         assert!(call(&mut cx, "body", serde_json::json!({"action": "log", "entries": [{"kg": 80.0}]})).is_ok());
         assert!(call(&mut cx, "note", serde_json::json!({"action": "add", "kind": "owner", "text": "test"})).is_ok());

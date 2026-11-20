@@ -1294,6 +1294,7 @@ mod tests {
             now: at(700),
             request_id: "fix".into(),
             data_dir: Path::new("/tmp"),
+            recipient: None,
             effects: vec![],
         };
         let fixed = crate::tools::call(&mut cx, "set_edit", json!({"set_id": set.id, "reps": 12})).unwrap();
@@ -1831,7 +1832,8 @@ mod tests {
 
     fn agent(db: &Connection, now: Ts, tool: &str, args: Value) -> Result<Value> {
         let request_id = format!("{tool}-{}", now.0.as_second());
-        let mut cx = crate::tools::Ctx { db, now, request_id, data_dir: Path::new("/tmp"), effects: vec![] };
+        let mut cx =
+            crate::tools::Ctx { db, now, request_id, data_dir: Path::new("/tmp"), recipient: None, effects: vec![] };
         crate::tools::call(&mut cx, tool, args)
     }
 

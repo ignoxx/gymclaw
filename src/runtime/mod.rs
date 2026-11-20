@@ -120,6 +120,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let agent = Agent {
         db_path: db_path.clone(),
         data_dir: config.data_dir.clone(),
+        recipient: Some(config.owner_id.to_string()),
         model,
         chat_model: config.model.clone(),
         vision_model: config.model_vision.clone(),

@@ -53,8 +53,8 @@ pub enum Update<'a> {
     /// The owner's plan, set in setup and whenever it changes: its template IDs (also the default
     /// rotation order) and, optionally, the plan in the owner's words.
     ConfirmPlan { templates: &'a [String], plan: Option<&'a str> },
-    /// The review fingerprint from `status`.
-    Finish(Option<&'a str>),
+    /// The review fingerprint from `status`, plus the delivery recipient if runtime should be enabled.
+    Finish { fingerprint: Option<&'a str>, recipient: Option<&'a str> },
 }
 
 /// Compact JSON with sorted keys, so equal values give equal text.
@@ -216,14 +216,14 @@ fn apply_profile(db: &Connection, changes: &Map<String, Value>) -> Result<()> {
 
 /// Enable reminders and weekly planning on the first transition to finished, only when no runtime row
 /// exists yet (never overrides a later pause). Calendar writes and crowd polling stay off.
-fn enable_runtime_once(db: &Connection) -> Result<()> {
+fn enable_runtime_once(db: &Connection, recipient: Option<&str>) -> Result<()> {
     if RuntimeSettings::get(db, 1)?.is_some() {
         return Ok(());
     }
-    if let Ok(owner) = crate::config::owner_id() {
+    if let Some(recipient) = recipient {
         RuntimeSettings {
             id: 1,
-            recipient: owner.to_string(),
+            recipient: recipient.to_string(),
             enabled: true,
             calendar_writes_enabled: false,
             crowd_polling_enabled: false,
@@ -243,7 +243,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
             "confirm-plan",
             json!({"answers": null, "profile": null, "template_ids": templates, "plan": plan, "fingerprint": null}),
         ),
-        Update::Finish(fingerprint) => {
+        Update::Finish { fingerprint, .. } => {
             ("finish", json!({"answers": null, "profile": null, "template_ids": null, "fingerprint": fingerprint}))
         }
     };
@@ -324,7 +324,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                     row.plan_text = Some(plan.trim().to_string()).filter(|p| !p.is_empty());
                 }
             }
-            Update::Finish(expected) => {
+            Update::Finish { fingerprint: expected, recipient } => {
                 let current = status(db)?;
                 let fingerprint = current["review_fingerprint"].as_str();
                 if !matches!(current["step"].as_str(), Some("REVIEW" | "READY"))
@@ -339,7 +339,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                 let first_finish = row.completed_fingerprint.is_none();
                 row.completed_fingerprint = fingerprint.map(String::from);
                 if first_finish {
-                    enable_runtime_once(db)?;
+                    enable_runtime_once(db, *recipient)?;
                 }
             }
         }
@@ -431,13 +431,26 @@ mod tests {
             .clone();
         assert_eq!(review["step"], "REVIEW");
         assert_eq!(
-            update(&db, Update::Finish(Some("stale")), at(0), "bad").unwrap_err().code(),
+            update(&db, Update::Finish { fingerprint: Some("stale"), recipient: None }, at(0), "bad")
+                .unwrap_err()
+                .code(),
             "ONBOARDING_INCOMPLETE"
         );
-        let done = update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
+        let done = update(
+            &db,
+            Update::Finish { fingerprint: review["review_fingerprint"].as_str(), recipient: Some("42") },
+            at(0),
+            "finish",
+        )
+        .unwrap();
         assert_eq!(
             (done["data"]["ready"].as_bool(), done["data"]["calendar_writes_enabled"].as_bool()),
             (Some(true), Some(false))
+        );
+        let settings = RuntimeSettings::get(&db, 1).unwrap().expect("runtime enabled from recipient");
+        assert_eq!(
+            (settings.recipient.as_str(), settings.enabled, settings.calendar_writes_enabled),
+            ("42", true, false)
         );
         // Later edits or old interview_json keys don't send the owner back into setup.
         db.execute("UPDATE onboarding_state SET interview_json = '{\"legacy\": \"yes\"}' WHERE id = 1", []).unwrap();
@@ -483,7 +496,13 @@ mod tests {
         let review = update(&db, Update::ConfirmPlan { templates: &["push".into()], plan: None }, at(0), "plan")
             .unwrap()["data"]
             .clone();
-        update(&db, Update::Finish(review["review_fingerprint"].as_str()), at(0), "finish").unwrap();
+        update(
+            &db,
+            Update::Finish { fingerprint: review["review_fingerprint"].as_str(), recipient: None },
+            at(0),
+            "finish",
+        )
+        .unwrap();
         assert!(!RuntimeSettings::get(&db, 1).unwrap().unwrap().enabled);
     }
 }

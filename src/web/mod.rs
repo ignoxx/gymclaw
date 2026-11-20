@@ -134,42 +134,41 @@ fn percent_decode(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Verify Telegram Mini App `initData` (HMAC-SHA256 with `WebAppData` + bot token, auth_date <= 24h,
-/// and matching `owner_id` when configured).
-pub fn verify_telegram_init_data(init_data: &str, auth: &WebAuth, now: Ts, max_age_secs: i64) -> bool {
+/// Verify Telegram Mini App `initData` (HMAC-SHA256 with `WebAppData` + bot token, auth_date within
+/// `max_age_secs`) and return the verified Telegram user id.
+pub fn verified_telegram_user_id(init_data: &str, bot_token: &str, now: Ts, max_age_secs: i64) -> Option<i64> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut hash_hex: Option<String> = None;
     for part in init_data.split('&').filter(|p| !p.is_empty()) {
-        let Some((k, v)) = part.split_once('=') else { return false };
-        let (Some(k), Some(v)) = (percent_decode(k), percent_decode(v)) else { return false };
+        let (k, v) = part.split_once('=')?;
+        let (k, v) = (percent_decode(k)?, percent_decode(v)?);
         if k == "hash" {
             hash_hex = Some(v);
         } else {
             pairs.push((k, v));
         }
     }
-    let Some(hash_bytes) = hash_hex.and_then(|h| hex::decode(h).ok()) else { return false };
-    let auth_date: i64 = match pairs.iter().find(|(k, _)| k == "auth_date").and_then(|(_, v)| v.parse().ok()) {
-        Some(d) => d,
-        None => return false,
-    };
+    let hash_bytes = hash_hex.and_then(|h| hex::decode(h).ok())?;
+    let auth_date: i64 = pairs.iter().find(|(k, _)| k == "auth_date").and_then(|(_, v)| v.parse().ok())?;
     let age = now.0.as_second() - auth_date;
     if !(-300..=max_age_secs).contains(&age) {
-        return false;
+        return None;
     }
     let user_id = pairs
         .iter()
         .find(|(k, _)| k == "user")
         .and_then(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok())
-        .and_then(|u| u["id"].as_i64());
-    if user_id != Some(auth.owner_id) {
-        return false;
-    }
+        .and_then(|u| u["id"].as_i64())?;
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     let check_string = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
-    let secret = hmac_sha256(b"WebAppData", auth.bot_token.as_bytes());
+    let secret = hmac_sha256(b"WebAppData", bot_token.as_bytes());
     let expected = hmac_sha256(&secret, check_string.as_bytes());
-    ct_eq(&expected, &hash_bytes)
+    ct_eq(&expected, &hash_bytes).then_some(user_id)
+}
+
+/// Verify Telegram Mini App `initData` against `auth.bot_token` and `auth.owner_id`.
+pub fn verify_telegram_init_data(init_data: &str, auth: &WebAuth, now: Ts, max_age_secs: i64) -> bool {
+    verified_telegram_user_id(init_data, &auth.bot_token, now, max_age_secs) == Some(auth.owner_id)
 }
 
 fn query_param(query: Option<&str>, key: &str) -> Option<String> {
@@ -345,7 +344,8 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
                     };
                     return Ok(serde_json::json!({"ack": view.ack}));
                 }
-                let mut cx = crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, effects: vec![] };
+                let recipient = app.auth.as_ref().map(|a| a.owner_id.to_string());
+                let mut cx = crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, recipient, effects: vec![] };
                 let result = crate::tools::call(&mut cx, &tool, args.clone())?;
                 if tool == "set_edit" {
                     // The chat saw the old number on the set's card: it gets a note with the fixed one.
@@ -488,12 +488,18 @@ fn asset(route: &str, embedded: &[u8]) -> Vec<u8> {
     embedded.to_vec()
 }
 
+/// Build the dashboard axum `Router` without binding a TCP listener.
+/// Requests whose `Host` header isn't in `hosts` are rejected.
+pub fn router(db_path: PathBuf, hosts: Vec<String>, auth: Option<WebAuth>) -> Router {
+    Router::new().fallback(handle).with_state(Arc::new(App { db_path, hosts, auth }))
+}
+
 /// Serve the dashboard: reads from a read-only connection, `DASHBOARD_TOOLS` writes through a writable one.
 /// Requests whose Host isn't `allowed_host` are rejected.
 pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String, auth: Option<WebAuth>) -> Result<()> {
     let port = addr.port();
     let hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), allowed_host];
-    let app = Router::new().fallback(handle).with_state(Arc::new(App { db_path, hosts, auth }));
+    let app = router(db_path, hosts, auth);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("gymclaw dashboard: http://{addr}");
     axum::serve(listener, app).await?;
@@ -689,6 +695,8 @@ mod tests {
         assert!(!verify_telegram_init_data(&expired, app.auth.as_ref().unwrap(), Ts::now(), 86_400));
         let tampered = valid.replace("42", "43");
         assert!(!verify_telegram_init_data(&tampered, app.auth.as_ref().unwrap(), Ts::now(), 86_400));
+        assert_eq!(verified_telegram_user_id(&valid, "123:secret", Ts::now(), 86_400), Some(42));
+        assert_eq!(verified_telegram_user_id(&tampered, "123:secret", Ts::now(), 86_400), None);
         // ICS export works without initData for the right token, and 404s for a wrong token.
         assert_eq!(get(&app, Method::GET, "/calendar/wrong.ics", "gym.example").await.status(), StatusCode::NOT_FOUND);
         let ics = get(&app, Method::GET, &format!("/calendar/{token}.ics"), "gym.example").await;
