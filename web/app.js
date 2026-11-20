@@ -24,21 +24,33 @@ const haptic = {
   done: (ok = true) => tgHas('6.1') && tg.HapticFeedback.notificationOccurred(ok ? 'success' : 'error'),
 };
 const token = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+// Fallback hexes matching styles.css: on Mini App reopen telegram-web-app.js is cached while
+// styles.css is no-store, so app.js can run before styles apply and token() returns "".
+// Telegram's colour setters throw on empty/invalid hex, which would abort the rest of app.js.
+const TG_COLORS = {
+  light: { paper: '#f1f1eb', white: '#fcfcf8', lime: '#d7f580', onLime: '#242824' },
+  dark: { paper: '#121412', white: '#1b1e1b', lime: '#d7f580', onLime: '#242824' },
+};
+const tgColor = (cssVar, key) => token(cssVar) || TG_COLORS[document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'][key];
+// Isolate Telegram SDK calls so a client quirk or unsupported call never aborts app startup.
+const tgTry = fn => { try { fn(); } catch (e) { console.warn('[tg]', e); } };
 
 /* Our palette, light or dark as Telegram is, with Telegram's header, background and bottom bar painted
    to match so the page reads as part of the app. */
 function applyTelegramTheme() {
   document.documentElement.dataset.theme = tg.colorScheme === 'dark' ? 'dark' : 'light';
-  if (tgHas('6.9')) tg.setHeaderColor(token('--paper'));
-  if (tgHas('6.1')) tg.setBackgroundColor(token('--paper'));
-  if (tgHas('7.10')) tg.setBottomBarColor(token('--white'));
+  if (tgHas('6.9')) tgTry(() => tg.setHeaderColor(tgColor('--paper', 'paper')));
+  if (tgHas('6.1')) tgTry(() => tg.setBackgroundColor(tgColor('--paper', 'paper')));
+  if (tgHas('7.10')) tgTry(() => tg.setBottomBarColor(tgColor('--white', 'white')));
 }
 
 /* Telegram's back button: closes the exercise sheet, else goes back to Today. */
 function syncBack() {
   if (!tgHas('6.1')) return;
-  if (document.getElementById('ex-detail').open || activeTab() !== 'today') tg.BackButton.show();
-  else tg.BackButton.hide();
+  tgTry(() => {
+    if (document.getElementById('ex-detail').open || activeTab() !== 'today') tg.BackButton.show();
+    else tg.BackButton.hide();
+  });
 }
 
 /* Telegram's main button does the screen's one main thing: save an edited plan form while the exercise
@@ -53,9 +65,15 @@ function syncMain() {
     : activeTab() === 'today' ? liveAction : null;
   mainRun = action?.run || null;
   if (!tg) return;
-  if (action) tg.MainButton.setParams({ text: action.text, color: token('--lime'), text_color: token('--on-lime'), is_visible: true, is_active: !action.busy });
-  else tg.MainButton.hide();
-  if (tgHas('6.2')) dirtyForm ? tg.enableClosingConfirmation() : tg.disableClosingConfirmation();
+  if (action) tgTry(() => tg.MainButton.setParams({
+    text: action.text,
+    color: tgColor('--lime', 'lime'),
+    text_color: tgColor('--on-lime', 'onLime'),
+    is_visible: true,
+    is_active: !action.busy,
+  }));
+  else tgTry(() => tg.MainButton.hide());
+  if (tgHas('6.2')) tgTry(() => (dirtyForm ? tg.enableClosingConfirmation() : tg.disableClosingConfirmation()));
 }
 function markDirty(form, label) { form.dataset.label = label; dirtyForm = form; syncMain(); }
 function clearDirty() { dirtyForm = null; tg?.MainButton.hideProgress(); syncMain(); }
@@ -63,23 +81,29 @@ function clearDirty() { dirtyForm = null; tg?.MainButton.hideProgress(); syncMai
 if (tg) {
   document.documentElement.classList.add('tg');
   applyTelegramTheme();
-  tg.onEvent('themeChanged', applyTelegramTheme);
-  tg.expand();
+  tgTry(() => tg.onEvent('themeChanged', applyTelegramTheme));
   // On phones the page fills the screen: no header strip, Telegram's Close and ⋯ float over our own
-  // background (styles.css keeps content clear of them). Desktop keeps its window.
+  // background (styles.css keeps content clear of them). Desktop and older clients expand instead.
   if (tgHas('8.0') && ['ios', 'android'].includes(tg.platform)) {
-    tg.onEvent('fullscreenChanged', () => document.documentElement.classList.toggle('tg-full', tg.isFullscreen));
-    tg.requestFullscreen();
+    const syncFull = () => document.documentElement.classList.toggle('tg-full', Boolean(tg.isFullscreen));
+    syncFull();
+    tgTry(() => tg.onEvent('fullscreenChanged', syncFull));
+    tgTry(() => tg.onEvent('fullscreenFailed', event => {
+      syncFull();
+      if (event?.error !== 'ALREADY_FULLSCREEN') tgTry(() => tg.expand());
+    }));
+    tgTry(() => tg.requestFullscreen());
+  } else {
+    tgTry(() => tg.expand());
   }
   // Scrubbing a chart would otherwise drag the whole app down; Close stays in Telegram's header.
-  if (tgHas('7.7')) tg.disableVerticalSwipes();
-  if (tgHas('6.1')) tg.BackButton.onClick(() => {
+  if (tgHas('7.7')) tgTry(() => tg.disableVerticalSwipes());
+  if (tgHas('6.1')) tgTry(() => tg.BackButton.onClick(() => {
     const dialog = document.getElementById('ex-detail');
     if (dialog.open) closeSheet();
     else goTab('today');
-  });
-  tg.MainButton.onClick(() => mainRun?.());
-  tg.ready();
+  }));
+  tgTry(() => tg.MainButton.onClick(() => mainRun?.()));
 }
 
 function el(tag, className, text) {
@@ -1927,6 +1951,7 @@ try {
   const cached = JSON.parse(localStorage.getItem('state') || 'null');
   if (cached) render(cached);
 } catch { /* nothing cached */ }
+if (!state) showTab();
 
 /* Close the exercise sheet (×, backdrop, Esc, Telegram's back button), asking first if a plan edit
    isn't saved. */
@@ -1975,6 +2000,8 @@ document.querySelectorAll('.crowd-nav .segmented button').forEach(button => butt
 document.getElementById('crowd-prev').addEventListener('click', () => { crowdView.back += 1; renderAttendance(state.crowd); });
 document.getElementById('crowd-next').addEventListener('click', () => { crowdView.back = Math.max(-CROWD_AHEAD[crowdView.view], crowdView.back - 1); renderAttendance(state.crowd); });
 document.getElementById('retry').addEventListener('click', () => refresh());
+// Signal ready only after the initial tab is revealed and listeners are wired.
+if (tg) tgTry(() => tg.ready());
 refresh();
 // Live state refreshes itself every 10 s while the page is visible (a refresh is ~70 ms server-side),
 // and at once when you come back to the tab. Telegram keeps a minimized Mini App's page running and
