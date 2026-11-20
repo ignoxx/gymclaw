@@ -24,6 +24,8 @@ pub struct Config {
     pub dashboard_host: Option<String>,
     /// Where full agent turns are logged, if anywhere.
     pub turn_log_dir: Option<PathBuf>,
+    /// Crowd source config JSON, if crowd polling is configured for this instance.
+    pub crowd_config: Option<PathBuf>,
 }
 
 #[expect(clippy::disallowed_methods, reason = "the one env read")]
@@ -99,6 +101,7 @@ impl Config {
             provider: provider(),
             dashboard_host: var("GYMCLAW_DASHBOARD_HOST"),
             turn_log_dir: var("GYMCLAW_TURN_LOG_DIR").map(PathBuf::from),
+            crowd_config: Some(crowd_config()),
         })
     }
 }
