@@ -205,8 +205,9 @@ pub fn update_profile(db: &Connection, changes: &Map<String, Value>) -> Result<P
     for (key, value) in changes {
         object.insert(key.clone(), value.clone());
     }
-    let profile: Profile =
+    let mut profile: Profile =
         serde_json::from_value(merged).map_err(|e| Error::domain("INVALID_PROFILE", e.to_string()))?;
+    profile.timezone = profile.timezone.trim().to_string();
     profile.validate()?;
     let mut row = UserProfile::get(db, 1)?.expect("created by get_profile");
     profile.write(&mut row);
@@ -242,4 +243,23 @@ pub mod local_time {
 /// Secret token for the read-only `/calendar/<token>.ics` feed, if initialized.
 pub fn ics_token(db: &Connection) -> Result<Option<String>> {
     Ok(UserProfile::get(db, 1)?.and_then(|r| r.ics_token).filter(|t| !t.is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn update_profile_trims_valid_timezone_and_rejects_invalid() {
+        let db = crate::db::test::db();
+        let changes = json!({"timezone": " America/New_York "}).as_object().unwrap().clone();
+        let updated = update_profile(&db, &changes).unwrap();
+        assert_eq!(updated.timezone, "America/New_York");
+
+        let bad = json!({"timezone": "UTC+2"}).as_object().unwrap().clone();
+        let err = update_profile(&db, &bad).unwrap_err();
+        assert_eq!(err.code(), "INVALID_TIMEZONE");
+        assert!(err.to_string().contains("IANA"), "{err}");
+    }
 }

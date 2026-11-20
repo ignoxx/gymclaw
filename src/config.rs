@@ -61,7 +61,7 @@ pub fn owner_id() -> Result<i64, String> {
 
 /// Timezone a new profile starts with.
 pub fn timezone_seed() -> String {
-    var("GYMCLAW_TIMEZONE").unwrap_or_else(|| "Europe/Berlin".into())
+    var("GYMCLAW_TIMEZONE").map(|v| v.trim().to_string()).unwrap_or_else(|| "Europe/Berlin".into())
 }
 
 /// Workout Guide assets, relative to the working dir unless set.

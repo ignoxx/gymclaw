@@ -51,7 +51,7 @@ const DASHBOARD_TOOLS: [&str; 10] = [
 /// exercise off from its history, so those stay with the agent.
 const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];
 /// The only profile fields the Settings tab edits directly.
-const PROFILE_FIELDS: [&str; 2] = ["weight_unit", "rest_seconds"];
+const PROFILE_FIELDS: [&str; 3] = ["weight_unit", "rest_seconds", "timezone"];
 
 /// A plan edit that touches only targets: no reordering, no other fields.
 fn targets_only(args: &serde_json::Value) -> bool {
@@ -725,10 +725,18 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
-        // profile_update allows weight_unit/rest_seconds and forbids other fields.
+        // profile_update allows weight_unit/rest_seconds/timezone and forbids other fields.
         assert_eq!(
-            post(&app, "/api/profile_update", r#"{"changes":{"timezone":"UTC"}}"#, "same-origin").await.status(),
+            post(&app, "/api/profile_update", r#"{"changes":{"weekly_target_sessions":5}}"#, "same-origin")
+                .await
+                .status(),
             StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post(&app, "/api/profile_update", r#"{"changes":{"timezone":"America/New_York"}}"#, "same-origin")
+                .await
+                .status(),
+            StatusCode::OK
         );
         assert_eq!(
             post(&app, "/api/profile_update", r#"{"changes":{"weight_unit":"lb"}}"#, "same-origin").await.status(),
