@@ -922,7 +922,7 @@ function renderNext(focus, next) {
 }
 
 function renderStartPicker(focus, plans) {
-  const box = el('details', 'swap');
+  const box = el('details', 'swap start-picker');
   box.append(el('summary', '', 'Start a workout now'));
   const actions = el('div', 'live-actions');
   for (const plan of plans) {
@@ -1190,7 +1190,7 @@ function renderWeightLog(points) {
   host.replaceChildren();
   const last = points.at(-1)?.kg;
   let value = last !== undefined ? toDisplayBody(last) : null;
-  host.append(stepper('Log weight', value, { step: 0.1, min: isLb() ? 45 : 20, base: isLb() ? 165 : 75, unit: weightUnit(), decimal: true, onChange: v => { value = v; } }));
+  host.append(stepper('Body weight', value, { step: 0.1, min: isLb() ? 45 : 20, base: isLb() ? 165 : 75, unit: weightUnit(), decimal: true, onChange: v => { value = v; } }));
   const save = el('button', 'save', 'Log');
   save.type = 'button';
   save.addEventListener('click', async () => {
@@ -1702,7 +1702,7 @@ function openSetEditor(exercise, set) {
     grid.append(stepper(exercise.per_side ? 'Reps / side' : 'Reps', draft.reps,
       { step: 1, min: 1, unit: 'reps', onChange: v => { draft.reps = v; markDirty(form, 'Save set'); } }));
   }
-  const save = el('button', 'save', 'Save set');
+  const save = el('button', 'save log-button', 'Save set');
   save.type = 'submit';
   const actions = el('div', 'ex-actions');
   actions.append(save);
@@ -1744,78 +1744,122 @@ function openSetEditor(exercise, set) {
 }
 
 /* Settings panel on the rebranded Settings + Memory tab. */
+let restSaveTimer = null;
+let restSaving = false;
 function renderSettings(data) {
   const host = document.getElementById('settings');
-  if (!host || host.contains(document.activeElement) || !data.profile) return;
+  if (!host || !data.profile || restSaveTimer || restSaving) return;
   host.replaceChildren();
-  const badge = document.getElementById('runtime-badge');
   const on = Boolean(data.runtime?.enabled);
-  if (badge) badge.textContent = on ? 'Reminders on' : 'Reminders paused';
   const rows = el('div', 'settings-rows');
 
-  // Weight unit toggle
-  const unitRow = el('div', 'setting-row');
-  unitRow.append(el('span', 'setting-label', 'Weight unit'));
-  const seg = el('div', 'segmented');
+  const row = (title, sub, control) => {
+    const r = el('div', 'setting-row');
+    const meta = el('div', 'setting-meta');
+    meta.append(el('span', 'setting-label', title));
+    if (sub) meta.append(el('small', '', sub));
+    const ctrl = el('div', 'setting-control');
+    ctrl.append(control);
+    r.append(meta, ctrl);
+    return r;
+  };
+
+  // 1. Weight unit
+  const unitSeg = el('div', 'segmented');
   for (const u of ['kg', 'lb']) {
     const b = el('button', '', u);
     b.type = 'button';
     b.setAttribute('aria-pressed', String(data.profile.weight_unit === u));
     b.addEventListener('click', async () => {
       if (data.profile.weight_unit === u) return;
+      haptic.select();
       try { await toolCall('profile_update', { changes: { weight_unit: u } }); haptic.done(); toast(`Weights set to ${u}`); }
       catch (e) { haptic.done(false); toast(e.message, true); }
     });
-    seg.append(b);
+    unitSeg.append(b);
   }
-  unitRow.append(seg);
-  rows.append(unitRow);
+  rows.append(row('Weight unit', null, unitSeg));
 
-  // Default rest stepper
+  // 2. Default rest (compact inline stepper with hold-to-repeat and poll-safe auto-save)
   let restVal = data.profile.rest_seconds;
-  const restRow = el('div', 'setting-row');
-  const restStep = stepper('Default rest', restVal, { step: 15, min: 15, unit: 's', onChange: v => { restVal = v; } });
-  const restSave = el('button', 'chip', 'Save');
-  restSave.type = 'button';
-  restSave.addEventListener('click', async () => {
-    if (!restVal || restVal === data.profile.rest_seconds) return;
-    try { await toolCall('profile_update', { changes: { rest_seconds: restVal } }); haptic.done(); toast(`Default rest ${restVal}s`); }
-    catch (e) { haptic.done(false); toast(e.message, true); }
-  });
-  restRow.append(restStep, restSave);
-  rows.append(restRow);
+  const restCtrl = el('div', 'mini-stepper');
+  const valNode = el('span', '', `${restVal}s`);
+  const stepBtn = (label, delta, aria) => {
+    const b = el('button', '', label);
+    b.type = 'button';
+    b.setAttribute('aria-label', aria);
+    let hold, held = false, startY = 0;
+    const stop = () => { clearTimeout(hold); clearInterval(hold); };
+    const bump = () => {
+      const next = Math.max(15, Math.min(600, restVal + delta));
+      if (next === restVal) { stop(); return; }
+      haptic.select();
+      restVal = next;
+      valNode.textContent = `${restVal}s`;
+      minus.disabled = restVal <= 15;
+      plus.disabled = restVal >= 600;
+      clearTimeout(restSaveTimer);
+      restSaveTimer = setTimeout(async () => {
+        restSaveTimer = null;
+        restSaving = true;
+        try { await toolCall('profile_update', { changes: { rest_seconds: restVal } }); haptic.done(); toast(`Default rest ${restVal}s`); }
+        catch (e) { haptic.done(false); toast(e.message, true); }
+        finally { restSaving = false; }
+      }, 450);
+    };
+    b.addEventListener('pointerdown', event => {
+      if (event.button) return;
+      held = false;
+      startY = event.clientY;
+      hold = setTimeout(() => { held = true; bump(); hold = setInterval(bump, 120); }, 420);
+    });
+    b.addEventListener('pointermove', event => { if (Math.abs(event.clientY - startY) > 10) stop(); });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(t => b.addEventListener(t, stop));
+    b.addEventListener('click', () => { if (!held) bump(); held = false; });
+    return b;
+  };
+  const minus = stepBtn('−', -15, 'Less rest');
+  const plus = stepBtn('+', 15, 'More rest');
+  minus.disabled = restVal <= 15;
+  plus.disabled = restVal >= 600;
+  restCtrl.append(minus, valNode, plus);
+  rows.append(row('Default rest', 'Between working sets', restCtrl));
 
-  // Reminders pause/resume toggle
-  const remRow = el('div', 'setting-row');
-  const remLabel = el('span', 'setting-label', 'Reminders & weekly plan');
-  remLabel.append(el('small', '', `${data.profile.weekly_target_sessions}/wk · ${data.profile.earliest_workout_start}–${data.profile.latest_workout_finish}`));
-  const remBtn = el('button', 'chip', on ? 'Pause' : 'Resume');
-  remBtn.type = 'button';
-  remBtn.addEventListener('click', async () => {
-    try {
-      if (on) await toolCall('runtime_pause', {});
-      else await toolCall('runtime_resume', { owner_asked: true });
-      haptic.done();
-      toast(on ? 'Reminders paused' : 'Reminders resumed');
-    } catch (e) { haptic.done(false); toast(e.message, true); }
-  });
-  remRow.append(remLabel, remBtn);
-  rows.append(remRow);
+  // 3. Reminders & weekly plan (On | Paused segmented control)
+  const remSeg = el('div', 'segmented');
+  for (const [label, want] of [['On', true], ['Paused', false]]) {
+    const b = el('button', '', label);
+    b.type = 'button';
+    b.setAttribute('aria-pressed', String(on === want));
+    b.addEventListener('click', async () => {
+      if (on === want) return;
+      haptic.select();
+      try {
+        if (want) await toolCall('runtime_resume', { owner_asked: true });
+        else await toolCall('runtime_pause', {});
+        haptic.done();
+        toast(want ? 'Reminders on' : 'Reminders paused');
+      } catch (e) { haptic.done(false); toast(e.message, true); }
+    });
+    remSeg.append(b);
+  }
+  rows.append(row('Reminders & plan', `${data.profile.weekly_target_sessions}/wk · ${data.profile.earliest_workout_start}–${data.profile.latest_workout_finish}`, remSeg));
 
-  // Calendar ICS subscription URL
+  // 4. Calendar ICS subscription URL
   if (data.ics_path) {
-    const icsRow = el('div', 'setting-row');
-    const icsLabel = el('span', 'setting-label', 'Calendar feed (read-only)');
-    icsLabel.append(el('small', '', 'Subscribe from Apple or Google Calendar'));
-    const copy = el('button', 'chip', 'Copy link');
+    const copy = el('button', 'chip sm', 'Copy');
     copy.type = 'button';
     copy.addEventListener('click', async () => {
       const url = new URL(data.ics_path, location.href).href;
-      try { await navigator.clipboard.writeText(url); haptic.done(); toast('Calendar link copied'); }
-      catch { window.prompt('Calendar subscription URL:', url); }
+      try {
+        await navigator.clipboard.writeText(url);
+        haptic.done();
+        copy.textContent = 'Copied ✓';
+        setTimeout(() => { copy.textContent = 'Copy'; }, 1800);
+        toast('Calendar link copied');
+      } catch { window.prompt('Calendar subscription URL:', url); }
     });
-    icsRow.append(icsLabel, copy);
-    rows.append(icsRow);
+    rows.append(row('Calendar feed', 'Read-only · Apple & Google', copy));
   }
   host.append(rows);
 }
