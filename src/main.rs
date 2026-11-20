@@ -154,23 +154,28 @@ fn crowd_test() -> Result<Value> {
 
 async fn doctor() -> Value {
     let (_, db_path) = Config::paths();
-    let db_check = match db::open(&db_path) {
-        Ok(conn) => {
-            let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
-            let setup_done = gymclaw::domain::onboarding::finished(&conn).unwrap_or(false);
-            let runtime = gymclaw::runtime::outbox::runtime_authority(&conn).ok();
-            let google = gymclaw::db::models::CalendarSyncState::get(&conn, 1)
-                .ok()
-                .flatten()
-                .is_some_and(|s| s.source == "google");
-            let ics = gymclaw::domain::personal_calendar::status(&conn).ok().is_some_and(|s| s["connected"] == true);
-            json!({
-                "ok": true, "path": db_path, "schema_version": version, "setup_done": setup_done,
-                "runtime_enabled": runtime.as_ref().is_some_and(|r| r.enabled),
-                "google_calendar": google, "personal_ics": ics,
-            })
+    let db_check = if !db_path.exists() {
+        json!({"ok": false, "path": db_path, "error": "database file does not exist (run `gymclaw migrate`)"})
+    } else {
+        match db::open_readonly(&db_path) {
+            Ok(conn) => {
+                let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+                let setup_done = gymclaw::domain::onboarding::finished(&conn).unwrap_or(false);
+                let runtime = gymclaw::runtime::outbox::runtime_authority(&conn).ok();
+                let google = gymclaw::db::models::CalendarSyncState::get(&conn, 1)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.source == "google");
+                let ics =
+                    gymclaw::domain::personal_calendar::status(&conn).ok().is_some_and(|s| s["connected"] == true);
+                json!({
+                    "ok": version > 0, "path": db_path, "schema_version": version, "setup_done": setup_done,
+                    "runtime_enabled": runtime.as_ref().is_some_and(|r| r.enabled),
+                    "google_calendar": google, "personal_ics": ics,
+                })
+            }
+            Err(e) => json!({"ok": false, "path": db_path, "error": e.to_string()}),
         }
-        Err(e) => json!({"ok": false, "path": db_path, "error": e.to_string()}),
     };
     let owner = config::owner_id();
     let tg_check = match config::telegram_token() {
@@ -355,16 +360,31 @@ async fn main() -> ExitCode {
             .and_then(|conn| gymclaw::domain::illustrations::missing(&conn))
             .map(|missing| Some(json!(missing))),
         Command::Dashboard { addr, allowed_host } => {
-            let auth = config::telegram_token()
-                .map(|bot_token| gymclaw::web::WebAuth { bot_token, owner_id: config::owner_id().ok() });
+            let auth = match config::telegram_token() {
+                Some(bot_token) => match config::owner_id() {
+                    Ok(owner_id) => Some(gymclaw::web::WebAuth { bot_token, owner_id }),
+                    Err(msg) => {
+                        return {
+                            print(&Error::domain("CONFIG", msg).to_json());
+                            ExitCode::FAILURE
+                        };
+                    }
+                },
+                None => None,
+            };
             gymclaw::web::dashboard(Config::paths().1, addr, allowed_host, auth).await.map(|_| None)
         }
-        Command::Doctor => Ok(Some(doctor().await)),
+        Command::Doctor => {
+            let report = doctor().await;
+            let ok = report["ok"] == true;
+            print(&report);
+            return if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        }
         Command::CrowdTest => tokio::task::spawn_blocking(crowd_test).await.expect("crowd test thread").map(Some),
         Command::CrowdReset => {
             let (_, path) = Config::paths();
             db::open(&path)
-                .and_then(|conn| gymclaw::domain::crowd::reset_source(&conn))
+                .and_then(|mut conn| db::in_tx(&mut conn, gymclaw::domain::crowd::reset_source))
                 .map(|cleared| Some(json!({"ok": true, "cleared": cleared})))
         }
     };

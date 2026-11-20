@@ -50,12 +50,12 @@ fn targets_only(args: &serde_json::Value) -> bool {
             .is_some_and(|c| c.keys().all(|k| TARGET_FIELDS.contains(&k.as_str())))
 }
 
-/// Optional Telegram Mini App auth (`TELEGRAM_BOT_TOKEN`, optional `GYMCLAW_TELEGRAM_USER_ID`).
-/// Enforced on `/api/*` and `/export.csv` for non-loopback hosts; local dev on loopback stays open.
+/// Optional Telegram Mini App auth (`TELEGRAM_BOT_TOKEN` + `GYMCLAW_TELEGRAM_USER_ID`).
+/// Enforced on every `/api/*` and `/export.csv` request whenever configured (`None` only for local dev).
 #[derive(Clone)]
 pub struct WebAuth {
     pub bot_token: String,
-    pub owner_id: Option<i64>,
+    pub owner_id: i64,
 }
 
 struct App {
@@ -124,7 +124,7 @@ fn percent_decode(input: &str) -> Option<String> {
 
 /// Verify Telegram Mini App `initData` (HMAC-SHA256 with `WebAppData` + bot token, auth_date <= 24h,
 /// and matching `owner_id` when configured).
-pub fn verify_telegram_init_data(init_data: &str, auth: &WebAuth, now: Ts) -> bool {
+pub fn verify_telegram_init_data(init_data: &str, auth: &WebAuth, now: Ts, max_age_secs: i64) -> bool {
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut hash_hex: Option<String> = None;
     for part in init_data.split('&').filter(|p| !p.is_empty()) {
@@ -142,29 +142,22 @@ pub fn verify_telegram_init_data(init_data: &str, auth: &WebAuth, now: Ts) -> bo
         None => return false,
     };
     let age = now.0.as_second() - auth_date;
-    if !(-300..=86_400).contains(&age) {
+    if !(-300..=max_age_secs).contains(&age) {
         return false;
     }
-    if let Some(expected_owner) = auth.owner_id {
-        let user_id = pairs
-            .iter()
-            .find(|(k, _)| k == "user")
-            .and_then(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok())
-            .and_then(|u| u["id"].as_i64());
-        if user_id != Some(expected_owner) {
-            return false;
-        }
+    let user_id = pairs
+        .iter()
+        .find(|(k, _)| k == "user")
+        .and_then(|(_, v)| serde_json::from_str::<serde_json::Value>(v).ok())
+        .and_then(|u| u["id"].as_i64());
+    if user_id != Some(auth.owner_id) {
+        return false;
     }
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     let check_string = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n");
     let secret = hmac_sha256(b"WebAppData", auth.bot_token.as_bytes());
     let expected = hmac_sha256(&secret, check_string.as_bytes());
     ct_eq(&expected, &hash_bytes)
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    let name = host.split(':').next().unwrap_or("");
-    matches!(name, "127.0.0.1" | "localhost")
 }
 
 fn query_param(query: Option<&str>, key: &str) -> Option<String> {
@@ -174,17 +167,16 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
     })
 }
 
-fn authorized(app: &App, host: &str, headers: &HeaderMap, query: Option<&str>, allow_query: bool) -> bool {
+fn authorized(app: &App, headers: &HeaderMap, query: Option<&str>, allow_query: bool) -> bool {
     let Some(auth) = &app.auth else { return true };
-    if is_loopback_host(host) {
-        return true;
+    if let Some(data) = headers.get("x-telegram-init-data").and_then(|v| v.to_str().ok()) {
+        return verify_telegram_init_data(data, auth, Ts::now(), 86_400);
     }
-    let init_data = headers
-        .get("x-telegram-init-data")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-        .or_else(|| if allow_query { query_param(query, "init_data") } else { None });
-    init_data.is_some_and(|data| verify_telegram_init_data(&data, auth, Ts::now()))
+    // Query-param auth (CSV download) uses a shorter 5-min window to limit URL log exposure.
+    if allow_query && let Some(data) = query_param(query, "init_data") {
+        return verify_telegram_init_data(&data, auth, Ts::now(), 300);
+    }
+    false
 }
 
 fn ics_escape(text: &str) -> String {
@@ -203,7 +195,7 @@ fn render_ics(db: &crate::db::Connection, now: Ts) -> Result<String> {
     let cutoff = now - jiff::SignedDuration::from_hours(24 * 30);
     let sessions = PlannedSession::select(
         db,
-        "WHERE status != 'CANCELLED' AND planned_end_at >= ?1 ORDER BY planned_start_at",
+        "WHERE status NOT IN ('CANCELLED', 'SKIPPED', 'MISSED') AND planned_end_at >= ?1 ORDER BY planned_start_at",
         [cutoff],
     )?;
     let stamp = ics_utc(now);
@@ -267,7 +259,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         return error(StatusCode::FORBIDDEN);
     }
     if request.method() == Method::POST {
-        if !authorized(&app, host, headers, request.uri().query(), false) {
+        if !authorized(&app, headers, request.uri().query(), false) {
             return error(StatusCode::UNAUTHORIZED);
         }
         let Some(tool) = request
@@ -359,8 +351,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
             _ => error(StatusCode::SERVICE_UNAVAILABLE),
         };
     }
-    if (path.starts_with("/api/") || path == "/export.csv")
-        && !authorized(&app, host, headers, query, path == "/export.csv")
+    if (path.starts_with("/api/") || path == "/export.csv") && !authorized(&app, headers, query, path == "/export.csv")
     {
         return error(StatusCode::UNAUTHORIZED);
     }
@@ -600,7 +591,7 @@ mod tests {
         session.merge_plan(serde_json::json!({"template": {"name": "Push"}}));
         session.insert(&db).unwrap();
 
-        let auth = WebAuth { bot_token: "123:secret".into(), owner_id: Some(42) };
+        let auth = WebAuth { bot_token: "123:secret".into(), owner_id: 42 };
         let app = Arc::new(App { db_path: path.clone(), hosts: vec!["gym.example".into()], auth: Some(auth) });
         // Without initData, /api/state is 401.
         assert_eq!(get(&app, Method::GET, "/api/state", "gym.example").await.status(), StatusCode::UNAUTHORIZED);
@@ -624,6 +615,18 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(handle(State(app.clone()), req).await.status(), StatusCode::UNAUTHORIZED);
+        // Loopback Host header cannot bypass auth when WebAuth is configured.
+        let app_lb = Arc::new(App {
+            db_path: path.clone(),
+            hosts: vec!["127.0.0.1:8766".into(), "gym.example".into()],
+            auth: Some(WebAuth { bot_token: "123:secret".into(), owner_id: 42 }),
+        });
+        assert_eq!(get(&app_lb, Method::GET, "/api/state", "127.0.0.1:8766").await.status(), StatusCode::UNAUTHORIZED);
+        // Expired and tampered initData are rejected.
+        let expired = sign_init_data("123:secret", 42, Ts::now().0.as_second() - 90_000);
+        assert!(!verify_telegram_init_data(&expired, app.auth.as_ref().unwrap(), Ts::now(), 86_400));
+        let tampered = valid.replace("42", "43");
+        assert!(!verify_telegram_init_data(&tampered, app.auth.as_ref().unwrap(), Ts::now(), 86_400));
         // ICS export works without initData for the right token, and 404s for a wrong token.
         assert_eq!(get(&app, Method::GET, "/calendar/wrong.ics", "gym.example").await.status(), StatusCode::NOT_FOUND);
         let ics = get(&app, Method::GET, &format!("/calendar/{token}.ics"), "gym.example").await;

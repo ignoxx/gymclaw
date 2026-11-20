@@ -269,10 +269,13 @@ impl CrowdModel {
 }
 
 /// The crowd source row, created on first use. A DB bound to another gym/provider refuses to mix data.
-/// Clear the bound gym crowd source so a different gym/source config can be used without a fresh DB.
+/// Clear the bound gym crowd source, its observations and felt-crowd ratings so a different gym
+/// config never mixes counts with the old gym.
 pub fn reset_source(db: &Connection) -> Result<bool> {
-    let removed = db.execute("DELETE FROM crowd_source_state WHERE source = ?1", [SOURCE])?;
-    Ok(removed > 0)
+    let state = db.execute("DELETE FROM crowd_source_state WHERE source = ?1", [SOURCE])?;
+    let obs = db.execute("DELETE FROM crowd_observation WHERE source = ?1", [SOURCE])?;
+    let fb = db.execute("DELETE FROM crowd_feedback", [])?;
+    Ok(state + obs + fb > 0)
 }
 
 fn bind_source(db: &Connection, source: &str, provider_id: &str) -> Result<CrowdSourceState> {

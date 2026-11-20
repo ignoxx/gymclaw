@@ -214,10 +214,20 @@ mod tests {
             call(&db, "runtime_resume", json!({"owner_asked": false})).unwrap_err().code(),
             "RUNTIME_NOT_APPROVED"
         );
-        let resumed = call(&db, "runtime_resume", json!({"owner_asked": true})).unwrap();
+        let resumed = call(&db, "runtime_resume", json!({"owner_asked": true, "crowd_polling": true})).unwrap();
         assert_eq!(
-            (resumed["enabled"].as_bool(), resumed["calendar_writes_enabled"].as_bool()),
-            (Some(true), Some(false))
+            (
+                resumed["enabled"].as_bool(),
+                resumed["calendar_writes_enabled"].as_bool(),
+                resumed["crowd_polling_enabled"].as_bool(),
+            ),
+            (Some(true), Some(false), Some(true))
+        );
+        // Omitting crowd_polling leaves it on; passing false turns it off.
+        assert_eq!(call(&db, "runtime_resume", json!({"owner_asked": true})).unwrap()["crowd_polling_enabled"], true);
+        assert_eq!(
+            call(&db, "runtime_resume", json!({"owner_asked": true, "crowd_polling": false})).unwrap()["crowd_polling_enabled"],
+            false
         );
     }
 }
