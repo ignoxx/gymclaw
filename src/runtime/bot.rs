@@ -1005,6 +1005,7 @@ mod tests {
             agent: Agent {
                 db_path,
                 data_dir: dir.clone(),
+                recipient: Some("1".into()),
                 model,
                 chat_model: "fixture".into(),
                 vision_model: "fixture".into(),

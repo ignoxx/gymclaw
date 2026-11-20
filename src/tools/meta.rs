@@ -272,7 +272,8 @@ mod tests {
     fn query_is_read_only_and_capped() {
         let db = crate::db::test::db();
         let dir = std::env::temp_dir();
-        let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
+        let mut cx =
+            Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, recipient: None, effects: vec![] };
         let query = |cx: &mut Ctx, sql: &str| SqlQuery { sql: sql.into() }.run(cx);
         assert!(query(&mut cx, "DELETE FROM agent_note RETURNING id").is_err());
         assert!(query(&mut cx, "PRAGMA query_only=OFF").is_err());
@@ -299,7 +300,8 @@ mod tests {
     fn notes_stay_within_budget_but_can_always_shrink() {
         let db = crate::db::test::db();
         let dir = std::env::temp_dir();
-        let mut cx = Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, effects: vec![] };
+        let mut cx =
+            Ctx { db: &db, now: Ts::now(), request_id: "r".into(), data_dir: &dir, recipient: None, effects: vec![] };
         let limit = budget(NoteKind::Learned);
         let add = |cx: &mut Ctx, text: String| NoteAdd { kind: NoteKind::Learned, text }.run(cx);
         let id = add(&mut cx, "a".repeat(limit - 10)).unwrap()["id"].as_i64().unwrap();

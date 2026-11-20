@@ -141,6 +141,7 @@ pub struct TurnInput {
 pub struct Agent {
     pub db_path: PathBuf,
     pub data_dir: PathBuf,
+    pub recipient: Option<String>,
     pub model: Arc<dyn ChatModel>,
     pub chat_model: String,
     pub vision_model: String,
@@ -256,6 +257,7 @@ impl Agent {
     async fn tool(&self, name: &str, args: Value, request_id: String) -> Ran {
         let now = (self.clock)();
         let data_dir = self.data_dir.clone();
+        let recipient = self.recipient.clone();
         let name_owned = name.to_string();
         let result = blocking(&self.db_path, move |db| {
             // The transaction holds the write lock (`db::open`), so until commit only this call adds events.
@@ -266,7 +268,7 @@ impl Agent {
             let mark = crate::domain::events::mark(&tx)?;
             let before = tx.total_changes();
             let described = context::name_sessions(&tx, &format!("{name_owned} {}", scrub(&args.to_string(), 400)))?;
-            let mut cx = tools::Ctx { db: &tx, now, request_id, data_dir: &data_dir, effects: vec![] };
+            let mut cx = tools::Ctx { db: &tx, now, request_id, data_dir: &data_dir, recipient, effects: vec![] };
             let mut value = tools::call(&mut cx, &name_owned, args)?;
             let effects = std::mem::take(&mut cx.effects);
             let saved = (tx.total_changes() > before).then(|| {
@@ -722,6 +724,7 @@ mod tests {
         let agent = Agent {
             db_path,
             data_dir: dir.clone(),
+            recipient: Some("1".into()),
             model: script.clone(),
             chat_model: "m".into(),
             vision_model: "v".into(),

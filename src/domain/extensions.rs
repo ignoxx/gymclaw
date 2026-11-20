@@ -752,7 +752,7 @@ mod tests {
     /// Runs a tool as the agent (`tg-…`), a background turn (`event-…`) or the dashboard.
     fn call(db: &Connection, request_id: &str, now: Ts, tool: &str, args: Value) -> Result<Value> {
         let dir = std::env::temp_dir();
-        let mut cx = Ctx { db, now, request_id: request_id.into(), data_dir: &dir, effects: vec![] };
+        let mut cx = Ctx { db, now, request_id: request_id.into(), data_dir: &dir, recipient: None, effects: vec![] };
         crate::tools::call(&mut cx, tool, args)
     }
 

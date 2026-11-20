@@ -229,7 +229,12 @@ fn call(tool: &str, args: Option<String>, now: Option<String>, request_id: Optio
             None => Ts::now(),
         };
         let request_id = request_id.unwrap_or_else(|| format!("cli:{}", db::new_id()));
-        tools::call(&mut tools::Ctx { db: tx, now, request_id, data_dir: &data_dir, effects: vec![] }, tool, args)
+        let recipient = config::owner_id().ok().map(|id| id.to_string());
+        tools::call(
+            &mut tools::Ctx { db: tx, now, request_id, data_dir: &data_dir, recipient, effects: vec![] },
+            tool,
+            args,
+        )
     })
 }
 
@@ -266,6 +271,7 @@ async fn replay(db_path: PathBuf, key: &str, at: &str, model: String, provider: 
     let agent = Agent {
         db_path,
         data_dir,
+        recipient: config::owner_id().ok().map(|id| id.to_string()),
         model: Arc::new(Tap(OpenRouter::new(key, provider)?)),
         vision_model: model.clone(),
         audio_model: model.clone(),

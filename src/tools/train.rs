@@ -574,7 +574,12 @@ impl Tool for OnboardingFinish {
         if cx.background() {
             crate::bail!("ONBOARDING_OWNER_REQUIRED", "Finishing setup requires the owner's confirmation");
         }
-        onboarding::update(cx.db, Update::Finish(Some(&self.fingerprint)), cx.now, &cx.request_id)
+        onboarding::update(
+            cx.db,
+            Update::Finish { fingerprint: Some(&self.fingerprint), recipient: cx.recipient.as_deref() },
+            cx.now,
+            &cx.request_id,
+        )
     }
 }
 
