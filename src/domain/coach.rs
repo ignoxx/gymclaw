@@ -611,6 +611,11 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
     }
     let Some(workout) = active_workout(db)? else { return Ok(acked("⌛ No workout running.", vec![])) };
     if action == "end" {
+        if let Some(r) = args.first().copied().filter(|r| !r.is_empty())
+            && !workout.id.starts_with(r)
+        {
+            return Ok(acked("⌛ Old button.", vec![]));
+        }
         return end_workout(db, &workout, now, request_id);
     }
     let r = args.first().copied().unwrap_or_default();
@@ -851,12 +856,18 @@ pub fn app_live(db: &Connection, workout_id: &str, now: Ts) -> Result<Value> {
             "reps_only": active.bodyweight && weight.unwrap_or(0.0) == 0.0}}))
 }
 
-/// A coach button pressed in the Mini App (a set typed there arrives as `log` with its numbers): the same
-/// step as a tap in the chat, plus an `APP_VIEW` event so the chat's card moves on too. A button the
-/// workout has moved past fails with `COACH_STALE` instead of acting on whatever is current.
 /// Start any saved workout template directly from the Mini App (no 64-byte callback limit).
+/// Refuses if a workout is already running (never discards it), and links today's planned session
+/// when its template matches so reminders cancel cleanly.
 pub fn app_start_template(db: &Connection, template_id: &str, now: Ts, request_id: &str) -> Result<CoachView> {
-    workout::start(db, Some(template_id), None, true, now, request_id)?;
+    if active_workout(db)?.is_some() {
+        return Err(Error::domain("COACH_STALE", "Workout is already running."));
+    }
+    let planned_id = workout::todays_session(db, now)?
+        .filter(|s| s.workout_template_id.as_deref() == Some(template_id))
+        .filter(|s| workout::startable(db, s, now).unwrap_or(false))
+        .map(|s| s.id);
+    workout::start(db, Some(template_id), planned_id.as_deref(), true, now, request_id)?;
     let workout = active_workout(db)?.ok_or_else(|| Error::domain("NO_WORKOUT", "Workout did not start"))?;
     let name = workout.template_snapshot["name"].as_str().unwrap_or("Workout").to_string();
     let view = acked(format!("▶️ Started {name}"), vec![exercise_card(db, &workout.id, now)?]);
@@ -864,6 +875,9 @@ pub fn app_start_template(db: &Connection, template_id: &str, now: Ts, request_i
     Ok(view)
 }
 
+/// A coach button pressed in the Mini App (a set typed there arrives as `log` with its numbers): the same
+/// step as a tap in the chat, plus an `APP_VIEW` event so the chat's card moves on too. A button the
+/// workout has moved past fails with `COACH_STALE` instead of acting on whatever is current.
 pub fn app_tap(db: &Connection, data: &str, now: Ts, request_id: &str) -> Result<CoachView> {
     if !app_action(data) {
         return Err(invalid("Not a coach button the app offers"));

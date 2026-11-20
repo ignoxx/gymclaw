@@ -852,8 +852,9 @@ function renderWorkout(focus, workout) {
   end.type = 'button';
   end.addEventListener('click', () => {
     const ask = 'End this workout now and save logged sets?';
-    if (tgHas('6.2')) tg.showConfirm(ask, ok => ok && coachTap('gc:end'));
-    else if (window.confirm(ask)) coachTap('gc:end');
+    const endData = `gc:end:${String(workout.id || '').slice(0, 8)}`;
+    if (tgHas('6.2')) tg.showConfirm(ask, ok => ok && coachTap(endData));
+    else if (window.confirm(ask)) coachTap(endData);
   });
   more.append(end);
   focus.append(more);
@@ -1188,7 +1189,7 @@ function renderWeightLog(points) {
   if (!host || host.contains(document.activeElement)) return;
   host.replaceChildren();
   const last = points.at(-1)?.kg;
-  let value = last !== undefined ? toDisplayBody(last) : (isLb() ? 165 : 75);
+  let value = last !== undefined ? toDisplayBody(last) : null;
   host.append(stepper('Log weight', value, { step: 0.1, min: isLb() ? 45 : 20, base: isLb() ? 165 : 75, unit: weightUnit(), decimal: true, onChange: v => { value = v; } }));
   const save = el('button', 'save', 'Log');
   save.type = 'button';
@@ -1709,9 +1710,20 @@ function openSetEditor(exercise, set) {
   form.addEventListener('submit', async event => {
     event.preventDefault();
     const payload = { set_id: set.id };
-    if (set.seconds) payload.minutes = draft.seconds / 60;
-    else if (set.meters) payload.meters = draft.meters;
-    else { payload.weight = toKg(draft.weight || 0); payload.reps = draft.reps; }
+    if (set.seconds) {
+      if (!draft.seconds) { toast('Enter a valid time', true); return; }
+      payload.minutes = draft.seconds / 60;
+    } else if (set.meters) {
+      if (!draft.meters) { toast('Enter a valid distance', true); return; }
+      payload.meters = draft.meters;
+    } else {
+      if (!draft.reps || ((set.weight || exercise.added) && draft.weight === null)) {
+        toast('Enter valid numbers first', true);
+        return;
+      }
+      payload.weight = toKg(draft.weight || 0);
+      payload.reps = draft.reps;
+    }
     save.disabled = true;
     try {
       await toolCall('set_edit', payload);
@@ -1751,7 +1763,7 @@ function renderSettings(data) {
     b.setAttribute('aria-pressed', String(data.profile.weight_unit === u));
     b.addEventListener('click', async () => {
       if (data.profile.weight_unit === u) return;
-      try { await toolCall('profile_update', { fields: { weight_unit: u } }); haptic.done(); toast(`Weights set to ${u}`); }
+      try { await toolCall('profile_update', { changes: { weight_unit: u } }); haptic.done(); toast(`Weights set to ${u}`); }
       catch (e) { haptic.done(false); toast(e.message, true); }
     });
     seg.append(b);
@@ -1767,7 +1779,7 @@ function renderSettings(data) {
   restSave.type = 'button';
   restSave.addEventListener('click', async () => {
     if (!restVal || restVal === data.profile.rest_seconds) return;
-    try { await toolCall('profile_update', { fields: { rest_seconds: restVal } }); haptic.done(); toast(`Default rest ${restVal}s`); }
+    try { await toolCall('profile_update', { changes: { rest_seconds: restVal } }); haptic.done(); toast(`Default rest ${restVal}s`); }
     catch (e) { haptic.done(false); toast(e.message, true); }
   });
   restRow.append(restStep, restSave);
@@ -1929,10 +1941,12 @@ if (tgHas('8.0')) {
   tg.onEvent('deactivated', () => { active = false; });
 }
 async function refreshLive() {
+  if (sending) return true;
   try {
     const response = await fetch('/api/live', { headers: apiHeaders() });
     if (!response.ok) throw new Error('Live unavailable');
     const live = await response.json();
+    if (sending || (state?.captured_at && live.captured_at < state.captured_at)) return true;
     // If a workout ended or started, pull full state so History/KPIs catch up too.
     if (Boolean(live.workout) !== Boolean(state?.workout)) return refresh();
     render({ ...state, ...live });

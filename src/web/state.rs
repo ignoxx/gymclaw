@@ -186,7 +186,7 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     // The last set with its exercise, so the app can fix it (`set_edit`).
     let last = coach::app_last(db, &w.id)?;
     Ok(
-        json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
+        json!({"id": w.id, "template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
         "rest_until": data["rest_job"].get("due_at"), "last_set": last["text"], "last": last, "exercises": exercises,
         "live": coach::app_live(db, &w.id, now)?}),
     )

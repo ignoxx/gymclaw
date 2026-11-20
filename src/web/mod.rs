@@ -50,6 +50,8 @@ const DASHBOARD_TOOLS: [&str; 10] = [
 /// The only exercise fields the dashboard may change. An id, name or picture change would cut an
 /// exercise off from its history, so those stay with the agent.
 const TARGET_FIELDS: [&str; 5] = ["target_weight", "working_sets", "rep_min", "rep_max", "rest_seconds"];
+/// The only profile fields the Settings tab edits directly.
+const PROFILE_FIELDS: [&str; 2] = ["weight_unit", "rest_seconds"];
 
 /// A plan edit that touches only targets: no reordering, no other fields.
 fn targets_only(args: &serde_json::Value) -> bool {
@@ -303,17 +305,30 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         if tool == "set_edit" && ["warmup", "exercise", "delete"].iter().any(|k| args.get(k).is_some()) {
             return error(StatusCode::FORBIDDEN);
         }
-        // The app logs typed weigh-ins only, never arbitrary filesystem photo paths.
-        if tool == "body_log"
-            && args
-                .get("entries")
-                .and_then(|e| e.as_array())
-                .is_some_and(|es| es.iter().any(|e| e.get("photo").is_some_and(|v| !v.is_null())))
-        {
-            return error(StatusCode::FORBIDDEN);
+        // The app logs one typed weigh-in (`kg` only), never photo paths or backfill batches.
+        if tool == "body_log" {
+            let valid = args.get("entries").and_then(|e| e.as_array()).is_some_and(|es| {
+                es.len() == 1 && es[0].as_object().is_some_and(|o| o.len() == 1 && o.contains_key("kg"))
+            });
+            if !valid {
+                return error(StatusCode::FORBIDDEN);
+            }
         }
-        // The app toggles reminders only; calendar writes stay an explicit chat grant.
-        if tool == "runtime_resume" && args.get("calendar_writes").is_some_and(|v| v == true) {
+        // Settings edits only weight_unit and rest_seconds; schedule constraints stay with the agent.
+        if tool == "profile_update" {
+            let valid = args
+                .get("changes")
+                .and_then(|c| c.as_object())
+                .is_some_and(|c| !c.is_empty() && c.keys().all(|k| PROFILE_FIELDS.contains(&k.as_str())));
+            if !valid {
+                return error(StatusCode::FORBIDDEN);
+            }
+        }
+        // The app toggles reminders only; calendar writes and crowd polling stay with the agent.
+        if tool == "runtime_resume"
+            && (args.get("calendar_writes").is_some_and(|v| !v.is_null())
+                || args.get("crowd_polling").is_some_and(|v| !v.is_null()))
+        {
             return error(StatusCode::FORBIDDEN);
         }
         let db_path = app.db_path.clone();
@@ -709,6 +724,15 @@ mod tests {
                 .await
                 .status(),
             StatusCode::FORBIDDEN
+        );
+        // profile_update allows weight_unit/rest_seconds and forbids other fields.
+        assert_eq!(
+            post(&app, "/api/profile_update", r#"{"changes":{"timezone":"UTC"}}"#, "same-origin").await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post(&app, "/api/profile_update", r#"{"changes":{"weight_unit":"lb"}}"#, "same-origin").await.status(),
+            StatusCode::OK
         );
         let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
     }
