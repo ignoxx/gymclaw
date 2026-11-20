@@ -186,7 +186,7 @@ fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     // The last set with its exercise, so the app can fix it (`set_edit`).
     let last = coach::app_last(db, &w.id)?;
     Ok(
-        json!({"template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
+        json!({"id": w.id, "template": w.template_snapshot.get("name").cloned().unwrap_or(json!("Workout")), "eta": eta, "active": active,
         "rest_until": data["rest_job"].get("due_at"), "last_set": last["text"], "last": last, "exercises": exercises,
         "live": coach::app_live(db, &w.id, now)?}),
     )
@@ -290,7 +290,9 @@ fn history(db: &Connection, tz: &TimeZone, unit: WeightUnit) -> Result<Vec<Value
                 .unwrap_or(&row.exercise_id);
             let muscle = illustrations::primary_muscle(Some(guide)).or_else(|| workout::muscle(&row));
             exercises.push(json!({"id": row.exercise_id, "name": name, "muscle": muscle, "svg_url": svg(&name, illustrations::catalog().contains_key(guide).then_some(guide)),
-                "lifted": lifted, "sets": done.iter().map(|s| json!({"weight": s.weight, "reps": s.reps, "seconds": s.seconds, "meters": s.meters,
+                "lifted": lifted, "unit": kind.unit(), "added": kind.load == Load::Added, "per_side": kind.per_side,
+                "equipment": illustrations::catalog().get(guide).map(|i| i.equipment.clone()),
+                "sets": done.iter().map(|s| json!({"id": s.id, "weight": s.weight, "reps": s.reps, "seconds": s.seconds, "meters": s.meters,
                     "text": kind.set(s.weight, s.reps, s.seconds, s.meters), "rank": kind.signed(s.weight)})).collect::<Vec<_>>()}));
         }
         let started_at = w.started_at.or(w.completed_at).expect("completed workout");
@@ -489,18 +491,44 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let done = history(db, &tz, profile.weight_unit)?;
     let mut insights = insights(db, &tz, now, &profile, &done)?;
     insights["weight"] = json!(body_weight(db, &tz, now)?);
-    let polling = settings.is_some_and(|s| s.enabled && s.crowd_polling_enabled);
+    let polling = settings.as_ref().is_some_and(|s| s.enabled && s.crowd_polling_enabled);
     let mut crowd = crowd_state(db, &tz, now, polling)?;
     crowd["sessions"] = json!(crowd_sessions(db, &tz, now)?);
     Ok(json!({
         "captured_at": now.iso(), "timezone": profile.timezone, "unit": profile.weight_unit,
         "setup_done": crate::domain::onboarding::finished(db)?,
         "ics_path": crate::domain::profile::ics_token(db)?.map(|t| format!("/calendar/{t}.ics")),
+        "profile": {
+            "weekly_target_sessions": profile.weekly_target_sessions,
+            "rest_seconds": profile.rest_seconds,
+            "earliest_workout_start": profile.earliest_workout_start.strftime("%H:%M").to_string(),
+            "latest_workout_finish": profile.latest_workout_finish.strftime("%H:%M").to_string(),
+            "weight_unit": profile.weight_unit,
+        },
+        "runtime": {
+            "enabled": settings.as_ref().is_some_and(|s| s.enabled),
+            "calendar_writes_enabled": settings.as_ref().is_some_and(|s| s.calendar_writes_enabled),
+            "crowd_polling_enabled": settings.as_ref().is_some_and(|s| s.crowd_polling_enabled),
+        },
         "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
         "days": days(db, &tz, today)?, "next": next_session(db, &tz, now, profile.weight_unit)?, "workout": active_workout(db, &tz, now)?,
         "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db, profile.weight_unit)?,
         "activity": events.iter().map(|e| json!({"time": fmt(e.created_at, &tz, "%H:%M"), "day": fmt(e.created_at, &tz, "%a"),
             "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
+    }))
+}
+
+/// Lightweight snapshot for the 3 s live-workout poll: skips 400-day crowd series and full history.
+pub fn live_snapshot(db: &Connection, now: Ts) -> Result<Value> {
+    let profile = if UserProfile::get(db, 1)?.is_some() { get_profile(db)? } else { Profile::default() };
+    let tz = profile.tz();
+    Ok(json!({
+        "captured_at": now.iso(),
+        "timezone": profile.timezone,
+        "unit": profile.weight_unit,
+        "setup_done": crate::domain::onboarding::finished(db)?,
+        "workout": active_workout(db, &tz, now)?,
+        "next": next_session(db, &tz, now, profile.weight_unit)?,
     }))
 }
 
