@@ -22,6 +22,9 @@ pub const LABELS: [(&str, &str); 4] = [("EMPTY", "Empty"), ("FINE", "A few"), ("
 const RATINGS: [(&str, f64); 4] = [("EMPTY", 0.0), ("FINE", 1.0 / 3.0), ("BUSY", 2.0 / 3.0), ("PACKED", 1.0)];
 const MAX_PAIR_AGE: SignedDuration = SignedDuration::from_mins(30);
 const HISTORY: SignedDuration = SignedDuration::from_hours(24 * 90);
+/// Exponential decay half-life for historical crowd days: recent weeks outweigh 2–3 month old data
+/// so schedule and seasonal shifts show up without shrinking the 90-day fallback window.
+const RECENCY_HALF_LIFE_DAYS: f64 = 21.0;
 const STALE_AFTER: SignedDuration = SignedDuration::from_mins(45);
 /// The owner hears about an outage only after this long without a reading (~4 missed 15-min polls),
 /// so a slow poll or two that recover on their own stay quiet.
@@ -43,8 +46,28 @@ pub(crate) fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
-/// Mean per local date, then the mean of those (repeated polls are not independent days). Returns (mean, days).
-fn daily_mean<'a>(rows: impl Iterator<Item = &'a CrowdObservation>, zone: &TimeZone) -> Option<(f64, usize)> {
+/// Recency-weighted mean of per-day means (`RECENCY_HALF_LIFE_DAYS`). Repeated polls on one day are averaged
+/// first so a single day never counts twice, and recent weeks outweigh older ones as schedules shift.
+pub(crate) fn weighted_daily_mean<'a>(
+    days: impl IntoIterator<Item = (Date, &'a [f64])>,
+    today: Date,
+) -> Option<(f64, usize)> {
+    let (mut weighted_sum, mut weight_total, mut count) = (0.0, 0.0, 0usize);
+    for (day, values) in days {
+        if values.is_empty() {
+            continue;
+        }
+        let age_days = (today - day).get_days().max(0) as f64;
+        let weight = 0.5_f64.powf(age_days / RECENCY_HALF_LIFE_DAYS);
+        weighted_sum += mean(values) * weight;
+        weight_total += weight;
+        count += 1;
+    }
+    (count > 0).then(|| (weighted_sum / weight_total, count))
+}
+
+/// Recency-weighted mean per local date (repeated polls are not independent days). Returns (mean, days).
+fn daily_mean<'a>(rows: impl Iterator<Item = &'a CrowdObservation>, now: Ts, zone: &TimeZone) -> Option<(f64, usize)> {
     let mut days: Vec<(Date, Vec<f64>)> = Vec::new();
     for row in rows {
         let day = row.observed_at.local(zone).date();
@@ -53,11 +76,7 @@ fn daily_mean<'a>(rows: impl Iterator<Item = &'a CrowdObservation>, zone: &TimeZ
             None => days.push((day, vec![row.raw_value])),
         }
     }
-    if days.is_empty() {
-        return None;
-    }
-    let means: Vec<f64> = days.iter().map(|(_, v)| mean(v)).collect();
-    Some((mean(&means), days.len()))
+    weighted_daily_mean(days.iter().map(|(d, v)| (*d, v.as_slice())), now.local(zone).date())
 }
 
 /// Score for a reported count from the owner's labels → (score, confidence, method).
@@ -184,7 +203,7 @@ impl CrowdModel {
         } else {
             (same, "weekday_hour")
         };
-        let (value, days) = daily_mean(selected.into_iter(), &self.zone)?;
+        let (value, days) = daily_mean(selected.into_iter(), self.now, &self.zone)?;
         Some(json!({"count": value.round_ties_even() as i64, "basis": basis, "days": days}))
     }
 
@@ -215,7 +234,7 @@ impl CrowdModel {
                 "locally_collected_slot_history",
             )
         };
-        let (raw, days) = daily_mean(selected.iter().copied(), &self.zone)?;
+        let (raw, days) = daily_mean(selected.iter().copied(), self.now, &self.zone)?;
         let freshness_penalty = if selected.iter().any(|r| r.freshness_seconds.is_none()) { 0.5 } else { 1.0 };
         let mut history_confidence = (days as f64 / (days as f64 + 5.0)).min(0.6) * freshness_penalty;
         if recent {
@@ -697,6 +716,26 @@ mod tests {
         assert_eq!(calibrated_count(30.0, &pairs).2, "personalized_isotonic");
         assert!(calibrated_count(500.0, &pairs).1 < calibrated_count(50.0, &pairs).1);
         assert_eq!(calibrated_count(100.0, &[]).0, None);
+    }
+
+    #[test]
+    fn recency_weighting_favors_recent_weeks_and_averages_same_day_polls() {
+        let db = db();
+        // 6 weeks ago (2 half-lives → weight 0.25): 4 repeated polls of 4 should still count as 1 day.
+        let old = now(-42 * 24 * 60);
+        for offset in [0, 15, 30, 45] {
+            poll(&db, &provider(4), Some(old.mins(offset))).unwrap();
+        }
+        // Today (0 half-lives → weight 1.0): single poll of 14.
+        poll(&db, &provider(14), Some(now(0))).unwrap();
+
+        let model = CrowdModel::new(&db, now(10)).unwrap();
+        // Expected weighted mean: (4 * 0.25 + 14 * 1.0) / 1.25 = 12.0 (flat mean would be 9.0).
+        let expected = model.expected_count(now(7 * 24 * 60)).unwrap();
+        assert_eq!(expected["count"], 12);
+        assert_eq!(expected["days"], 2);
+        let feature = model.predict(now(7 * 24 * 60)).json["features"]["GYM_API"]["raw_value"].as_f64().unwrap();
+        assert!((feature - 12.0).abs() < 1e-9);
     }
 
     #[test]

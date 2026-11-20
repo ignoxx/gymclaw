@@ -389,7 +389,7 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
     let mut muscle_list: Vec<(String, f64, i64)> =
         muscle_order.into_iter().map(|m| (m.clone(), muscles[&m].0, muscles[&m].1)).collect();
     muscle_list.sort_by(|a, b| b.1.total_cmp(&a.1));
-    // Gym crowd by weekday × hour: mean of daily means, so busy days don't count twice.
+    // Gym crowd by weekday × hour: recency-weighted mean of daily means (matches CrowdModel).
     let mut cells: BTreeMap<(i8, i8), BTreeMap<Date, Vec<f64>>> = BTreeMap::new();
     for row in CrowdObservation::select(
         db,
@@ -406,7 +406,10 @@ fn insights(db: &Connection, tz: &TimeZone, now: Ts, profile: &Profile, done: &[
     }
     let heatmap: Vec<Value> = cells
         .iter()
-        .map(|((d, h), dates)| json!({"weekday": d, "hour": h, "count": round(crowd::mean(&dates.values().map(|v| crowd::mean(v)).collect::<Vec<_>>()), 1), "days": dates.len()}))
+        .filter_map(|((d, h), dates)| {
+            let (avg, days) = crowd::weighted_daily_mean(dates.iter().map(|(day, v)| (*day, v.as_slice())), today)?;
+            Some(json!({"weekday": d, "hour": h, "count": round(avg, 1), "days": days}))
+        })
         .collect();
     let recent_cut = today.checked_sub(30.days())?;
     let recent: Vec<&Value> = done.iter().filter(|w| workout_date(w) >= recent_cut).collect();
