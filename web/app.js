@@ -112,6 +112,8 @@ const KG_PER_LB = 0.45359237;
 const isLb = () => state?.unit === 'lb';
 const weightUnit = () => isLb() ? 'lb' : 'kg';
 const toDisplay = kg => kg === null || kg === undefined ? kg : isLb() ? Math.round((kg / KG_PER_LB) * 2) / 2 : kg;
+const toDisplayBody = kg => kg === null || kg === undefined ? kg : isLb() ? Math.round((kg / KG_PER_LB) * 10) / 10 : kg;
+const bodyWeightText = kg => `${Number(toDisplayBody(kg))} ${weightUnit()}`;
 const toKg = v => v === null || v === undefined ? v : isLb() ? Math.round(v * KG_PER_LB * 100) / 100 : v;
 const tonnes = kg => {
   if (isLb()) { const lb = kg / KG_PER_LB; return lb >= 1000 ? `${(lb / 1000).toFixed(1)}k lb` : `${Math.round(lb)} lb`; }
@@ -1125,7 +1127,7 @@ function renderWeight(insights) {
     box.replaceChildren(el('p', 'empty', 'Send gymclaw a photo of your scale to start tracking.'));
     return;
   }
-  const values = points.flatMap(p => [toDisplay(p.kg), toDisplay(p.avg)]);
+  const values = points.flatMap(p => [toDisplayBody(p.kg), toDisplayBody(p.avg)]);
   const low = Math.floor(Math.min(...values) - 0.5), top = Math.ceil(Math.max(...values) + 0.5);
   const chart = frame(box, top - low, { label: 'Body weight: weigh-ins and 7-day average' });
   chart.svg.querySelectorAll('text.label').forEach((label, i) => { label.textContent = low + [0, (top - low) / 2, top - low][i]; });
@@ -1138,10 +1140,10 @@ function renderWeight(insights) {
     const at = new Date((first + span * i / ticks) * 864e5);
     chart.svg.append(svgText(x(at.toISOString().slice(0, 10)), chart.H - 6, `${at.getUTCDate()} ${at.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' })}`, { 'text-anchor': 'middle' }));
   }
-  points.forEach(p => chart.svg.append(svgEl('circle', { cx: x(p.date), cy: y(toDisplay(p.kg)), r: 3, class: 'weigh-in' })));
-  chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(toDisplay(p.avg)).toFixed(1)}`).join(' ') }));
+  points.forEach(p => chart.svg.append(svgEl('circle', { cx: x(p.date), cy: y(toDisplayBody(p.kg)), r: 3, class: 'weigh-in' })));
+  chart.svg.append(svgEl('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${x(p.date).toFixed(1)},${y(toDisplayBody(p.avg)).toFixed(1)}`).join(' ') }));
   crosshair(chart, points.map(p => x(p.date)), i => ({ title: points[i].label,
-    rows: [[kgs(points[i].kg), 'weigh-in', 'weigh-in'], [kgs(points[i].avg), '7-day average', 'today']], y: y(toDisplay(points[i].avg)) }));
+    rows: [[bodyWeightText(points[i].kg), 'weigh-in', 'weigh-in'], [bodyWeightText(points[i].avg), '7-day average', 'today']], y: y(toDisplayBody(points[i].avg)) }));
 }
 
 function renderInsights(data) {

@@ -524,14 +524,22 @@ pub fn moved_on(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
 
 /// Typed text during a workout ("10x40", "25 min", "2 km"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
-    Ok(log_text(db, text, false, now, request_id)?.0)
+    let unit = get_profile(db)?.weight_unit;
+    Ok(log_text(db, text, false, unit, now, request_id)?.0)
 }
 
 /// `handle_text` for the agent's `workout log`: `warmup` logs the set as the warm-up, which the owner
 /// said it was (2026-11-18: "warm-up done with 45 kg" became working set 1). A typed set is a working set.
 /// Also returns the logged set as `log_set` reports it (its exercise, type and number) and whether it
 /// skipped a pending warm-up, so the agent's reply names where the set really went.
-pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: &str) -> Result<(CoachView, Value)> {
+pub fn log_text(
+    db: &Connection,
+    text: &str,
+    warmup: bool,
+    default_unit: crate::db::models::WeightUnit,
+    now: Ts,
+    request_id: &str,
+) -> Result<(CoachView, Value)> {
     let Some(workout) =
         active_workout(db)?.filter(|w| matches!(w.status, WorkoutStatus::SetActive | WorkoutStatus::Resting))
     else {
@@ -561,7 +569,7 @@ pub fn log_text(db: &Connection, text: &str, warmup: bool, now: Ts, request_id: 
             let reps_alone = active.as_ref().is_some_and(workout::reps_alone);
             // The weight the card offers decides an unclear order.
             let expected = active.as_ref().map(|row| workout::next_working_set(db, row)).transpose()?.flatten();
-            match parse_set(text, expected.map(|(weight, _)| weight), reps_alone, unit) {
+            match parse_set(text, expected.map(|(weight, _)| weight), reps_alone, default_unit) {
                 Ok(value) => value,
                 Err(Error::Domain { .. }) => return Ok((CoachView::default(), Value::Null)),
                 Err(other) => return Err(other),

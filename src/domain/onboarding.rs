@@ -115,14 +115,23 @@ fn missing(row: &OnboardingState) -> Vec<&'static str> {
     QUESTIONS.iter().map(|q| q.0).filter(|key| row.interview_json.get(*key).is_none()).collect()
 }
 
-fn step_and_instruction(row: &OnboardingState, missing: &[&'static str]) -> (&'static str, &'static str) {
+fn step_and_instruction(
+    row: &OnboardingState,
+    missing: &[&'static str],
+    runtime_enabled: bool,
+) -> (&'static str, &'static str) {
     // Once finished, stay READY regardless of later question or profile changes.
     if row.completed_fingerprint.is_some() {
         return (
             "READY",
-            "Setup done; reminders and weekly planning are on (the week drafts within a minute). \
-             Give one short wrap-up with a few tips (voice notes, scale photos, Strong/Hevy CSV import, Gym app button, /help). \
-             Calendar writes stay opt-in.",
+            if runtime_enabled {
+                "Setup done; reminders and weekly planning are on (the week drafts within a minute). \
+                 Give one short wrap-up with a few tips (voice notes, scale photos, Strong/Hevy CSV import, Gym app button, /help). \
+                 Calendar writes stay opt-in."
+            } else {
+                "Setup done. Runtime reminders are currently off; turn them on when the owner asks. \
+                 Calendar writes stay opt-in."
+            },
         );
     }
     if !missing.is_empty() {
@@ -148,7 +157,7 @@ pub fn prompt_summary(db: &Connection) -> Result<Option<String>> {
         return Ok(None);
     }
     let missing = missing(&row);
-    let (step, instruction) = step_and_instruction(&row, &missing);
+    let (step, instruction) = step_and_instruction(&row, &missing, false);
     let line = match step {
         "INTERVIEW" => format!(
             "Setup: INTERVIEW ({}/{} done) · next: {} (\"{instruction}\") · missing: {}.",
@@ -169,8 +178,9 @@ pub fn status(db: &Connection) -> Result<Value> {
     let row = state(db)?;
     let missing = missing(&row);
     let ready = row.completed_fingerprint.is_some();
-    let (step, instruction) = step_and_instruction(&row, &missing);
     let settings = RuntimeSettings::get(db, 1)?;
+    let runtime_enabled = settings.as_ref().is_some_and(|s| s.enabled);
+    let (step, instruction) = step_and_instruction(&row, &missing, runtime_enabled);
     let fingerprint = if row.split_json.is_empty() { None } else { Some(review_fingerprint(db, &row)?) };
     Ok(json!({
         "step": step, "ready": ready, "next_question": (!ready).then(|| missing.first().copied()).flatten(),
@@ -270,7 +280,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                         needs_profile.insert(key.clone(), json!(lacking));
                     }
                 }
-                if accepted.is_empty() && profile.is_none_or(Map::is_empty) {
+                if accepted.is_empty() {
                     let fields: BTreeSet<&str> = needs_profile
                         .values()
                         .filter_map(Value::as_array)

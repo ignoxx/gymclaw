@@ -104,8 +104,9 @@ stop, call `personal_calendar_disconnect`, then turn off **Public Calendar** to 
 
 ## Runtime authority
 
-Reminders, rest timers, the Sunday plan and calendar publishing run inside `gymclaw serve`, and
-nothing is sent until you turn it on. Ask the bot ("turn on reminders, and poll the gym's crowd"),
+Reminders, rest timers, the Sunday plan and calendar publishing run inside `gymclaw serve`. Finishing
+setup turns reminders and weekly planning on automatically; calendar writes and crowd polling stay off
+until you ask. Ask the bot ("turn on reminders, and poll the gym's crowd"),
 or:
 
 ```bash

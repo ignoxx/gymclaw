@@ -440,49 +440,71 @@ impl Bot {
     }
 
     async fn send_start(&self) {
-        let done = blocking(self.db(), |db| crate::domain::onboarding::finished(db)).await.unwrap_or(false);
-        if done {
+        let Ok(st) = blocking(self.db(), |db| crate::domain::onboarding::status(db)).await else { return };
+        if st["ready"] == true {
             self.send_bot("You're already set up. Message me anytime, or send `/help` for tips.", "start").await;
             return;
         }
-        let text = "**Welcome to gymclaw.** Quick 5-question setup so I can plan your week and coach your workouts.
-
-**1/5** What's your main goal, and how long have you been training?";
-        let choices = [
-            ("Build muscle", "My main goal is to build muscle"),
-            ("Get stronger", "My main goal is to get stronger"),
-            ("Lose fat", "My main goal is to lose fat"),
-            ("General fitness", "My main goal is general fitness"),
-        ];
-        let rows: Vec<(String, String, String)> = choices
+        let total = crate::domain::onboarding::QUESTIONS.len();
+        let missing = st["missing"].as_array().map_or(0, Vec::len);
+        let next = st["next_question"].as_str();
+        let instruction = st["instruction"].as_str().unwrap_or("");
+        let fresh = st["answers"].as_object().is_none_or(|m| m.is_empty());
+        let text = match st["step"].as_str() {
+            Some("INTERVIEW") => {
+                let n = total.saturating_sub(missing) + 1;
+                if fresh {
+                    format!(
+                        "**Welcome to gymclaw.** Quick {total}-question setup so I can plan your week and coach your workouts.\n\n**{n}/{total}** {instruction}"
+                    )
+                } else {
+                    format!("**{n}/{total}** {instruction}")
+                }
+            }
+            _ => instruction.to_string(),
+        };
+        let rows: Vec<(String, String, String)> = if next == Some("goal") {
+            [
+                ("Build muscle", "Build muscle"),
+                ("Get stronger", "Get stronger"),
+                ("Lose fat", "Lose fat"),
+                ("General fitness", "General fitness"),
+            ]
             .iter()
             .map(|(label, value)| (crate::db::new_id()[..8].to_string(), (*label).into(), (*value).into()))
-            .collect();
-        let stored = rows.clone();
-        let _ = blocking(self.db(), move |db| {
-            for (id, label, value) in stored {
-                AgentButton { id, label, value, created_at: Ts::now() }.insert(db)?;
-            }
-            Ok(())
-        })
-        .await;
+            .collect()
+        } else {
+            vec![]
+        };
         let keyboard: Vec<Vec<Button>> =
             rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
-        if let Ok(id) = self.tg.send(self.owner, text, None, &keyboard, None).await {
+        if let Ok(id) = self.tg.send(self.owner, &text, None, &keyboard, None).await {
+            if !rows.is_empty() {
+                let _ = blocking(self.db(), move |db| {
+                    for (id, label, value) in rows {
+                        AgentButton { id, label, value, created_at: Ts::now() }.insert(db)?;
+                    }
+                    Ok(())
+                })
+                .await;
+            }
             // Recorded as assistant so the agent sees the question it asked when the owner answers.
-            self.remember(ChatRole::Assistant, text.into(), Some(id), json!({"kind": "start"})).await;
+            self.remember(ChatRole::Assistant, text, Some(id), json!({"kind": "start"})).await;
         }
     }
 
     async fn send_help(&self) {
-        let text = "**gymclaw tips**
-            • **During a workout:** tap the card button, type a set (`10x80`, `135lb x 8`, `25 min`), or send a voice note.
-            • **Fix a set:** reply to any exercise card with the right numbers, or tap Fix in the **Gym** app.
-            • **Body weight:** send a photo of your scale (as a file for old photos to keep the date).
-            • **History:** send a Strong or Hevy CSV export anytime to import past workouts.
-            • **Feedback:** react 👎 on my last reply if I got something wrong and I'll fix it.
-            • **Commands:** `/status` (health), `/extensions` (toggle playbooks/triggers), `/help`.";
-        self.send_bot(text, "help").await;
+        let text = [
+            "**gymclaw tips**",
+            "• **During a workout:** tap the card button, type a set (`10x80`, `135lb x 8`, `25 min`), or send a voice note.",
+            "• **Fix a set:** reply to any exercise card with the right numbers, or tap Fix in the **Gym** app.",
+            "• **Body weight:** send a photo of your scale (as a file for old photos to keep the date).",
+            "• **History:** send a Strong or Hevy CSV export anytime to import past workouts.",
+            "• **Feedback:** react 👎 on my last reply if I got something wrong and I'll fix it.",
+            "• **Commands:** `/status` (health), `/extensions` (toggle playbooks/triggers), `/help`.",
+        ]
+        .join("\n");
+        self.send_bot(&text, "help").await;
     }
 
     async fn send_status(&self) {
