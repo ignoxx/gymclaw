@@ -17,20 +17,68 @@ use crate::time::Ts;
 
 pub const MAX_BYTES: usize = 5_000_000;
 
-/// Apple shares feeds as webcal://; fetch them over https.
+/// Apple shares feeds as webcal://; fetch them over https. Parsed with `reqwest::Url` (the same
+/// WHATWG parser reqwest connects with) so obfuscated loopback/private/CGNAT literal hosts cannot
+/// bypass validation.
 pub fn normalize_url(url: &str) -> Result<String> {
-    let url = url.trim();
-    let url = match url.strip_prefix("webcal://") {
-        Some(rest) => format!("https://{rest}"),
-        None => url.to_string(),
-    };
-    let host = url.strip_prefix("https://").map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
-    // Strip userinfo and port.
-    let host = host.map(|h| h.rsplit('@').next().unwrap_or("")).map(|h| h.split(':').next().unwrap_or(""));
-    if !url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) || host.is_none_or(str::is_empty) {
+    let raw = url.trim();
+    if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
         bail!("PERSONAL_CALENDAR_URL_INVALID", "Personal calendar feed must be an https:// or webcal:// ICS link");
     }
-    Ok(url)
+    let candidate = if raw.get(..9).is_some_and(|s| s.eq_ignore_ascii_case("webcal://")) {
+        format!("https://{}", &raw[9..])
+    } else if raw.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) {
+        format!("https://{}", &raw[8..])
+    } else {
+        bail!("PERSONAL_CALENDAR_URL_INVALID", "Personal calendar feed must be an https:// or webcal:// ICS link");
+    };
+    let parsed = reqwest::Url::parse(&candidate).map_err(|_| {
+        Error::domain(
+            "PERSONAL_CALENDAR_URL_INVALID",
+            "Personal calendar feed must be an https:// or webcal:// ICS link",
+        )
+    })?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none_or(is_private_host) {
+        bail!(
+            "PERSONAL_CALENDAR_URL_INVALID",
+            "Personal calendar feed must be a public https:// or webcal:// ICS link"
+        );
+    }
+    Ok(parsed.into())
+}
+
+fn is_private_v4(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+}
+
+fn is_private_host(host: &str) -> bool {
+    let unbracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let lower = unbracketed.trim_end_matches('.').to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => is_private_v4(v4),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+                    || v6.to_ipv4_mapped().is_some_and(is_private_v4)
+                    || v6.to_ipv4().is_some_and(is_private_v4)
+            }
+        };
+    }
+    false
 }
 
 /// GET the feed body. The URL is a capability secret and never appears in errors.
@@ -384,5 +432,27 @@ mod tests {
             "https://p42-caldav.icloud.com/published/2/abc"
         );
         assert_eq!(normalize_url("http://example.com/cal.ics").unwrap_err().code(), "PERSONAL_CALENDAR_URL_INVALID");
+        assert_eq!(
+            normalize_url("WEBCAL://p42-caldav.icloud.com/published/2/abc").unwrap(),
+            "https://p42-caldav.icloud.com/published/2/abc"
+        );
+        assert_eq!(normalize_url("HTTPS://Example.COM/cal.ics").unwrap(), "https://example.com/cal.ics");
+        for bad in [
+            "https://localhost/cal.ics",
+            "https://127.0.0.1/cal.ics",
+            "https://2130706433/cal.ics",
+            "https://127.1/cal.ics",
+            "https://0x7f.0.0.1/cal.ics",
+            "https://%31%32%37.0.0.1/cal.ics",
+            r"https://127.0.0.1\@evil.com/cal.ics",
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.0.0.1/cal.ics",
+            "https://100.100.100.100/cal.ics",
+            "https://[::1]/cal.ics",
+            "https://[::7f00:1]/cal.ics",
+            "https://[::ffff:127.0.0.1]/cal.ics",
+        ] {
+            assert_eq!(normalize_url(bad).unwrap_err().code(), "PERSONAL_CALENDAR_URL_INVALID", "{bad}");
+        }
     }
 }
