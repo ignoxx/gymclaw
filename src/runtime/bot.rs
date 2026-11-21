@@ -773,7 +773,11 @@ impl Bot {
     /// goes out between the turn and its reply, showing the plan as the turn left it, whether or not
     /// the turn succeeded.
     async fn turn(&self, batch: Vec<Inbound>, review: bool) -> bool {
-        let typing = {
+        let last = batch.last().expect("non-empty batch").clone();
+        let images = batch.iter().flat_map(|b| b.images.clone()).collect();
+        let background = batch.iter().all(|b| b.background);
+        // Background turns (reflection, event wakes) often stay silent: don't show phantom "typing...".
+        let typing = (!background).then(|| {
             let tg = self.tg.clone();
             let chat = self.owner;
             tokio::spawn(async move {
@@ -782,12 +786,11 @@ impl Bot {
                     tokio::time::sleep(Duration::from_secs(4)).await;
                 }
             })
-        };
-        let last = batch.last().expect("non-empty batch").clone();
-        let images = batch.iter().flat_map(|b| b.images.clone()).collect();
-        let background = batch.iter().all(|b| b.background);
+        });
         let outcome = self.agent.turn(TurnInput { key: last.key.clone(), images, background }).await;
-        typing.abort();
+        if let Some(typing) = typing {
+            typing.abort();
+        }
         if review {
             self.send_recap().await;
         }
@@ -1020,6 +1023,36 @@ mod tests {
 
     fn enable_runtime(db: &crate::db::Connection) {
         crate::db::test::authority().insert(db).unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_turn_skips_typing_indicator() {
+        struct YieldingSilent;
+        #[async_trait::async_trait]
+        impl crate::agent::ChatModel for YieldingSilent {
+            async fn complete(&self, _: &str, _: &[Value], _: &[Value], _: bool) -> Result<crate::agent::ModelReply> {
+                // Yield so any spawned typing task gets polled before the turn returns.
+                tokio::task::yield_now().await;
+                Ok(crate::agent::ModelReply {
+                    message: json!({"role": "assistant", "content": ""}),
+                    finish_reason: Some("stop".into()),
+                    ..Default::default()
+                })
+            }
+        }
+        let (bot, db, _, tg) = fixture(Arc::new(YieldingSilent));
+        enable_runtime(&db);
+        crate::domain::events::request(&db, "planning.attention", json!({"note": "quiet check"}), Ts::now()).unwrap();
+        bot.event_turn().await.unwrap();
+        assert!(!tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Typing)));
+
+        // Owner-initiated turns still show the typing indicator.
+        bot.turn(
+            vec![Inbound { message_id: Some(1), key: "owner-1".into(), images: vec![], background: false }],
+            false,
+        )
+        .await;
+        assert!(tg.calls().iter().any(|c| matches!(c, crate::telegram::coach::tests::Call::Typing)));
     }
 
     #[tokio::test]
