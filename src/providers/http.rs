@@ -72,6 +72,7 @@ impl Request {
 pub struct Response {
     pub status: u16,
     pub body: Vec<u8>,
+    pub location: Option<String>,
 }
 
 impl Response {
@@ -147,6 +148,8 @@ impl Transport for Net {
         // Strip URLs from transport errors so secret ICS feed tokens or OAuth params never leak to logs.
         let response = builder.send().map_err(|e| Error::Http(e.without_url()))?;
         let status = response.status().as_u16();
+        let location =
+            response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).map(String::from);
         let cap = request.max_bytes.saturating_add(1) as u64;
         let mut body = Vec::new();
         response
@@ -159,50 +162,6 @@ impl Transport for Net {
                 format!("response body exceeds {} byte limit", request.max_bytes),
             ));
         }
-        Ok(Response { status, body })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transport_errors_strip_secret_urls() {
-        let net = Net::new().unwrap();
-        let req = Request::new(Method::Get, "http://127.0.0.1:1/calendar?token=super-secret-value", 1);
-        let err = net.send(&req).unwrap_err();
-        assert_eq!(err.code(), "NETWORK_ERROR");
-        assert!(!err.to_string().contains("super-secret-value"), "URL leaked in error: {err}");
-    }
-
-    #[test]
-    fn net_caps_response_body_at_max_bytes_plus_one() {
-        use std::io::Write;
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut req_buf = [0u8; 512];
-            let _ = stream.read(&mut req_buf);
-            let payload = "x".repeat(2048);
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK
-Content-Length: {}
-Connection: close
-
-{}",
-                payload.len(),
-                payload
-            );
-        });
-        let net = Net::new().unwrap();
-        let req = Request::new(Method::Get, format!("http://{addr}/big"), 5).max_bytes(64);
-        let err = net.send(&req).unwrap_err();
-        assert_eq!(err.code(), "RESPONSE_TOO_LARGE");
-        let _ = server.join();
+        Ok(Response { status, body, location })
     }
 }

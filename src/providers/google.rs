@@ -613,7 +613,7 @@ mod tests {
     }
 
     fn ok(status: u16, body: Value) -> Result<Response> {
-        Ok(Response { status, body: body.to_string().into_bytes() })
+        Ok(Response { status, body: body.to_string().into_bytes(), location: None })
     }
 
     #[test]

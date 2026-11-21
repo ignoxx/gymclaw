@@ -163,7 +163,7 @@ mod tests {
     impl Transport for Feed {
         fn send(&self, _: &Request) -> Result<Response> {
             self.calls.set(self.calls.get() + 1);
-            Ok(Response { status: self.status, body: self.body.clone() })
+            Ok(Response { status: self.status, body: self.body.clone(), location: None })
         }
     }
 

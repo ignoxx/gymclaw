@@ -811,7 +811,7 @@ mod tests {
     fn fixture_source_cannot_replace_live_studio() {
         let db = db();
         poll(&db, &provider(7), Some(now(0))).unwrap();
-        let transport = |_: &Request| Ok(Response { status: 200, body: br#"{"value": 7}"#.to_vec() });
+        let transport = |_: &Request| Ok(Response { status: 200, body: br#"{"value": 7}"#.to_vec(), location: None });
         let live = MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap();
         assert_eq!(poll(&db, &live, Some(now(0))).unwrap_err().code(), "CROWD_SOURCE_MISMATCH");
     }
