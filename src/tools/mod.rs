@@ -276,6 +276,29 @@ mod tests {
         assert!(!blocked.contains("don't retry"), "{blocked}");
     }
 
+    /// `docs/architecture.md` tells readers and agents to use `rg '^//!' src` as the module map;
+    /// keep every Rust source file covered.
+    #[test]
+    fn every_source_file_opens_with_module_doc() {
+        fn walk(dir: &std::path::Path, missing: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, missing);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let head: String =
+                        std::fs::read_to_string(&path).unwrap().lines().take(3).collect::<Vec<_>>().join("\n");
+                    if !head.lines().any(|l| l.starts_with("//!")) {
+                        missing.push(path.display().to_string());
+                    }
+                }
+            }
+        }
+        let mut missing = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut missing);
+        assert!(missing.is_empty(), "missing //! module header: {missing:?}");
+    }
+
     /// Docs drift: every backticked `src/…`, `docs/…`, `scripts/…` or `deploy/…` path and every relative
     /// Markdown link in the docs exists, and every `gymclaw call <tool>` names a registered tool.
     #[test]
