@@ -80,6 +80,9 @@ pub fn split_message(text: &str, limit: usize) -> Vec<&str> {
     if !rest.is_empty() {
         chunks.push(rest);
     }
+    if chunks.is_empty() {
+        chunks.push("");
+    }
     chunks
 }
 
@@ -333,5 +336,7 @@ mod tests {
         assert!(parts.len() >= 3);
         assert!(parts.iter().all(|p| utf16_len(p) <= 10));
         assert_eq!(parts.concat(), emojis);
+        // Whitespace-only input over the limit never returns an empty vec.
+        assert_eq!(split_message(&" ".repeat(20), 10), vec![""]);
     }
 }
