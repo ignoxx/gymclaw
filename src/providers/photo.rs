@@ -10,6 +10,8 @@ use crate::error::{Error, Result};
 
 /// Longest edge sent to the vision model.
 pub const MAX_EDGE: u32 = 1600;
+/// Upper bound on decoded pixel count (50 MP covers 48 MP phone photos while rejecting bombs).
+const MAX_DECODE_PIXELS: u64 = 50_000_000;
 const JPEG_QUALITY: u8 = 85;
 
 /// A JPEG ready for the vision model, upright and at most `max_edge` on its longest side.
@@ -50,12 +52,24 @@ pub fn to_jpeg(bytes: &[u8], max_edge: u32) -> Result<Photo> {
     Ok(Photo { jpeg, width: rgb.width(), height: rgb.height() })
 }
 
+fn check_dimensions(width: u32, height: u32) -> Result<()> {
+    if width == 0 || height == 0 {
+        return Err(invalid());
+    }
+    if u64::from(width) * u64::from(height) > MAX_DECODE_PIXELS {
+        crate::bail!("PHOTO_TOO_LARGE", "Photo exceeds 50 MP size limit");
+    }
+    Ok(())
+}
+
 fn decode_raster(bytes: &[u8]) -> Result<DynamicImage> {
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     if !matches!(reader.format(), Some(ImageFormat::Jpeg | ImageFormat::Png)) {
         return Err(unsupported());
     }
     let mut decoder = reader.into_decoder().map_err(|_| invalid())?;
+    let (w, h) = decoder.dimensions();
+    check_dimensions(w, h)?;
     let orientation = decoder.orientation().map_err(|_| invalid())?;
     let mut image = DynamicImage::from_decoder(decoder).map_err(|_| invalid())?;
     image.apply_orientation(orientation);
@@ -67,6 +81,7 @@ fn decode_heif(bytes: &[u8]) -> Result<DynamicImage> {
     use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
     let context = HeifContext::read_from_bytes(bytes).map_err(|_| invalid())?;
     let handle = context.primary_image_handle().map_err(|_| invalid())?;
+    check_dimensions(handle.width(), handle.height())?;
     // libheif applies the container's rotation/mirroring while decoding.
     let decoded = LibHeif::new().decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None).map_err(|_| invalid())?;
     let plane = decoded.planes().interleaved.ok_or_else(invalid)?;
@@ -99,6 +114,32 @@ mod tests {
         let small = to_jpeg(PLAIN_PNG, 32).unwrap();
         assert_eq!((small.width, small.height), (32, 24));
         assert_eq!(to_jpeg(b"GIF89a....", MAX_EDGE).unwrap_err().code(), "PHOTO_UNSUPPORTED");
+    }
+
+    #[test]
+    fn rejects_oversized_image_dimensions_before_decoding() {
+        assert!(check_dimensions(8000, 6000).is_ok()); // 48 MP phone photo
+        assert_eq!(check_dimensions(10_000, 10_000).unwrap_err().code(), "PHOTO_TOO_LARGE");
+        assert_eq!(check_dimensions(0, 100).unwrap_err().code(), "PHOTO_INVALID");
+        // Patch PLAIN_PNG's IHDR width/height to 10_000 x 10_000 (100 MP) with a valid CRC so the
+        // PNG header parses cleanly and decode_raster rejects it before allocating pixel buffers.
+        let mut bomb = PLAIN_PNG.to_vec();
+        bomb[16..20].copy_from_slice(&10_000u32.to_be_bytes());
+        bomb[20..24].copy_from_slice(&10_000u32.to_be_bytes());
+        let crc = crc32(&bomb[12..29]);
+        bomb[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(to_jpeg(&bomb, MAX_EDGE).unwrap_err().code(), "PHOTO_TOO_LARGE");
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
     }
 
     #[cfg(feature = "heic")]
