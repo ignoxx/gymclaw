@@ -1,10 +1,11 @@
 //! The one seam between providers and the network. Production uses `Net` (blocking reqwest, honors
 //! HTTP(S)_PROXY); tests pass a closure `|req: &Request| -> Result<Response>`.
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -82,7 +83,12 @@ impl<F: Fn(&Request) -> Result<Response>> Transport for F {
     }
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Real network access over blocking reqwest. Call from blocking code (`spawn_blocking`), never directly on the async runtime.
+/// Clients are shared process-wide so ticks reuse connection pools and TLS state instead of rebuilding
+/// two blocking runtimes and root cert stores on every call.
+#[derive(Clone)]
 pub struct Net {
     follow: reqwest::blocking::Client,
     no_follow: reqwest::blocking::Client,
@@ -90,10 +96,18 @@ pub struct Net {
 
 impl Net {
     pub fn new() -> Result<Net> {
-        Ok(Net {
-            follow: reqwest::blocking::Client::builder().build()?,
-            no_follow: reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?,
-        })
+        static SHARED: OnceLock<Net> = OnceLock::new();
+        if let Some(net) = SHARED.get() {
+            return Ok(net.clone());
+        }
+        let net = Net {
+            follow: reqwest::blocking::Client::builder().connect_timeout(CONNECT_TIMEOUT).build()?,
+            no_follow: reqwest::blocking::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
+        };
+        Ok(SHARED.get_or_init(|| net).clone())
     }
 }
 
@@ -118,8 +132,24 @@ impl Transport for Net {
             Body::Json(value) => builder.json(value),
             Body::Form(fields) => builder.form(fields),
         };
-        let response = builder.send()?;
+        // Strip URLs from transport errors so secret ICS feed tokens or OAuth params never leak to logs.
+        let response = builder.send().map_err(|e| Error::Http(e.without_url()))?;
         let status = response.status().as_u16();
-        Ok(Response { status, body: response.bytes()?.to_vec() })
+        let body = response.bytes().map_err(|e| Error::Http(e.without_url()))?.to_vec();
+        Ok(Response { status, body })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_errors_strip_secret_urls() {
+        let net = Net::new().unwrap();
+        let req = Request::new(Method::Get, "http://127.0.0.1:1/calendar?token=super-secret-value", 1);
+        let err = net.send(&req).unwrap_err();
+        assert_eq!(err.code(), "NETWORK_ERROR");
+        assert!(!err.to_string().contains("super-secret-value"), "URL leaked in error: {err}");
     }
 }
