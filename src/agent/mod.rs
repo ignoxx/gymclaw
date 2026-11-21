@@ -122,15 +122,48 @@ impl Reply {
 
 /// `reply` arguments with `message` given as a string read as the message it means: a JSON object
 /// in a string is that object, other text is the message's text. 2026-11-21: the model sent
-/// `{"message": "{\"text\": …}"}` twice in one turn, each a wasted round trip.
+/// `{"message": "{\"text\": …}"}` twice in one turn, each a wasted round trip; later the same with a
+/// stray trailing `}`, which was sent to the owner as raw JSON. A string that starts like an object
+/// but isn't one is left as is, so `Reply` rejects it and the model fixes it.
 fn unstring_message(mut args: Value) -> Value {
     if let Some(text) = args.get("message").and_then(Value::as_str) {
-        args["message"] = match serde_json::from_str::<Value>(text) {
-            Ok(object @ Value::Object(_)) => object,
-            _ => json!({"text": text}),
-        };
+        if text.trim_start().starts_with('{') {
+            if let Some(object) = leading_object(text) {
+                args["message"] = object;
+            }
+        } else {
+            args["message"] = json!({"text": text});
+        }
     }
     args
+}
+
+/// The JSON object `text` starts with, ignoring anything after it (a stray `}`).
+fn leading_object(text: &str) -> Option<Value> {
+    match serde_json::Deserializer::from_str(text.trim()).into_iter::<Value>().next()? {
+        Ok(object @ Value::Object(_)) => Some(object),
+        _ => None,
+    }
+}
+
+/// The words in reply JSON written as text (`{"text": …}`, `{"buttons": …, "text": …}`,
+/// `{"message": …}`, `{"react": …}`), or "" when unreadable. None for ordinary text.
+fn leaked_reply(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !text.starts_with('{') {
+        return None;
+    }
+    let Some(object) = leading_object(text) else {
+        // Broken JSON that looks like a reply payload (e.g. `{"text": broken`).
+        return (text.contains("\"text\"") || text.contains("\"message\"")).then(String::new);
+    };
+    let map = object.as_object()?;
+    if !["text", "message", "react"].iter().any(|k| map.contains_key(*k)) {
+        return None;
+    }
+    let unwrapped = unstring_message(object);
+    let words = unwrapped.pointer("/message/text").or_else(|| unwrapped.get("text")).and_then(Value::as_str);
+    Some(words.unwrap_or_default().to_string())
 }
 
 /// How a turn ended. A failure is a reply with the sanitized line.
@@ -514,6 +547,14 @@ impl Agent {
                     continue;
                 }
                 let content = written.or(content);
+                let leaked = content.and_then(leaked_reply);
+                if leaked.is_some() && !force_text {
+                    steps += 1;
+                    messages.push(json!({"role": "assistant", "content": content}));
+                    messages.push(json!({"role": "user", "content": "[system] That answer was reply JSON written as text; the owner would have seen the raw JSON. Call the reply tool with message as an object, or answer in plain words."}));
+                    continue;
+                }
+                let content = leaked.as_deref().or(content);
                 if force_text && content.is_none_or(|c| c.trim().is_empty()) {
                     crate::bail!("STUCK", "step limit reached without an answer");
                 }
@@ -545,6 +586,9 @@ impl Agent {
                         // Its round trip counts as a step, so a model that keeps doing it is forced to answer in text.
                         Ok(reply) if reply.message.as_ref().and_then(|m| written_tool_call(&m.text)).is_some() => {
                             (Error::domain("WRITTEN_TOOL_CALL", "The reply text contains a tool call written as text; it did not run. Make it as a function call, then reply.").to_json(), false)
+                        }
+                        Ok(reply) if reply.message.as_ref().and_then(|m| leaked_reply(&m.text)).is_some() => {
+                            (Error::domain("INVALID_ARGUMENTS", "reply: message.text is reply JSON, which the owner would see raw. Put only the words in text and the buttons in message.buttons.").to_json(), false)
                         }
                         Ok(mut reply) => match self.picture(reply.message.as_mut()).await {
                             Ok(()) => {
@@ -1039,6 +1083,29 @@ mod tests {
         assert_eq!(script.seen.lock().unwrap().len(), 1);
         let (agent, _, _) = scripted(vec![call("reply", json!({"message": "Saved."}))]);
         assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Saved."));
+    }
+
+    /// 2026-11-21: a stringified message with a stray trailing `}` reached the owner as raw JSON.
+    #[tokio::test]
+    async fn reply_json_never_reaches_the_owner_as_text() {
+        let (agent, _, _) = scripted(vec![call("reply", json!({"message": "{\"text\":\"Hi\",\"buttons\":[]}}"}))]);
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Hi"));
+        // Broken JSON goes back to the model, never to the owner as literal text.
+        let broken = call("reply", json!({"message": "{\"text\": broken"}));
+        let (agent, script, _) = scripted(vec![broken, json!({"content": "Hi there."})]);
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Hi there."));
+        let messages = script.last.lock().unwrap().clone();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["role"] == "tool" && m["content"].as_str().unwrap().contains("INVALID_ARGUMENTS"))
+        );
+        // Reply JSON as message.text or as plain-text content goes back too.
+        let nested = call("reply", json!({"message": {"text": "{\"text\": \"Hi\"}"}}));
+        let (agent, script, _) =
+            scripted(vec![nested, json!({"content": "{\"text\": \"Hi\"}"}), json!({"content": "Hi."})]);
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Hi."));
+        assert_eq!(script.seen.lock().unwrap().len(), 3);
     }
 
     /// 2026-11-21: importing a plan took 7 parallel catalog searches and 3 template imports; counted per

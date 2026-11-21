@@ -6,8 +6,8 @@ it in that style, so nobody can tell which pictures were added. Example: `horizo
 
 ## Which exercises need one
 
-An exercise may be saved without a picture (`guide_id`), e.g. when the owner keeps the name from
-another app. Its card and the dashboard show the closest catalog picture meanwhile
+New plan exercises must carry a catalog `guide_id`, so every exercise has a picture. Legacy plans
+or imported history rows without a `guide_id` fall back to the closest catalog picture meanwhile
 (`illustrations::closest`: the best match that shares a movement word, else none).
 `gymclaw illustrations missing` lists these exercises, plan exercises first, then by logged sets,
 with the stand-in each shows. Work through that list; nothing is drawn at runtime.
