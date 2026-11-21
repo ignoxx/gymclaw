@@ -38,6 +38,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/012_weight_unit.sql"),
     include_str!("migrations/013_ics_token.sql"),
     include_str!("migrations/014_drop_alembic_version.sql"),
+    include_str!("migrations/015_hot_query_indexes.sql"),
 ];
 
 /// Read-write connection. WAL lets readers (the dashboard, a sync waiting on Google) run alongside a
@@ -367,5 +368,30 @@ mod tests {
         let mut fresh = Connection::open_in_memory().unwrap();
         migrate(&mut fresh).unwrap();
         assert_eq!(dump(&fresh), dump(&upgraded), "a fresh database matches a migrated one");
+    }
+
+    #[test]
+    fn hot_queries_use_partial_and_fk_indexes() {
+        let db = test::db();
+        let plan = |sql: &str| -> String {
+            let mut stmt = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(3)).unwrap().map(|r| r.unwrap()).collect::<Vec<_>>().join(" | ")
+        };
+        assert!(
+            plan("SELECT * FROM agent_event WHERE type = 'coach.app_view' AND handled_at IS NULL ORDER BY rowid")
+                .contains("ix_agent_event_unhandled")
+        );
+        assert!(
+            plan("SELECT * FROM notification_delivery WHERE status = 'PENDING' AND recipient = '42' ORDER BY created_at, id")
+                .contains("ix_notification_delivery_status")
+        );
+        assert!(
+            plan("SELECT * FROM notification_job WHERE status = 'PENDING' ORDER BY due_at, id")
+                .contains("ix_notification_job_pending")
+        );
+        assert!(
+            plan("SELECT * FROM workout_exercise WHERE workout_session_id = 'w1'")
+                .contains("ix_workout_exercise_session")
+        );
     }
 }

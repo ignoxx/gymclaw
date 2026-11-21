@@ -1,4 +1,4 @@
--- Generated from baseline.sql plus every migration (user_version 14); don't edit. When a
+-- Generated from baseline.sql plus every migration (user_version 15); don't edit. When a
 -- migration changes the schema, `cargo test schema_snapshot` rewrites this file: review and
 -- commit it. Fresh databases are created from this file.
 
@@ -46,6 +46,10 @@ CREATE TABLE agent_event (
 );
 
 CREATE INDEX ix_agent_event_type ON agent_event (type);
+
+CREATE INDEX ix_agent_event_unhandled
+    ON agent_event (type)
+    WHERE handled_at IS NULL;
 
 CREATE TABLE "agent_note" (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +278,9 @@ CREATE TABLE "notification_delivery" (
 	FOREIGN KEY(notification_job_id) REFERENCES notification_job (id)
 );
 
+CREATE INDEX ix_notification_delivery_status
+    ON notification_delivery (status, recipient, created_at, id);
+
 CREATE TABLE "notification_job" (
 	id VARCHAR NOT NULL, 
 	kind VARCHAR NOT NULL, 
@@ -293,7 +300,9 @@ CREATE TABLE "notification_job" (
 	FOREIGN KEY(set_log_id) REFERENCES set_log (id)
 );
 
-CREATE INDEX ix_notification_job_due_at ON notification_job (due_at);
+CREATE INDEX ix_notification_job_pending
+    ON notification_job (due_at, id)
+    WHERE status = 'PENDING';
 
 CREATE TABLE "onboarding_state" (
 	id INTEGER NOT NULL,
@@ -415,6 +424,9 @@ CREATE TABLE workout_exercise (
 	CHECK (status IN ('PENDING','ACTIVE','DEFERRED','COMPLETED','SKIPPED','SUBSTITUTED')), 
 	FOREIGN KEY(workout_session_id) REFERENCES workout_session (id)
 );
+
+CREATE INDEX ix_workout_exercise_session
+    ON workout_exercise (workout_session_id);
 
 CREATE TABLE "workout_session" (
 	id VARCHAR NOT NULL, 
