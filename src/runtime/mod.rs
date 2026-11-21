@@ -129,15 +129,15 @@ pub async fn serve(config: Config) -> Result<()> {
         log: log.clone(),
         clock: Arc::new(Ts::now),
     };
-    let scheduler = Arc::new(scheduler::Scheduler {
-        db_path: db_path.clone(),
-        data_dir: config.data_dir.clone(),
-        recipient: config.owner_id.to_string(),
-        crowd_config: config.crowd_config.clone(),
-        tg: tg.clone(),
-        wake: wake.clone(),
-        health: health.clone(),
-    });
+    let scheduler = Arc::new(scheduler::Scheduler::new(
+        db_path.clone(),
+        config.data_dir.clone(),
+        config.owner_id.to_string(),
+        config.crowd_config.clone(),
+        tg.clone(),
+        wake.clone(),
+        health.clone(),
+    ));
     let bot = bot::Bot::start(config.owner_id, tg, coach, agent, log, wake, health);
 
     tracing::info!("gymclaw serving owner {} with {}", config.owner_id, config.model);
