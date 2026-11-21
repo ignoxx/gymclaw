@@ -21,22 +21,26 @@ pub struct FailureState {
 fn classify(state: &FailureState) -> (&'static str, &'static str, bool) {
     let error = state.error.to_lowercase();
     let has = |patterns: &[&str]| patterns.iter().any(|p| error.contains(p));
+    // Match HTTP status codes as whole tokens so numbers like "150000 tokens" never match "500".
+    let has_code = |codes: &[&str]| error.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| codes.contains(&w));
     if state.stop.as_deref() == Some("length") {
         ("OUTPUT_LIMIT", "Model exhausted output/reasoning budget before finishing its answer.", true)
     } else if error.contains("context") && has(&["exceed", "limit", "overflow", "long"])
         || error.contains("too many tokens")
     {
         ("CONTEXT_LIMIT", "Model request exceeded context capacity.", true)
-    } else if has(&["429", "rate limit", "rate-limit", "ratelimit", "quota"]) {
+    } else if has_code(&["402", "429"])
+        || has(&["rate limit", "rate-limit", "ratelimit", "quota", "insufficient credits"])
+    {
         ("RATE_LIMIT", "Provider rate limit or quota blocked response.", false)
-    } else if has(&["401", "403", "unauthoriz", "authentication", "api key"]) {
+    } else if has_code(&["401", "403"]) || has(&["unauthoriz", "authentication", "api key"]) {
         ("PROVIDER_AUTH", "Provider rejected authentication or access.", false)
     } else if has(&["step limit", "turn deadline"]) {
         // One model request times out well inside the turn deadline, so hitting it means many steps.
         ("STUCK", "Model kept calling tools without finishing.", true)
     } else if has(&["timeout", "timed out"]) {
         ("TIMEOUT", "Model request exceeded time limit.", false)
-    } else if has(&["connection", "upstream", "502", "503", "504"]) {
+    } else if has_code(&["500", "502", "503", "504", "529"]) || has(&["connection", "upstream", "overloaded"]) {
         ("UPSTREAM_ERROR", "Model provider connection failed.", false)
     } else {
         ("NO_ANSWER", "Model returned no usable answer; cause not reported.", true)
@@ -114,5 +118,21 @@ mod tests {
         assert!(diagnose(&state).starts_with("RATE_LIMIT:") && !diagnose(&state).contains("sk-secret"));
         let state = FailureState { error: "turn deadline exceeded".into(), observed_input: true, ..Default::default() };
         assert!(format_failure(&state).contains("I got stuck") && diagnose(&state).starts_with("STUCK:"));
+
+        for err in ["500 Internal Server Error", "529 Overloaded"] {
+            let state = FailureState { error: err.into(), observed_input: true, ..Default::default() };
+            assert!(format_failure(&state).contains("can't reach my model"), "{err}");
+            assert!(diagnose(&state).starts_with("UPSTREAM_ERROR:"), "{err}");
+        }
+        let state =
+            FailureState { error: "402 Insufficient credits".into(), observed_input: true, ..Default::default() };
+        assert!(format_failure(&state).contains("can't reach my model"));
+        assert!(diagnose(&state).starts_with("RATE_LIMIT:"));
+
+        // Digits embedded inside larger numbers must not trip HTTP status code matches.
+        for err in ["MODEL_ERROR: 400 requested 150000 tokens", "MODEL_ERROR: 400 max 4020 items"] {
+            let state = FailureState { error: err.into(), observed_input: true, ..Default::default() };
+            assert!(diagnose(&state).starts_with("NO_ANSWER:"), "{err}");
+        }
     }
 }
