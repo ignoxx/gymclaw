@@ -158,22 +158,37 @@ async fn doctor() -> Value {
         json!({"ok": false, "path": db_path, "error": "database file does not exist (run `gymclaw migrate`)"})
     } else {
         match db::open_readonly(&db_path) {
-            Ok(conn) => {
-                let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
-                let setup_done = gymclaw::domain::onboarding::finished(&conn).unwrap_or(false);
-                let runtime = gymclaw::runtime::outbox::runtime_authority(&conn).ok();
-                let google = gymclaw::db::models::CalendarSyncState::get(&conn, 1)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|s| s.source == "google");
-                let ics =
-                    gymclaw::domain::personal_calendar::status(&conn).ok().is_some_and(|s| s["connected"] == true);
-                json!({
-                    "ok": version > 0, "path": db_path, "schema_version": version, "setup_done": setup_done,
-                    "runtime_enabled": runtime.as_ref().is_some_and(|r| r.enabled),
-                    "google_calendar": google, "personal_ics": ics,
-                })
-            }
+            Ok(conn) => match conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0)) {
+                Err(e) => json!({"ok": false, "path": db_path, "error": e.to_string()}),
+                Ok(version) => {
+                    let expected = db::expected_version();
+                    let setup_done = gymclaw::domain::onboarding::finished(&conn).unwrap_or(false);
+                    let runtime = gymclaw::runtime::outbox::runtime_authority(&conn).ok();
+                    let google = gymclaw::db::models::CalendarSyncState::get(&conn, 1)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|s| s.source == "google");
+                    let ics =
+                        gymclaw::domain::personal_calendar::status(&conn).ok().is_some_and(|s| s["connected"] == true);
+                    let error = if version < expected {
+                        Some(format!("database schema is behind ({version} < {expected}); run `gymclaw migrate`"))
+                    } else if version > expected {
+                        Some(format!("database schema is newer than this binary ({version} > {expected})"))
+                    } else {
+                        None
+                    };
+                    let mut report = json!({
+                        "ok": version == expected, "path": db_path, "schema_version": version,
+                        "expected_schema_version": expected, "setup_done": setup_done,
+                        "runtime_enabled": runtime.as_ref().is_some_and(|r| r.enabled),
+                        "google_calendar": google, "personal_ics": ics,
+                    });
+                    if let Some(error) = error {
+                        report["error"] = json!(error);
+                    }
+                    report
+                }
+            },
             Err(e) => json!({"ok": false, "path": db_path, "error": e.to_string()}),
         }
     };
