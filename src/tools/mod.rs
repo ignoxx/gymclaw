@@ -299,6 +299,32 @@ mod tests {
         assert!(missing.is_empty(), "missing //! module header: {missing:?}");
     }
 
+    /// Every CLI subcommand in `src/main.rs` (`enum Command`) is listed in `docs/architecture.md`.
+    #[test]
+    fn architecture_lists_every_cli_command() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let main = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        let arch = std::fs::read_to_string(root.join("docs/architecture.md")).unwrap();
+        let enum_body = main.split("enum Command {").nth(1).unwrap().split("\n}").next().unwrap();
+        let variant_re = regex::Regex::new(r"(?m)^\s{4}([A-Z][A-Za-z0-9]*)\b").unwrap();
+        let kebab = |name: &str| {
+            let mut out = String::new();
+            for (i, ch) in name.chars().enumerate() {
+                if ch.is_uppercase() && i > 0 {
+                    out.push('-');
+                }
+                out.push(ch.to_ascii_lowercase());
+            }
+            out
+        };
+        let missing: Vec<_> = variant_re
+            .captures_iter(enum_body)
+            .map(|c| kebab(&c[1]))
+            .filter(|cmd| !arch.contains(&format!("gymclaw {cmd}")))
+            .collect();
+        assert!(missing.is_empty(), "CLI commands missing from docs/architecture.md: {missing:?}");
+    }
+
     /// Docs drift: every backticked `src/…`, `docs/…`, `scripts/…` or `deploy/…` path and every relative
     /// Markdown link in the docs exists, and every `gymclaw call <tool>` names a registered tool.
     #[test]
