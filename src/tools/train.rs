@@ -12,7 +12,7 @@ use crate::domain::onboarding::{self, Update};
 use crate::domain::past::{PastSet, log_past};
 use crate::domain::profile::get_profile;
 use crate::domain::templates::{
-    ExerciseEdit, Template, edit_exercise, get_template, import_template, missing_pictures, orphaned_history,
+    ExerciseEdit, Template, edit_exercise, get_template, import_template, orphaned_history,
 };
 use crate::domain::view::CoachView;
 use crate::domain::{audit, workout};
@@ -355,9 +355,8 @@ pub struct TemplateImport {
     /// The whole plan, exercise names as the owner wrote them. guide_id: the catalog picture; omit it for a
     /// name that is a catalog exercise (also as Strong/Hevy write it, "Bench Press (Barbell)"): it's matched on save.
     /// For other names, including other languages and other apps' names, catalog_search the English movement
-    /// ("Latzug" → "lat pulldown") and set guide_id to the match, keeping their name; set muscle without guide_id
-    /// only when no catalog exercise is that movement. The first primary
-    /// exercise needs warmup_weight.
+    /// ("Latzug" → "lat pulldown") and set guide_id to the match, keeping their name. Every exercise must have
+    /// a valid catalog guide_id (no exercises without pictures). The first primary exercise needs warmup_weight.
     pub template: Template,
 }
 
@@ -367,12 +366,22 @@ impl Tool for TemplateImport {
     const DESCRIPTION: &'static str = "Save a whole workout plan (new, or replacing one with the same id). For small changes use template_edit_exercise.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let before = get_template(cx.db, &self.template.id).ok();
-        let mut result = import_template(cx.db, &self.template)?;
-        if let Some(warning) = missing_pictures(&serde_json::from_value(result.clone())?) {
-            result["pictures"] = json!(warning);
+        let mut template = self.template;
+        crate::domain::templates::resolve_pictures(&mut template);
+        let missing = crate::domain::templates::unpictured(&template);
+        if !missing.is_empty() {
+            crate::bail!(
+                "EXERCISE_PICTURE_REQUIRED",
+                "Every exercise needs a catalog guide_id so it has a picture. Unmatched: {}. \
+                 Run catalog_search with the English movement name (translate non-English names, e.g. \
+                 Brustpresse -> chest press machine, Latzug -> lat pulldown) to pick the closest catalog \
+                 guide_id (keep the owner's wording in name), then re-run template (action import).",
+                missing.join("; ")
+            );
         }
-        warn_orphans(cx, before, &self.template.id, result)
+        let before = get_template(cx.db, &template.id).ok();
+        let result = import_template(cx.db, &template)?;
+        warn_orphans(cx, before, &template.id, result)
     }
 }
 
@@ -722,5 +731,42 @@ mod tests {
         let mut cx = Ctx { db: &db, now, request_id: "r2".into(), data_dir, recipient: None, effects: vec![] };
         let ok = BodyLog { entries: vec![WeighIn { kg: 80.0, at: None, photo: Some(inside) }] }.run(&mut cx).unwrap();
         assert_eq!(ok["data"]["logged"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn template_import_requires_a_catalog_picture_for_every_exercise() {
+        let (db_path, db) = crate::db::test::file();
+        let data_dir = db_path.parent().unwrap();
+        let now = crate::time::Ts::parse("2026-10-13T10:00:00Z", None).unwrap();
+        let make = |name: &str, guide_id: Option<&str>| {
+            let tpl: Template = serde_json::from_value(json!({
+                "id": "push",
+                "name": "Push",
+                "exercises": [{
+                    "id": "brustpresse",
+                    "name": name,
+                    "role": "press",
+                    "muscle": "Chest",
+                    "guide_id": guide_id,
+                    "target_weight": 50
+                }]
+            }))
+            .unwrap();
+            TemplateImport { template: tpl }
+        };
+        let mut cx = Ctx { db: &db, now, request_id: "r1".into(), data_dir, recipient: None, effects: vec![] };
+        let err = make("Brustpresse", None).run(&mut cx).unwrap_err();
+        assert_eq!(err.code(), "EXERCISE_PICTURE_REQUIRED");
+
+        // With the matched English catalog guide_id, the German display name saves cleanly with its picture.
+        let mut cx = Ctx { db: &db, now, request_id: "r2".into(), data_dir, recipient: None, effects: vec![] };
+        let ok = make("Brustpresse", Some("machine-chest-press")).run(&mut cx).unwrap();
+        assert_eq!(ok["exercises"][0]["name"], "Brustpresse");
+        assert_eq!(ok["exercises"][0]["guide_id"], "machine-chest-press");
+
+        // Exact English catalog names still auto-match without passing guide_id.
+        let mut cx = Ctx { db: &db, now, request_id: "r3".into(), data_dir, recipient: None, effects: vec![] };
+        let auto = make("Leg Press", None).run(&mut cx).unwrap();
+        assert_eq!(auto["exercises"][0]["guide_id"], "leg-press");
     }
 }

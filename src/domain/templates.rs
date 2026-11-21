@@ -418,11 +418,6 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
     })
 }
 
-/// The catalog picture an exercise's name means, so a plan read off another app's screenshots saves
-/// with pictures without a catalog search per exercise: its exact catalog name or the way other apps
-/// write it ("Bench Press (Barbell)", `matching`). A guide_id the catalog doesn't know is read as a
-/// name too, else dropped, so the exercise saves as the owner's own instead of failing the import
-/// (`missing_pictures` then asks). A muscle without a guide_id is an owner's own exercise: left alone.
 /// Normalize common informal muscle names (e.g. "Abs" -> "Core", "Pecs" -> "Chest") to catalog
 /// muscles; drop unknown ones so an import never fails over a synonym.
 fn normalize_muscle(spec: &mut ExerciseSpec) {
@@ -446,20 +441,41 @@ fn normalize_muscle(spec: &mut ExerciseSpec) {
     }
 }
 
+/// Resolve an exercise's catalog `guide_id` picture from its `guide_id` or `name` (exact catalog
+/// name or Strong/Hevy style like "Bench Press (Barbell)"). Unknown `guide_id`s are treated as
+/// names or cleared so `unpictured` can flag them.
 fn picture(spec: &mut ExerciseSpec) {
     normalize_muscle(spec);
-    let known = spec.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g));
-    if known || (spec.guide_id.is_none() && spec.muscle.is_some()) {
+    if spec.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g)) {
         return;
     }
     let named = |key: &str| lookup(key).map(|i| i.slug.clone()).or_else(|| matching(key).map(|e| e.guide_id));
     spec.guide_id = spec.guide_id.as_deref().and_then(named).or_else(|| named(&spec.name));
 }
 
-/// Save a whole template (new or replacing its id), pictures matched (`picture`). Returns what was saved.
+/// Match catalog `guide_id` pictures on every exercise and alternative in `template`.
+pub fn resolve_pictures(template: &mut Template) {
+    template.exercises.iter_mut().chain(template.alternatives.iter_mut()).for_each(picture);
+}
+
+/// Exercises in `template` that still have no valid catalog `guide_id` picture after `resolve_pictures`.
+pub fn unpictured(template: &Template) -> Vec<String> {
+    template
+        .exercises
+        .iter()
+        .chain(&template.alternatives)
+        .filter(|s| !s.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g)))
+        .map(|s| {
+            let options = suggestions(&s.name);
+            format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
+        })
+        .collect()
+}
+
+/// Save a whole template (new or replacing its id), pictures matched (`resolve_pictures`). Returns what was saved.
 pub fn import_template(db: &Connection, template: &Template) -> Result<Value> {
     let mut template = template.clone();
-    template.exercises.iter_mut().chain(template.alternatives.iter_mut()).for_each(picture);
+    resolve_pictures(&mut template);
     template.validate()?;
     let definition = serde_json::to_value(&template)?;
     let row =
@@ -771,7 +787,10 @@ mod tests {
         .unwrap();
         let saved: Template = serde_json::from_value(import_template(&db, &template).unwrap()).unwrap();
         let pictures: Vec<Option<&str>> = saved.exercises.iter().map(|e| e.guide_id.as_deref()).collect();
-        assert_eq!(pictures, [Some("leg-press"), Some("lat-pulldown"), Some("hack-squat"), None, None]);
+        assert_eq!(
+            pictures,
+            [Some("leg-press"), Some("lat-pulldown"), Some("hack-squat"), None, Some("leg-extension")]
+        );
         assert_eq!(get_template(&db, "legs").unwrap(), saved);
         let mp = missing_pictures(&saved).unwrap();
         assert!(mp.contains("Grandma's Glute Thing") && !mp.contains("Leg Extension"));
