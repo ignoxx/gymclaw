@@ -219,6 +219,8 @@ pub struct Message {
     pub audio: Option<Audio>,
     /// The message this one replies to (Telegram "Reply"), as Telegram has it now.
     pub reply_to_message: Option<Box<Message>>,
+    /// Set on every photo of an album: Telegram sends each as its own message, about a second apart.
+    pub media_group_id: Option<String>,
 }
 
 impl Message {
@@ -263,6 +265,7 @@ mod tests {
             voice: None,
             audio: None,
             reply_to_message: None,
+            media_group_id: None,
         }
     }
 

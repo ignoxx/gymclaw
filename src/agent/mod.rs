@@ -32,8 +32,12 @@ use crate::tools::{self, Effect};
 use failure::{FailureState, diagnose, format_failure};
 use turnlog::{TurnLog, clean, redact, scrub, sha};
 
-/// Tool calls per turn before the model must answer.
+/// Model round trips with tool calls per turn before the model must answer. Counted per round trip,
+/// not per call: 7 parallel catalog searches and 3 template imports are 2 steps (2026-11-21: counted
+/// per call, that plan import hit the cap and the owner got "I got stuck").
 pub const STEP_CAP: usize = 12;
+/// Tool calls per turn, however they are batched, before the model must answer.
+pub const MAX_TOOL_CALLS: usize = 40;
 /// Wall time for a whole turn.
 pub const DEADLINE: Duration = Duration::from_secs(300);
 /// Longest tool result the model gets back (chars); more is cut with a marker.
@@ -114,6 +118,19 @@ impl Reply {
     fn text(text: String) -> Self {
         Reply { message: Some(Message { text, buttons: vec![], exercises: vec![], photo: None }), react: None }
     }
+}
+
+/// `reply` arguments with `message` given as a string read as the message it means: a JSON object
+/// in a string is that object, other text is the message's text. 2026-11-21: the model sent
+/// `{"message": "{\"text\": …}"}` twice in one turn, each a wasted round trip.
+fn unstring_message(mut args: Value) -> Value {
+    if let Some(text) = args.get("message").and_then(Value::as_str) {
+        args["message"] = match serde_json::from_str::<Value>(text) {
+            Ok(object @ Value::Object(_)) => object,
+            _ => json!({"text": text}),
+        };
+    }
+    args
 }
 
 /// How a turn ended. A failure is a reply with the sanitized line.
@@ -433,6 +450,7 @@ impl Agent {
         }));
 
         let mut steps = 0usize;
+        let mut called = 0usize;
         // Calls made this turn: how often, the error of the first run if it failed, its result if it worked.
         let mut seen: HashMap<String, (u32, Option<String>, Option<Value>)> = HashMap::new();
         // Set once the model loops on one call: the next turn must answer in text.
@@ -440,8 +458,9 @@ impl Agent {
         // Messages already in the trajectory: each step logs only what was added since.
         let mut logged = 0usize;
         loop {
-            let force_text = steps >= STEP_CAP || looping;
-            let forced = force_text.then_some(if steps >= STEP_CAP { "step_cap" } else { "breaker" });
+            let capped = steps >= STEP_CAP || called >= MAX_TOOL_CALLS;
+            let force_text = capped || looping;
+            let forced = force_text.then_some(if capped { "step_cap" } else { "breaker" });
             state.observed_input = true;
             let call_started = Instant::now();
             let sent = trajectory(&messages[logged..], logged, &stable_blob);
@@ -504,6 +523,8 @@ impl Agent {
             }
             // Text next to tool calls is narration ("Moving it now…"): it never reaches the owner.
             messages.push(json!({"role": "assistant", "content": content, "tool_calls": tool_calls}));
+            steps += 1;
+            called += tool_calls.len();
             let mut finished: Option<Reply> = None;
             for tc in &tool_calls {
                 let id = tc["id"].as_str().unwrap_or_default().to_string();
@@ -519,11 +540,10 @@ impl Agent {
                             .to_json(),
                         false,
                     ),
-                    (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(args) {
+                    (REPLY, Ok(args)) => match serde_json::from_value::<Reply>(unstring_message(args)) {
                         // The call it meant didn't run; the owner must not get its markup or a silent reply.
+                        // Its round trip counts as a step, so a model that keeps doing it is forced to answer in text.
                         Ok(reply) if reply.message.as_ref().and_then(|m| written_tool_call(&m.text)).is_some() => {
-                            // Counts as a step, so a model that keeps doing it is forced to answer in text.
-                            steps += 1;
                             (Error::domain("WRITTEN_TOOL_CALL", "The reply text contains a tool call written as text; it did not run. Make it as a function call, then reply.").to_json(), false)
                         }
                         Ok(mut reply) => match self.picture(reply.message.as_mut()).await {
@@ -554,7 +574,6 @@ impl Agent {
                             };
                             (Error::domain("REPEATED_CALL", message).to_json(), false)
                         } else {
-                            steps += 1;
                             let request_id = format!("{}-{}", input.key, state.ran.len() + 1);
                             let Ran { value: result, ok, saved, raised, changes } =
                                 self.tool(&name, args, request_id).await;
@@ -1008,6 +1027,39 @@ mod tests {
         let message = agent.turn(input()).await.reply.message.unwrap();
         assert_eq!((message.text.as_str(), message.buttons.len()), ("Pick one:", 1));
         assert_eq!(script.seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn reply_message_given_as_a_string_is_read_as_the_message() {
+        let buttons = json!([{"label": "Yes", "value": "Yes, build the plan around it"}]);
+        let encoded = json!({"text": "Legs, Push, Pull?", "buttons": buttons}).to_string();
+        let (agent, script, _) = scripted(vec![call("reply", json!({"message": encoded}))]);
+        let message = agent.turn(input()).await.reply.message.unwrap();
+        assert_eq!((message.text.as_str(), message.buttons.len()), ("Legs, Push, Pull?", 1));
+        assert_eq!(script.seen.lock().unwrap().len(), 1);
+        let (agent, _, _) = scripted(vec![call("reply", json!({"message": "Saved."}))]);
+        assert_eq!(agent.turn(input()).await.reply.message.map(|m| m.text).as_deref(), Some("Saved."));
+    }
+
+    /// 2026-11-21: importing a plan took 7 parallel catalog searches and 3 template imports; counted per
+    /// call, that hit the cap after three round trips and the owner got "I got stuck".
+    #[tokio::test]
+    async fn parallel_calls_count_as_one_step() {
+        let batch = |round: usize| {
+            let calls: Vec<Value> = (0..10)
+                .map(|i| json!({"id": format!("c-{round}-{i}"), "type": "function", "function": {"name": "sql_query", "arguments": json!({"sql": format!("SELECT {round}{i}")}).to_string()}}))
+                .collect();
+            json!({"content": null, "tool_calls": calls})
+        };
+        let (agent, script, _) = scripted(vec![batch(1), batch(2), json!({"content": "Plan saved."})]);
+        let outcome = agent.turn(input()).await;
+        assert_eq!(outcome.reply.message.map(|m| m.text).as_deref(), Some("Plan saved."));
+        assert!(script.seen.lock().unwrap().iter().all(|(_, forced)| !forced));
+        // However they are batched, a turn's calls are capped.
+        let (agent, script, _) = scripted((1..=5).map(batch).collect());
+        agent.turn(input()).await;
+        let seen = script.seen.lock().unwrap();
+        assert!(seen.len() == MAX_TOOL_CALLS / 10 + 1 && seen.last().unwrap().1, "{seen:?}");
     }
 
     #[tokio::test]

@@ -2,10 +2,12 @@
 //!
 //! Originals are saved under `data/media/` (EXIF intact, so tools can read the capture date for
 //! scale backfill); the model gets an upright JPEG at most `photo::MAX_EDGE` on its longest side.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::error::Result;
 use crate::providers::photo;
@@ -64,13 +66,19 @@ fn viewable(media: &Media, bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
     }
 }
 
-/// Attach this turn's images to the last owner message. Returns how many the model will see.
+/// Attach this turn's images to the last owner message, each distinct picture once (the same
+/// screenshot sent twice costs vision tokens twice and reads as two pages). Returns how many the
+/// model will see.
 pub async fn attach(messages: &mut [Value], images: &[Media]) -> usize {
     let Some(last) = messages.iter_mut().rev().find(|m| m["role"] == "user") else { return 0 };
     let mut parts = vec![json!({"type": "text", "text": text_of(&last["content"])})];
     let mut shown = 0;
+    let mut seen = HashSet::new();
     for media in images {
         let Ok(bytes) = tokio::fs::read(&media.path).await else { continue };
+        if !seen.insert(Sha256::digest(&bytes)) {
+            continue;
+        }
         let owned = media.clone();
         let decoded = tokio::task::spawn_blocking(move || viewable(&owned, bytes)).await.ok().flatten();
         match decoded {

@@ -153,7 +153,7 @@ mod tests {
     fn setup(changes: Value) -> (Connection, FixtureCalendarProvider) {
         let db = crate::db::test::with_short_template();
         update_profile(&db, changes.as_object().unwrap()).unwrap();
-        draft_week(&db, Date::constant(2026, 10, 12), sunday(0), None, Some("short"), false, &[]).unwrap();
+        draft_week(&db, Date::constant(2026, 10, 12), sunday(0), None, None, Some("short"), false, &[]).unwrap();
         crate::db::models::RuntimeSettings { recipient: "123".into(), ..crate::db::test::authority() }
             .insert(&db)
             .unwrap();

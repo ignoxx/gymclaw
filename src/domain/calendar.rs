@@ -461,7 +461,7 @@ mod tests {
         sync_calendar(&db, &mut provider, now(0)).unwrap();
         let signal = SlotSignal { start: at(14, 20, 0), crowd: Some(0.0), confidence: 1.0, preferred_time: 0.0 };
         let week = Date::constant(2026, 10, 12);
-        let ids = draft_week(&db, week, now(0), None, Some("long"), false, &[signal]).unwrap().created;
+        let ids = draft_week(&db, week, now(0), None, None, Some("long"), false, &[signal]).unwrap().created;
         publish(&db, &mut provider, now(1));
         sync_calendar(&db, &mut provider, now(2)).unwrap();
         assert!(ids.iter().all(|id| !session(&db, id).user_locked));
@@ -655,7 +655,7 @@ mod tests {
     fn write_retry_after_remote_success_no_duplicate_events() {
         let (db, mut provider, _) = setup();
         let week = Date::constant(2026, 10, 19);
-        let created = draft_week(&db, week, now(3), None, Some("long"), false, &[]).unwrap().created;
+        let created = draft_week(&db, week, now(3), None, None, Some("long"), false, &[]).unwrap().created;
         let write = queue_session_write(&db, &session(&db, &created[0]), now(3), false).unwrap().unwrap();
         let count = provider.event_count();
         provider.create_gym_event(&write.body_json).unwrap(); // Crash after Google accepted, before our ack.

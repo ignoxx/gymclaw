@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::db::models::{ExerciseProgression, WeightUnit, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
-use crate::domain::illustrations::{Item, catalog, lookup, muscles, suggestions, timed, unknown};
+use crate::domain::illustrations::{Item, catalog, lookup, matching, muscles, suggestions, timed, unknown};
 use crate::domain::workout::{format_distance, format_time, g, in_seconds};
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -418,9 +418,26 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
     })
 }
 
+/// The catalog picture an exercise's name means, so a plan read off another app's screenshots saves
+/// with pictures without a catalog search per exercise: its exact catalog name or the way other apps
+/// write it ("Bench Press (Barbell)", `matching`). A guide_id the catalog doesn't know is read as a
+/// name too, else dropped, so the exercise saves as the owner's own instead of failing the import
+/// (`missing_pictures` then asks). A muscle without a guide_id is an owner's own exercise: left alone.
+fn picture(spec: &mut ExerciseSpec) {
+    let known = spec.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g));
+    if known || (spec.guide_id.is_none() && spec.muscle.is_some()) {
+        return;
+    }
+    let named = |key: &str| lookup(key).map(|i| i.slug.clone()).or_else(|| matching(key).map(|e| e.guide_id));
+    spec.guide_id = spec.guide_id.as_deref().and_then(named).or_else(|| named(&spec.name));
+}
+
+/// Save a whole template (new or replacing its id), pictures matched (`picture`). Returns what was saved.
 pub fn import_template(db: &Connection, template: &Template) -> Result<Value> {
+    let mut template = template.clone();
+    template.exercises.iter_mut().chain(template.alternatives.iter_mut()).for_each(picture);
     template.validate()?;
-    let definition = serde_json::to_value(template)?;
+    let definition = serde_json::to_value(&template)?;
     let row =
         WorkoutTemplate { id: template.id.clone(), definition_json: Json(definition.clone()), updated_at: Ts::now() };
     if WorkoutTemplate::get(db, &template.id)?.is_some() {
@@ -708,6 +725,31 @@ mod tests {
             let modified: Template = serde_json::from_value(modified).unwrap();
             assert_eq!(modified.validate().unwrap_err().code(), "INVALID_TEMPLATE", "{change}");
         }
+    }
+
+    /// 2026-11-21: a plan read off screenshots took a catalog search per exercise before it could be saved.
+    #[test]
+    fn import_matches_catalog_pictures_by_name_and_keeps_unknown_exercises() {
+        let db = db();
+        let exercise = |name: &str, extra: Value| {
+            let mut spec =
+                json!({"id": name.to_lowercase().replace(' ', "-"), "name": name, "role": name, "target_weight": 20});
+            spec.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            spec
+        };
+        let template: Template = serde_json::from_value(json!({"id": "legs", "name": "Legs", "exercises": [
+            exercise("Leg Press", json!({})),
+            exercise("Lat Pulldown (Cable)", json!({})),
+            exercise("Hack Squat", json!({"guide_id": "leg-press-ish"})),
+            exercise("Grandma's Glute Thing", json!({})),
+            exercise("Leg Extension", json!({"muscle": "Quads"})),
+        ]}))
+        .unwrap();
+        let saved: Template = serde_json::from_value(import_template(&db, &template).unwrap()).unwrap();
+        let pictures: Vec<Option<&str>> = saved.exercises.iter().map(|e| e.guide_id.as_deref()).collect();
+        assert_eq!(pictures, [Some("leg-press"), Some("lat-pulldown"), Some("hack-squat"), None, None]);
+        assert_eq!(get_template(&db, "legs").unwrap(), saved);
+        assert!(missing_pictures(&saved).unwrap().contains("Grandma's Glute Thing"));
     }
 
     #[test]
