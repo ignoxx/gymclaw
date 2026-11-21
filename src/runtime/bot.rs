@@ -8,6 +8,7 @@
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
 //! - Coach steps taken in the Mini App (`coach::APP_VIEW` events) are shown in the chat like taps.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -93,6 +94,23 @@ enum Fast {
     },
 }
 
+struct AlbumGuard<'a>(&'a Bot);
+
+impl<'a> AlbumGuard<'a> {
+    fn new(bot: &'a Bot) -> Self {
+        bot.album_inflight.fetch_add(1, Ordering::AcqRel);
+        bot.hold_for_album();
+        Self(bot)
+    }
+}
+
+impl Drop for AlbumGuard<'_> {
+    fn drop(&mut self) {
+        self.0.album_inflight.fetch_sub(1, Ordering::AcqRel);
+        self.0.hold_for_album();
+    }
+}
+
 pub struct Bot {
     owner: i64,
     tg: Arc<dyn Telegram>,
@@ -107,6 +125,8 @@ pub struct Bot {
     inbox_ready: Notify,
     /// While an album is still arriving, the agent waits until then (`ALBUM_WAIT` after its latest photo).
     album_until: std::sync::Mutex<Option<tokio::time::Instant>>,
+    album_inflight: AtomicUsize,
+    album_change: Notify,
     app_wake: Notify,
     fast: mpsc::UnboundedSender<Fast>,
     stop: watch::Sender<bool>,
@@ -141,6 +161,8 @@ impl Bot {
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
             album_until: std::sync::Mutex::new(None),
+            album_inflight: AtomicUsize::new(0),
+            album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
             stop,
@@ -267,11 +289,9 @@ impl Bot {
     }
 
     async fn message(&self, message: Message) {
-        // Held before the download too, so a slow download doesn't let the agent start without this photo.
-        let album = message.media_group_id.is_some();
-        if album {
-            self.hold_for_album();
-        }
+        // Hold the agent loop while any album photo is in flight (downloading/saving), then for
+        // ALBUM_WAIT after it lands, so slow downloads never split an album across turns.
+        let _album_guard = message.media_group_id.is_some().then(|| AlbumGuard::new(self));
         let voice = message.voice.as_ref().or(message.audio.as_ref());
         let text = match voice {
             Some(audio) => match self.transcribe(message.message_id, audio).await {
@@ -311,23 +331,36 @@ impl Bot {
         let text = self.with_reply(text, message.reply_to_message.as_deref()).await;
         let key = format!("tg-{}", message.message_id);
         self.to_agent(Some(message.message_id), key, text.trim().to_string(), images, meta).await;
-        if album {
-            self.hold_for_album();
-        }
     }
 
     fn hold_for_album(&self) {
         *self.album_until.lock().unwrap_or_else(PoisonError::into_inner) =
             Some(tokio::time::Instant::now() + ALBUM_WAIT);
+        self.album_change.notify_one();
     }
 
-    /// Wait until no album photo arrived for `ALBUM_WAIT`, so the whole album lands in one turn.
-    async fn album_settled(&self, stop: &mut watch::Receiver<bool>) {
+    /// Wait until no album photo is downloading and `ALBUM_WAIT` has passed since the last one, so
+    /// the whole album lands in one turn. Returns `false` if shutdown was signalled.
+    async fn album_settled(&self, stop: &mut watch::Receiver<bool>) -> bool {
         loop {
+            if *stop.borrow() {
+                return false;
+            }
+            if self.album_inflight.load(Ordering::Acquire) > 0 {
+                tokio::select! {
+                    biased;
+                    _ = stop.changed() => return false,
+                    _ = self.album_change.notified() => continue,
+                }
+            }
             let until = *self.album_until.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(until) = until.filter(|u| *u > tokio::time::Instant::now()) else { return };
+            let Some(until) = until.filter(|u| *u > tokio::time::Instant::now()) else {
+                return true;
+            };
             tokio::select! {
-                _ = stop.changed() => return,
+                biased;
+                _ = stop.changed() => return false,
+                _ = self.album_change.notified() => continue,
                 _ = tokio::time::sleep_until(until) => {}
             }
         }
@@ -515,6 +548,12 @@ impl Bot {
                  Tap one, or just type it in your own words; mixing is fine (\"lose fat, build muscle, better endurance\")."
             ),
             Some("INTERVIEW") => format!("**{}/{total}** {instruction}", total.saturating_sub(missing) + 1),
+            Some("PLAN") => {
+                "Almost done! Do you already follow a workout plan (send screenshots, a Strong/Hevy CSV, or type it out), or want me to build one for you?".into()
+            }
+            Some("REVIEW") => {
+                "Your plan is ready to review — reply **yes** to finish setup, or tell me what you'd like to change.".into()
+            }
             _ => instruction.to_string(),
         };
         let rows: Vec<(String, String, String)> = if next == Some("goal") {
@@ -771,7 +810,9 @@ impl Bot {
                 break;
             }
             loop {
-                self.album_settled(&mut stop).await;
+                if !self.album_settled(&mut stop).await {
+                    break;
+                }
                 let batch = std::mem::take(&mut *self.inbox.lock().await);
                 if batch.is_empty() {
                     break;
@@ -1141,6 +1182,8 @@ mod tests {
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
             album_until: std::sync::Mutex::new(None),
+            album_inflight: AtomicUsize::new(0),
+            album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
             stop: watch::channel(false).0,

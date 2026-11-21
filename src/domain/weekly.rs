@@ -336,8 +336,14 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let warnings = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
-        let tomorrow = Ts(now.local(&tz).date().tomorrow()?.to_zoned(tz.clone())?.timestamp());
-        draft_week(db, current_week, now, Some(tomorrow), Some(&key), Some(template_id), true, &[])?.created
+        // Brand-new setup (no sessions ever planned): start tomorrow so setup never triggers an
+        // immediate "Gym soon" reminder. Later weeks (e.g. a missed Sunday run) still include today.
+        let not_before = if PlannedSession::first(db, "", [])?.is_none() {
+            Some(Ts(now.local(&tz).date().tomorrow()?.to_zoned(tz.clone())?.timestamp()))
+        } else {
+            None
+        };
+        draft_week(db, current_week, now, not_before, Some(&key), Some(template_id), true, &[])?.created
     } else {
         vec![]
     };

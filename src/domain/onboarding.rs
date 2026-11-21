@@ -120,8 +120,20 @@ fn review_fingerprint(db: &Connection, row: &OnboardingState) -> Result<String> 
     Ok(fingerprint(&json!({"interview": row.interview_json.0, "profile": get_profile(db)?, "split": templates})))
 }
 
+fn answered(row: &OnboardingState, key: &str) -> bool {
+    if row.interview_json.get(key).is_some() {
+        return true;
+    }
+    // Owners mid-setup from the old 5-question interview keep their progress.
+    match key {
+        "routine" => row.interview_json.get("schedule").is_some(),
+        "locale" => row.interview_json.get("preferences").is_some(),
+        _ => false,
+    }
+}
+
 fn missing(row: &OnboardingState) -> Vec<&'static str> {
-    QUESTIONS.iter().map(|q| q.key).filter(|key| row.interview_json.get(*key).is_none()).collect()
+    QUESTIONS.iter().map(|q| q.key).filter(|key| !answered(row, key)).collect()
 }
 
 /// Interview questions not answered yet; None once setup is finished. The prompt hides profile
@@ -216,10 +228,36 @@ pub fn status(db: &Connection) -> Result<Value> {
     let fingerprint = if row.split_json.is_empty() { None } else { Some(review_fingerprint(db, &row)?) };
     let next = (!ready).then(|| missing.first().copied()).flatten();
     let how = next.and_then(|key| QUESTIONS.iter().find(|q| q.key == key)).map(|q| q.how);
+    // During setup, strip seeded defaults for unanswered questions so the model never treats
+    // e.g. a default timezone or commute as the owner's stated preference.
+    let mut profile_val = serde_json::to_value(get_profile(db)?)?;
+    if !ready && let Some(obj) = profile_val.as_object_mut() {
+        if missing.contains(&"locale") {
+            obj.remove("timezone");
+            obj.remove("weight_unit");
+        }
+        if missing.contains(&"routine") {
+            for k in [
+                "weekly_min_sessions",
+                "weekly_target_sessions",
+                "weekly_max_sessions",
+                "weekdays_allowed",
+                "earliest_workout_start",
+                "latest_workout_finish",
+                "preferred_workout_minutes",
+                "minimum_workout_minutes",
+                "prep_minutes",
+                "commute_to_gym_minutes",
+                "commute_home_minutes",
+            ] {
+                obj.remove(k);
+            }
+        }
+    }
     Ok(json!({
         "step": step, "ready": ready, "next_question": next, "how_to_save": how,
         "missing": if ready { vec![] } else { missing },
-        "answers": row.interview_json.0, "profile": get_profile(db)?, "split": row.split_json.0, "plan": row.plan_text, "templates": template_options(db)?,
+        "answers": row.interview_json.0, "profile": profile_val, "split": row.split_json.0, "plan": row.plan_text, "templates": template_options(db)?,
         "review_fingerprint": fingerprint,
         "calendar_writes_enabled": settings.as_ref().is_some_and(|s| s.calendar_writes_enabled),
         "runtime_enabled": settings.as_ref().is_some_and(|s| s.enabled), "instruction": instruction,
@@ -372,9 +410,19 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                 }
                 let first_finish = row.completed_fingerprint.is_none();
                 row.completed_fingerprint = fingerprint.map(String::from);
+                row.update(db)?;
                 if first_finish {
                     enable_runtime_once(db, *recipient)?;
+                    // Draft the first week right away (starting tomorrow via `rolling_plan`) so the
+                    // wrap-up turn and any immediate "Train today" / "Start next week" tap see the
+                    // real schedule instead of racing the next 60 s tick.
+                    if RuntimeSettings::get(db, 1)?.is_some_and(|s| s.enabled)
+                        && let Some(first_template) = row.split_json.first()
+                    {
+                        crate::domain::weekly::rolling_plan(db, first_template, now)?;
+                    }
                 }
+                return status(db);
             }
         }
         row.update(db)?;
