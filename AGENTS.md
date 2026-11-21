@@ -17,8 +17,10 @@ One Rust binary: Telegram bot, agent loop, scheduler and training domain over on
   `cargo test`, shellcheck and gitleaks. Test against DB copies in `/tmp`, never the production DB.
 - **Dashboard**: `cargo run -- dashboard` serves `data/gymclaw.db` on :8766 (`GYMCLAW_DB=…` for
   another copy). Debug builds read `web/` from disk, so a refresh shows edits. Verify UI changes with
-  `scripts/shot <url> <out.png> [width height] [--full]`; width 390 for phone;
+  `scripts/shot <url> <out.png> [width height] [--full]`;
   `--click`/`--fill`/`--text` steps drive dialogs and forms (see its header).
+- **Web UI** is the term for the dashboard / Telegram Mini App. It is Mini-App-first: check UI
+  changes at widths 320 and 390; desktop is secondary.
 - **Public repo**: run `git config core.hooksPath .githooks` once per clone. The pre-commit hook
   blocks private strings (owner IDs, hostnames, deployment IDs).
 - **Review** against `CODING_STANDARDS.md`.
