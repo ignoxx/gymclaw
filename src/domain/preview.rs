@@ -3,9 +3,11 @@
 //! Used when the owner asks "what's on today?". One photo with every exercise's illustration, sent
 //! without a caption (the plan lines go to chat history), instead of a stack of messages; rendered
 //! once per plan content under `data/previews/`.
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 use image::{Rgb, RgbImage, imageops::FilterType};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -121,10 +123,14 @@ pub(crate) fn ensure_ascii(json: &str) -> String {
     out
 }
 
-/// DM Sans, embedded so previews never depend on the deploy layout.
-fn font() -> Result<FontVec> {
-    FontVec::try_from_vec(include_bytes!("../../web/fonts/DM-Sans.ttf").to_vec())
-        .map_err(|e| Error::domain("ASSET_MISSING", format!("Bad font: {e}")))
+/// DM Sans, embedded and parsed once so previews never depend on the deploy layout or re-parse TTF bytes.
+fn font() -> Result<&'static FontRef<'static>> {
+    static FONT: OnceLock<std::result::Result<FontRef<'static>, String>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        FontRef::try_from_slice(include_bytes!("../../web/fonts/DM-Sans.ttf")).map_err(|e| e.to_string())
+    })
+    .as_ref()
+    .map_err(|e| Error::domain("ASSET_MISSING", format!("Bad font: {e}")))
 }
 
 /// items: (label, png path). Returns a cached PNG path under `root`; same content renders once.
@@ -194,7 +200,50 @@ pub fn render_grid(items: &[(String, String)], root: &Path) -> Result<String> {
             pen += advance;
         }
     }
-    std::fs::create_dir_all(path.parent().expect("preview dir"))?;
-    canvas.save(&path).map_err(|e| Error::domain("IO_ERROR", format!("{}: {e}", path.display())))?;
+    let dir = path.parent().expect("preview dir");
+    std::fs::create_dir_all(dir)?;
+    // Encode fully in memory, write to a sibling temp file, then rename atomically so a crash
+    // or concurrent render never leaves a half-written `preview.png` cached forever.
+    let mut png = Vec::new();
+    canvas
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| Error::domain("IO_ERROR", format!("{}: {e}", path.display())))?;
+    let tmp = dir.join(format!("preview.{}.tmp", crate::db::new_id()));
+    if let Err(e) = std::fs::write(&tmp, &png) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::from(e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::from(e));
+    }
     Ok(path.to_string_lossy().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_grid_caches_valid_png_without_tmp_leftovers() {
+        let root = std::env::temp_dir().join(format!("gymclaw-preview-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tile = root.join("tile.png");
+        RgbImage::from_pixel(64, 64, Rgb([120, 120, 120])).save(&tile).unwrap();
+        let items = vec![("Bench Press".to_string(), tile.to_string_lossy().into_owned())];
+        let out = render_grid(&items, &root).unwrap();
+        let out_path = Path::new(&out);
+        assert!(out_path.exists());
+        assert!(image::open(out_path).is_ok());
+        // No leftover .tmp files in the cache directory.
+        let leftovers: Vec<_> = std::fs::read_dir(out_path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        // Second call hits cache and returns the same path.
+        assert_eq!(render_grid(&items, &root).unwrap(), out);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

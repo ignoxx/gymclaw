@@ -177,14 +177,28 @@ async fn append(file: &Path, line: &str) -> std::io::Result<()> {
     options().create(true).append(true).open(file).await?.write_all(line.as_bytes()).await
 }
 
-/// Write a blob unless it's already there (same hash, same content).
+/// Write a blob atomically unless it's already there (same hash, same content).
 async fn store(file: &Path, text: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    match options().write(true).create_new(true).open(file).await {
-        Ok(mut f) => f.write_all(text.as_bytes()).await,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e),
+    if tokio::fs::try_exists(file).await.unwrap_or(false) {
+        return Ok(());
     }
+    let tmp = file.with_extension(format!("json.{}.tmp", crate::db::new_id()));
+    let write = async {
+        let mut f = options().write(true).create_new(true).open(&tmp).await?;
+        f.write_all(text.as_bytes()).await?;
+        f.flush().await
+    }
+    .await;
+    if let Err(e) = write {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, file).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Every event in a turn-log dir (a local copy), oldest file first; unreadable lines are skipped.
