@@ -17,6 +17,9 @@ gymclaw dashboard    # the Mini App (the bot's "Gym" menu button); its writes ar
 GYMCLAW_DB=copy.db gymclaw replay --at <local time> [--model …]   # re-run the agent on the chat's last owner message
 gymclaw rewind <run> --db copy.db --turns <dir>   # undo a turn's tool calls on a DB copy (turn-log changesets)
 gymclaw backfill --db copy.db --turns <dir> --out <file> [--git .]   # index past turns with outcome labels
+gymclaw doctor       # check DB, owner id, Telegram token, OpenRouter key and crowd config
+gymclaw crowd-test   # test the configured crowd source and print the live count
+gymclaw crowd-reset  # wipe crowd history and state before switching crowd sources
 ```
 
 ## Layout

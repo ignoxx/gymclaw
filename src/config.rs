@@ -105,3 +105,22 @@ impl Config {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// `config.rs` promises every env var is listed in `docs/self-hosting.md`; keep them in step
+    /// (including clap `env = "..."` args in `src/main.rs`).
+    #[test]
+    fn every_env_var_is_documented() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config = std::fs::read_to_string(root.join("src/config.rs")).unwrap();
+        let main = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        let doc = std::fs::read_to_string(root.join("docs/self-hosting.md")).unwrap();
+        let cfg_re = regex::Regex::new(r#"(?:var|need)\("([A-Z0-9_]+)"\)"#).unwrap();
+        let clap_re = regex::Regex::new(r#"env\s*=\s*"([A-Z0-9_]+)""#).unwrap();
+        let vars: std::collections::BTreeSet<String> =
+            cfg_re.captures_iter(&config).chain(clap_re.captures_iter(&main)).map(|c| c[1].to_string()).collect();
+        let missing: Vec<_> = vars.into_iter().filter(|v| !doc.contains(&format!("`{v}`"))).collect();
+        assert!(missing.is_empty(), "env vars missing from docs/self-hosting.md: {missing:?}");
+    }
+}
