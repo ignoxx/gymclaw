@@ -378,7 +378,8 @@ async fn main() -> ExitCode {
                 },
                 None => None,
             };
-            gymclaw::web::dashboard(Config::paths().1, addr, allowed_host, auth).await.map(|_| None)
+            let (data_dir, db_path) = Config::paths();
+            gymclaw::web::dashboard(db_path, data_dir, addr, allowed_host, auth).await.map(|_| None)
         }
         Command::Doctor => {
             let report = doctor().await;
