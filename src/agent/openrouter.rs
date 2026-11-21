@@ -48,35 +48,75 @@ pub fn body(model: &str, messages: &[Value], tools: &[Value], force_text: bool, 
     body
 }
 
+/// Max elapsed time on attempt 1 that still qualifies for a retry, keeping total wall time well
+/// inside the turn `DEADLINE` (300 s).
+const MAX_RETRY_ELAPSED: Duration = Duration::from_secs(30);
+const MAX_RETRY_AFTER_SECS: u64 = 5;
+
+/// Retry delay for pre-generation transient HTTP errors (429, 500, 502, 503, 504, 529).
+/// Never retries HTTP 200 inline errors (generation already started; retrying could double-bill),
+/// connection/timeout errors, or `Retry-After` waits longer than 5 s.
+fn retry_delay(http_status: u16, retry_after: Option<&str>) -> Option<Duration> {
+    if !matches!(http_status, 429 | 500 | 502 | 503 | 504 | 529) {
+        return None;
+    }
+    let secs = match retry_after {
+        None => 1,
+        Some(raw) => {
+            let parsed = raw.trim().parse::<u64>().ok()?;
+            if parsed > MAX_RETRY_AFTER_SECS {
+                return None;
+            }
+            parsed.max(1)
+        }
+    };
+    Some(Duration::from_secs(secs))
+}
+
 #[async_trait]
 impl ChatModel for OpenRouter {
     async fn complete(&self, model: &str, messages: &[Value], tools: &[Value], force_text: bool) -> Result<ModelReply> {
         let started = Instant::now();
         let request = body(model, messages, tools, force_text, self.provider.as_deref());
         let req_bytes = request.to_string().len();
-        let response = self
-            .http
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .bearer_auth(&self.key)
-            .header("X-Title", "gymclaw")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| Error::domain("MODEL_ERROR", format!("connection: {}", e.without_url())))?;
-        let ttfb_ms = started.elapsed().as_millis();
-        let status = response.status();
-        let text = response
-            .text()
-            .await
-            .map_err(|e| Error::domain("MODEL_ERROR", format!("connection: {}", e.without_url())))?;
-        let res_bytes = text.len();
-        let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        if !status.is_success() || parsed.get("error").is_some_and(|e| !e.is_null()) {
-            let message = parsed.pointer("/error/message").and_then(Value::as_str).unwrap_or("no details");
-            let code =
-                parsed.pointer("/error/code").map(|c| c.to_string()).unwrap_or_else(|| status.as_u16().to_string());
-            return Err(Error::domain("MODEL_ERROR", format!("{code} {message}")));
-        }
+        let mut attempt = 0u8;
+        let (ttfb_ms, res_bytes, parsed) = loop {
+            let attempt_started = Instant::now();
+            let response = self
+                .http
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .bearer_auth(&self.key)
+                .header("X-Title", "gymclaw")
+                .json(&request)
+                .send()
+                .await
+                .map_err(|e| Error::domain("MODEL_ERROR", format!("connection: {}", e.without_url())))?;
+            let ttfb_ms = attempt_started.elapsed().as_millis();
+            let status = response.status();
+            let retry_after = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(String::from);
+            let text = response
+                .text()
+                .await
+                .map_err(|e| Error::domain("MODEL_ERROR", format!("connection: {}", e.without_url())))?;
+            let res_bytes = text.len();
+            let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            if !status.is_success() || parsed.get("error").is_some_and(|e| !e.is_null()) {
+                let message = parsed.pointer("/error/message").and_then(Value::as_str).unwrap_or("no details");
+                let code =
+                    parsed.pointer("/error/code").map(|c| c.to_string()).unwrap_or_else(|| status.as_u16().to_string());
+                if attempt == 0
+                    && started.elapsed() < MAX_RETRY_ELAPSED
+                    && let Some(delay) = retry_delay(status.as_u16(), retry_after.as_deref())
+                {
+                    attempt += 1;
+                    tracing::warn!("openrouter transient error ({code} {message}); retrying in {}s", delay.as_secs());
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(Error::domain("MODEL_ERROR", format!("{code} {message}")));
+            }
+            break (ttfb_ms, res_bytes, parsed);
+        };
         let choice = parsed
             .pointer("/choices/0")
             .cloned()
@@ -174,5 +214,22 @@ mod tests {
 
         let req = body("anthropic/claude-haiku-5.5", &[], &[], false, None);
         assert_eq!(req["usage"]["include"], true);
+    }
+
+    #[test]
+    fn retry_delay_retries_only_pre_generation_transient_http_errors() {
+        assert_eq!(retry_delay(502, None), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(529, None), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(429, Some("3")), Some(Duration::from_secs(3)));
+        assert_eq!(retry_delay(429, Some("0")), Some(Duration::from_secs(1)));
+        // Long or non-numeric Retry-After: skip retry instead of hammering the limit.
+        assert_eq!(retry_delay(429, Some("60")), None);
+        assert_eq!(retry_delay(429, Some("Wed, 21 Oct 2026 07:28:00 GMT")), None);
+        // HTTP 200 inline errors (already generating) and 4xx client errors never retry.
+        assert_eq!(retry_delay(200, None), None);
+        assert_eq!(retry_delay(400, None), None);
+        assert_eq!(retry_delay(401, None), None);
+        assert_eq!(retry_delay(402, None), None);
+        assert_eq!(retry_delay(403, None), None);
     }
 }
