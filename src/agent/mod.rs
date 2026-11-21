@@ -46,6 +46,8 @@ pub struct Usage {
     pub output: Option<u64>,
     pub reasoning: Option<u64>,
     pub cache_read: Option<u64>,
+    /// Exact cost reported by the provider (OpenRouter `usage.cost`, in USD/credits), when present.
+    pub cost: Option<f64>,
 }
 
 /// One assistant message from the model.
@@ -461,7 +463,7 @@ impl Agent {
                 "ms": reply.ms as u64, "ttfbMs": reply.ttfb_ms as u64, "outcome": "completed", "reqBytes": reply.req_bytes, "resBytes": reply.res_bytes,
                 "from": from, "messages": sent, "settings": reply.settings, "forced": forced,
                 "message": redact(&reply.message), "generationId": reply.generation_id}));
-            let usage = json!({"input": reply.usage.input, "output": reply.usage.output, "reasoning": reply.usage.reasoning, "cacheRead": reply.usage.cache_read});
+            let usage = json!({"input": reply.usage.input, "output": reply.usage.output, "reasoning": reply.usage.reasoning, "cacheRead": reply.usage.cache_read, "cost": reply.usage.cost});
             self.log.log(
                 json!({"ev": "llm_output", "run": run_id, "model": model, "usage": usage, "stop": reply.finish_reason}),
             );

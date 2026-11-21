@@ -29,8 +29,7 @@ impl OpenRouter {
 /// Request body. `force_text` asks for a plain answer with no further tool calls.
 pub fn body(model: &str, messages: &[Value], tools: &[Value], force_text: bool, provider: Option<&str>) -> Value {
     // Some models (GLM) can't turn reasoning off (`enabled: false` is a 400); minimal keeps it to a few hundred tokens.
-    let mut body =
-        json!({"model": model, "messages": messages, "max_tokens": MAX_TOKENS, "reasoning": {"effort": "minimal"}});
+    let mut body = json!({"model": model, "messages": messages, "max_tokens": MAX_TOKENS, "reasoning": {"effort": "minimal"}, "usage": {"include": true}});
     if !tools.is_empty() {
         body["tools"] = json!(tools);
         body["tool_choice"] = json!(if force_text { "none" } else { "auto" });
@@ -89,16 +88,10 @@ impl ChatModel for OpenRouter {
             map.remove("messages");
             map.remove("tools");
         }
-        let cached = usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0);
         Ok(ModelReply {
             message: choice["message"].clone(),
             finish_reason: choice["finish_reason"].as_str().map(String::from),
-            usage: Usage {
-                input: usage["prompt_tokens"].as_u64().map(|p| p.saturating_sub(cached)),
-                output: usage["completion_tokens"].as_u64(),
-                reasoning: usage.pointer("/completion_tokens_details/reasoning_tokens").and_then(Value::as_u64),
-                cache_read: Some(cached),
-            },
+            usage: parse_usage(usage),
             provider: parsed["provider"].as_str().map(String::from),
             generation_id: parsed["id"].as_str().map(String::from),
             settings,
@@ -144,4 +137,42 @@ pub async fn transcribe(chat: &dyn ChatModel, model: &str, audio: &[u8], format:
         crate::bail!("NOTHING_HEARD", "no speech in the voice note");
     }
     Ok(text)
+}
+
+fn parse_usage(usage: &Value) -> Usage {
+    let cached = usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0);
+    Usage {
+        input: usage["prompt_tokens"].as_u64().map(|p| p.saturating_sub(cached)),
+        output: usage["completion_tokens"].as_u64(),
+        reasoning: usage.pointer("/completion_tokens_details/reasoning_tokens").and_then(Value::as_u64),
+        cache_read: Some(cached),
+        cost: usage["cost"].as_f64(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_usage_extracts_tokens_and_exact_cost() {
+        let u = parse_usage(&json!({
+            "prompt_tokens": 1200,
+            "completion_tokens": 180,
+            "prompt_tokens_details": {"cached_tokens": 800},
+            "completion_tokens_details": {"reasoning_tokens": 40},
+            "cost": 0.00125
+        }));
+        assert_eq!(u.input, Some(400));
+        assert_eq!(u.output, Some(180));
+        assert_eq!(u.cache_read, Some(800));
+        assert_eq!(u.reasoning, Some(40));
+        assert_eq!(u.cost, Some(0.00125));
+
+        let without_cost = parse_usage(&json!({"prompt_tokens": 100, "completion_tokens": 20}));
+        assert_eq!(without_cost.cost, None);
+
+        let req = body("anthropic/claude-haiku-5.5", &[], &[], false, None);
+        assert_eq!(req["usage"]["include"], true);
+    }
 }
