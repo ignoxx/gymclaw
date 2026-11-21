@@ -53,7 +53,8 @@ pub const QUESTIONS: [Question; 3] = [
         ask: "Last one: what city or timezone are you in?",
         needs: &["timezone", "weight_unit"],
         how: "Set timezone (IANA name for their city) and weight_unit from their country: lb in the US, kg almost \
-              everywhere else. Don't ask about the unit; name the one you picked when confirming so they can flip it.",
+              everywhere else. Don't ask about the unit; mention it once as a short aside they can flip, e.g. \
+              \"I'll log your weights in **kg**, just say if you'd rather use lb.\"",
     },
 ];
 
@@ -154,13 +155,11 @@ fn step_and_instruction(
         return (
             "READY",
             if runtime_enabled {
-                "Setup done; reminders and weekly planning are on. Wrap up warmly in one message: \
-                 1) first, a short **What you can do now** list of three bullets: just talk or send voice notes to move sessions, \
-                 swap exercises or change anything (gymclaw remembers preferences and adapts over time); the **Gym** button \
-                 (bottom-left) opens the dashboard with your plan, 1RM progress charts, live workout tracker and calendar export; \
-                 during workouts tap buttons or type sets (`10x80`), send scale photos or a Strong/Hevy CSV anytime, /help for the rest. \
-                 2) last (right above the buttons), if drafted_week has sessions, name the first one (day and time) and ask if it works, \
-                 with buttons \"Sounds good\", \"Train today\", \"Different time\", \"Start next week\". \
+                "Setup done; reminders and weekly planning are on. The bot sends the owner a **What you can do now** tips \
+                 message right before your reply, so don't repeat tips or recap the setup. Reply in one or two short lines: \
+                 if drafted_week has sessions, name the first one (day and time) and ask if it works, \
+                 with buttons \"Sounds good\", \"Train today\", \"Different time\", \"Start next week\"; otherwise say \
+                 you'll plan the week ahead and they can ask for a session anytime. \
                  On \"Train today\", move the first drafted session to today with session_update (keeping rotation and weekly count); \
                  on \"Start next week\", cancel this week's drafted sessions. Calendar writes stay opt-in."
             } else {
@@ -179,11 +178,15 @@ fn step_and_instruction(
              If building from scratch, ask once about experience level and any injuries/limitations first. \
              When they share a plan, read every workout and every exercise in that same turn: save each workout with \
              template (action import), then call plan_set \
-             in rotation order, and reply with one concise review summary + a \"Looks good ✅\" button so they confirm once. \
+             in rotation order, and reply with one review summary + a \"Looks good ✅\" button so they confirm once. \
+             Format the summary as one quote block per workout, separated by blank lines: first line `> **Push**`, then \
+             one exercise per line with sets×reps (`> Chest press machine 3×8-12`); one short line before and after. \
              Before importing, match non-English or non-standard exercise names to the English catalog: run catalog_search \
              in parallel with each movement's English name (translate other languages: Brustpresse → chest press machine, \
              Latzug → lat pulldown, Beinstrecker → leg extension) and set guide_id to the matching slug; standard English \
-             names match automatically on save, so skip searching those. Every exercise must have a catalog guide_id (no exercises without pictures); keep the owner's name in name. \
+             names match automatically on save, so skip searching those. Every exercise must have a catalog guide_id (no exercises without pictures); \
+             set name to the matched catalog exercise's English name, so names stay consistent with the pictures \
+             (keep the owner's own name only if they ask for it). \
              Photos are gone from later turns, so if you \
              must ask before saving, list the exact workouts and exercises you read in the reply.",
         );
