@@ -1,8 +1,12 @@
 //! Outbox: every proactive owner message is a `notification_delivery` row committed before the send.
 //!
 //! PENDING → claim SENDING (committed, no network under the write lock) → send → SENT with the
-//! Telegram message id. Any send error → UNKNOWN plus a `notifications.delivery_unknown` event,
-//! never retried automatically: Telegram has no idempotent send, so the owner checks and resolves.
+//! Telegram message id. Ambiguous send errors (network, timeout, 5xx) → UNKNOWN plus a
+//! `notifications.delivery_unknown` event, never retried automatically: Telegram has no idempotent
+//! send, so the owner checks and resolves. Definitive 4xx rejections were not sent: 429 (rate limit)
+//! and 401/404 (bad credentials) return the row to PENDING; 403 (bot blocked) cancels it; other 4xx
+//! (such as 400) cancel the delivery without acknowledging its source event and record a
+//! `notifications.delivery_failed` open issue.
 //! Once a resend would no longer go out (`settle_unknown`), it closes itself without asking.
 use std::path::Path;
 
@@ -428,8 +432,10 @@ fn no_show_buttons(db: &Connection, session_id: &str, now: Ts) -> Result<Vec<Vec
     Ok(vec![start_button(session_id), choices])
 }
 
-/// Send one PENDING delivery. Returns its data; a failed send leaves it UNKNOWN and returns
-/// TELEGRAM_DELIVERY_UNKNOWN.
+/// Send one PENDING delivery. Returns its data; an ambiguous send error (network, timeout, 5xx)
+/// leaves it UNKNOWN and returns TELEGRAM_DELIVERY_UNKNOWN. Definitive 4xx rejections were not
+/// sent: 429/401/404 return the row to PENDING, 403 cancels and acknowledges, and other 4xx (e.g.
+/// 400) cancel without acknowledging while recording a `notifications.delivery_failed` open issue.
 pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: Ts) -> Result<Value> {
     let id = delivery_id.to_string();
     let (chat, message, buttons, session, recap) = match in_tx(db_path, move |db| claim(db, &id, now)).await? {
@@ -440,18 +446,82 @@ pub async fn deliver(db_path: &Path, tg: &dyn Telegram, delivery_id: &str, now: 
     let id = delivery_id.to_string();
     let effect = recap.as_ref().and_then(|r| r.effect.as_deref());
     match tg.send(chat, &message, None, &buttons, effect).await {
-        Err(error) => {
-            tracing::warn!("delivery {delivery_id} outcome unknown: {error}");
-            in_tx(db_path, move |db| {
-                db.execute("UPDATE notification_delivery SET status = 'UNKNOWN' WHERE id = ?1 AND status = 'SENDING'", [&id])?;
-                emit(db, "notifications.delivery_unknown", now, json!({"delivery_id": id, "instruction": "Check Telegram before explicitly resolving; do not auto-retry."})).map(drop)
-            })
-            .await?;
-            crate::bail!(
-                "TELEGRAM_DELIVERY_UNKNOWN",
-                "Delivery outcome unknown; inspect Telegram, then resolve it. No automatic resend."
-            )
-        }
+        Err(error) => match error.telegram_status() {
+            Some(429 | 401 | 404) => {
+                tracing::warn!(
+                    "delivery {delivery_id} deferred (status={:?}, retry_after={:?}): {error}",
+                    error.telegram_status(),
+                    error.retry_after()
+                );
+                in_tx(db_path, move |db| {
+                    db.execute(
+                        "UPDATE notification_delivery SET status = 'PENDING', handled_at = NULL WHERE id = ?1 AND status = 'SENDING'",
+                        [&id],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+                Err(error)
+            }
+            Some(403) => {
+                tracing::warn!("delivery {delivery_id} blocked (403): {error}");
+                let err_msg = error.to_string();
+                in_tx(db_path, move |db| {
+                    if let Some(mut row) = NotificationDelivery::get(db, &id)?
+                        && row.status == DeliveryStatus::Sending
+                    {
+                        row.status = DeliveryStatus::Cancelled;
+                        row.handled_at = Some(now);
+                        row.update(db)?;
+                        acknowledge_delivery_event(db, &row, now)?;
+                        emit(
+                            db,
+                            "notifications.delivery_blocked",
+                            now,
+                            json!({"delivery_id": row.id, "status": 403, "error": err_msg}),
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await?;
+                Err(error)
+            }
+            Some(status) if (400..500).contains(&status) => {
+                tracing::warn!("delivery {delivery_id} rejected ({status}): {error}");
+                let err_msg = error.to_string();
+                in_tx(db_path, move |db| {
+                    if let Some(mut row) = NotificationDelivery::get(db, &id)?
+                        && row.status == DeliveryStatus::Sending
+                    {
+                        row.status = DeliveryStatus::Cancelled;
+                        row.handled_at = Some(now);
+                        row.update(db)?;
+                        // Do not acknowledge the source event: the owner never saw this message.
+                        emit(
+                            db,
+                            "notifications.delivery_failed",
+                            now,
+                            json!({"delivery_id": row.id, "status": status, "error": err_msg}),
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await?;
+                Err(error)
+            }
+            _ => {
+                tracing::warn!("delivery {delivery_id} outcome unknown: {error}");
+                in_tx(db_path, move |db| {
+                    db.execute("UPDATE notification_delivery SET status = 'UNKNOWN' WHERE id = ?1 AND status = 'SENDING'", [&id])?;
+                    emit(db, "notifications.delivery_unknown", now, json!({"delivery_id": id, "instruction": "Check Telegram before explicitly resolving; do not auto-retry."})).map(drop)
+                })
+                .await?;
+                crate::bail!(
+                    "TELEGRAM_DELIVERY_UNKNOWN",
+                    "Delivery outcome unknown; inspect Telegram, then resolve it. No automatic resend."
+                )
+            }
+        },
         Ok(message_id) => {
             let (data, replaced) = in_tx(db_path, move |db| {
                 db.execute("UPDATE notification_delivery SET status = 'SENT', external_message_id = ?2 WHERE id = ?1 AND status = 'SENDING'", [&id, &message_id.to_string()])?;
@@ -642,6 +712,115 @@ mod tests {
         let data = deliver(&path, ok.as_ref(), &id, now()).await.unwrap();
         assert_eq!((data["status"].as_str(), data["external_message_id"].as_str()), (Some("SENT"), Some("100")));
         assert_eq!(ok.calls().len(), 1);
+    }
+
+    struct RejectingTelegram(u16, Option<u64>, &'static str);
+
+    #[async_trait::async_trait]
+    impl Telegram for RejectingTelegram {
+        async fn send(
+            &self,
+            _: i64,
+            _: &str,
+            _: Option<&Path>,
+            _: &crate::telegram::Keyboard,
+            _: Option<&str>,
+        ) -> Result<i64> {
+            Err(Error::telegram("sendMessage", self.0, self.2, self.1))
+        }
+        async fn edit(&self, _: i64, _: i64, _: &str, _: &crate::telegram::Keyboard, _: bool) -> Result<()> {
+            Ok(())
+        }
+        async fn edit_buttons(&self, _: i64, _: i64, _: &crate::telegram::Keyboard) -> Result<()> {
+            Ok(())
+        }
+        async fn remove(&self, _: i64, _: i64) -> Result<()> {
+            Ok(())
+        }
+        async fn pin(&self, _: i64, _: i64, _: bool) -> Result<()> {
+            Ok(())
+        }
+        async fn react(&self, _: i64, _: i64, _: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+        async fn typing(&self, _: i64) -> Result<()> {
+            Ok(())
+        }
+        async fn answer_callback(&self, _: &str, _: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+        async fn updates(&self, _: i64, _: u64) -> Result<Vec<crate::telegram::Update>> {
+            Ok(vec![])
+        }
+        async fn download(&self, _: &str) -> Result<Vec<u8>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_429_requeues_without_unknown_and_403_cancels() {
+        let (path, db) = crate::db::test::file();
+        let id_429 = briefing(&db, now());
+        drop(db);
+        let err =
+            deliver(&path, &RejectingTelegram(429, Some(30), "Too Many Requests"), &id_429, now()).await.unwrap_err();
+        assert_eq!(err.telegram_status(), Some(429));
+        assert_eq!(err.retry_after(), Some(30));
+        let db = crate::db::open(&path).unwrap();
+        let row = NotificationDelivery::get(&db, &id_429).unwrap().unwrap();
+        assert_eq!(row.status, DeliveryStatus::Pending);
+        assert!(row.handled_at.is_none());
+        assert!(AgentEvent::first(&db, "WHERE type = 'notifications.delivery_unknown'", []).unwrap().is_none());
+
+        // 403 Forbidden: definitively not sent, cancelled without opening an issue.
+        let id_403 = briefing(&db, now());
+        let ev_403 = NotificationDelivery::get(&db, &id_403).unwrap().unwrap().agent_event_id.unwrap();
+        drop(db);
+        let err = deliver(&path, &RejectingTelegram(403, None, "Forbidden: bot was blocked"), &id_403, now())
+            .await
+            .unwrap_err();
+        assert_eq!(err.telegram_status(), Some(403));
+        let db = crate::db::open(&path).unwrap();
+        assert_eq!(NotificationDelivery::get(&db, &id_403).unwrap().unwrap().status, DeliveryStatus::Cancelled);
+        assert!(AgentEvent::get(&db, &ev_403).unwrap().unwrap().handled_at.is_some());
+        assert!(AgentEvent::first(&db, "WHERE type = 'notifications.delivery_unknown'", []).unwrap().is_none());
+        assert!(crate::domain::events::open_issues(&db).unwrap().is_empty());
+
+        // 401 Unauthorized (revoked/rotated token): stays PENDING so fixing credentials delivers it.
+        let id_401 = briefing(&db, now());
+        drop(db);
+        let err = deliver(&path, &RejectingTelegram(401, None, "Unauthorized"), &id_401, now()).await.unwrap_err();
+        assert_eq!(err.telegram_status(), Some(401));
+        let db = crate::db::open(&path).unwrap();
+        assert_eq!(NotificationDelivery::get(&db, &id_401).unwrap().unwrap().status, DeliveryStatus::Pending);
+
+        // 400 Bad Request: cancelled without acknowledging source event, opens notifications.delivery_failed.
+        let id_400 = briefing(&db, now());
+        let ev_400 = NotificationDelivery::get(&db, &id_400).unwrap().unwrap().agent_event_id.unwrap();
+        drop(db);
+        let err = deliver(&path, &RejectingTelegram(400, None, "Bad Request: message is too long"), &id_400, now())
+            .await
+            .unwrap_err();
+        assert_eq!(err.telegram_status(), Some(400));
+        let db = crate::db::open(&path).unwrap();
+        assert_eq!(NotificationDelivery::get(&db, &id_400).unwrap().unwrap().status, DeliveryStatus::Cancelled);
+        assert!(AgentEvent::get(&db, &ev_400).unwrap().unwrap().handled_at.is_none());
+        assert!(
+            crate::domain::events::open_issues(&db)
+                .unwrap()
+                .iter()
+                .any(|e| e.r#type == "notifications.delivery_failed")
+        );
+
+        // 500 server error: ambiguous, still marked UNKNOWN.
+        let id_500 = briefing(&db, now());
+        drop(db);
+        let err =
+            deliver(&path, &RejectingTelegram(500, None, "Internal Server Error"), &id_500, now()).await.unwrap_err();
+        assert_eq!(err.code(), "TELEGRAM_DELIVERY_UNKNOWN");
+        let db = crate::db::open(&path).unwrap();
+        assert_eq!(NotificationDelivery::get(&db, &id_500).unwrap().unwrap().status, DeliveryStatus::Unknown);
+        assert!(AgentEvent::first(&db, "WHERE type = 'notifications.delivery_unknown'", []).unwrap().is_some());
     }
 
     #[tokio::test]

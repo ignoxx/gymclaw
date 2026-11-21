@@ -138,19 +138,26 @@ fn scrub(error: reqwest::Error) -> Error {
 }
 
 async fn parse<T: DeserializeOwned>(method: &str, response: reqwest::Response) -> Result<T> {
+    let http_status = response.status().as_u16();
     let body: Value = response.json().await.map_err(scrub)?;
+    parse_body(method, http_status, body)
+}
+
+fn parse_body<T: DeserializeOwned>(method: &str, http_status: u16, body: Value) -> Result<T> {
     if body["ok"] == json!(true) {
         return Ok(serde_json::from_value(body["result"].clone())?);
     }
+    let status = body["error_code"].as_u64().and_then(|c| u16::try_from(c).ok()).unwrap_or(http_status);
     let description = body["description"].as_str().unwrap_or("unknown error");
-    Err(Error::domain("TELEGRAM_ERROR", format!("{method}: {description}")))
+    let retry_after = body.pointer("/parameters/retry_after").and_then(Value::as_u64);
+    Err(Error::telegram(method, status, description, retry_after))
 }
 
 fn markup(buttons: &Keyboard) -> Value {
     json!({"inline_keyboard": buttons.iter().map(|row| row.iter().map(|b| json!({"text": b.text, "callback_data": b.data})).collect::<Vec<_>>()).collect::<Vec<_>>()})
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct Sent {
     message_id: i64,
 }
@@ -256,5 +263,45 @@ impl Telegram for Bot {
             .error_for_status()
             .map_err(scrub)?;
         Ok(response.bytes().await.map_err(scrub)?.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_body_reads_status_and_retry_after() {
+        let ok: Sent = parse_body("sendMessage", 200, json!({"ok": true, "result": {"message_id": 7}})).unwrap();
+        assert_eq!(ok.message_id, 7);
+
+        let limited = parse_body::<Sent>(
+            "sendMessage",
+            429,
+            json!({
+                "ok": false,
+                "error_code": 429,
+                "description": "Too Many Requests: retry after 35",
+                "parameters": {"retry_after": 35}
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(limited.code(), "TELEGRAM_ERROR");
+        assert_eq!(limited.telegram_status(), Some(429));
+        assert_eq!(limited.retry_after(), Some(35));
+        assert_eq!(limited.to_string(), "sendMessage: Too Many Requests: retry after 35");
+
+        let blocked = parse_body::<Sent>(
+            "sendMessage",
+            403,
+            json!({"ok": false, "error_code": 403, "description": "Forbidden: bot was blocked by the user"}),
+        )
+        .unwrap_err();
+        assert_eq!(blocked.telegram_status(), Some(403));
+        assert_eq!(blocked.retry_after(), None);
+
+        let fallback = parse_body::<Sent>("sendMessage", 502, json!({"ok": false})).unwrap_err();
+        assert_eq!(fallback.telegram_status(), Some(502));
+        assert_eq!(fallback.to_string(), "sendMessage: unknown error");
     }
 }
