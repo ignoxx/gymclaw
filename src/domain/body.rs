@@ -3,6 +3,7 @@
 //! Weigh-ins read from scale photos (or typed), a weekly trend and a quiet nudge. The agent reads the
 //! number with its own vision; for old photos it passes the file, and the capture date comes from the
 //! photo's EXIF data. Telegram strips EXIF from compressed photos, so backfills must be sent as files.
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -68,8 +69,8 @@ pub fn photo_taken_at(path: &Path, zone: &TimeZone) -> Result<Ts> {
             (get(exif::Tag::DateTimeOriginal).or_else(|| get(exif::Tag::DateTime)), get(exif::Tag::OffsetTimeOriginal))
         }
         None => {
-            let mut head = std::fs::read(path)?;
-            head.truncate(1 << 18);
+            let mut head = Vec::new();
+            std::fs::File::open(path)?.take(1 << 18).read_to_end(&mut head)?;
             (EXIF_STAMP.find(&head).map(|m| String::from_utf8_lossy(m.as_bytes()).into_owned()), None)
         }
     };

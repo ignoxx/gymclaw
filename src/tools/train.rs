@@ -595,7 +595,24 @@ impl Tool for BodyLog {
     const DESCRIPTION: &'static str = "Save weigh-ins (from a scale photo or typed). Old photos sent as files: pass the photo path and its capture date is used. \
         The same time twice is skipped as a duplicate. Echo the number back so a misread scale gets caught.";
 
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
+    fn run(mut self, cx: &mut Ctx) -> Result<Value> {
+        if self.entries.iter().any(|e| e.photo.is_some()) {
+            // Only photos the bot saved under data/media (mirrors history_import's data/imports check).
+            let dir = cx.data_dir.join("media").canonicalize().ok();
+            for entry in &mut self.entries {
+                if let Some(photo) = &entry.photo {
+                    let path = photo.canonicalize().ok();
+                    let Some(path) = path.filter(|p| dir.as_ref().is_some_and(|d| p.starts_with(d))) else {
+                        crate::bail!(
+                            "MEDIA_FILE",
+                            "Pass the path of a photo the owner sent ({}/media/…)",
+                            cx.data_dir.display()
+                        );
+                    };
+                    entry.photo = Some(path);
+                }
+            }
+        }
         body::log(cx.db, &self.entries, cx.now, &cx.request_id)
     }
 }
@@ -672,5 +689,33 @@ impl Tool for Body {
             Body::Log(t) => t.run(cx),
             Body::Delete(t) => t.run(cx),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_log_confines_photo_paths_to_data_media() {
+        let (db_path, db) = crate::db::test::file();
+        let data_dir = db_path.parent().unwrap();
+        let media_dir = data_dir.join("media");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/providers/testdata/photo/offset.jpg");
+        let inside = media_dir.join("scale.jpg");
+        let outside = data_dir.join("outside.jpg");
+        std::fs::copy(&fixture, &inside).unwrap();
+        std::fs::copy(&fixture, &outside).unwrap();
+
+        let now = crate::time::Ts::parse("2026-10-13T10:00:00Z", None).unwrap();
+        let mut cx = Ctx { db: &db, now, request_id: "r1".into(), data_dir, recipient: None, effects: vec![] };
+        let err =
+            BodyLog { entries: vec![WeighIn { kg: 80.0, at: None, photo: Some(outside) }] }.run(&mut cx).unwrap_err();
+        assert_eq!(err.code(), "MEDIA_FILE");
+
+        let mut cx = Ctx { db: &db, now, request_id: "r2".into(), data_dir, recipient: None, effects: vec![] };
+        let ok = BodyLog { entries: vec![WeighIn { kg: 80.0, at: None, photo: Some(inside) }] }.run(&mut cx).unwrap();
+        assert_eq!(ok["data"]["logged"].as_array().unwrap().len(), 1);
     }
 }
