@@ -49,11 +49,14 @@ pub const COMMIT: &str = match option_env!("GYMCLAW_COMMIT") {
 
 static SECRET_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)token|secret|password|passwd|api.?key|authorization|cookie|credential").unwrap());
-static SECRET_VALUE: LazyLock<[Regex; 3]> = LazyLock::new(|| {
+static SECRET_VALUE: LazyLock<[Regex; 4]> = LazyLock::new(|| {
     [
         Regex::new(r"(?i)\bBearer\s+[\w.~+/=-]+").unwrap(),
         Regex::new(r"\bsk-[\w-]{16,}").unwrap(),
-        Regex::new(r"\b\d{6,12}:[\w-]{30,}").unwrap(),
+        // Match both bare Telegram bot tokens and `api.telegram.org/bot<id>:<secret>/...` URLs.
+        Regex::new(r"(?:\bbot|\b)\d{6,12}:[\w-]{30,}").unwrap(),
+        // Private ICS calendar feed bearer URLs (`/calendar/<hex-token>.ics`).
+        Regex::new(r"/calendar/[0-9a-fA-F]{16,}\.ics").unwrap(),
     ]
 });
 // Inline media: data URLs and long unbroken base64 runs are stored as size + hash only.
@@ -288,6 +291,12 @@ mod tests {
         let deep = json!([{"tool_calls": [{"function": {"arguments": format!("{} sk-1234567890abcdefXYZ", "x".repeat(2000))}}]}]);
         let kept = redact(&deep)[0]["tool_calls"][0]["function"]["arguments"].as_str().unwrap().to_string();
         assert!(kept.starts_with(&"x".repeat(2000)) && kept.ends_with("[redacted]"), "{kept}");
+        let bot_url = "https://api.telegram.org/bot123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/sendMessage";
+        let scrubbed_bot = scrub(bot_url, 200);
+        assert!(!scrubbed_bot.contains("AAHxxx"), "bot token leaked: {scrubbed_bot}");
+        let ics_url = "https://gym.example/calendar/0123456789abcdef0123456789abcdef.ics";
+        let scrubbed_ics = scrub(ics_url, 200);
+        assert!(!scrubbed_ics.contains("0123456789abcdef"), "ics token leaked: {scrubbed_ics}");
     }
 
     /// A tool call's recorded inverse restores the DB exactly; OAuth tokens never enter the changeset.
