@@ -275,12 +275,10 @@ pub async fn handle_request(
     auth: Option<&WebAuth>,
     request: Request,
 ) -> Response {
-    let headers = request.headers();
-    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
-    let cross_site = headers.get("sec-fetch-site").is_some_and(|v| v == "cross-site");
-    if !hosts.iter().any(|h| h == host) || cross_site {
-        return error(StatusCode::FORBIDDEN);
+    if let Some(response) = serve_public(hosts, &request) {
+        return response;
     }
+    let headers = request.headers();
     if request.method() == Method::POST {
         if !authorized(auth, headers, request.uri().query(), false) {
             return error(StatusCode::UNAUTHORIZED);
@@ -469,8 +467,18 @@ pub async fn handle_request(
     if path == "/api/catalog" {
         return reply(StatusCode::OK, serde_json::to_vec(&state::catalog()).unwrap_or_default(), "application/json");
     }
+    error(StatusCode::NOT_FOUND)
+}
+
+fn host_allowed(hosts: &[String], headers: &HeaderMap) -> bool {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let cross_site = headers.get("sec-fetch-site").is_some_and(|v| v == "cross-site");
+    hosts.iter().any(|h| h == host) && !cross_site
+}
+
+fn public_response(path: &str) -> Option<Response> {
     if let Some(slug) = path.strip_prefix("/illustrations/").and_then(|p| p.strip_suffix(".svg")) {
-        return match crate::domain::illustrations::svg_path(slug).map(std::fs::read) {
+        return Some(match crate::domain::illustrations::svg_path(slug).map(std::fs::read) {
             Some(Ok(bytes)) => {
                 // Without a cache, every dashboard redraw (each 10 s poll that changed the state) downloaded
                 // every picture again. A redrawn picture shows within a day.
@@ -481,12 +489,25 @@ pub async fn handle_request(
                 response
             }
             _ => error(StatusCode::NOT_FOUND),
-        };
+        });
     }
-    match ASSETS.iter().find(|(route, _, _)| *route == path) {
-        Some((route, embedded, mime)) => reply(StatusCode::OK, asset(route, embedded), mime),
-        None => error(StatusCode::NOT_FOUND),
+    ASSETS
+        .iter()
+        .find(|(route, _, _)| *route == path)
+        .map(|(route, embedded, mime)| reply(StatusCode::OK, asset(route, embedded), mime))
+}
+
+/// Serve static dashboard assets (HTML/CSS/JS/fonts and `/illustrations/*.svg`) without requiring
+/// a database path, after enforcing the Host and `sec-fetch-site` checks. Returns `None` for
+/// non-static or non-GET routes so the caller can forward them to `handle_request`.
+pub fn serve_public(hosts: &[String], request: &Request) -> Option<Response> {
+    if !host_allowed(hosts, request.headers()) {
+        return Some(error(StatusCode::FORBIDDEN));
     }
+    if request.method() != Method::GET {
+        return None;
+    }
+    public_response(request.uri().path())
 }
 
 /// Release builds serve the copy embedded at compile time; debug builds read `web/` from disk, so an
@@ -793,5 +814,18 @@ mod tests {
             .unwrap();
         let response = handle_request(db_path, data_dir, &hosts, None, request).await;
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn serve_public_handles_assets_and_defers_db_routes() {
+        let hosts = vec!["gym.example".to_string()];
+        let req = |uri: &str, host: &str| {
+            Request::builder().method(Method::GET).uri(uri).header(header::HOST, host).body(Body::empty()).unwrap()
+        };
+        assert_eq!(serve_public(&hosts, &req("/", "gym.example")).unwrap().status(), StatusCode::OK);
+        assert_eq!(serve_public(&hosts, &req("/styles.css", "gym.example")).unwrap().status(), StatusCode::OK);
+        assert_eq!(serve_public(&hosts, &req("/", "evil.example")).unwrap().status(), StatusCode::FORBIDDEN);
+        assert!(serve_public(&hosts, &req("/api/catalog", "gym.example")).is_none());
+        assert!(serve_public(&hosts, &req("/api/state", "gym.example")).is_none());
     }
 }
