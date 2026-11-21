@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{
     AgentEvent, BodyWeight, CrowdFeedback, CrowdObservation, ExerciseProgression, NoteKind, PlannedSession,
-    RuntimeSettings, SetType, UserProfile, WeightUnit, WorkoutSession, WorkoutTemplate,
+    RuntimeSettings, SetLog, SetType, UserProfile, WeightUnit, WorkoutExercise, WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::profile::{Profile, get_profile};
 use crate::domain::templates::{ExerciseSpec, Load, Measure, get_template};
@@ -127,12 +127,14 @@ fn plans(db: &Connection, unit: WeightUnit) -> Result<Vec<Value>> {
     if templates.iter().any(|t| t.definition_json.get("source").and_then(Value::as_str) != Some("demo_fixture")) {
         templates.retain(|t| t.definition_json.get("source").and_then(Value::as_str) != Some("demo_fixture"));
     }
+    let progression: HashMap<String, f64> =
+        ExerciseProgression::select(db, "", [])?.into_iter().map(|p| (p.exercise_id, p.next_weight)).collect();
     let mut out = vec![];
     for row in templates {
         let template = get_template(db, &row.id)?;
         let mut exercises = vec![];
         for spec in &template.exercises {
-            let next = ExerciseProgression::get(db, &spec.id)?.map_or(spec.target_weight, |p| p.next_weight);
+            let next = progression.get(&spec.id).copied().unwrap_or(spec.target_weight);
             exercises.push(json!({"id": spec.id, "name": spec.name, "guide_id": spec.guide_id, "svg_url": svg(&spec.name, spec.guide_id.as_deref()),
                 "muscle": illustrations::primary_muscle(spec.guide_id.as_deref()).or(spec.muscle.clone()), "bodyweight": illustrations::bodyweight(spec.guide_id.as_deref()),
                 "sets": spec.working_sets, "rep_min": spec.rep_min, "rep_max": spec.rep_max, "weight": next, "rest_seconds": spec.rest_seconds,
@@ -260,14 +262,22 @@ fn history(db: &Connection, tz: &TimeZone, unit: WeightUnit) -> Result<Vec<Value
             }
         }
     }
+    let mut exercises_by_workout: HashMap<String, Vec<WorkoutExercise>> = HashMap::new();
+    for row in WorkoutExercise::select(db, "ORDER BY position, id", [])? {
+        exercises_by_workout.entry(row.workout_session_id.clone()).or_default().push(row);
+    }
+    let mut logs_by_exercise: HashMap<String, Vec<SetLog>> = HashMap::new();
+    for log in SetLog::select(db, "WHERE set_type = ?1 ORDER BY logged_at, set_number", [SetType::Working])? {
+        logs_by_exercise.entry(log.workout_exercise_id.clone()).or_default().push(log);
+    }
     let mut best: HashMap<String, f64> = HashMap::new();
     let mut result = vec![];
     for w in &workouts {
         let (mut exercises, mut volume, mut sets, mut prs, mut last_log, mut abandoned) =
             (vec![], 0.0, 0, vec![], None::<Ts>, false);
-        for row in workout::exercises(db, &w.id)? {
+        for row in exercises_by_workout.remove(&w.id).unwrap_or_default() {
             abandoned |= row.deferred_reason.as_deref() == Some("abandoned");
-            let done = workout::logs(db, &row.id, Some(SetType::Working))?;
+            let done = logs_by_exercise.remove(&row.id).unwrap_or_default();
             let Some(last) = done.last() else { continue };
             last_log = Some(last_log.map_or(last.logged_at, |l| l.max(last.logged_at)));
             let kind = workout::kind(&row).in_unit(unit);
@@ -560,5 +570,47 @@ mod tests {
         let begin = |now| next_session(&db, &TimeZone::UTC, now, WeightUnit::Kg).unwrap()["begin"].clone();
         assert_eq!(begin(start.mins(-46)), Value::Null);
         assert_eq!(begin(start.mins(-45)), json!(coach::begin_data(&plan.id)));
+    }
+
+    #[test]
+    fn history_bulk_loads_exercises_working_sets_and_prs() {
+        let db = crate::db::test::with_short_template();
+        let t1 = Ts::parse("2026-10-12T10:00:00Z", None).unwrap();
+        let t2 = Ts::parse("2026-10-15T10:00:00Z", None).unwrap();
+        let log_one = |at: Ts, weight: f64, key: &str| {
+            let started = workout::start(&db, Some("short"), None, true, at, &format!("{key}-start")).unwrap();
+            let wid = started["data"]["workout_id"].as_str().unwrap().to_string();
+            workout::log_set(
+                &db,
+                &wid,
+                &crate::domain::set_parser::SetInput::reps(50.0, 5, SetType::Warmup),
+                at.mins(1),
+                &format!("{key}-w"),
+            )
+            .unwrap();
+            for n in 1..=2 {
+                workout::log_set(
+                    &db,
+                    &wid,
+                    &crate::domain::set_parser::SetInput::reps(weight, 8, SetType::Working),
+                    at.mins(2 + n * 2),
+                    &format!("{key}-{n}"),
+                )
+                .unwrap();
+            }
+            crate::domain::audit::finish(&db, &wid, at.mins(20), &format!("{key}-fin")).unwrap();
+        };
+        log_one(t1, 80.0, "w1");
+        log_one(t2, 85.0, "w2");
+
+        let tz = TimeZone::get("Europe/Berlin").unwrap();
+        let hist = history(&db, &tz, WeightUnit::Kg).unwrap();
+        assert_eq!(hist.len(), 2);
+        // Newest first: 85 kg beats earlier 80 kg -> Bench PR; warmup excluded from working sets/volume.
+        assert_eq!(hist[0]["volume"], 1360);
+        assert_eq!(hist[0]["sets"], 2);
+        assert_eq!(hist[0]["prs"], json!(["Bench"]));
+        assert_eq!(hist[1]["volume"], 1280);
+        assert_eq!(hist[1]["prs"], json!([]));
     }
 }
