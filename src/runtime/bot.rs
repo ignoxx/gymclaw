@@ -12,7 +12,8 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use super::{blocking, in_tx};
 use crate::agent::turnlog::{TurnLog, scrub};
@@ -101,11 +102,15 @@ pub struct Bot {
     last_ignored: std::sync::Mutex<Option<Instant>>,
     inbox: Mutex<Vec<Inbound>>,
     inbox_ready: Notify,
+    app_wake: Notify,
     fast: mpsc::UnboundedSender<Fast>,
+    stop: watch::Sender<bool>,
+    workers: std::sync::Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl Bot {
-    /// Start the fast lane and the agent worker.
+    /// Start the fast lane, agent worker, and Mini App view relay. Call `shutdown` before dropping
+    /// the last `Arc<Bot>` so the workers exit cleanly instead of holding strong references forever.
     pub fn start(
         owner: i64,
         tg: Arc<dyn Telegram>,
@@ -116,6 +121,9 @@ impl Bot {
         status: Arc<std::sync::Mutex<super::Health>>,
     ) -> Arc<Bot> {
         let (fast, mut lane) = mpsc::unbounded_channel();
+        let (stop, mut stop_lane) = watch::channel(false);
+        let stop_agent = stop.subscribe();
+        let stop_views = stop.subscribe();
         let bot = Arc::new(Bot {
             owner,
             tg,
@@ -127,22 +135,51 @@ impl Bot {
             last_ignored: std::sync::Mutex::new(None),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
+            app_wake: Notify::new(),
             fast,
+            stop,
+            workers: std::sync::Mutex::new(Vec::new()),
         });
         let worker = bot.clone();
-        tokio::spawn(async move {
-            while let Some(job) = lane.recv().await {
-                match job {
-                    Fast::Tap(q) => worker.tap(*q).await,
-                    Fast::Text { message_id, text, reply } => worker.set_text(message_id, text, reply).await,
+        let h_lane = tokio::spawn(async move {
+            loop {
+                if *stop_lane.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    biased;
+                    _ = stop_lane.changed() => break,
+                    job = lane.recv() => {
+                        let Some(job) = job else { break };
+                        match job {
+                            Fast::Tap(q) => worker.tap(*q).await,
+                            Fast::Text { message_id, text, reply } => worker.set_text(message_id, text, reply).await,
+                        }
+                    }
                 }
             }
         });
         let worker = bot.clone();
-        tokio::spawn(async move { worker.agent_loop().await });
+        let h_agent = tokio::spawn(async move { worker.agent_loop(stop_agent).await });
         let worker = bot.clone();
-        tokio::spawn(async move { worker.app_views().await });
+        let h_views = tokio::spawn(async move { worker.app_views(stop_views).await });
+        *bot.workers.lock().unwrap_or_else(PoisonError::into_inner) = vec![h_lane, h_agent, h_views];
         bot
+    }
+
+    /// Wake the Mini App view relay immediately instead of waiting for the next `APP_POLL` tick.
+    pub fn notify_app_views(&self) {
+        self.app_wake.notify_one();
+    }
+
+    /// Signal all background workers to stop and await their exit, releasing their `Arc<Bot>` refs.
+    /// Idempotent: calling again after shutdown returns immediately.
+    pub async fn shutdown(&self) {
+        let _ = self.stop.send(true);
+        let handles = std::mem::take(&mut *self.workers.lock().unwrap_or_else(PoisonError::into_inner));
+        for handle in handles {
+            let _ = handle.await;
+        }
     }
 
     fn db(&self) -> &std::path::Path {
@@ -630,11 +667,22 @@ impl Bot {
     /// Coach steps taken in the Mini App, shown in the chat as if tapped there: the old card is retired
     /// with the ack, the next card (or rest countdown) is sent. The Mini App runs in its own process
     /// without Telegram access, so it leaves each step as an `APP_VIEW` event; this claims and renders them.
-    async fn app_views(&self) {
+    async fn app_views(&self, mut stop: watch::Receiver<bool>) {
         let mut timer = tokio::time::interval(APP_POLL);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            timer.tick().await;
+            if *stop.borrow() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = stop.changed() => break,
+                _ = self.app_wake.notified() => {}
+                _ = timer.tick() => {}
+            }
+            if *stop.borrow() {
+                break;
+            }
             // A plain read first: the write lock is taken only when there is a step to claim.
             // In the order they were written: a fix note, then the card redrawn from it.
             const PENDING: &str = "WHERE type = ?1 AND handled_at IS NULL ORDER BY rowid";
@@ -686,13 +734,21 @@ impl Bot {
         }
     }
 
-    async fn agent_loop(&self) {
+    async fn agent_loop(&self, mut stop: watch::Receiver<bool>) {
         let mut timer = tokio::time::interval(Duration::from_secs(60));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            if *stop.borrow() {
+                break;
+            }
             tokio::select! {
+                biased;
+                _ = stop.changed() => break,
                 _ = self.inbox_ready.notified() => {}
                 _ = timer.tick() => {}
+            }
+            if *stop.borrow() {
+                break;
             }
             loop {
                 let batch = std::mem::take(&mut *self.inbox.lock().await);
@@ -700,6 +756,9 @@ impl Bot {
                     break;
                 }
                 self.turn(batch, false).await;
+            }
+            if *stop.borrow() {
+                break;
             }
             if let Err(e) = self.event_turn().await {
                 tracing::warn!("agent event wake: {} {e}", e.code());
@@ -1001,7 +1060,10 @@ mod tests {
             last_ignored: std::sync::Mutex::new(None),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
+            app_wake: Notify::new(),
             fast,
+            stop: watch::channel(false).0,
+            workers: std::sync::Mutex::new(Vec::new()),
             agent: Agent {
                 db_path,
                 data_dir: dir.clone(),
