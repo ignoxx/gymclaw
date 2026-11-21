@@ -1,3 +1,4 @@
+//! CLI entry point for gymclaw (see `Command` for subcommands).
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;

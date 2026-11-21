@@ -1,3 +1,4 @@
+//! Row-mapping `table!` macro for SQLite tables.
 /// Declares a row struct for an existing table plus get/select/insert/update/delete.
 /// Field names are the column names; the first field is the primary key.
 ///
