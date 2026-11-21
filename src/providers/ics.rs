@@ -81,23 +81,49 @@ fn is_private_host(host: &str) -> bool {
     false
 }
 
-/// GET the feed body. The URL is a capability secret and never appears in errors.
+const MAX_REDIRECTS: usize = 5;
+
+/// GET the feed body, validating every redirect target through `normalize_url` so a public feed
+/// cannot redirect to `http://` or a private/loopback/CGNAT host. The URL is a capability secret
+/// and never appears in errors.
 pub fn fetch(url: &str, transport: &dyn Transport) -> Result<Vec<u8>> {
-    let request = Request::new(Method::Get, url, 30).header("Accept", "text/calendar").max_bytes(MAX_BYTES);
-    let response = transport.send(&request).map_err(|e| {
-        if e.code() == "RESPONSE_TOO_LARGE" {
-            Error::domain("PERSONAL_CALENDAR_TOO_LARGE", "Personal calendar feed exceeds size limit")
-        } else {
-            Error::domain("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed request failed")
+    let mut current = normalize_url(url)?;
+    for _ in 0..=MAX_REDIRECTS {
+        let mut request =
+            Request::new(Method::Get, &current, 30).header("Accept", "text/calendar").max_bytes(MAX_BYTES);
+        request.follow_redirects = false;
+        let response = transport.send(&request).map_err(|e| {
+            if e.code() == "RESPONSE_TOO_LARGE" {
+                Error::domain("PERSONAL_CALENDAR_TOO_LARGE", "Personal calendar feed exceeds size limit")
+            } else {
+                Error::domain("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed request failed")
+            }
+        })?;
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            let Some(loc) = response.location.as_deref() else {
+                bail!("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed redirect missing Location");
+            };
+            let base = reqwest::Url::parse(&current).map_err(|_| {
+                Error::domain(
+                    "PERSONAL_CALENDAR_URL_INVALID",
+                    "Personal calendar feed must be an https:// or webcal:// ICS link",
+                )
+            })?;
+            let resolved = base.join(loc).map_err(|_| {
+                Error::domain("PERSONAL_CALENDAR_URL_INVALID", "Personal calendar feed redirect target is invalid")
+            })?;
+            current = normalize_url(resolved.as_str())?;
+            continue;
         }
-    })?;
-    if response.status >= 400 {
-        bail!("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed failed (HTTP {})", response.status);
+        if response.status >= 400 {
+            bail!("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed failed (HTTP {})", response.status);
+        }
+        if response.body.len() > MAX_BYTES {
+            bail!("PERSONAL_CALENDAR_TOO_LARGE", "Personal calendar feed exceeds size limit");
+        }
+        return Ok(response.body);
     }
-    if response.body.len() > MAX_BYTES {
-        bail!("PERSONAL_CALENDAR_TOO_LARGE", "Personal calendar feed exceeds size limit");
-    }
-    Ok(response.body)
+    bail!("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed exceeded redirect limit")
 }
 
 /// Busy intervals overlapping [start, end), sorted and deduplicated. Recurrences, EXDATE and
@@ -458,5 +484,50 @@ mod tests {
         ] {
             assert_eq!(normalize_url(bad).unwrap_err().code(), "PERSONAL_CALENDAR_URL_INVALID", "{bad}");
         }
+    }
+
+    #[test]
+    fn fetch_follows_public_https_redirects_and_blocks_private_or_downgrade_redirects() {
+        let ok_transport = |req: &Request| {
+            assert!(!req.follow_redirects);
+            if req.url.contains("p42-caldav") {
+                Ok(crate::providers::http::Response {
+                    status: 302,
+                    body: vec![],
+                    location: Some("https://p123-caldav.icloud.com/published/2/ok".into()),
+                })
+            } else {
+                Ok(crate::providers::http::Response {
+                    status: 200,
+                    body: b"BEGIN:VCALENDAR\r\nEND:VCALENDAR".to_vec(),
+                    location: None,
+                })
+            }
+        };
+        let body = fetch("https://p42-caldav.icloud.com/published/2/start", &ok_transport).unwrap();
+        assert!(body.starts_with(b"BEGIN:VCALENDAR"));
+
+        for target in ["http://example.com/downgrade.ics", "https://127.0.0.1/secret", "https://169.254.169.254/"] {
+            let bad = |_: &Request| {
+                Ok(crate::providers::http::Response { status: 302, body: vec![], location: Some(target.into()) })
+            };
+            assert_eq!(
+                fetch("https://example.com/start.ics", &bad).unwrap_err().code(),
+                "PERSONAL_CALENDAR_URL_INVALID",
+                "{target}"
+            );
+        }
+
+        let looping = |_: &Request| {
+            Ok(crate::providers::http::Response {
+                status: 302,
+                body: vec![],
+                location: Some("https://example.com/loop.ics".into()),
+            })
+        };
+        assert_eq!(
+            fetch("https://example.com/loop.ics", &looping).unwrap_err().code(),
+            "PERSONAL_CALENDAR_UNAVAILABLE"
+        );
     }
 }

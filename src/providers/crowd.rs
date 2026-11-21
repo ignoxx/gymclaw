@@ -414,7 +414,7 @@ mod tests {
     use crate::providers::http::Response;
 
     fn body(value: Value) -> impl Fn(&Request) -> Result<Response> {
-        move |_: &Request| Ok(Response { status: 200, body: value.to_string().into_bytes() })
+        move |_: &Request| Ok(Response { status: 200, body: value.to_string().into_bytes(), location: None })
     }
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
         let seen = RefCell::new(None);
         let transport = |r: &Request| {
             *seen.borrow_mut() = Some(r.clone());
-            Ok(Response { status: 200, body: br#"{"value": 7}"#.to_vec() })
+            Ok(Response { status: 200, body: br#"{"value": 7}"#.to_vec(), location: None })
         };
         let reading = MySportsProvider::new("1234567890", "fixture-tenant", &transport).unwrap().get_reading().unwrap();
         assert_eq!(reading, CrowdReading::count(7));
@@ -464,7 +464,8 @@ mod tests {
         // Pinned: the DB stores this identity, so the same config must keep producing it.
         assert_eq!(source.provider_id(), "http:https://gym.example/live#dcdf56b39c45");
 
-        let transport = |_: &Request| Ok(Response { status: 200, body: b"<b>12 people</b> training now".to_vec() });
+        let transport =
+            |_: &Request| Ok(Response { status: 200, body: b"<b>12 people</b> training now".to_vec(), location: None });
         assert_eq!(
             HttpCountProvider::new(config(json!({"regex": r"(\d+) people"})), &transport)
                 .unwrap()

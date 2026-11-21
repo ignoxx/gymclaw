@@ -10,9 +10,10 @@ set -euo pipefail
 
 read -rsp "Paste your personal calendar link (webcal://…): " LINK; echo
 LINK="${LINK//[[:space:]]/}"
-case "$LINK" in
-  webcal://*) URL="https://${LINK#webcal://}" ;;
-  https://*) URL="$LINK" ;;
+LOWER="$(printf '%s' "$LINK" | tr '[:upper:]' '[:lower:]')"
+case "$LOWER" in
+  webcal://*) URL="https://${LINK:9}" ;;
+  https://*) URL="https://${LINK:8}" ;;
   *) echo "Expected a webcal:// or https:// link" >&2; exit 1 ;;
 esac
 
