@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::db::models::{ExerciseProgression, WeightUnit, WorkoutExercise, WorkoutTemplate};
 use crate::db::{Connection, Json};
-use crate::domain::illustrations::{Item, catalog, lookup, muscles, suggestions, timed, unknown};
+use crate::domain::illustrations::{Item, catalog, lookup, matching, muscles, suggestions, timed, unknown};
 use crate::domain::workout::{format_distance, format_time, g, in_seconds};
 use crate::error::{Error, Result};
 use crate::time::Ts;
@@ -404,7 +404,7 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
         .exercises
         .iter()
         .chain(&template.alternatives)
-        .filter(|s| s.guide_id.is_none())
+        .filter(|s| s.guide_id.is_none() && s.muscle.is_none())
         .map(|s| {
             let options = suggestions(&s.name);
             format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
@@ -412,15 +412,56 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
         .collect();
     (!missing.is_empty()).then(|| {
         format!(
-            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template_edit_exercise (keep id and name); otherwise set its muscle.",
+            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template (action edit_exercise) (keep id and name); otherwise set its muscle.",
             missing.join("; ")
         )
     })
 }
 
+/// The catalog picture an exercise's name means, so a plan read off another app's screenshots saves
+/// with pictures without a catalog search per exercise: its exact catalog name or the way other apps
+/// write it ("Bench Press (Barbell)", `matching`). A guide_id the catalog doesn't know is read as a
+/// name too, else dropped, so the exercise saves as the owner's own instead of failing the import
+/// (`missing_pictures` then asks). A muscle without a guide_id is an owner's own exercise: left alone.
+/// Normalize common informal muscle names (e.g. "Abs" -> "Core", "Pecs" -> "Chest") to catalog
+/// muscles; drop unknown ones so an import never fails over a synonym.
+fn normalize_muscle(spec: &mut ExerciseSpec) {
+    let Some(raw) = spec.muscle.as_deref() else { return };
+    let valid = muscles();
+    if let Some(exact) = valid.iter().find(|m| m.eq_ignore_ascii_case(raw.trim())) {
+        spec.muscle = Some((*exact).to_string());
+        return;
+    }
+    let mapped = match raw.trim().to_ascii_lowercase().as_str() {
+        "abs" | "abdominals" | "obliques" | "midsection" => Some("Core"),
+        "pecs" | "pectorals" => Some("Chest"),
+        "lats" | "upper back" | "lower back" | "traps" | "rhomboids" => Some("Back"),
+        "delts" | "deltoids" => Some("Shoulders"),
+        "quads" | "quadriceps" | "hamstrings" | "glutes" | "calves" | "adductors" | "abductors" => Some("Legs"),
+        "arms" | "bicep" | "tricep" | "forearms" => Some("Arms"),
+        _ => None,
+    };
+    if let Some(m) = mapped.filter(|m| valid.iter().any(|v| v == m)) {
+        spec.muscle = Some(m.to_string());
+    }
+}
+
+fn picture(spec: &mut ExerciseSpec) {
+    normalize_muscle(spec);
+    let known = spec.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g));
+    if known || (spec.guide_id.is_none() && spec.muscle.is_some()) {
+        return;
+    }
+    let named = |key: &str| lookup(key).map(|i| i.slug.clone()).or_else(|| matching(key).map(|e| e.guide_id));
+    spec.guide_id = spec.guide_id.as_deref().and_then(named).or_else(|| named(&spec.name));
+}
+
+/// Save a whole template (new or replacing its id), pictures matched (`picture`). Returns what was saved.
 pub fn import_template(db: &Connection, template: &Template) -> Result<Value> {
+    let mut template = template.clone();
+    template.exercises.iter_mut().chain(template.alternatives.iter_mut()).for_each(picture);
     template.validate()?;
-    let definition = serde_json::to_value(template)?;
+    let definition = serde_json::to_value(&template)?;
     let row =
         WorkoutTemplate { id: template.id.clone(), definition_json: Json(definition.clone()), updated_at: Ts::now() };
     if WorkoutTemplate::get(db, &template.id)?.is_some() {
@@ -708,6 +749,40 @@ mod tests {
             let modified: Template = serde_json::from_value(modified).unwrap();
             assert_eq!(modified.validate().unwrap_err().code(), "INVALID_TEMPLATE", "{change}");
         }
+    }
+
+    /// 2026-11-21: a plan read off screenshots took a catalog search per exercise before it could be saved.
+    #[test]
+    fn import_matches_catalog_pictures_by_name_and_keeps_unknown_exercises() {
+        let db = db();
+        let exercise = |name: &str, extra: Value| {
+            let mut spec =
+                json!({"id": name.to_lowercase().replace(' ', "-"), "name": name, "role": name, "target_weight": 20});
+            spec.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            spec
+        };
+        let template: Template = serde_json::from_value(json!({"id": "legs", "name": "Legs", "exercises": [
+            exercise("Leg Press", json!({})),
+            exercise("Lat Pulldown (Cable)", json!({})),
+            exercise("Hack Squat", json!({"guide_id": "leg-press-ish"})),
+            exercise("Grandma's Glute Thing", json!({})),
+            exercise("Leg Extension", json!({"muscle": "Quads"})),
+        ]}))
+        .unwrap();
+        let saved: Template = serde_json::from_value(import_template(&db, &template).unwrap()).unwrap();
+        let pictures: Vec<Option<&str>> = saved.exercises.iter().map(|e| e.guide_id.as_deref()).collect();
+        assert_eq!(pictures, [Some("leg-press"), Some("lat-pulldown"), Some("hack-squat"), None, None]);
+        assert_eq!(get_template(&db, "legs").unwrap(), saved);
+        let mp = missing_pictures(&saved).unwrap();
+        assert!(mp.contains("Grandma's Glute Thing") && !mp.contains("Leg Extension"));
+        // Informal muscle aliases ("Abs") normalize to catalog muscles instead of failing import.
+        let abs_tpl: Template = serde_json::from_value(json!({"id": "core", "name": "Core", "exercises": [
+            exercise("Ab Machine", json!({"muscle": "Abs"})),
+        ]}))
+        .unwrap();
+        let saved_abs: Template = serde_json::from_value(import_template(&db, &abs_tpl).unwrap()).unwrap();
+        assert_eq!(saved_abs.exercises[0].muscle.as_deref(), Some("Core"));
+        assert!(missing_pictures(&saved_abs).is_none());
     }
 
     #[test]

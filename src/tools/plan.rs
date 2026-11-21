@@ -199,7 +199,7 @@ impl Tool for PlanWeek {
                     Some(id) => Some(id),
                     None => crate::runtime::outbox::runtime_authority(cx.db)?.template_id,
                 };
-                let draft = scheduling::draft_week(cx.db, week, cx.now, None, template.as_deref(), rotate, &[])?;
+                let draft = scheduling::draft_week(cx.db, week, cx.now, None, None, template.as_deref(), rotate, &[])?;
                 // The agent placed these, like a session it creates: lock them.
                 for id in &draft.created {
                     if let Some(mut session) = PlannedSession::get(cx.db, id)? {

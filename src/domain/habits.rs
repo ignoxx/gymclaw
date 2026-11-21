@@ -94,7 +94,7 @@ mod tests {
     fn a_chain_of_moves_counts_its_ends() {
         let db = db();
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
-        let planned = draft_week(&db, jiff::civil::date(2026, 10, 12), now, None, None, false, &[]).unwrap();
+        let planned = draft_week(&db, jiff::civil::date(2026, 10, 12), now, None, None, None, false, &[]).unwrap();
         let id = planned.created[0].as_str();
         let first = crate::db::models::PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at;
         for (hours, request) in [(2, "move-1"), (5, "move-2")] {

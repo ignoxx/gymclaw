@@ -801,7 +801,8 @@ mod tests {
         }
         let week = Date::constant(2026, 10, 19);
         let draft =
-            crate::domain::scheduling::draft_week(&db, week, now(0), Some("future-week"), None, false, &[]).unwrap();
+            crate::domain::scheduling::draft_week(&db, week, now(0), None, Some("future-week"), None, false, &[])
+                .unwrap();
         let [id] = draft.created.as_slice() else { panic!("{draft:?}") };
         let session = crate::db::models::PlannedSession::get(&db, id).unwrap().unwrap();
         assert_eq!(session.planned_start_at.0.strftime("%H").to_string(), "18");

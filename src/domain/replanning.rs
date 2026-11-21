@@ -352,7 +352,7 @@ mod tests {
         let tz = get_profile(&db).unwrap().tz();
         let week = jiff::civil::date(2026, 10, 12);
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
-        let ids = draft_week(&db, week, now, None, None, false, &[]).unwrap().created;
+        let ids = draft_week(&db, week, now, None, None, None, false, &[]).unwrap().created;
         let before: Vec<PlannedSession> = ids.iter().map(|id| PlannedSession::get(&db, id).unwrap().unwrap()).collect();
         assert_eq!(before.iter().map(|s| weekday(s.planned_start_at.local(&tz).date())).collect::<Vec<_>>(), [0, 2, 4]);
 
@@ -430,7 +430,7 @@ mod tests {
         let db = db();
         let week = jiff::civil::date(2026, 10, 12);
         let now = Ts::parse("2026-10-11T12:00:00+00:00", None).unwrap();
-        let id = draft_week(&db, week, now, None, None, false, &[]).unwrap().created.remove(0);
+        let id = draft_week(&db, week, now, None, None, None, false, &[]).unwrap().created.remove(0);
         let first = PlannedSession::get(&db, &id).unwrap().unwrap();
         let later = first.planned_end_at.mins(1);
         crate::domain::weekly::mark_missed(&db, later).unwrap();

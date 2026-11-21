@@ -8,6 +8,7 @@
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
 //! - Coach steps taken in the Mini App (`coach::APP_VIEW` events) are shown in the chat like taps.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,9 @@ const APP_POLL: Duration = Duration::from_millis(700);
 /// A Mini App step older than this when the bot gets to it (it was down) only updates the DB: its cards
 /// would be out of date by now.
 const APP_STALE: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
+/// Quiet time after an album photo before the agent takes its turn: Telegram sends an album's photos as
+/// separate messages about a second apart, and answering the first got two contradicting replies.
+const ALBUM_WAIT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, PartialEq)]
 pub enum Route {
@@ -90,6 +94,23 @@ enum Fast {
     },
 }
 
+struct AlbumGuard<'a>(&'a Bot);
+
+impl<'a> AlbumGuard<'a> {
+    fn new(bot: &'a Bot) -> Self {
+        bot.album_inflight.fetch_add(1, Ordering::AcqRel);
+        bot.hold_for_album();
+        Self(bot)
+    }
+}
+
+impl Drop for AlbumGuard<'_> {
+    fn drop(&mut self) {
+        self.0.album_inflight.fetch_sub(1, Ordering::AcqRel);
+        self.0.hold_for_album();
+    }
+}
+
 pub struct Bot {
     owner: i64,
     tg: Arc<dyn Telegram>,
@@ -102,6 +123,10 @@ pub struct Bot {
     last_ignored: std::sync::Mutex<Option<Instant>>,
     inbox: Mutex<Vec<Inbound>>,
     inbox_ready: Notify,
+    /// While an album is still arriving, the agent waits until then (`ALBUM_WAIT` after its latest photo).
+    album_until: std::sync::Mutex<Option<tokio::time::Instant>>,
+    album_inflight: AtomicUsize,
+    album_change: Notify,
     app_wake: Notify,
     fast: mpsc::UnboundedSender<Fast>,
     stop: watch::Sender<bool>,
@@ -135,6 +160,9 @@ impl Bot {
             last_ignored: std::sync::Mutex::new(None),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
+            album_until: std::sync::Mutex::new(None),
+            album_inflight: AtomicUsize::new(0),
+            album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
             stop,
@@ -261,6 +289,9 @@ impl Bot {
     }
 
     async fn message(&self, message: Message) {
+        // Hold the agent loop while any album photo is in flight (downloading/saving), then for
+        // ALBUM_WAIT after it lands, so slow downloads never split an album across turns.
+        let _album_guard = message.media_group_id.is_some().then(|| AlbumGuard::new(self));
         let voice = message.voice.as_ref().or(message.audio.as_ref());
         let text = match voice {
             Some(audio) => match self.transcribe(message.message_id, audio).await {
@@ -300,6 +331,39 @@ impl Bot {
         let text = self.with_reply(text, message.reply_to_message.as_deref()).await;
         let key = format!("tg-{}", message.message_id);
         self.to_agent(Some(message.message_id), key, text.trim().to_string(), images, meta).await;
+    }
+
+    fn hold_for_album(&self) {
+        *self.album_until.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(tokio::time::Instant::now() + ALBUM_WAIT);
+        self.album_change.notify_one();
+    }
+
+    /// Wait until no album photo is downloading and `ALBUM_WAIT` has passed since the last one, so
+    /// the whole album lands in one turn. Returns `false` if shutdown was signalled.
+    async fn album_settled(&self, stop: &mut watch::Receiver<bool>) -> bool {
+        loop {
+            if *stop.borrow() {
+                return false;
+            }
+            if self.album_inflight.load(Ordering::Acquire) > 0 {
+                tokio::select! {
+                    biased;
+                    _ = stop.changed() => return false,
+                    _ = self.album_change.notified() => continue,
+                }
+            }
+            let until = *self.album_until.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(until) = until.filter(|u| *u > tokio::time::Instant::now()) else {
+                return true;
+            };
+            tokio::select! {
+                biased;
+                _ = stop.changed() => return false,
+                _ = self.album_change.notified() => continue,
+                _ = tokio::time::sleep_until(until) => {}
+            }
+        }
     }
 
     /// Transcribe a voice note. Not echoed to the chat: the owner's message row holds the transcript for
@@ -469,7 +533,7 @@ impl Bot {
     async fn send_start(&self) {
         let Ok(st) = blocking(self.db(), |db| crate::domain::onboarding::status(db)).await else { return };
         if st["ready"] == true {
-            self.send_bot("You're already set up. Message me anytime, or send `/help` for tips.", "start").await;
+            self.send_bot("You're already set up 💪 Message me anytime, or send `/help` for tips.", "start").await;
             return;
         }
         let total = crate::domain::onboarding::QUESTIONS.len();
@@ -478,33 +542,35 @@ impl Bot {
         let instruction = st["instruction"].as_str().unwrap_or("");
         let fresh = st["answers"].as_object().is_none_or(|m| m.is_empty());
         let text = match st["step"].as_str() {
-            Some("INTERVIEW") => {
-                let n = total.saturating_sub(missing) + 1;
-                if fresh {
-                    format!(
-                        "**Welcome to gymclaw.** Quick {total}-question setup so I can plan your week and coach your workouts.\n\n**{n}/{total}** {instruction}"
-                    )
-                } else {
-                    format!("**{n}/{total}** {instruction}")
-                }
+            Some("INTERVIEW") if fresh => format!(
+                "👋 **Hey, I'm gymclaw**, your gym buddy in Telegram. I plan your week around your life and coach you through every set.\n\n\
+                 {total} quick questions and we're rolling. First: **what are you training for?**\n\
+                 Tap one, or just type it in your own words; mixing is fine (\"lose fat, build muscle, better endurance\")."
+            ),
+            Some("INTERVIEW") => format!("**{}/{total}** {instruction}", total.saturating_sub(missing) + 1),
+            Some("PLAN") => {
+                "Almost done! Do you already follow a workout plan (send screenshots, a Strong/Hevy CSV, or type it out), or want me to build one for you?".into()
+            }
+            Some("REVIEW") => {
+                "Your plan is ready to review — reply **yes** to finish setup, or tell me what you'd like to change.".into()
             }
             _ => instruction.to_string(),
         };
         let rows: Vec<(String, String, String)> = if next == Some("goal") {
-            [
-                ("Build muscle", "Build muscle"),
-                ("Get stronger", "Get stronger"),
-                ("Lose fat", "Lose fat"),
-                ("General fitness", "General fitness"),
-            ]
-            .iter()
-            .map(|(label, value)| (crate::db::new_id()[..8].to_string(), (*label).into(), (*value).into()))
-            .collect()
+            ["Build muscle", "Get stronger", "Lose fat", "General fitness"]
+                .iter()
+                .map(|label| (crate::db::new_id()[..8].to_string(), (*label).into(), (*label).into()))
+                .collect()
         } else {
             vec![]
         };
-        let keyboard: Vec<Vec<Button>> =
-            rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
+        // Two per row: four stacked full-width goals filled the screen.
+        let keyboard: Vec<Vec<Button>> = rows
+            .chunks(2)
+            .map(|pair| {
+                pair.iter().map(|(id, label, _)| Button { text: label.clone(), data: format!("btn:{id}") }).collect()
+            })
+            .collect();
         if let Ok(id) = self.tg.send(self.owner, &text, None, &keyboard, None).await {
             if !rows.is_empty() {
                 let _ = blocking(self.db(), move |db| {
@@ -744,6 +810,9 @@ impl Bot {
                 break;
             }
             loop {
+                if !self.album_settled(&mut stop).await {
+                    break;
+                }
                 let batch = std::mem::take(&mut *self.inbox.lock().await);
                 if batch.is_empty() {
                     break;
@@ -1112,6 +1181,9 @@ mod tests {
             last_ignored: std::sync::Mutex::new(None),
             inbox: Mutex::new(vec![]),
             inbox_ready: Notify::new(),
+            album_until: std::sync::Mutex::new(None),
+            album_inflight: AtomicUsize::new(0),
+            album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
             stop: watch::channel(false).0,
@@ -1499,16 +1571,74 @@ mod tests {
         assert_eq!(stored.len(), 2);
     }
 
+    /// 2026-11-21: four screenshots of a plan, sent as one album, got two contradicting replies: the
+    /// agent answered photo one before the rest arrived. The album is one turn, each picture once.
+    #[tokio::test]
+    async fn album_photos_reach_the_agent_in_one_turn() {
+        struct Pictures(std::sync::Mutex<Vec<usize>>);
+        #[async_trait::async_trait]
+        impl crate::agent::ChatModel for Pictures {
+            async fn complete(
+                &self,
+                _: &str,
+                messages: &[Value],
+                _: &[Value],
+                _: bool,
+            ) -> Result<crate::agent::ModelReply> {
+                let parts = messages.iter().filter_map(|m| m["content"].as_array()).flatten();
+                self.0.lock().unwrap().push(parts.filter(|p| p["type"] == "image_url").count());
+                Ok(crate::agent::ModelReply {
+                    message: json!({"role": "assistant", "content": "Got the plan."}),
+                    finish_reason: Some("stop".into()),
+                    ..Default::default()
+                })
+            }
+        }
+        let model = Arc::new(Pictures(std::sync::Mutex::new(vec![])));
+        let (bot, _db, dir, _) = fixture(model.clone());
+        let bot = Arc::new(bot);
+        let (worker, stop) = (bot.clone(), bot.stop.subscribe());
+        let looping = tokio::spawn(async move { worker.agent_loop(stop).await });
+        let photo = |id: i64, file: &str| -> Message {
+            serde_json::from_value(json!({"message_id": id, "from": {"id": 42}, "chat": {"id": 42, "type": "private"},
+                "media_group_id": "album", "photo": [{"file_id": file, "file_unique_id": format!("u{id}"), "width": 800}]}))
+            .unwrap()
+        };
+        // The fourth is the first screenshot again (same bytes, new Telegram file).
+        for (id, file) in [(1, "GIF89a-legs"), (2, "GIF89a-push"), (3, "GIF89a-pull"), (4, "GIF89a-legs")] {
+            bot.message(photo(id, file)).await;
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while model.0.lock().unwrap().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(ALBUM_WAIT).await;
+        assert_eq!(*model.0.lock().unwrap(), [3]);
+        let _ = bot.stop.send(true);
+        looping.await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn start_before_setup_records_question_in_chat_history() {
         let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
-        let (bot, db, dir, _tg) = fixture(model.clone());
+        let (bot, db, dir, tg) = fixture(model.clone());
         bot.send_start().await;
         assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
         let msg = ChatMessage::first(&db, "WHERE role = 'assistant'", []).unwrap().unwrap();
-        assert!(msg.text.contains("1/5") && msg.meta_json["kind"] == "start");
+        assert!(msg.text.contains("own words") && msg.meta_json["kind"] == "start", "{}", msg.text);
         let buttons: i64 = db.query_row("SELECT count(*) FROM agent_button", [], |r| r.get(0)).unwrap();
         assert_eq!(buttons, 4);
+        let grid: Vec<usize> = tg
+            .calls()
+            .into_iter()
+            .find_map(|c| match c {
+                crate::telegram::coach::tests::Call::Send(_, kb) => Some(kb.iter().map(Vec::len).collect()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(grid, [2, 2]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -352,8 +352,10 @@ impl Tool for TemplateGet {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct TemplateImport {
-    /// The whole plan. guide_id: the catalog_search match's picture (keep the owner's name); if none, omit it and set muscle.
-    /// The first primary exercise needs warmup_weight.
+    /// The whole plan, exercise names as the owner wrote them. guide_id: the catalog picture; omit it for a
+    /// name that is a catalog exercise (also as Strong/Hevy write it, "Bench Press (Barbell)"): it's matched on save.
+    /// For other names use a catalog_search match, or set muscle to keep it as their own. The first primary
+    /// exercise needs warmup_weight.
     pub template: Template,
 }
 
@@ -365,7 +367,7 @@ impl Tool for TemplateImport {
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let before = get_template(cx.db, &self.template.id).ok();
         let mut result = import_template(cx.db, &self.template)?;
-        if let Some(warning) = missing_pictures(&self.template) {
+        if let Some(warning) = missing_pictures(&serde_json::from_value(result.clone())?) {
             result["pictures"] = json!(warning);
         }
         warn_orphans(cx, before, &self.template.id, result)
@@ -509,10 +511,11 @@ impl Tool for OnboardingStatus {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingAnswer {
-    /// Question key → the owner's words, e.g. {"goal": "Build muscle, 2 years"}. Keys: goal, schedule,
-    /// where, preferences, limitations.
+    /// Question key → the owner's words, e.g. {"goal": "Lose fat and build muscle"}. Keys: goal, routine, locale.
     pub answers: Map<String, Value>,
-    /// Profile fields backing those answers (schedule, where and preferences need them; gym_address is optional; timezone must be an IANA name like "America/New_York").
+    /// Profile fields backing those answers: routine needs weekly_target_sessions and weekdays_allowed
+    /// (anything else only if the owner said it), locale needs timezone (an IANA name like
+    /// "America/New_York") and weight_unit.
     pub profile: Option<Map<String, Value>>,
 }
 

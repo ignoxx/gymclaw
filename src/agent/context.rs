@@ -107,18 +107,53 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     let tz = profile.tz();
     let local = now.local(&tz);
     let mut out = String::new();
-    writeln!(out, "Local time: {} ({}). Week starts Monday.", local.strftime("%A %Y-%m-%d %H:%M"), profile.timezone)
+    // During setup the profile holds seeded defaults: shown as the owner's, the agent asked "is Berlin
+    // right?" and confirmed a commute nobody mentioned (2026-11-21). Only answered parts show.
+    let unanswered = crate::domain::onboarding::unanswered(db)?;
+    let answered = |key: &str| unanswered.as_ref().is_none_or(|missing| !missing.contains(&key));
+    if answered("locale") {
+        writeln!(
+            out,
+            "Local time: {} ({}). Week starts Monday.",
+            local.strftime("%A %Y-%m-%d %H:%M"),
+            profile.timezone
+        )
         .unwrap();
+    } else {
+        writeln!(
+            out,
+            "Time: {} UTC. Timezone: not set yet (ask the owner; never guess a default). Week starts Monday.",
+            now.0.strftime("%A %Y-%m-%d %H:%M")
+        )
+        .unwrap();
+    }
     const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     let days: Vec<&str> = profile.weekdays_allowed.iter().filter_map(|d| DAYS.get(*d as usize).copied()).collect();
-    writeln!(
-        out,
-        "Profile: {}–{} sessions/week (target {}), days {}, window {}–{}, {} min sessions, commute {}+{} min, prep {} min, weights in {}.",
-        profile.weekly_min_sessions, profile.weekly_max_sessions, profile.weekly_target_sessions, days.join(" "),
-        profile.earliest_workout_start.strftime("%H:%M"), profile.latest_workout_finish.strftime("%H:%M"), profile.preferred_workout_minutes,
-        profile.commute_to_gym_minutes, profile.commute_home_minutes, profile.prep_minutes, profile.weight_unit.label(),
-    )
-    .unwrap();
+    let unit = if answered("locale") {
+        format!("weights in {}", profile.weight_unit.label())
+    } else {
+        "weight unit not set yet".into()
+    };
+    if unanswered.is_none() {
+        writeln!(
+            out,
+            "Profile: {}–{} sessions/week (target {}), days {}, window {}–{}, {} min sessions, commute {}+{} min, prep {} min, {unit}.",
+            profile.weekly_min_sessions, profile.weekly_max_sessions, profile.weekly_target_sessions, days.join(" "),
+            profile.earliest_workout_start.strftime("%H:%M"), profile.latest_workout_finish.strftime("%H:%M"), profile.preferred_workout_minutes,
+            profile.commute_to_gym_minutes, profile.commute_home_minutes, profile.prep_minutes,
+        )
+        .unwrap();
+    } else if answered("routine") {
+        writeln!(
+            out,
+            "Profile so far: target {} sessions/week, days {}, {unit}; session length, window, prep and commute are defaults unless the owner said them.",
+            profile.weekly_target_sessions,
+            days.join(" "),
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "Profile: schedule not set yet, {unit}.").unwrap();
+    }
     let onboarding = OnboardingState::get(db, 1)?;
     if let Some(o) = onboarding.as_ref().filter(|o| !o.split_json.is_empty()) {
         let words = o.plan_text.as_deref().map_or("none saved".into(), |p| format!("\"{p}\""));
@@ -466,10 +501,22 @@ mod tests {
     #[test]
     fn snapshot_inlines_setup_step_and_weight_unit() {
         let db = crate::db::test::db();
+        let now = Ts::parse("2026-11-13T14:00:00+01:00", None).unwrap();
         crate::domain::profile::update_profile(&db, serde_json::json!({"weight_unit": "lb"}).as_object().unwrap())
             .unwrap();
-        let (text, _) = snapshot(&db, Ts::parse("2026-11-13T14:00:00+01:00", None).unwrap()).unwrap();
-        assert!(text.contains("weights in lb."), "{text}");
-        assert!(text.contains("Setup: INTERVIEW (0/5 done) · next: goal"), "{text}");
+        // Before the owner names their city, the seeded timezone and unit are nobody's answer.
+        let (text, _) = snapshot(&db, now).unwrap();
+        assert!(text.contains("Setup: INTERVIEW (0/3 done) · next: goal"), "{text}");
+        assert!(text.contains("Timezone: not set yet") && text.contains("weight unit not set yet"), "{text}");
+        assert!(!text.contains("Europe/Berlin") && !text.contains("commute"), "{text}");
+        let answers = serde_json::json!({"locale": "Chicago"});
+        let profile = serde_json::json!({"timezone": "America/Chicago", "weight_unit": "lb"});
+        let update = crate::domain::onboarding::Update::Answer {
+            answers: answers.as_object().unwrap(),
+            profile: profile.as_object(),
+        };
+        crate::domain::onboarding::update(&db, update, now, "locale").unwrap();
+        let (text, _) = snapshot(&db, now).unwrap();
+        assert!(text.contains("(America/Chicago)") && text.contains("weights in lb."), "{text}");
     }
 }

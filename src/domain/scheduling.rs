@@ -61,14 +61,16 @@ pub struct Draft {
     pub shortfall: i64,
 }
 
-/// Fill a week with new sessions around the existing ones. Each gets `template_id`, or with `rotate` the
-/// default rotation (`rotation`); then it is allocated, committed when within 48 h and queued for the
-/// calendar. Idempotent per `request_id` (the same week and template). `fixture_signals` replace the crowd
-/// model's signals (tests).
+/// Fill a week with new sessions around the existing ones, none preparing before `not_before` (default
+/// `now`). Each gets `template_id`, or with `rotate` the default rotation (`rotation`); then it is
+/// allocated, committed when within 48 h and queued for the calendar. Idempotent per `request_id` (the
+/// same week and template). `fixture_signals` replace the crowd model's signals (tests).
+#[allow(clippy::too_many_arguments)]
 pub fn draft_week(
     db: &Connection,
     week_start: Date,
     now: Ts,
+    not_before: Option<Ts>,
     request_id: Option<&str>,
     template_id: Option<&str>,
     rotate: bool,
@@ -89,7 +91,7 @@ pub fn draft_week(
     let mut inputs = planner_inputs(db, week_start, &profile)?;
     inputs.signals =
         if fixture_signals.is_empty() { planning_signals(db, week_start, now)? } else { fixture_signals.to_vec() };
-    let plan = plan_week(&profile, week_start, &inputs, now)?;
+    let plan = plan_week(&profile, week_start, &inputs, not_before.map_or(now, |t| t.max(now)))?;
     let mut created: Vec<PlannedSession> = plan
         .sessions
         .iter()
@@ -205,7 +207,7 @@ mod tests {
             (start, end, start, start);
         locked.insert(&db).unwrap();
         let week = jiff::civil::date(2026, 10, 12);
-        let draft = draft_week(&db, week, ts("2026-10-11T12:00:00+02:00"), None, None, false, &[]).unwrap();
+        let draft = draft_week(&db, week, ts("2026-10-11T12:00:00+02:00"), None, None, None, false, &[]).unwrap();
         assert!(draft.created.is_empty(), "{draft:?}");
         assert_eq!(PlannedSession::get(&db, "locked").unwrap().unwrap().planned_start_at, start);
     }
@@ -215,11 +217,11 @@ mod tests {
     fn skipped_slot_is_not_refilled() {
         let db = crate::db::test::with_short_template();
         let (week, now) = (jiff::civil::date(2026, 10, 12), ts("2026-10-11T12:00:00+02:00"));
-        let first = draft_week(&db, week, now, None, Some("short"), false, &[]).unwrap();
+        let first = draft_week(&db, week, now, None, None, Some("short"), false, &[]).unwrap();
         let mut skipped = PlannedSession::get(&db, &first.created[0]).unwrap().unwrap();
         skipped.status = SessionStatus::Skipped;
         skipped.update(&db).unwrap();
-        assert!(draft_week(&db, week, now, None, Some("short"), false, &[]).unwrap().created.is_empty());
+        assert!(draft_week(&db, week, now, None, None, Some("short"), false, &[]).unwrap().created.is_empty());
     }
 
     /// Keys stored before the request shrank to week and template, with a result listing the week's
@@ -235,9 +237,9 @@ mod tests {
         event.correlation_id = Some("rolling:old".into());
         event.update(&db).unwrap();
         let week = jiff::civil::date(2026, 10, 12);
-        let replay = draft_week(&db, week, now, Some("rolling:old"), Some("short"), true, &[]).unwrap();
+        let replay = draft_week(&db, week, now, None, Some("rolling:old"), Some("short"), true, &[]).unwrap();
         assert!(replay.created.is_empty() && replay.shortfall == 3);
-        let other = draft_week(&db, week, now, Some("rolling:old"), None, true, &[]).unwrap_err();
+        let other = draft_week(&db, week, now, None, Some("rolling:old"), None, true, &[]).unwrap_err();
         assert_eq!(other.code(), "IDEMPOTENCY_CONFLICT");
         assert!(PlannedSession::select(&db, "", []).unwrap().is_empty());
     }

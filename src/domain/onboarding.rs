@@ -1,8 +1,10 @@
 //! Mandatory owner interview, then an owner-confirmed plan.
 //!
-//! Steps: INTERVIEW (one question at a time) → PLAN (owner's plan from a photo, or one gymclaw builds from
-//! the catalog) → REVIEW (one summary, owner confirms) → READY. Defaults never count as answers. Ready
-//! stays ready: later profile, template or question changes don't send the owner back into setup.
+//! Steps: INTERVIEW (three short questions, one at a time) → PLAN (owner's plan from screenshots or a
+//! list, or one gymclaw builds from the catalog) → REVIEW (one summary, owner confirms) → READY.
+//! Defaults never count as answers, and the interview asks only what planning can't do without: the
+//! rest of the profile keeps its defaults until the owner mentions it. Ready stays ready: later
+//! profile, template or question changes don't send the owner back into setup.
 //! Finishing turns on reminders and weekly planning (if runtime isn't configured yet); calendar writes
 //! and crowd polling remain opt-in.
 use std::collections::BTreeSet;
@@ -19,32 +21,40 @@ use crate::domain::templates::get_template;
 use crate::error::Result;
 use crate::time::Ts;
 
-/// Asked in this order (5 compact questions). Profile-backed answers also write their profile fields.
-/// `gym_address` is optional (home trainers set `commute_to_gym_minutes: 0` with no address).
-pub const QUESTIONS: [(&str, &str, &[&str]); 5] = [
-    (
-        "goal",
-        "What's your main goal (build muscle, get stronger, lose fat, or general fitness) and how long have you been training?",
-        &[],
-    ),
-    (
-        "schedule",
-        "How many days a week do you want to train, which days, how long per session, and what time window works?",
-        &[
-            "weekly_target_sessions",
-            "weekdays_allowed",
-            "preferred_workout_minutes",
-            "earliest_workout_start",
-            "latest_workout_finish",
-        ],
-    ),
-    (
-        "where",
-        "Where do you train (full gym, basic gym, or at home)? If a gym, how long to get ready and get there (address optional)?",
-        &["prep_minutes", "commute_to_gym_minutes"],
-    ),
-    ("preferences", "Do you use kg or lb, and what's your timezone?", &["weight_unit", "timezone"]),
-    ("limitations", "Any injuries or exercises you want to avoid?", &[]),
+/// One interview question: what the owner is asked, the profile fields its answer must set, and how
+/// the agent saves it (only the agent sees `how`).
+pub struct Question {
+    pub key: &'static str,
+    pub ask: &'static str,
+    pub needs: &'static [&'static str],
+    pub how: &'static str,
+}
+
+/// Asked in this order. Anything else (session length, time window, prep, commute, injuries) is set
+/// only when the owner brings it up, so the agent never has to make it up to get past a question.
+pub const QUESTIONS: [Question; 3] = [
+    Question {
+        key: "goal",
+        ask: "What are you training for? Tap one or say it in your own words; mixing goals is fine.",
+        needs: &[],
+        how: "Save their words as said (goals, and experience if they gave it); no profile fields.",
+    },
+    Question {
+        key: "routine",
+        ask: "How many days a week do you want to train, roughly what time of day (morning, lunch, evening), and gym or home?",
+        needs: &["weekly_target_sessions", "weekdays_allowed"],
+        how: "Set weekly_target_sessions and weekdays_allowed (0 = Mon … 6 = Sun; use [0,1,2,3,4,5,6] if they didn't restrict days). \
+              Map rough time of day to earliest_workout_start/latest_workout_finish (morning 07:00-11:30, lunch 11:30-14:30, evening 17:00-21:30); \
+              if they only gave part of the answer, ask just the missing part. Training at home: commute_to_gym_minutes 0; \
+              never invent prep or commute times they didn't mention.",
+    },
+    Question {
+        key: "locale",
+        ask: "Last one: what city or timezone are you in?",
+        needs: &["timezone", "weight_unit"],
+        how: "Set timezone (IANA name for their city) and weight_unit from their country: lb in the US, kg almost \
+              everywhere else. Don't ask about the unit; name the one you picked when confirming so they can flip it.",
+    },
 ];
 
 pub enum Update<'a> {
@@ -111,8 +121,27 @@ fn review_fingerprint(db: &Connection, row: &OnboardingState) -> Result<String> 
     Ok(fingerprint(&json!({"interview": row.interview_json.0, "profile": get_profile(db)?, "split": templates})))
 }
 
+fn answered(row: &OnboardingState, key: &str) -> bool {
+    if row.interview_json.get(key).is_some() {
+        return true;
+    }
+    // Owners mid-setup from the old 5-question interview keep their progress.
+    match key {
+        "routine" => row.interview_json.get("schedule").is_some(),
+        "locale" => row.interview_json.get("preferences").is_some(),
+        _ => false,
+    }
+}
+
 fn missing(row: &OnboardingState) -> Vec<&'static str> {
-    QUESTIONS.iter().map(|q| q.0).filter(|key| row.interview_json.get(*key).is_none()).collect()
+    QUESTIONS.iter().map(|q| q.key).filter(|key| !answered(row, key)).collect()
+}
+
+/// Interview questions not answered yet; None once setup is finished. The prompt hides profile
+/// defaults behind these, so the agent doesn't take a seeded default for the owner's answer.
+pub fn unanswered(db: &Connection) -> Result<Option<Vec<&'static str>>> {
+    let row = state(db)?;
+    Ok(row.completed_fingerprint.is_none().then(|| missing(&row)))
 }
 
 fn step_and_instruction(
@@ -125,23 +154,38 @@ fn step_and_instruction(
         return (
             "READY",
             if runtime_enabled {
-                "Setup done; reminders and weekly planning are on (the week drafts within a minute). \
-                 Give one short wrap-up with a few tips (voice notes, scale photos, Strong/Hevy CSV import, Gym app button, /help). \
-                 Calendar writes stay opt-in."
+                "Setup done; reminders and weekly planning are on. Wrap up warmly in a few short lines with a couple of tips \
+                 (voice notes, scale photos, Strong/Hevy CSV import, the Gym app button, /help). \
+                 If drafted_week has sessions, name the first one (day and time) and ask if it works, with buttons like \
+                 \"Sounds good\", \"Train today\", \"Different time\", \"Start next week\". \
+                 On \"Train today\", move the first drafted session to today with session_update (keeping rotation and weekly count); \
+                 on \"Start next week\", cancel this week's drafted sessions. Calendar writes stay opt-in."
             } else {
                 "Setup done. Runtime reminders are currently off; turn them on when the owner asks. \
                  Calendar writes stay opt-in."
             },
         );
     }
-    if !missing.is_empty() {
-        let prompt = QUESTIONS.iter().find(|q| q.0 == missing[0]).map_or("", |q| q.1);
-        return ("INTERVIEW", prompt);
+    if let Some(next) = missing.first() {
+        return ("INTERVIEW", QUESTIONS.iter().find(|q| q.key == *next).map_or("", |q| q.ask));
     }
     if row.split_json.is_empty() {
-        return ("PLAN", "Do you have a workout plan? Send a photo, CSV export, or I'll build one for you.");
+        return (
+            "PLAN",
+            "Ask whether they follow a plan (screenshots, a list, a CSV export) or want one built. \
+             If building from scratch, ask once about experience level and any injuries/limitations first. \
+             When they share a plan, read every workout and every exercise in that same turn: save each workout with \
+             template (action import; keep their exercise names and set muscle on custom exercises), then call plan_set \
+             in rotation order, and reply with one concise review summary + a \"Looks good ✅\" button so they confirm once. \
+             Skip quizzing about unmatched exercise pictures during setup. Photos are gone from later turns, so if you \
+             must ask before saving, list the exact workouts and exercises you read in the reply.",
+        );
     }
-    ("REVIEW", "Summarise the answers and split in one short message; finish when the owner confirms.")
+    (
+        "REVIEW",
+        "Summarise in one short message what the owner told you and the plan's workouts (leave out defaults they never \
+         mentioned); finish when the owner confirms.",
+    )
 }
 
 /// Where setup stands: step, next question, answers, profile, split and the review fingerprint.
@@ -159,13 +203,17 @@ pub fn prompt_summary(db: &Connection) -> Result<Option<String>> {
     let missing = missing(&row);
     let (step, instruction) = step_and_instruction(&row, &missing, false);
     let line = match step {
-        "INTERVIEW" => format!(
-            "Setup: INTERVIEW ({}/{} done) · next: {} (\"{instruction}\") · missing: {}.",
-            QUESTIONS.len() - missing.len(),
-            QUESTIONS.len(),
-            missing[0],
-            missing.join(", ")
-        ),
+        "INTERVIEW" => {
+            let next = QUESTIONS.iter().find(|q| q.key == missing[0]).expect("missing keys are questions");
+            format!(
+                "Setup: INTERVIEW ({}/{} done) · next: {} (\"{instruction}\"; {}) · missing: {}.",
+                QUESTIONS.len() - missing.len(),
+                QUESTIONS.len(),
+                next.key,
+                next.how,
+                missing.join(", ")
+            )
+        }
         "PLAN" => format!("Setup: PLAN · {instruction}"),
         _ => format!(
             "Setup: REVIEW · {instruction} (call onboarding_status for review_fingerprint before onboarding_finish)"
@@ -182,10 +230,54 @@ pub fn status(db: &Connection) -> Result<Value> {
     let runtime_enabled = settings.as_ref().is_some_and(|s| s.enabled);
     let (step, instruction) = step_and_instruction(&row, &missing, runtime_enabled);
     let fingerprint = if row.split_json.is_empty() { None } else { Some(review_fingerprint(db, &row)?) };
+    let next = (!ready).then(|| missing.first().copied()).flatten();
+    let how = next.and_then(|key| QUESTIONS.iter().find(|q| q.key == key)).map(|q| q.how);
+    // During setup, strip seeded defaults for unanswered questions so the model never treats
+    // e.g. a default timezone or commute as the owner's stated preference.
+    let profile = get_profile(db)?;
+    let defaults = crate::domain::profile::Profile::default();
+    let mut profile_val = serde_json::to_value(&profile)?;
+    if !ready && let Some(obj) = profile_val.as_object_mut() {
+        if missing.contains(&"locale") {
+            obj.remove("timezone");
+            obj.remove("weight_unit");
+        }
+        if missing.contains(&"routine") {
+            for k in [
+                "weekly_min_sessions",
+                "weekly_target_sessions",
+                "weekly_max_sessions",
+                "weekdays_allowed",
+                "minimum_full_rest_days_between_sessions",
+            ] {
+                obj.remove(k);
+            }
+        }
+        // Hide untouched defaults during setup so REVIEW never echoes fabricated prep/commute/window.
+        if profile.prep_minutes == defaults.prep_minutes {
+            obj.remove("prep_minutes");
+        }
+        if profile.commute_to_gym_minutes == defaults.commute_to_gym_minutes {
+            obj.remove("commute_to_gym_minutes");
+        }
+        if profile.commute_home_minutes == defaults.commute_home_minutes {
+            obj.remove("commute_home_minutes");
+        }
+        if profile.preferred_workout_minutes == defaults.preferred_workout_minutes {
+            obj.remove("preferred_workout_minutes");
+            obj.remove("minimum_workout_minutes");
+        }
+        if profile.earliest_workout_start == defaults.earliest_workout_start
+            && profile.latest_workout_finish == defaults.latest_workout_finish
+        {
+            obj.remove("earliest_workout_start");
+            obj.remove("latest_workout_finish");
+        }
+    }
     Ok(json!({
-        "step": step, "ready": ready, "next_question": (!ready).then(|| missing.first().copied()).flatten(),
+        "step": step, "ready": ready, "next_question": next, "how_to_save": how,
         "missing": if ready { vec![] } else { missing },
-        "answers": row.interview_json.0, "profile": get_profile(db)?, "split": row.split_json.0, "plan": row.plan_text, "templates": template_options(db)?,
+        "answers": row.interview_json.0, "profile": profile_val, "split": row.split_json.0, "plan": row.plan_text, "templates": template_options(db)?,
         "review_fingerprint": fingerprint,
         "calendar_writes_enabled": settings.as_ref().is_some_and(|s| s.calendar_writes_enabled),
         "runtime_enabled": settings.as_ref().is_some_and(|s| s.enabled), "instruction": instruction,
@@ -200,6 +292,28 @@ fn apply_profile(db: &Connection, changes: &Map<String, Value>) -> Result<()> {
         derived.insert("weekly_max_sessions".into(), target.clone());
         if let Some(t) = target.as_i64() {
             derived.insert("weekly_min_sessions".into(), json!(current.weekly_min_sessions.min(t)));
+        }
+    }
+    if !changes.contains_key("minimum_full_rest_days_between_sessions") {
+        let target =
+            derived.get("weekly_target_sessions").and_then(Value::as_i64).unwrap_or(current.weekly_target_sessions);
+        let mut days: Vec<i64> = derived
+            .get("weekdays_allowed")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_i64).collect())
+            .unwrap_or_else(|| current.weekdays_allowed.clone());
+        days.sort_unstable();
+        days.dedup();
+        let mut non_adjacent = 0i64;
+        let mut last: Option<i64> = None;
+        for d in days {
+            if last.is_none_or(|prev| d - prev > 1) {
+                non_adjacent += 1;
+                last = Some(d);
+            }
+        }
+        if target > non_adjacent {
+            derived.insert("minimum_full_rest_days_between_sessions".into(), json!(0));
         }
     }
     if let Some(minutes) = changes.get("preferred_workout_minutes").and_then(Value::as_i64) {
@@ -256,7 +370,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                     crate::bail!("ONBOARDING_ANSWER_REQUIRED", "Supply at least one interview answer");
                 }
                 let unknown: BTreeSet<&str> =
-                    answers.keys().map(String::as_str).filter(|k| !QUESTIONS.iter().any(|q| q.0 == *k)).collect();
+                    answers.keys().map(String::as_str).filter(|k| !QUESTIONS.iter().any(|q| q.key == *k)).collect();
                 if !unknown.is_empty() {
                     crate::bail!(
                         "ONBOARDING_UNKNOWN_QUESTION",
@@ -271,7 +385,7 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                 // ones instead of rejecting the whole batch (#114).
                 let mut accepted: Vec<(&String, &Value)> = Vec::new();
                 for (key, value) in answers.iter() {
-                    let required = QUESTIONS.iter().find(|q| q.0 == key.as_str()).map_or(&[][..], |q| q.2);
+                    let required = QUESTIONS.iter().find(|q| q.key == key.as_str()).map_or(&[][..], |q| q.needs);
                     let lacking: Vec<&str> =
                         required.iter().copied().filter(|f| !profile.is_some_and(|p| p.contains_key(*f))).collect();
                     if lacking.is_empty() {
@@ -338,9 +452,33 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                 }
                 let first_finish = row.completed_fingerprint.is_none();
                 row.completed_fingerprint = fingerprint.map(String::from);
+                row.update(db)?;
+                let mut drafted_week = Value::Null;
                 if first_finish {
                     enable_runtime_once(db, *recipient)?;
+                    // Draft the first week right away (starting tomorrow) in a savepoint so a draft
+                    // error never blocks finishing setup, and return the sessions to the wrap-up turn.
+                    if RuntimeSettings::get(db, 1)?.is_some_and(|s| s.enabled)
+                        && let Some(first_template) = row.split_json.first()
+                    {
+                        db.execute_batch("SAVEPOINT onboarding_first_week")?;
+                        match crate::domain::weekly::draft_first_week(db, first_template, now) {
+                            Ok(plan) => {
+                                db.execute_batch("RELEASE onboarding_first_week")?;
+                                drafted_week = plan;
+                            }
+                            Err(e) => {
+                                tracing::warn!("initial week draft skipped: {} {e}", e.code());
+                                db.execute_batch("ROLLBACK TO onboarding_first_week; RELEASE onboarding_first_week")?;
+                            }
+                        }
+                    }
                 }
+                let mut out = status(db)?;
+                if !drafted_week.is_null() {
+                    out["drafted_week"] = drafted_week;
+                }
+                return Ok(out);
             }
         }
         row.update(db)?;
@@ -387,28 +525,22 @@ mod tests {
         let db = db();
         assert_eq!(status(&db).unwrap()["next_question"], "goal");
         // Batch with one missing profile answer still saves valid answers (#114).
-        let mixed = object(json!({"goal": "Build muscle, 2 years", "schedule": "3x, Mon/Wed/Fri"}));
+        let mixed = object(json!({"goal": "Lose fat and build muscle", "routine": "3x, Mon/Wed/Fri, at home"}));
         let partial = update(&db, Update::Answer { answers: &mixed, profile: None }, at(0), "mixed").unwrap();
-        assert_eq!(partial["data"]["answers"]["goal"], "Build muscle, 2 years");
-        assert!(partial["data"]["needs_profile"]["schedule"].is_array());
+        assert_eq!(partial["data"]["answers"]["goal"], "Lose fat and build muscle");
+        assert_eq!(partial["data"]["needs_profile"]["routine"], json!(["weekly_target_sessions", "weekdays_allowed"]));
         // Purely missing profile fields with no valid answer fails.
-        let sched_only = object(json!({"schedule": "3x, Mon/Wed/Fri"}));
-        let err = update(&db, Update::Answer { answers: &sched_only, profile: None }, at(0), "no-profile").unwrap_err();
+        let locale_only = object(json!({"locale": "New York"}));
+        let err =
+            update(&db, Update::Answer { answers: &locale_only, profile: None }, at(0), "no-profile").unwrap_err();
         assert_eq!(err.code(), "ONBOARDING_PROFILE_REQUIRED");
-        // Home gym needs no gym_address and zeros commute.
-        let rest = object(json!({
-            "schedule": "3x, Mon/Wed/Fri, 60 min, 10:30-22:00",
-            "where": "at home",
-            "preferences": "lb, America/New_York",
-            "limitations": "none"
-        }));
+        // The routine needs only days and count: what the owner didn't mention keeps its default, and
+        // training at home zeros the commute both ways.
+        let before = get_profile(&db).unwrap();
+        let rest = object(json!({"routine": "3x, Mon/Wed/Fri, at home", "locale": "New York"}));
         let profile = object(json!({
             "weekly_target_sessions": 3,
             "weekdays_allowed": [0, 2, 4],
-            "preferred_workout_minutes": 60,
-            "earliest_workout_start": "10:30",
-            "latest_workout_finish": "22:00",
-            "prep_minutes": 5,
             "commute_to_gym_minutes": 0,
             "weight_unit": "lb",
             "timezone": "America/New_York"
@@ -416,7 +548,11 @@ mod tests {
         let result = update(&db, Update::Answer { answers: &rest, profile: Some(&profile) }, at(0), "rest").unwrap();
         assert_eq!(result["data"]["step"], "PLAN");
         let p = get_profile(&db).unwrap();
-        assert_eq!((p.weekly_max_sessions, p.minimum_workout_minutes, p.commute_home_minutes), (3, 45, 0));
+        assert_eq!((p.weekly_max_sessions, p.commute_home_minutes), (3, 0));
+        assert_eq!(
+            (p.preferred_workout_minutes, p.prep_minutes),
+            (before.preferred_workout_minutes, before.prep_minutes)
+        );
         assert_eq!((p.weight_unit, p.timezone.as_str(), p.gym_address), (WeightUnit::Lb, "America/New_York", None));
         template(&db, "demo", "demo");
         assert_eq!(
@@ -463,21 +599,10 @@ mod tests {
         let db = db();
         // Pre-seed a paused runtime row: finishing must never unpause it.
         RuntimeSettings { enabled: false, ..crate::db::test::authority() }.insert(&db).unwrap();
-        let answers = object(json!({
-            "goal": "Fitness",
-            "schedule": "3x",
-            "where": "full gym",
-            "preferences": "kg, Europe/Berlin",
-            "limitations": "none"
-        }));
+        let answers = object(json!({"goal": "Fitness", "routine": "3x at the gym", "locale": "Berlin"}));
         let profile = object(json!({
             "weekly_target_sessions": 3,
             "weekdays_allowed": [0, 2, 4],
-            "preferred_workout_minutes": 60,
-            "earliest_workout_start": "10:30",
-            "latest_workout_finish": "22:00",
-            "prep_minutes": 10,
-            "commute_to_gym_minutes": 15,
             "weight_unit": "kg",
             "timezone": "Europe/Berlin"
         }));
@@ -504,5 +629,42 @@ mod tests {
         )
         .unwrap();
         assert!(!RuntimeSettings::get(&db, 1).unwrap().unwrap().enabled);
+    }
+
+    #[test]
+    fn four_day_routine_allows_consecutive_days_and_finish_returns_drafted_week() {
+        let db = db();
+        let answers = object(json!({
+            "goal": "Build muscle",
+            "routine": "4x a week Mon/Tue/Thu/Fri evening at gym",
+            "locale": "Berlin"
+        }));
+        let profile = object(json!({
+            "weekly_target_sessions": 4,
+            "weekdays_allowed": [0, 1, 3, 4],
+            "earliest_workout_start": "17:00",
+            "latest_workout_finish": "21:30",
+            "weight_unit": "kg",
+            "timezone": "Europe/Berlin"
+        }));
+        update(&db, Update::Answer { answers: &answers, profile: Some(&profile) }, at(0), "ans").unwrap();
+        assert_eq!(get_profile(&db).unwrap().minimum_full_rest_days_between_sessions, 0);
+        template(&db, "push", "user");
+        let review = update(&db, Update::ConfirmPlan { templates: &["push".into()], plan: None }, at(0), "plan")
+            .unwrap()["data"]
+            .clone();
+        assert!(review["profile"].get("prep_minutes").is_none());
+        assert!(review["profile"].get("commute_to_gym_minutes").is_none());
+        let done = update(
+            &db,
+            Update::Finish { fingerprint: review["review_fingerprint"].as_str(), recipient: Some("42") },
+            at(0),
+            "finish",
+        )
+        .unwrap()["data"]
+            .clone();
+        let sessions = done["drafted_week"]["sessions"].as_array().unwrap();
+        assert!(!sessions.is_empty());
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
     }
 }

@@ -393,8 +393,9 @@ pub mod tests {
         async fn updates(&self, _: i64, _: u64) -> Result<Vec<Update>> {
             Ok(vec![])
         }
-        async fn download(&self, _: &str) -> Result<Vec<u8>> {
-            Ok(vec![])
+        /// The file's bytes are its id: an id like "GIF89a-1" downloads as a picture.
+        async fn download(&self, file_id: &str) -> Result<Vec<u8>> {
+            Ok(file_id.as_bytes().to_vec())
         }
     }
 

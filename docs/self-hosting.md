@@ -56,8 +56,8 @@ Reverse-proxy setup, backups and moving hosts: [deploy/README.md](../deploy/READ
 ## First run
 
 1. **Verify the stack:** `docker compose exec gymclaw gymclaw doctor`
-2. **Open your bot in Telegram and tap Start.** It runs a short 5-question setup interview (goal,
-   schedule, gym/home, kg/lb & timezone, limitations). Send a photo of your plan, a Strong/Hevy CSV
+2. **Open your bot in Telegram and tap Start.** It asks three quick questions (goal; days and gym or
+   home; your city, for timezone and kg/lb). Send a photo of your plan, a Strong/Hevy CSV
    export, or let it build one. Finishing setup turns on reminders and weekly planning automatically.
 3. **Optional integrations:** subscribe to your workouts from any calendar app via the dashboard's
    read-only `/calendar/<token>.ics` feed, connect a read-only [personal calendar](#personal-calendar-read-only)

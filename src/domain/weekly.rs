@@ -323,7 +323,25 @@ pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
 /// draft the current week when it is empty, refresh unlocked plan snapshots/crowd, and reconcile reminder
 /// jobs.
 /// Next week is planned only by the Sunday run (`weekly_plan`); if that run never happened, the
-/// current week is drafted here once it starts.
+/// current week is drafted here once it starts. That draft is unrequested, so it starts tomorrow: drafted
+/// right after setup, it put a workout an hour out and sent "Gym soon" a minute later (2026-11-21).
+/// Today's session is the agent's to place when the owner asks for one.
+/// Draft the owner's very first week right after onboarding finishes: starts tomorrow (never
+/// ambushing them with an immediate "Gym soon" reminder on setup day) and skips raising a shortfall
+/// wake for the partial week. Returns the drafted week snapshot for the wrap-up message.
+pub fn draft_first_week(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
+    get_template(db, template_id)?;
+    let tz = get_profile(db)?.tz();
+    let current_week = week_of(now, &tz);
+    if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
+        let key = first_plan_key(db, current_week, now, template_id)?;
+        let tomorrow = Ts(now.local(&tz).date().tomorrow()?.to_zoned(tz.clone())?.timestamp());
+        draft_week(db, current_week, now, Some(tomorrow), Some(&key), Some(template_id), true, &[])?;
+        commit_upcoming(db, now)?;
+    }
+    get_week(db, current_week)
+}
+
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     get_template(db, template_id)?; // Fails fast on an unknown template.
     let tz = get_profile(db)?.tz();
@@ -334,7 +352,7 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let warnings = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
-        draft_week(db, current_week, now, Some(&key), Some(template_id), true, &[])?.created
+        draft_week(db, current_week, now, None, Some(&key), Some(template_id), true, &[])?.created
     } else {
         vec![]
     };
@@ -356,7 +374,7 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     rolling_plan(db, template_id, now)?;
     if PlannedSession::first(db, "WHERE week_id = ?1", [next_week.to_string()])?.is_none() {
         let key = format!("weekly-plan:{next_week}:{template_id}");
-        draft_week(db, next_week, now, Some(&key), Some(template_id), true, &[])?;
+        draft_week(db, next_week, now, None, Some(&key), Some(template_id), true, &[])?;
     }
     Ok(json!({"week_start": next_week.to_string(), "plan": get_week(db, next_week)?}))
 }
@@ -967,6 +985,33 @@ mod tests {
         rolling_plan(&db, "short", sunday(3)).unwrap();
         assert_eq!(PlannedSession::get(&db, id).unwrap().unwrap().planned_start_at, updated.planned_start_at);
         assert!(AgentEvent::get(&db, &event.id).unwrap().unwrap().handled_at.is_none());
+    }
+
+    /// 2026-11-21: setup finished at 18:25, the rolling plan drafted the empty week with a workout that
+    /// evening, and "Gym soon — start getting ready now" went out a minute later.
+    #[test]
+    fn unrequested_week_draft_leaves_today_alone() {
+        // Wednesday 07 Oct 06:00 Berlin: today still has the whole window free.
+        let wednesday = sunday(-(4 * 24 + 13) * 60);
+        let days = |draft: &dyn Fn(&Connection)| {
+            let db = db();
+            let every_day = json!({"weekdays_allowed": [0, 1, 2, 3, 4, 5, 6], "earliest_workout_start": "07:00", "latest_workout_finish": "22:00"});
+            update_profile(&db, every_day.as_object().unwrap()).unwrap();
+            draft(&db);
+            let tz = get_profile(&db).unwrap().tz();
+            let days: Vec<_> = sessions(&db).iter().map(|s| s.prep_start_at.local(&tz).date()).collect();
+            (wednesday.local(&tz).date(), days)
+        };
+        let (today, drafted) = days(&|db| {
+            draft_first_week(db, "short", wednesday).unwrap();
+        });
+        assert!(!drafted.is_empty() && drafted.iter().all(|d| *d > today), "{drafted:?}");
+        // Asked for, today is fine.
+        let (today, planned) = days(&|db| {
+            let week = week_of(wednesday, &get_profile(db).unwrap().tz());
+            draft_week(db, week, wednesday, None, None, Some("short"), false, &[]).unwrap();
+        });
+        assert!(planned.contains(&today), "{planned:?}");
     }
 
     /// Next week used to be drafted (and published) from Friday on; only the Sunday run plans it now.
