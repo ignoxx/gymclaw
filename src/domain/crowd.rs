@@ -300,7 +300,6 @@ impl CrowdModel {
     }
 }
 
-/// The crowd source row, created on first use. A DB bound to another gym/provider refuses to mix data.
 /// Clear the bound gym crowd source, its observations and felt-crowd ratings so a different gym
 /// config never mixes counts with the old gym.
 pub fn reset_source(db: &Connection) -> Result<bool> {
@@ -310,6 +309,7 @@ pub fn reset_source(db: &Connection) -> Result<bool> {
     Ok(state + obs + fb > 0)
 }
 
+/// The crowd source row, created on first use. A DB bound to another gym/provider refuses to mix data.
 fn bind_source(db: &Connection, source: &str, provider_id: &str) -> Result<CrowdSourceState> {
     match CrowdSourceState::get(db, source)? {
         Some(state) if state.provider_id != provider_id => {

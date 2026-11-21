@@ -280,16 +280,19 @@ pub struct CommandOutput {
 /// Runs `argv` with a timeout. Injected so tests don't spawn processes.
 pub type Runner = dyn Fn(&[String], Duration) -> Result<CommandOutput>;
 
-/// The real runner: no shell, stdout/stderr captured, killed after `timeout`.
+/// Upper bound on captured crowd-command stdout (a count or small JSON payload).
+const MAX_COMMAND_STDOUT: u64 = 64 * 1024;
+
+/// The real runner: no shell, stdout capped at 64 KiB, stderr drained, killed after `timeout`.
 pub fn run_command(argv: &[String], timeout: Duration) -> Result<CommandOutput> {
     let (program, args) = argv.split_first().ok_or_else(|| Error::domain("COMMAND_EMPTY", "Empty command"))?;
     let mut child =
         Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let mut stdout = child.stdout.take().expect("piped");
+    let stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let out = std::thread::spawn(move || {
         let mut text = Vec::new();
-        let _ = stdout.read_to_end(&mut text);
+        let _ = stdout.take(MAX_COMMAND_STDOUT).read_to_end(&mut text);
         text
     });
     let err = std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
@@ -546,5 +549,13 @@ mod tests {
             json!({"json_path": "n", "headers": {"x-tenant": "gym-b", "b": "2"}, "url": "https://gym.example/live"}),
         );
         assert!(a != b && first == reordered);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_caps_stdout() {
+        let argv = vec!["sh".into(), "-c".into(), "yes x | head -c 200000".into()];
+        let out = run_command(&argv, Duration::from_secs(5)).unwrap();
+        assert_eq!(out.stdout.len(), MAX_COMMAND_STDOUT as usize);
     }
 }
