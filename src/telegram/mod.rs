@@ -22,6 +22,70 @@ pub const EFFECT_FIRE: &str = "5104841245755180586";
 /// Inline keyboard rows. Empty = no keyboard (an edit with none removes the buttons).
 pub type Keyboard = Vec<Vec<Button>>;
 
+/// Telegram Bot API message text limit (4096 UTF-16 code units; margin for formatting).
+pub const TEXT_LIMIT: usize = 4000;
+/// Telegram Bot API photo caption limit (1024 UTF-16 code units; margin for formatting).
+pub const CAPTION_LIMIT: usize = 1000;
+
+/// Length in UTF-16 code units (how Telegram measures message and caption limits).
+pub fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// Split `text` into chunks each at most `limit` UTF-16 code units, preferring paragraph (`\n\n`),
+/// line (`\n`), then word boundaries. Returns a single empty slice for empty input.
+pub fn split_message(text: &str, limit: usize) -> Vec<&str> {
+    if limit == 0 || utf16_len(text) <= limit {
+        return vec![text];
+    }
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    while utf16_len(rest) > limit {
+        // Find the largest UTF-8 byte boundary whose UTF-16 length is <= limit.
+        let mut units = 0;
+        let mut hard = 0;
+        for (idx, ch) in rest.char_indices() {
+            let len = ch.len_utf16();
+            if units + len > limit {
+                break;
+            }
+            units += len;
+            hard = idx + ch.len_utf8();
+        }
+        if hard == 0 {
+            // Single character exceeds limit; advance by one char to guarantee progress.
+            hard = rest.chars().next().map_or(rest.len(), char::len_utf8);
+        }
+        let prefix = &rest[..hard];
+        let cut = prefix
+            .rfind("\n\n")
+            .filter(|&i| i > 0)
+            .or_else(|| prefix.rfind('\n').filter(|&i| i > 0))
+            .or_else(|| prefix.rfind(' ').filter(|&i| i > 0))
+            .unwrap_or(hard);
+        let head = rest[..cut].trim_end();
+        if !head.is_empty() {
+            chunks.push(head);
+        }
+        let after = &rest[cut..];
+        rest = if after.starts_with('\n') || after.starts_with("\r\n") {
+            after.trim_start_matches(['\r', '\n'])
+        } else {
+            after.trim_start_matches(' ')
+        };
+        if rest.is_empty() {
+            break;
+        }
+    }
+    if !rest.is_empty() {
+        chunks.push(rest);
+    }
+    if chunks.is_empty() {
+        chunks.push("");
+    }
+    chunks
+}
+
 /// Telegram's answer when the message we edit is gone (deleted by the owner or another step).
 pub fn is_gone(error: &crate::error::Error) -> bool {
     let text = error.to_string().to_lowercase();
@@ -258,5 +322,21 @@ mod tests {
             }),
         };
         assert_eq!(react.dm_user_id(), Some(42));
+    }
+
+    #[test]
+    fn split_message_respects_utf16_limit_and_prefers_breaks() {
+        assert_eq!(split_message("short", 100), vec!["short"]);
+        assert_eq!(split_message("para one\n\npara two", 12), vec!["para one", "para two"]);
+        assert_eq!(split_message("line one\nline two", 10), vec!["line one", "line two"]);
+        assert_eq!(split_message("hello world again", 12), vec!["hello world", "again"]);
+        // Emoji are multi-code-unit in UTF-16.
+        let emojis = "🏋️".repeat(10); // 10 * 3 = 30 UTF-16 code units
+        let parts = split_message(&emojis, 10);
+        assert!(parts.len() >= 3);
+        assert!(parts.iter().all(|p| utf16_len(p) <= 10));
+        assert_eq!(parts.concat(), emojis);
+        // Whitespace-only input over the limit never returns an empty vec.
+        assert_eq!(split_message(&" ".repeat(20), 10), vec![""]);
     }
 }
