@@ -41,11 +41,12 @@ pub const QUESTIONS: [Question; 3] = [
     },
     Question {
         key: "routine",
-        ask: "How many days a week do you want to train, which days or times usually work, and do you train at a gym or at home?",
+        ask: "How many days a week do you want to train, roughly what time of day (morning, lunch, evening), and gym or home?",
         needs: &["weekly_target_sessions", "weekdays_allowed"],
-        how: "Set weekly_target_sessions and weekdays_allowed (0 = Mon … 6 = Sun). Set preferred_workout_minutes, \
-              earliest_workout_start, latest_workout_finish, prep_minutes, commute_to_gym_minutes or gym_address only if \
-              the owner said them; never ask for or invent them. Training at home: commute_to_gym_minutes 0.",
+        how: "Set weekly_target_sessions and weekdays_allowed (0 = Mon … 6 = Sun; use [0,1,2,3,4,5,6] if they didn't restrict days). \
+              Map rough time of day to earliest_workout_start/latest_workout_finish (morning 07:00-11:30, lunch 11:30-14:30, evening 17:00-21:30); \
+              if they only gave part of the answer, ask just the missing part. Training at home: commute_to_gym_minutes 0; \
+              never invent prep or commute times they didn't mention.",
     },
     Question {
         key: "locale",
@@ -154,10 +155,11 @@ fn step_and_instruction(
             "READY",
             if runtime_enabled {
                 "Setup done; reminders and weekly planning are on. Wrap up warmly in a few short lines with a couple of tips \
-                 (voice notes, scale photos, Strong/Hevy CSV import, the Gym app button, /help), then ask when they want \
-                 their first session, with buttons like \"Start tomorrow\", \"Train today\", \"Start next week\". \
-                 The week drafts itself from tomorrow on; act on their answer with session_create/session_update. \
-                 Calendar writes stay opt-in."
+                 (voice notes, scale photos, Strong/Hevy CSV import, the Gym app button, /help). \
+                 If drafted_week has sessions, name the first one (day and time) and ask if it works, with buttons like \
+                 \"Sounds good\", \"Train today\", \"Different time\", \"Start next week\". \
+                 On \"Train today\", move the first drafted session to today with session_update (keeping rotation and weekly count); \
+                 on \"Start next week\", cancel this week's drafted sessions. Calendar writes stay opt-in."
             } else {
                 "Setup done. Runtime reminders are currently off; turn them on when the owner asks. \
                  Calendar writes stay opt-in."
@@ -170,11 +172,13 @@ fn step_and_instruction(
     if row.split_json.is_empty() {
         return (
             "PLAN",
-            "Ask whether they follow a plan (screenshots, a list, a CSV export) or want one built. When they share one, \
-             read every workout and every exercise in that same turn: save each workout with template (action import; \
-             exercise names as they wrote them), then plan_set in rotation order, and reply with a short summary of the \
-             workouts and their exercises to confirm. Photos are gone from later turns, so if you ask before saving, \
-             list the exact workouts and exercises you read in the reply.",
+            "Ask whether they follow a plan (screenshots, a list, a CSV export) or want one built. \
+             If building from scratch, ask once about experience level and any injuries/limitations first. \
+             When they share a plan, read every workout and every exercise in that same turn: save each workout with \
+             template (action import; keep their exercise names and set muscle on custom exercises), then call plan_set \
+             in rotation order, and reply with one concise review summary + a \"Looks good ✅\" button so they confirm once. \
+             Skip quizzing about unmatched exercise pictures during setup. Photos are gone from later turns, so if you \
+             must ask before saving, list the exact workouts and exercises you read in the reply.",
         );
     }
     (
@@ -230,7 +234,9 @@ pub fn status(db: &Connection) -> Result<Value> {
     let how = next.and_then(|key| QUESTIONS.iter().find(|q| q.key == key)).map(|q| q.how);
     // During setup, strip seeded defaults for unanswered questions so the model never treats
     // e.g. a default timezone or commute as the owner's stated preference.
-    let mut profile_val = serde_json::to_value(get_profile(db)?)?;
+    let profile = get_profile(db)?;
+    let defaults = crate::domain::profile::Profile::default();
+    let mut profile_val = serde_json::to_value(&profile)?;
     if !ready && let Some(obj) = profile_val.as_object_mut() {
         if missing.contains(&"locale") {
             obj.remove("timezone");
@@ -242,16 +248,30 @@ pub fn status(db: &Connection) -> Result<Value> {
                 "weekly_target_sessions",
                 "weekly_max_sessions",
                 "weekdays_allowed",
-                "earliest_workout_start",
-                "latest_workout_finish",
-                "preferred_workout_minutes",
-                "minimum_workout_minutes",
-                "prep_minutes",
-                "commute_to_gym_minutes",
-                "commute_home_minutes",
+                "minimum_full_rest_days_between_sessions",
             ] {
                 obj.remove(k);
             }
+        }
+        // Hide untouched defaults during setup so REVIEW never echoes fabricated prep/commute/window.
+        if profile.prep_minutes == defaults.prep_minutes {
+            obj.remove("prep_minutes");
+        }
+        if profile.commute_to_gym_minutes == defaults.commute_to_gym_minutes {
+            obj.remove("commute_to_gym_minutes");
+        }
+        if profile.commute_home_minutes == defaults.commute_home_minutes {
+            obj.remove("commute_home_minutes");
+        }
+        if profile.preferred_workout_minutes == defaults.preferred_workout_minutes {
+            obj.remove("preferred_workout_minutes");
+            obj.remove("minimum_workout_minutes");
+        }
+        if profile.earliest_workout_start == defaults.earliest_workout_start
+            && profile.latest_workout_finish == defaults.latest_workout_finish
+        {
+            obj.remove("earliest_workout_start");
+            obj.remove("latest_workout_finish");
         }
     }
     Ok(json!({
@@ -272,6 +292,28 @@ fn apply_profile(db: &Connection, changes: &Map<String, Value>) -> Result<()> {
         derived.insert("weekly_max_sessions".into(), target.clone());
         if let Some(t) = target.as_i64() {
             derived.insert("weekly_min_sessions".into(), json!(current.weekly_min_sessions.min(t)));
+        }
+    }
+    if !changes.contains_key("minimum_full_rest_days_between_sessions") {
+        let target =
+            derived.get("weekly_target_sessions").and_then(Value::as_i64).unwrap_or(current.weekly_target_sessions);
+        let mut days: Vec<i64> = derived
+            .get("weekdays_allowed")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_i64).collect())
+            .unwrap_or_else(|| current.weekdays_allowed.clone());
+        days.sort_unstable();
+        days.dedup();
+        let mut non_adjacent = 0i64;
+        let mut last: Option<i64> = None;
+        for d in days {
+            if last.is_none_or(|prev| d - prev > 1) {
+                non_adjacent += 1;
+                last = Some(d);
+            }
+        }
+        if target > non_adjacent {
+            derived.insert("minimum_full_rest_days_between_sessions".into(), json!(0));
         }
     }
     if let Some(minutes) = changes.get("preferred_workout_minutes").and_then(Value::as_i64) {
@@ -411,18 +453,32 @@ pub fn update(db: &Connection, update: Update, now: Ts, request_id: &str) -> Res
                 let first_finish = row.completed_fingerprint.is_none();
                 row.completed_fingerprint = fingerprint.map(String::from);
                 row.update(db)?;
+                let mut drafted_week = Value::Null;
                 if first_finish {
                     enable_runtime_once(db, *recipient)?;
-                    // Draft the first week right away (starting tomorrow via `rolling_plan`) so the
-                    // wrap-up turn and any immediate "Train today" / "Start next week" tap see the
-                    // real schedule instead of racing the next 60 s tick.
+                    // Draft the first week right away (starting tomorrow) in a savepoint so a draft
+                    // error never blocks finishing setup, and return the sessions to the wrap-up turn.
                     if RuntimeSettings::get(db, 1)?.is_some_and(|s| s.enabled)
                         && let Some(first_template) = row.split_json.first()
                     {
-                        crate::domain::weekly::rolling_plan(db, first_template, now)?;
+                        db.execute_batch("SAVEPOINT onboarding_first_week")?;
+                        match crate::domain::weekly::draft_first_week(db, first_template, now) {
+                            Ok(plan) => {
+                                db.execute_batch("RELEASE onboarding_first_week")?;
+                                drafted_week = plan;
+                            }
+                            Err(e) => {
+                                tracing::warn!("initial week draft skipped: {} {e}", e.code());
+                                db.execute_batch("ROLLBACK TO onboarding_first_week; RELEASE onboarding_first_week")?;
+                            }
+                        }
                     }
                 }
-                return status(db);
+                let mut out = status(db)?;
+                if !drafted_week.is_null() {
+                    out["drafted_week"] = drafted_week;
+                }
+                return Ok(out);
             }
         }
         row.update(db)?;
@@ -573,5 +629,42 @@ mod tests {
         )
         .unwrap();
         assert!(!RuntimeSettings::get(&db, 1).unwrap().unwrap().enabled);
+    }
+
+    #[test]
+    fn four_day_routine_allows_consecutive_days_and_finish_returns_drafted_week() {
+        let db = db();
+        let answers = object(json!({
+            "goal": "Build muscle",
+            "routine": "4x a week Mon/Tue/Thu/Fri evening at gym",
+            "locale": "Berlin"
+        }));
+        let profile = object(json!({
+            "weekly_target_sessions": 4,
+            "weekdays_allowed": [0, 1, 3, 4],
+            "earliest_workout_start": "17:00",
+            "latest_workout_finish": "21:30",
+            "weight_unit": "kg",
+            "timezone": "Europe/Berlin"
+        }));
+        update(&db, Update::Answer { answers: &answers, profile: Some(&profile) }, at(0), "ans").unwrap();
+        assert_eq!(get_profile(&db).unwrap().minimum_full_rest_days_between_sessions, 0);
+        template(&db, "push", "user");
+        let review = update(&db, Update::ConfirmPlan { templates: &["push".into()], plan: None }, at(0), "plan")
+            .unwrap()["data"]
+            .clone();
+        assert!(review["profile"].get("prep_minutes").is_none());
+        assert!(review["profile"].get("commute_to_gym_minutes").is_none());
+        let done = update(
+            &db,
+            Update::Finish { fingerprint: review["review_fingerprint"].as_str(), recipient: Some("42") },
+            at(0),
+            "finish",
+        )
+        .unwrap()["data"]
+            .clone();
+        let sessions = done["drafted_week"]["sessions"].as_array().unwrap();
+        assert!(!sessions.is_empty());
+        assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
     }
 }

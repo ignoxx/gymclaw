@@ -404,7 +404,7 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
         .exercises
         .iter()
         .chain(&template.alternatives)
-        .filter(|s| s.guide_id.is_none())
+        .filter(|s| s.guide_id.is_none() && s.muscle.is_none())
         .map(|s| {
             let options = suggestions(&s.name);
             format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
@@ -412,7 +412,7 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
         .collect();
     (!missing.is_empty()).then(|| {
         format!(
-            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template_edit_exercise (keep id and name); otherwise set its muscle.",
+            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template (action edit_exercise) (keep id and name); otherwise set its muscle.",
             missing.join("; ")
         )
     })
@@ -423,7 +423,31 @@ pub fn missing_pictures(template: &Template) -> Option<String> {
 /// write it ("Bench Press (Barbell)", `matching`). A guide_id the catalog doesn't know is read as a
 /// name too, else dropped, so the exercise saves as the owner's own instead of failing the import
 /// (`missing_pictures` then asks). A muscle without a guide_id is an owner's own exercise: left alone.
+/// Normalize common informal muscle names (e.g. "Abs" -> "Core", "Pecs" -> "Chest") to catalog
+/// muscles; drop unknown ones so an import never fails over a synonym.
+fn normalize_muscle(spec: &mut ExerciseSpec) {
+    let Some(raw) = spec.muscle.as_deref() else { return };
+    let valid = muscles();
+    if let Some(exact) = valid.iter().find(|m| m.eq_ignore_ascii_case(raw.trim())) {
+        spec.muscle = Some((*exact).to_string());
+        return;
+    }
+    let mapped = match raw.trim().to_ascii_lowercase().as_str() {
+        "abs" | "abdominals" | "obliques" | "midsection" => Some("Core"),
+        "pecs" | "pectorals" => Some("Chest"),
+        "lats" | "upper back" | "lower back" | "traps" | "rhomboids" => Some("Back"),
+        "delts" | "deltoids" => Some("Shoulders"),
+        "quads" | "quadriceps" | "hamstrings" | "glutes" | "calves" | "adductors" | "abductors" => Some("Legs"),
+        "arms" | "bicep" | "tricep" | "forearms" => Some("Arms"),
+        _ => None,
+    };
+    if let Some(m) = mapped.filter(|m| valid.iter().any(|v| v == m)) {
+        spec.muscle = Some(m.to_string());
+    }
+}
+
 fn picture(spec: &mut ExerciseSpec) {
+    normalize_muscle(spec);
     let known = spec.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g));
     if known || (spec.guide_id.is_none() && spec.muscle.is_some()) {
         return;
@@ -749,7 +773,16 @@ mod tests {
         let pictures: Vec<Option<&str>> = saved.exercises.iter().map(|e| e.guide_id.as_deref()).collect();
         assert_eq!(pictures, [Some("leg-press"), Some("lat-pulldown"), Some("hack-squat"), None, None]);
         assert_eq!(get_template(&db, "legs").unwrap(), saved);
-        assert!(missing_pictures(&saved).unwrap().contains("Grandma's Glute Thing"));
+        let mp = missing_pictures(&saved).unwrap();
+        assert!(mp.contains("Grandma's Glute Thing") && !mp.contains("Leg Extension"));
+        // Informal muscle aliases ("Abs") normalize to catalog muscles instead of failing import.
+        let abs_tpl: Template = serde_json::from_value(json!({"id": "core", "name": "Core", "exercises": [
+            exercise("Ab Machine", json!({"muscle": "Abs"})),
+        ]}))
+        .unwrap();
+        let saved_abs: Template = serde_json::from_value(import_template(&db, &abs_tpl).unwrap()).unwrap();
+        assert_eq!(saved_abs.exercises[0].muscle.as_deref(), Some("Core"));
+        assert!(missing_pictures(&saved_abs).is_none());
     }
 
     #[test]

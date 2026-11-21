@@ -326,6 +326,22 @@ pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
 /// current week is drafted here once it starts. That draft is unrequested, so it starts tomorrow: drafted
 /// right after setup, it put a workout an hour out and sent "Gym soon" a minute later (2026-11-21).
 /// Today's session is the agent's to place when the owner asks for one.
+/// Draft the owner's very first week right after onboarding finishes: starts tomorrow (never
+/// ambushing them with an immediate "Gym soon" reminder on setup day) and skips raising a shortfall
+/// wake for the partial week. Returns the drafted week snapshot for the wrap-up message.
+pub fn draft_first_week(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
+    get_template(db, template_id)?;
+    let tz = get_profile(db)?.tz();
+    let current_week = week_of(now, &tz);
+    if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
+        let key = first_plan_key(db, current_week, now, template_id)?;
+        let tomorrow = Ts(now.local(&tz).date().tomorrow()?.to_zoned(tz.clone())?.timestamp());
+        draft_week(db, current_week, now, Some(tomorrow), Some(&key), Some(template_id), true, &[])?;
+        commit_upcoming(db, now)?;
+    }
+    get_week(db, current_week)
+}
+
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     get_template(db, template_id)?; // Fails fast on an unknown template.
     let tz = get_profile(db)?.tz();
@@ -336,14 +352,7 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let warnings = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
-        // Brand-new setup (no sessions ever planned): start tomorrow so setup never triggers an
-        // immediate "Gym soon" reminder. Later weeks (e.g. a missed Sunday run) still include today.
-        let not_before = if PlannedSession::first(db, "", [])?.is_none() {
-            Some(Ts(now.local(&tz).date().tomorrow()?.to_zoned(tz.clone())?.timestamp()))
-        } else {
-            None
-        };
-        draft_week(db, current_week, now, not_before, Some(&key), Some(template_id), true, &[])?.created
+        draft_week(db, current_week, now, None, Some(&key), Some(template_id), true, &[])?.created
     } else {
         vec![]
     };
@@ -994,7 +1003,7 @@ mod tests {
             (wednesday.local(&tz).date(), days)
         };
         let (today, drafted) = days(&|db| {
-            rolling_plan(db, "short", wednesday).unwrap();
+            draft_first_week(db, "short", wednesday).unwrap();
         });
         assert!(!drafted.is_empty() && drafted.iter().all(|d| *d > today), "{drafted:?}");
         // Asked for, today is fine.
