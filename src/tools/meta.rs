@@ -15,6 +15,8 @@ pub fn tools() -> Vec<ToolDef> {
 
 /// Tables holding OAuth tokens and the private feed URL stay outside model access and turn-log changesets.
 pub const SECRET_TABLES: [&str; 2] = ["calendar_credential", "personal_calendar_state"];
+/// Secret columns on otherwise readable tables: SQLite replaces them with NULL in `sql_query`.
+const SECRET_COLUMNS: [(&str, &str); 1] = [("user_profile", "ics_token")];
 const MAX_ROWS: usize = 200;
 
 /// Read-only pragmas the model may use to inspect the schema.
@@ -65,14 +67,19 @@ Your chat only shows the latest messages; chat_message holds every one (role own
                 copy
             }
         };
-        db.authorizer(Some(|ctx: AuthContext<'_>| {
-            let allowed = match ctx.action {
-                AuthAction::Select | AuthAction::Recursive | AuthAction::Function { .. } => true,
-                AuthAction::Read { table_name, .. } => !SECRET_TABLES.contains(&table_name),
-                AuthAction::Pragma { pragma_name, .. } => SCHEMA_PRAGMAS.contains(&pragma_name),
-                _ => false,
-            };
-            if allowed { Authorization::Allow } else { Authorization::Deny }
+        db.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Select | AuthAction::Recursive | AuthAction::Function { .. } => Authorization::Allow,
+            AuthAction::Read { table_name, column_name } => {
+                if SECRET_TABLES.contains(&table_name) {
+                    Authorization::Deny
+                } else if SECRET_COLUMNS.contains(&(table_name, column_name)) {
+                    Authorization::Ignore
+                } else {
+                    Authorization::Allow
+                }
+            }
+            AuthAction::Pragma { pragma_name, .. } if SCHEMA_PRAGMAS.contains(&pragma_name) => Authorization::Allow,
+            _ => Authorization::Deny,
         }))?;
         {
             let mut stmt = match db.prepare(&self.sql) {
@@ -115,7 +122,14 @@ pub fn schema(db: &Connection) -> Result<Vec<(String, String)>> {
     Ok(rows
         .into_iter()
         .filter(|(t, _)| !SECRET_TABLES.contains(&t.as_str()))
-        .map(|(t, cols)| (t.clone(), format!("{t}({cols})")))
+        .map(|(t, cols)| {
+            let visible = cols
+                .split(", ")
+                .filter(|col| !SECRET_COLUMNS.contains(&(t.as_str(), *col)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (t.clone(), format!("{t}({visible})"))
+        })
         .collect())
 }
 
@@ -318,5 +332,27 @@ mod tests {
         cx.db.execute("UPDATE agent_note SET text = ?1 WHERE id = ?2", (&"a".repeat(limit), id)).unwrap();
         assert!(NoteEdit { id, text: "a".repeat(limit + 1) }.run(&mut cx).is_err());
         NoteEdit { id, text: "a".repeat(limit - 1) }.run(&mut cx).unwrap();
+    }
+
+    #[test]
+    fn sql_query_masks_ics_token_and_hides_it_from_schema() {
+        let (path, db) = crate::db::test::file();
+        crate::domain::profile::get_profile(&db).unwrap();
+        let token = "secret-ics-token-value";
+        db.execute("UPDATE user_profile SET ics_token = ?1 WHERE id = 1", [token]).unwrap();
+        let mut cx = Ctx {
+            db: &db,
+            now: crate::time::Ts::now(),
+            request_id: "r1".into(),
+            data_dir: path.parent().unwrap(),
+            recipient: None,
+            effects: vec![],
+        };
+        let direct = SqlQuery { sql: "SELECT ics_token FROM user_profile".into() }.run(&mut cx).unwrap();
+        assert_eq!(direct["rows"], json!([[null]]));
+        let star = SqlQuery { sql: "SELECT * FROM user_profile".into() }.run(&mut cx).unwrap();
+        assert!(!star.to_string().contains(token));
+        let cols = schema(&db).unwrap().into_iter().find(|(t, _)| t == "user_profile").unwrap().1;
+        assert!(!cols.contains("ics_token"));
     }
 }
