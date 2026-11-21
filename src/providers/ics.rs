@@ -35,10 +35,14 @@ pub fn normalize_url(url: &str) -> Result<String> {
 
 /// GET the feed body. The URL is a capability secret and never appears in errors.
 pub fn fetch(url: &str, transport: &dyn Transport) -> Result<Vec<u8>> {
-    let request = Request::new(Method::Get, url, 30).header("Accept", "text/calendar");
-    let response = transport
-        .send(&request)
-        .map_err(|_| Error::domain("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed request failed"))?;
+    let request = Request::new(Method::Get, url, 30).header("Accept", "text/calendar").max_bytes(MAX_BYTES);
+    let response = transport.send(&request).map_err(|e| {
+        if e.code() == "RESPONSE_TOO_LARGE" {
+            Error::domain("PERSONAL_CALENDAR_TOO_LARGE", "Personal calendar feed exceeds size limit")
+        } else {
+            Error::domain("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed request failed")
+        }
+    })?;
     if response.status >= 400 {
         bail!("PERSONAL_CALENDAR_UNAVAILABLE", "Personal calendar feed failed (HTTP {})", response.status);
     }

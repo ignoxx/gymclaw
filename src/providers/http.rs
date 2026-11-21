@@ -1,5 +1,6 @@
 //! The one seam between providers and the network. Production uses `Net` (blocking reqwest, honors
 //! HTTP(S)_PROXY); tests pass a closure `|req: &Request| -> Result<Response>`.
+use std::io::Read;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -22,6 +23,9 @@ pub enum Body {
     Form(Vec<(String, String)>),
 }
 
+/// Default upper bound on response body bytes read into memory (16 MiB).
+pub const DEFAULT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct Request {
     pub method: Method,
@@ -31,6 +35,8 @@ pub struct Request {
     pub body: Body,
     pub timeout: Duration,
     pub follow_redirects: bool,
+    /// Maximum response bytes to accept; larger bodies return `RESPONSE_TOO_LARGE` without buffering.
+    pub max_bytes: usize,
 }
 
 impl Request {
@@ -43,7 +49,13 @@ impl Request {
             body: Body::None,
             timeout: Duration::from_secs(timeout_secs),
             follow_redirects: true,
+            max_bytes: DEFAULT_MAX_BYTES,
         }
+    }
+
+    pub fn max_bytes(mut self, limit: usize) -> Request {
+        self.max_bytes = limit;
+        self
     }
 
     pub fn header(mut self, name: &str, value: impl Into<String>) -> Request {
@@ -135,7 +147,18 @@ impl Transport for Net {
         // Strip URLs from transport errors so secret ICS feed tokens or OAuth params never leak to logs.
         let response = builder.send().map_err(|e| Error::Http(e.without_url()))?;
         let status = response.status().as_u16();
-        let body = response.bytes().map_err(|e| Error::Http(e.without_url()))?.to_vec();
+        let cap = request.max_bytes.saturating_add(1) as u64;
+        let mut body = Vec::new();
+        response
+            .take(cap)
+            .read_to_end(&mut body)
+            .map_err(|e| Error::domain("NETWORK_ERROR", format!("response body read failed: {}", e.kind())))?;
+        if body.len() > request.max_bytes {
+            return Err(Error::domain(
+                "RESPONSE_TOO_LARGE",
+                format!("response body exceeds {} byte limit", request.max_bytes),
+            ));
+        }
         Ok(Response { status, body })
     }
 }
@@ -151,5 +174,35 @@ mod tests {
         let err = net.send(&req).unwrap_err();
         assert_eq!(err.code(), "NETWORK_ERROR");
         assert!(!err.to_string().contains("super-secret-value"), "URL leaked in error: {err}");
+    }
+
+    #[test]
+    fn net_caps_response_body_at_max_bytes_plus_one() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req_buf = [0u8; 512];
+            let _ = stream.read(&mut req_buf);
+            let payload = "x".repeat(2048);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+{}",
+                payload.len(),
+                payload
+            );
+        });
+        let net = Net::new().unwrap();
+        let req = Request::new(Method::Get, format!("http://{addr}/big"), 5).max_bytes(64);
+        let err = net.send(&req).unwrap_err();
+        assert_eq!(err.code(), "RESPONSE_TOO_LARGE");
+        let _ = server.join();
     }
 }
