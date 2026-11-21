@@ -554,9 +554,12 @@ impl Bot {
 
     /// A message from the bot itself (status, extensions), stored as `bot` in the history.
     async fn send_bot(&self, text: &str, kind: &'static str) {
-        match self.tg.send(self.owner, text, None, &vec![], None).await {
-            Ok(id) => self.remember(ChatRole::Bot, text.to_string(), Some(id), json!({"kind": kind})).await,
-            Err(e) => tracing::warn!("send failed: {e}"),
+        let (sent, err) = self.send_chunks(text, &[]).await;
+        for (id, chunk) in sent {
+            self.remember(ChatRole::Bot, chunk, Some(id), json!({"kind": kind})).await;
+        }
+        if let Some(e) = err {
+            tracing::warn!("send failed: {e}");
         }
     }
 
@@ -942,20 +945,76 @@ impl Bot {
         }
         let keyboard: Vec<Vec<Button>> =
             rows.iter().map(|(id, label, _)| vec![Button { text: label.clone(), data: format!("btn:{id}") }]).collect();
-        let sent = self.tg.send(self.owner, text, photo, &keyboard, None).await;
-        self.log.log(json!({"ev": "outbound", "session": SESSION, "run": outcome.run_id, "channel": "telegram", "msg": sent.as_ref().ok(), "photo": photo.is_some(),
-            "ok": sent.is_ok(), "error": sent.as_ref().err().map(|e| scrub(&e.to_string(), 500)), "text": scrub(text, 4000)}));
-        match sent {
-            Ok(id) => {
-                let meta = json!({"kind": if outcome.failed { "failure" } else { "reply" }, "run": outcome.run_id, "buttons": buttons.iter().map(|b| &b.0).collect::<Vec<_>>(), "actions": outcome.actions});
-                self.remember(ChatRole::Assistant, text.to_string(), Some(id), meta).await;
-                true
+        let empty = vec![];
+        let mut sent_parts: Vec<(i64, String)> = Vec::new();
+        let err = if let Some(photo_path) = photo {
+            if crate::telegram::utf16_len(text) <= crate::telegram::CAPTION_LIMIT {
+                match self.tg.send(self.owner, text, Some(photo_path), &keyboard, None).await {
+                    Ok(id) => {
+                        sent_parts.push((id, text.to_string()));
+                        None
+                    }
+                    Err(e) => Some(e),
+                }
+            } else {
+                // Caption exceeds Telegram's 1024-unit limit: send the photo first, then chunked text.
+                match self.tg.send(self.owner, "", Some(photo_path), &empty, None).await {
+                    Ok(photo_id) => {
+                        sent_parts.push((photo_id, "(photo)".into()));
+                        let (chunks, err) = self.send_chunks(text, &keyboard).await;
+                        sent_parts.extend(chunks);
+                        err
+                    }
+                    Err(e) => Some(e),
+                }
             }
-            Err(e) => {
-                tracing::warn!("reply not sent: {e}");
-                false
+        } else {
+            let (chunks, err) = self.send_chunks(text, &keyboard).await;
+            sent_parts.extend(chunks);
+            err
+        };
+        let last_id = sent_parts.last().map(|(id, _)| *id);
+        self.log.log(json!({"ev": "outbound", "session": SESSION, "run": outcome.run_id, "channel": "telegram", "msg": last_id, "photo": photo.is_some(),
+            "ok": err.is_none(), "error": err.as_ref().map(|e| scrub(&e.to_string(), 500)), "text": scrub(text, 4000)}));
+        // Record every message that actually went out so chat history and reaction lookups stay accurate,
+        // even if a later chunk fails partway through.
+        let last_part = sent_parts.len().saturating_sub(1);
+        for (i, (id, part)) in sent_parts.iter().enumerate() {
+            let meta = if i == last_part {
+                json!({"kind": if outcome.failed { "failure" } else { "reply" }, "run": outcome.run_id, "buttons": buttons.iter().map(|b| &b.0).collect::<Vec<_>>(), "actions": outcome.actions})
+            } else {
+                json!({"kind": if outcome.failed { "failure" } else { "reply" }, "run": outcome.run_id})
+            };
+            self.remember(ChatRole::Assistant, part.clone(), Some(*id), meta).await;
+        }
+        if let Some(e) = err {
+            tracing::warn!("reply not sent: {e}");
+            // If at least one chunk reached the owner, treat as delivered so events aren't duplicated.
+            !sent_parts.is_empty()
+        } else {
+            true
+        }
+    }
+
+    /// Send `text` in Telegram-sized chunks, attaching `keyboard` to the final chunk.
+    /// Returns every `(message_id, chunk_text)` that succeeded alongside the first error, if any.
+    async fn send_chunks(
+        &self,
+        text: &str,
+        keyboard: &[Vec<Button>],
+    ) -> (Vec<(i64, String)>, Option<crate::error::Error>) {
+        let chunks = crate::telegram::split_message(text, crate::telegram::TEXT_LIMIT);
+        let last_idx = chunks.len().saturating_sub(1);
+        let empty = vec![];
+        let mut sent = Vec::with_capacity(chunks.len());
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let kb = if i == last_idx { keyboard.to_vec() } else { empty.clone() };
+            match self.tg.send(self.owner, chunk, None, &kb, None).await {
+                Ok(id) => sent.push((id, chunk.to_string())),
+                Err(e) => return (sent, Some(e)),
             }
         }
+        (sent, None)
     }
 }
 
@@ -1408,6 +1467,36 @@ mod tests {
                 .iter()
                 .all(|(c, _)| matches!(route(&format!("/{c}")), Route::Status | Route::Help | Route::Extensions))
         );
+    }
+
+    #[tokio::test]
+    async fn long_reply_is_split_with_buttons_on_last_chunk() {
+        let long = format!("{}\n\n{}", "a".repeat(3000), "b".repeat(2500));
+        let (bot, _db, _dir, tg) = fixture(Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0))));
+        let outcome = Outcome {
+            run_id: "r-long".into(),
+            reply: crate::agent::Reply::default(),
+            failed: false,
+            actions: vec![],
+            settles: vec![],
+        };
+        let buttons = vec![("Go".into(), "Go now".into())];
+        assert!(bot.send_reply(&outcome, &long, None, &buttons).await);
+        let sends: Vec<_> = tg
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                crate::telegram::coach::tests::Call::Send(text, kb) => Some((text, kb)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sends.len(), 2);
+        assert!(sends[0].1.is_empty());
+        assert_eq!(sends[1].1.len(), 1);
+        assert!(crate::telegram::utf16_len(&sends[0].0) <= crate::telegram::TEXT_LIMIT);
+        assert!(crate::telegram::utf16_len(&sends[1].0) <= crate::telegram::TEXT_LIMIT);
+        let stored = ChatMessage::select(&_db, "WHERE role = 'assistant' ORDER BY id", []).unwrap();
+        assert_eq!(stored.len(), 2);
     }
 
     #[tokio::test]
