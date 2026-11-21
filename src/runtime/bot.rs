@@ -545,7 +545,7 @@ impl Bot {
             Some("INTERVIEW") if fresh => format!(
                 "👋 **Hey, I'm gymclaw**, your gym buddy in Telegram. I plan your week around your life and coach you through every set.\n\n\
                  {total} quick questions and we're rolling. First: **what are you training for?**\n\
-                 Tap one, or just type it in your own words; mixing is fine (\"lose fat, build muscle, better endurance\")."
+                 Tap a button, type it, or send a voice note 🎙️, whatever's easiest; mixing goals is fine (\"lose fat, build muscle, better endurance\")."
             ),
             Some("INTERVIEW") => format!("**{}/{total}** {instruction}", total.saturating_sub(missing) + 1),
             Some("PLAN") => {
@@ -1627,7 +1627,7 @@ mod tests {
         bot.send_start().await;
         assert_eq!(model.0.load(std::sync::atomic::Ordering::SeqCst), 0);
         let msg = ChatMessage::first(&db, "WHERE role = 'assistant'", []).unwrap().unwrap();
-        assert!(msg.text.contains("own words") && msg.meta_json["kind"] == "start", "{}", msg.text);
+        assert!(msg.text.contains("voice note") && msg.meta_json["kind"] == "start", "{}", msg.text);
         let buttons: i64 = db.query_row("SELECT count(*) FROM agent_button", [], |r| r.get(0)).unwrap();
         assert_eq!(buttons, 4);
         let grid: Vec<usize> = tg

@@ -354,7 +354,9 @@ impl Tool for TemplateGet {
 pub struct TemplateImport {
     /// The whole plan, exercise names as the owner wrote them. guide_id: the catalog picture; omit it for a
     /// name that is a catalog exercise (also as Strong/Hevy write it, "Bench Press (Barbell)"): it's matched on save.
-    /// For other names use a catalog_search match, or set muscle to keep it as their own. The first primary
+    /// For other names, including other languages and other apps' names, catalog_search the English movement
+    /// ("Latzug" → "lat pulldown") and set guide_id to the match, keeping their name; set muscle without guide_id
+    /// only when no catalog exercise is that movement. The first primary
     /// exercise needs warmup_weight.
     pub template: Template,
 }
