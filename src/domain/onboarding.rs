@@ -155,12 +155,12 @@ fn step_and_instruction(
             "READY",
             if runtime_enabled {
                 "Setup done; reminders and weekly planning are on. Wrap up warmly in one message: \
-                 1) if drafted_week has sessions, name the first one (day and time) and ask if it works, with buttons \
-                 \"Sounds good\", \"Train today\", \"Different time\", \"Start next week\"; \
-                 2) a short **What you can do now** list of three bullets: just talk or send voice notes to move sessions, \
+                 1) first, a short **What you can do now** list of three bullets: just talk or send voice notes to move sessions, \
                  swap exercises or change anything (gymclaw remembers preferences and adapts over time); the **Gym** button \
-                 (bottom-left) opens the dashboard with the plan, 1RM progress charts, live workout tracker and calendar export; \
+                 (bottom-left) opens the dashboard with your plan, 1RM progress charts, live workout tracker and calendar export; \
                  during workouts tap buttons or type sets (`10x80`), send scale photos or a Strong/Hevy CSV anytime, /help for the rest. \
+                 2) last (right above the buttons), if drafted_week has sessions, name the first one (day and time) and ask if it works, \
+                 with buttons \"Sounds good\", \"Train today\", \"Different time\", \"Start next week\". \
                  On \"Train today\", move the first drafted session to today with session_update (keeping rotation and weekly count); \
                  on \"Start next week\", cancel this week's drafted sessions. Calendar writes stay opt-in."
             } else {
@@ -180,9 +180,10 @@ fn step_and_instruction(
              When they share a plan, read every workout and every exercise in that same turn: save each workout with \
              template (action import), then call plan_set \
              in rotation order, and reply with one concise review summary + a \"Looks good ✅\" button so they confirm once. \
-             Before importing, match every exercise to the English catalog: run catalog_search in parallel with each \
-             movement's English name (translate other languages: Brustpresse → chest press machine, Latzug → lat pulldown, \
-             Beinstrecker → leg extension) and set guide_id to the matching slug; keep the owner's name in name. Set muscle \
+             Before importing, match non-English or non-standard exercise names to the English catalog: run catalog_search \
+             in parallel with each movement's English name (translate other languages: Brustpresse → chest press machine, \
+             Latzug → lat pulldown, Beinstrecker → leg extension) and set guide_id to the matching slug; standard English \
+             names match automatically on save, so skip searching those. Keep the owner's name in name, and set muscle \
              without guide_id only when no catalog exercise is that movement. \
              Skip quizzing about unmatched exercise pictures during setup. Photos are gone from later turns, so if you \
              must ask before saving, list the exact workouts and exercises you read in the reply.",

@@ -146,18 +146,24 @@ fn leading_object(text: &str) -> Option<Value> {
     }
 }
 
-/// Text that is a reply's JSON rather than its words: `{"text": …}` or `{"message": …}`.
-static REPLY_JSON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^\{\s*"(text|message)"\s*:"#).unwrap());
-
-/// The words in reply JSON written as text, or "" when they can't be read. None for ordinary text.
+/// The words in reply JSON written as text (`{"text": …}`, `{"buttons": …, "text": …}`,
+/// `{"message": …}`, `{"react": …}`), or "" when unreadable. None for ordinary text.
 fn leaked_reply(text: &str) -> Option<String> {
     let text = text.trim();
-    if !REPLY_JSON.is_match(text) {
+    if !text.starts_with('{') {
         return None;
     }
-    let object = leading_object(text).unwrap_or_default();
-    let words = object.pointer("/message/text").or(object.get("message")).or(object.get("text"));
-    Some(words.and_then(Value::as_str).unwrap_or_default().to_string())
+    let Some(object) = leading_object(text) else {
+        // Broken JSON that looks like a reply payload (e.g. `{"text": broken`).
+        return (text.contains("\"text\"") || text.contains("\"message\"")).then(String::new);
+    };
+    let map = object.as_object()?;
+    if !["text", "message", "react"].iter().any(|k| map.contains_key(*k)) {
+        return None;
+    }
+    let unwrapped = unstring_message(object);
+    let words = unwrapped.pointer("/message/text").or_else(|| unwrapped.get("text")).and_then(Value::as_str);
+    Some(words.unwrap_or_default().to_string())
 }
 
 /// How a turn ended. A failure is a reply with the sanitized line.
