@@ -72,6 +72,23 @@ pub struct Update {
     pub message_reaction: Option<MessageReaction>,
 }
 
+impl Update {
+    /// Telegram user id for a private DM update (message, callback query, or reaction), or `None`
+    /// for group chats, channel posts, or updates without a matching sender.
+    pub fn dm_user_id(&self) -> Option<i64> {
+        if let Some(q) = &self.callback_query {
+            let chat_ok = q.message.as_ref().is_none_or(|m| m.chat.kind == "private" && m.chat.id == q.from.id);
+            return chat_ok.then_some(q.from.id);
+        }
+        if let Some(r) = &self.message_reaction {
+            return r.user.as_ref().filter(|u| r.chat.kind == "private" && r.chat.id == u.id).map(|u| u.id);
+        }
+        let m = self.message.as_ref()?;
+        let from = m.from.as_ref()?;
+        (m.chat.kind == "private" && m.chat.id == from.id).then_some(from.id)
+    }
+}
+
 /// The owner changed their reactions on a message: `new_reaction` is the full set now.
 #[derive(Clone, Debug, Deserialize)]
 pub struct MessageReaction {
@@ -160,4 +177,86 @@ pub struct CallbackQuery {
 pub struct Media {
     pub path: PathBuf,
     pub mime: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chat(id: i64, kind: &str) -> Chat {
+        Chat { id, kind: kind.into() }
+    }
+
+    fn msg(chat_id: i64, kind: &str, from_id: Option<i64>) -> Message {
+        Message {
+            message_id: 1,
+            from: from_id.map(|id| User { id }),
+            chat: chat(chat_id, kind),
+            text: Some("hi".into()),
+            caption: None,
+            photo: None,
+            document: None,
+            voice: None,
+            audio: None,
+            reply_to_message: None,
+        }
+    }
+
+    #[test]
+    fn dm_user_id_extracts_private_sender_and_ignores_groups() {
+        let dm = Update {
+            update_id: 1,
+            message: Some(msg(42, "private", Some(42))),
+            callback_query: None,
+            message_reaction: None,
+        };
+        assert_eq!(dm.dm_user_id(), Some(42));
+
+        let group = Update {
+            update_id: 2,
+            message: Some(msg(-100, "supergroup", Some(42))),
+            callback_query: None,
+            message_reaction: None,
+        };
+        assert_eq!(group.dm_user_id(), None);
+
+        let cb_ok = Update {
+            update_id: 3,
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "c1".into(),
+                from: User { id: 42 },
+                message: Some(msg(42, "private", Some(99))),
+                data: None,
+            }),
+            message_reaction: None,
+        };
+        assert_eq!(cb_ok.dm_user_id(), Some(42));
+
+        let cb_group = Update {
+            update_id: 4,
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "c2".into(),
+                from: User { id: 42 },
+                message: Some(msg(-100, "group", Some(99))),
+                data: None,
+            }),
+            message_reaction: None,
+        };
+        assert_eq!(cb_group.dm_user_id(), None);
+
+        let react = Update {
+            update_id: 5,
+            message: None,
+            callback_query: None,
+            message_reaction: Some(MessageReaction {
+                chat: chat(42, "private"),
+                message_id: 1,
+                user: Some(User { id: 42 }),
+                new_reaction: vec![],
+            }),
+        };
+        assert_eq!(react.dm_user_id(), Some(42));
+    }
 }

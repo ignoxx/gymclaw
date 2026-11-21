@@ -207,26 +207,10 @@ impl Bot {
 
     /// Owner DMs only; everything else is dropped.
     pub async fn handle(&self, update: Update) {
-        if let Some(q) = update.callback_query {
-            let chat_ok = q.message.as_ref().is_none_or(|m| m.chat.id == self.owner);
-            if q.from.id == self.owner && chat_ok {
-                self.callback(q).await;
-            }
-            return;
-        }
-        if let Some(reaction) = update.message_reaction {
-            if reaction.chat.id == self.owner && reaction.user.as_ref().is_some_and(|u| u.id == self.owner) {
-                self.reaction(reaction).await;
-            }
-            return;
-        }
-        let Some(message) = update.message else { return };
-        if message.chat.kind != "private"
-            || message.chat.id != self.owner
-            || message.from.as_ref().is_none_or(|f| f.id != self.owner)
-        {
-            if message.chat.kind == "private"
-                && let Some(from) = message.from.as_ref()
+        if update.dm_user_id() != Some(self.owner) {
+            if let Some(m) = update.message.as_ref()
+                && m.chat.kind == "private"
+                && let Some(from) = m.from.as_ref()
             {
                 let mut last = self.last_ignored.lock().unwrap_or_else(PoisonError::into_inner);
                 if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
@@ -236,7 +220,13 @@ impl Bot {
             }
             return;
         }
-        self.message(message).await;
+        if let Some(q) = update.callback_query {
+            self.callback(q).await;
+        } else if let Some(reaction) = update.message_reaction {
+            self.reaction(reaction).await;
+        } else if let Some(message) = update.message {
+            self.message(message).await;
+        }
     }
 
     async fn callback(&self, q: CallbackQuery) {
