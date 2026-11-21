@@ -272,6 +272,7 @@ impl CrowdProvider for HttpCountProvider<'_> {
 }
 
 /// What a finished command printed.
+#[derive(Debug)]
 pub struct CommandOutput {
     pub status: i32,
     pub stdout: String,
@@ -283,19 +284,23 @@ pub type Runner = dyn Fn(&[String], Duration) -> Result<CommandOutput>;
 /// Upper bound on captured crowd-command stdout (a count or small JSON payload).
 const MAX_COMMAND_STDOUT: u64 = 64 * 1024;
 
-/// The real runner: no shell, stdout capped at 64 KiB, stderr drained, killed after `timeout`.
+/// The real runner: no shell, stdout capped at 64 KiB, stderr drained, gives up after `timeout`.
 pub fn run_command(argv: &[String], timeout: Duration) -> Result<CommandOutput> {
     let (program, args) = argv.split_first().ok_or_else(|| Error::domain("COMMAND_EMPTY", "Empty command"))?;
     let mut child =
         Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
-    let out = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
         let mut text = Vec::new();
         let _ = stdout.take(MAX_COMMAND_STDOUT).read_to_end(&mut text);
-        text
+        let _ = tx.send(text);
     });
-    let err = std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+    // Drain stderr without blocking on join: a background grandchild keeping stderr open must not hang us.
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+    });
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -308,8 +313,8 @@ pub fn run_command(argv: &[String], timeout: Duration) -> Result<CommandOutput> 
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let stdout = out.join().unwrap_or_default();
-    let _ = err.join();
+    let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100));
+    let stdout = rx.recv_timeout(remaining).map_err(|_| Error::domain("COMMAND_TIMEOUT", "Command timed out"))?;
     Ok(CommandOutput { status: status.code().unwrap_or(-1), stdout: String::from_utf8_lossy(&stdout).into_owned() })
 }
 
@@ -557,5 +562,15 @@ mod tests {
         let argv = vec!["sh".into(), "-c".into(), "yes x | head -c 200000".into()];
         let out = run_command(&argv, Duration::from_secs(5)).unwrap();
         assert_eq!(out.stdout.len(), MAX_COMMAND_STDOUT as usize);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_times_out_if_grandchild_holds_stdout_open() {
+        let started = Instant::now();
+        let argv = vec!["sh".into(), "-c".into(), "sleep 10 & echo 42".into()];
+        let err = run_command(&argv, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(err.code(), "COMMAND_TIMEOUT");
+        assert!(started.elapsed() < Duration::from_secs(3), "hung for {:?}", started.elapsed());
     }
 }
