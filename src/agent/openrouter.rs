@@ -117,10 +117,7 @@ impl ChatModel for OpenRouter {
             }
             break (ttfb_ms, res_bytes, parsed);
         };
-        let choice = parsed
-            .pointer("/choices/0")
-            .cloned()
-            .ok_or_else(|| Error::domain("MODEL_ERROR", "upstream returned no choices"))?;
+        let choice = parse_choice(&parsed)?;
         let usage = &parsed["usage"];
         // The request minus what the trajectory already stores (messages, tool specs).
         let mut settings = request;
@@ -190,6 +187,23 @@ fn parse_usage(usage: &Value) -> Usage {
     }
 }
 
+/// Extract `choices[0]`, surfacing OpenRouter mid-generation errors (`finish_reason == "error"`
+/// or a non-null `choice.error`) as `MODEL_ERROR` instead of an empty silent reply.
+fn parse_choice(parsed: &Value) -> Result<Value> {
+    let choice = parsed
+        .pointer("/choices/0")
+        .cloned()
+        .ok_or_else(|| Error::domain("MODEL_ERROR", "upstream returned no choices"))?;
+    let is_error =
+        choice["finish_reason"].as_str() == Some("error") || choice.get("error").is_some_and(|e| !e.is_null());
+    if is_error {
+        let message = choice.pointer("/error/message").and_then(Value::as_str).unwrap_or("mid-generation error");
+        let code = choice.pointer("/error/code").map(|c| c.to_string()).unwrap_or_else(|| "upstream".into());
+        return Err(Error::domain("MODEL_ERROR", format!("{code} {message}")));
+    }
+    Ok(choice)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +245,35 @@ mod tests {
         assert_eq!(retry_delay(401, None), None);
         assert_eq!(retry_delay(402, None), None);
         assert_eq!(retry_delay(403, None), None);
+    }
+
+    #[test]
+    fn parse_choice_surfaces_mid_generation_errors() {
+        let ok = parse_choice(&json!({
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}]
+        }))
+        .unwrap();
+        assert_eq!(ok["message"]["content"], "hi");
+
+        let err = parse_choice(&json!({
+            "choices": [{
+                "finish_reason": "error",
+                "error": {"code": 502, "message": "Provider disconnected"},
+                "message": {"role": "assistant", "content": ""}
+            }]
+        }))
+        .unwrap_err();
+        assert_eq!(err.code(), "MODEL_ERROR");
+        assert!(err.to_string().contains("502") && err.to_string().contains("Provider disconnected"));
+
+        let no_detail = parse_choice(&json!({
+            "choices": [{"finish_reason": "error", "message": {"role": "assistant", "content": ""}}]
+        }))
+        .unwrap_err();
+        assert_eq!(no_detail.code(), "MODEL_ERROR");
+        assert!(no_detail.to_string().contains("upstream"));
+
+        let missing = parse_choice(&json!({"choices": []})).unwrap_err();
+        assert_eq!(missing.code(), "MODEL_ERROR");
     }
 }
