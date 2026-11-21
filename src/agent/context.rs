@@ -184,12 +184,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
         writeln!(out, "Last completed per workout, longest ago first: {}.", done.join(", ")).unwrap();
     }
     if let Some(setup) = crate::domain::onboarding::prompt_summary(db)? {
-        writeln!(
-            out,
-            "{setup} Don't restate, paraphrase or praise what the owner just told you (no \"X, got it\"); go straight \
-             to the next question. Never interrupt a running workout with setup."
-        )
-        .unwrap();
+        writeln!(out, "{setup} Never interrupt a running workout with setup.").unwrap();
     }
     let authority = runtime_authority(db)?;
     writeln!(

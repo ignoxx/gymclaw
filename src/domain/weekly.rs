@@ -354,7 +354,8 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
     let warnings = inspect_weeks(db, &BTreeSet::from([current_week, next_week]), now)?;
     let created = if PlannedSession::first(db, "WHERE week_id = ?1", [current_week.to_string()])?.is_none() {
         let key = first_plan_key(db, current_week, now, template_id)?;
-        draft_week(db, current_week, now, None, Some(&key), Some(template_id), true, &[])?.created
+        let tomorrow = Ts(now.local(&tz).date().tomorrow()?.to_zoned(tz.clone())?.timestamp());
+        draft_week(db, current_week, now, Some(tomorrow), Some(&key), Some(template_id), true, &[])?.created
     } else {
         vec![]
     };
@@ -1016,15 +1017,23 @@ mod tests {
         assert!(planned.contains(&today), "{planned:?}");
     }
 
-    /// 2026-11-22: setup finished on a Sunday night drafted nothing (tomorrow was already next week),
-    /// so the wrap-up had no first session to propose.
+    /// 2026-11-22: setup finished on a Sunday drafted nothing (tomorrow was already next week), so the
+    /// wrap-up had no first session to propose. The rolling plan then still finds this week empty and
+    /// must not fill today either.
     #[test]
     fn first_week_on_sunday_is_next_week() {
         let db = db();
-        let week = draft_first_week(&db, "short", sunday(0)).unwrap();
+        let every_day = json!({"weekdays_allowed": [0, 1, 2, 3, 4, 5, 6], "earliest_workout_start": "07:00",
+            "latest_workout_finish": "22:00", "minimum_full_rest_days_between_sessions": 0});
+        update_profile(&db, every_day.as_object().unwrap()).unwrap();
+        // Sunday 08:00 Berlin: today's window is still open.
+        let morning = sunday(-11 * 60);
+        let week = draft_first_week(&db, "short", morning).unwrap();
         let drafted = sessions(&db);
         assert!(!drafted.is_empty() && drafted.iter().all(|s| s.week_id == "2026-10-12"), "{drafted:?}");
         assert_eq!(week["sessions"].as_array().unwrap().len(), drafted.len(), "{week}");
+        rolling_plan(&db, "short", morning.mins(5)).unwrap();
+        assert!(sessions(&db).iter().all(|s| s.week_id == "2026-10-12"), "{:?}", sessions(&db));
     }
 
     /// Next week used to be drafted (and published) from Friday on; only the Sunday run plans it now.

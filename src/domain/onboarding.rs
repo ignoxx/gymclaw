@@ -158,10 +158,10 @@ fn step_and_instruction(
                 "Setup done; reminders and weekly planning are on. The bot sends the owner a **What you can do now** tips \
                  message right before your reply, so don't repeat tips or recap the setup. Reply in one or two short lines: \
                  if drafted_week has sessions, name the first one (day and time) and ask if it works, \
-                 with buttons \"Sounds good\", \"Train today\", \"Different time\", \"Start next week\"; otherwise say \
-                 you'll plan the week ahead and they can ask for a session anytime. \
+                 with buttons \"Sounds good\", \"Train today\", \"Different time\", plus \"Start next week\" only when that \
+                 session is in the current week; otherwise say you'll plan the week ahead and they can ask for a session anytime. \
                  On \"Train today\", move the first drafted session to today with session_update (keeping rotation and weekly count); \
-                 on \"Start next week\", cancel this week's drafted sessions. Calendar writes stay opt-in."
+                 on \"Start next week\", cancel the current week's drafted sessions. Calendar writes stay opt-in."
             } else {
                 "Setup done. Runtime reminders are currently off; turn them on when the owner asks. \
                  Calendar writes stay opt-in."
@@ -216,7 +216,8 @@ pub fn prompt_summary(db: &Connection) -> Result<Option<String>> {
         "INTERVIEW" => {
             let next = QUESTIONS.iter().find(|q| q.key == missing[0]).expect("missing keys are questions");
             format!(
-                "Setup: INTERVIEW ({}/{} done) · next: {} (\"{instruction}\"; {}) · missing: {}.",
+                "Setup: INTERVIEW ({}/{} done) · next: {} (\"{instruction}\"; {}) · missing: {}. Don't restate, \
+                 paraphrase or praise what the owner just told you (no \"X, got it\"); go straight to the next question.",
                 QUESTIONS.len() - missing.len(),
                 QUESTIONS.len(),
                 next.key,

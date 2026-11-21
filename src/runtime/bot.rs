@@ -8,7 +8,7 @@
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
 //! - Coach steps taken in the Mini App (`coach::APP_VIEW` events) are shown in the chat like taps.
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -132,6 +132,8 @@ pub struct Bot {
     /// While an album is still arriving, the agent waits until then (`ALBUM_WAIT` after its latest photo).
     album_until: std::sync::Mutex<Option<tokio::time::Instant>>,
     album_inflight: AtomicUsize,
+    /// Setup is known to be finished; it never un-finishes, so later turns skip the DB check.
+    setup_done: AtomicBool,
     album_change: Notify,
     app_wake: Notify,
     fast: mpsc::UnboundedSender<Fast>,
@@ -168,6 +170,7 @@ impl Bot {
             inbox_ready: Notify::new(),
             album_until: std::sync::Mutex::new(None),
             album_inflight: AtomicUsize::new(0),
+            setup_done: AtomicBool::new(false),
             album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
@@ -954,7 +957,14 @@ impl Bot {
 
     /// Whether onboarding is done; a read error counts as done so it never triggers the welcome.
     async fn setup_finished(&self) -> bool {
-        blocking(self.db(), |db| crate::domain::onboarding::finished(db)).await.unwrap_or(true)
+        if self.setup_done.load(Ordering::Relaxed) {
+            return true;
+        }
+        let done = blocking(self.db(), |db| crate::domain::onboarding::finished(db)).await;
+        if let Ok(true) = done {
+            self.setup_done.store(true, Ordering::Relaxed);
+        }
+        done.unwrap_or(true)
     }
 
     /// Queue and send this week's recap (`weekly::release_recap`). A failed send stays in the outbox.
@@ -1198,6 +1208,7 @@ mod tests {
             inbox_ready: Notify::new(),
             album_until: std::sync::Mutex::new(None),
             album_inflight: AtomicUsize::new(0),
+            setup_done: AtomicBool::new(false),
             album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
