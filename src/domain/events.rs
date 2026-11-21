@@ -16,8 +16,9 @@ use crate::time::Ts;
 /// outbox as the session's own message; the owner's answer reaches the agent. `extension.trigger` is a
 /// trigger the agent set itself; `agent.reflect` (`extensions::reflect`) asks it to learn from a hard turn,
 /// and is never open, so it runs only once the chat is quiet.
-const KINDS: [Kind; 10] = [
+const KINDS: [Kind; 11] = [
     Kind { name: "notifications.delivery_unknown", open: true, wake: false },
+    Kind { name: "notifications.delivery_failed", open: true, wake: false },
     Kind { name: "calendar.write_blocked", open: true, wake: false },
     Kind { name: "planning.attention", open: true, wake: true },
     Kind { name: "planning.replan_required", open: true, wake: true },

@@ -5,6 +5,8 @@ use std::borrow::Cow;
 pub enum Error {
     #[error("{message}")]
     Domain { code: Cow<'static, str>, message: String },
+    #[error("{method}: {description}")]
+    Telegram { method: String, status: u16, description: String, retry_after: Option<u64> },
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -24,10 +26,36 @@ impl Error {
         Error::Domain { code: code.into(), message: message.into() }
     }
 
+    pub fn telegram(
+        method: impl Into<String>,
+        status: u16,
+        description: impl Into<String>,
+        retry_after: Option<u64>,
+    ) -> Error {
+        Error::Telegram { method: method.into(), status, description: description.into(), retry_after }
+    }
+
+    /// Telegram Bot API status code, when this error came from a rejected API response.
+    pub fn telegram_status(&self) -> Option<u16> {
+        match self {
+            Error::Telegram { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// Telegram `parameters.retry_after` seconds on a 429 Too Many Requests response.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            Error::Telegram { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
     /// Stable code for JSON output and turn logs.
     pub fn code(&self) -> &str {
         match self {
             Error::Domain { code, .. } => code,
+            Error::Telegram { .. } => "TELEGRAM_ERROR",
             Error::Db(_) => "DATABASE_ERROR",
             Error::Json(_) => "INVALID_JSON",
             Error::Time(_) => "INVALID_TIME",

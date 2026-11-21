@@ -60,6 +60,9 @@ impl Scheduler {
                 for id in ids {
                     if let Err(e) = outbox::deliver(&self.db_path, self.tg.as_ref(), &id, Ts::now()).await {
                         tracing::warn!("delivery {id}: {} {e}", e.code());
+                        if matches!(e.telegram_status(), Some(429 | 401 | 404)) {
+                            break;
+                        }
                     }
                 }
             }
