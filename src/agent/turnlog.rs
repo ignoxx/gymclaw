@@ -14,7 +14,7 @@
 //!   index `from` (the first step's stable prompt is `{"blob": sha}`; its "Now" snapshot is inline),
 //!   plus the request `settings`, `forced` (`step_cap`/`breaker` when tools were withheld) and the
 //!   response `message` (text, tool calls, reasoning) with OpenRouter's `generationId` for cost.
-//! - `llm_output`: that step's usage and stop reason.
+//! - `llm_output`: that step's token usage, reported cost, and stop reason.
 //! - `tool`: one tool call; `changes` holds the rows it changed and the SQLite changeset with its
 //!   `inverse` (base64), which `gymclaw rewind` applies.
 //! - `run_end`: outcome, reply, `flags` (`failed`, `deadline`, `step_cap`, `breaker`).

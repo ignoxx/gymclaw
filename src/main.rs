@@ -249,8 +249,8 @@ impl ChatModel for Tap {
         let m = &reply.message;
         let u = &reply.usage;
         eprintln!(
-            "--- step ({} ms; tokens in {:?}, cached {:?}, out {:?}, reasoning {:?})",
-            reply.ms, u.input, u.cache_read, u.output, u.reasoning
+            "--- step ({} ms; tokens in {:?}, cached {:?}, out {:?}, reasoning {:?}, cost {:?})",
+            reply.ms, u.input, u.cache_read, u.output, u.reasoning, u.cost
         );
         for key in ["reasoning", "content"] {
             if let Some(text) = m[key].as_str().filter(|t| !t.trim().is_empty()) {
