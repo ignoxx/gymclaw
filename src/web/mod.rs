@@ -72,6 +72,7 @@ pub struct WebAuth {
 
 struct App {
     db_path: PathBuf,
+    data_dir: PathBuf,
     hosts: Vec<String>,
     auth: Option<WebAuth>,
 }
@@ -178,8 +179,8 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
     })
 }
 
-fn authorized(app: &App, headers: &HeaderMap, query: Option<&str>, allow_query: bool) -> bool {
-    let Some(auth) = &app.auth else { return true };
+fn authorized(auth: Option<&WebAuth>, headers: &HeaderMap, query: Option<&str>, allow_query: bool) -> bool {
+    let Some(auth) = auth else { return true };
     if let Some(data) = headers.get("x-telegram-init-data").and_then(|v| v.to_str().ok()) {
         return verify_telegram_init_data(data, auth, Ts::now(), 86_400);
     }
@@ -263,14 +264,25 @@ fn error(status: StatusCode) -> Response {
 }
 
 async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
+    handle_request(app.db_path.clone(), app.data_dir.clone(), &app.hosts, app.auth.as_ref(), request).await
+}
+
+/// Handle one dashboard HTTP request against the given DB and data directory.
+pub async fn handle_request(
+    db_path: PathBuf,
+    data_dir: PathBuf,
+    hosts: &[String],
+    auth: Option<&WebAuth>,
+    request: Request,
+) -> Response {
     let headers = request.headers();
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
     let cross_site = headers.get("sec-fetch-site").is_some_and(|v| v == "cross-site");
-    if !app.hosts.iter().any(|h| h == host) || cross_site {
+    if !hosts.iter().any(|h| h == host) || cross_site {
         return error(StatusCode::FORBIDDEN);
     }
     if request.method() == Method::POST {
-        if !authorized(&app, headers, request.uri().query(), false) {
+        if !authorized(auth, headers, request.uri().query(), false) {
             return error(StatusCode::UNAUTHORIZED);
         }
         let Some(tool) = request
@@ -330,9 +342,8 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         {
             return error(StatusCode::FORBIDDEN);
         }
-        let db_path = app.db_path.clone();
+        let recipient = auth.map(|a| a.owner_id.to_string());
         let result = tokio::task::spawn_blocking(move || {
-            let data_dir = db_path.parent().unwrap_or(Path::new("."));
             crate::db::in_tx(&mut crate::db::open(&db_path)?, |db| {
                 let request_id = format!("dashboard:{}", crate::db::new_id());
                 if tool == "coach" {
@@ -344,8 +355,14 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
                     };
                     return Ok(serde_json::json!({"ack": view.ack}));
                 }
-                let recipient = app.auth.as_ref().map(|a| a.owner_id.to_string());
-                let mut cx = crate::tools::Ctx { db, now: Ts::now(), request_id, data_dir, recipient, effects: vec![] };
+                let mut cx = crate::tools::Ctx {
+                    db,
+                    now: Ts::now(),
+                    request_id,
+                    data_dir: &data_dir,
+                    recipient: recipient.clone(),
+                    effects: vec![],
+                };
                 let result = crate::tools::call(&mut cx, &tool, args.clone())?;
                 if tool == "set_edit" {
                     // The chat saw the old number on the set's card: it gets a note with the fixed one.
@@ -377,7 +394,6 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
     let query = request.uri().query();
     if let Some(token) = path.strip_prefix("/calendar/").and_then(|p| p.strip_suffix(".ics")) {
         let token = token.to_string();
-        let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = crate::db::open_readonly(&db_path)?;
             let Some(expected) = crate::domain::profile::ics_token(&db)? else { return Ok(None) };
@@ -393,12 +409,11 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
             _ => error(StatusCode::SERVICE_UNAVAILABLE),
         };
     }
-    if (path.starts_with("/api/") || path == "/export.csv") && !authorized(&app, headers, query, path == "/export.csv")
+    if (path.starts_with("/api/") || path == "/export.csv") && !authorized(auth, headers, query, path == "/export.csv")
     {
         return error(StatusCode::UNAUTHORIZED);
     }
     if path == "/api/live" {
-        let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = crate::db::open_readonly(&db_path)?;
             let snapshot = state::live_snapshot(&db, Ts::now())?;
@@ -418,7 +433,6 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         };
     }
     if path == "/api/state" {
-        let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = crate::db::open_readonly(&db_path)?;
             let snapshot = state::snapshot(&db, Ts::now())?;
@@ -438,7 +452,6 @@ async fn handle(State(app): State<Arc<App>>, request: Request) -> Response {
         };
     }
     if path == "/export.csv" {
-        let db_path = app.db_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::domain::import::export_csv(&crate::db::open_readonly(&db_path)?)
         })
@@ -490,16 +503,22 @@ fn asset(route: &str, embedded: &[u8]) -> Vec<u8> {
 
 /// Build the dashboard axum `Router` without binding a TCP listener.
 /// Requests whose `Host` header isn't in `hosts` are rejected.
-pub fn router(db_path: PathBuf, hosts: Vec<String>, auth: Option<WebAuth>) -> Router {
-    Router::new().fallback(handle).with_state(Arc::new(App { db_path, hosts, auth }))
+pub fn router(db_path: PathBuf, data_dir: PathBuf, hosts: Vec<String>, auth: Option<WebAuth>) -> Router {
+    Router::new().fallback(handle).with_state(Arc::new(App { db_path, data_dir, hosts, auth }))
 }
 
 /// Serve the dashboard: reads from a read-only connection, `DASHBOARD_TOOLS` writes through a writable one.
 /// Requests whose Host isn't `allowed_host` are rejected.
-pub async fn dashboard(db_path: PathBuf, addr: SocketAddr, allowed_host: String, auth: Option<WebAuth>) -> Result<()> {
+pub async fn dashboard(
+    db_path: PathBuf,
+    data_dir: PathBuf,
+    addr: SocketAddr,
+    allowed_host: String,
+    auth: Option<WebAuth>,
+) -> Result<()> {
     let port = addr.port();
     let hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), allowed_host];
-    let app = router(db_path, hosts, auth);
+    let app = router(db_path, data_dir, hosts, auth);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("gymclaw dashboard: http://{addr}");
     axum::serve(listener, app).await?;
@@ -512,7 +531,8 @@ mod tests {
 
     fn app() -> Arc<App> {
         let (path, _) = crate::db::test::file();
-        Arc::new(App { db_path: path, hosts: vec!["gym.example".into()], auth: None })
+        let data_dir = path.parent().unwrap().to_path_buf();
+        Arc::new(App { db_path: path, data_dir, hosts: vec!["gym.example".into()], auth: None })
     }
 
     async fn post(app: &Arc<App>, path: &str, body: &str, site: &str) -> Response {
@@ -660,7 +680,13 @@ mod tests {
         session.insert(&db).unwrap();
 
         let auth = WebAuth { bot_token: "123:secret".into(), owner_id: 42 };
-        let app = Arc::new(App { db_path: path.clone(), hosts: vec!["gym.example".into()], auth: Some(auth) });
+        let data_dir = path.parent().unwrap().to_path_buf();
+        let app = Arc::new(App {
+            db_path: path.clone(),
+            data_dir: data_dir.clone(),
+            hosts: vec!["gym.example".into()],
+            auth: Some(auth),
+        });
         // Without initData, /api/state is 401.
         assert_eq!(get(&app, Method::GET, "/api/state", "gym.example").await.status(), StatusCode::UNAUTHORIZED);
         // With valid initData for owner 42, /api/state is 200.
@@ -686,6 +712,7 @@ mod tests {
         // Loopback Host header cannot bypass auth when WebAuth is configured.
         let app_lb = Arc::new(App {
             db_path: path.clone(),
+            data_dir,
             hosts: vec!["127.0.0.1:8766".into(), "gym.example".into()],
             auth: Some(WebAuth { bot_token: "123:secret".into(), owner_id: 42 }),
         });
@@ -751,5 +778,20 @@ mod tests {
             StatusCode::OK
         );
         let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn handle_request_serves_without_router_and_takes_explicit_data_dir() {
+        let (db_path, _) = crate::db::test::file();
+        let data_dir = std::env::temp_dir().join(format!("gymclaw-datadir-{}", crate::db::new_id()));
+        let hosts = vec!["gym.example".to_string()];
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/state")
+            .header(header::HOST, "gym.example")
+            .body(Body::empty())
+            .unwrap();
+        let response = handle_request(db_path, data_dir, &hosts, None, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
