@@ -41,6 +41,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/015_hot_query_indexes.sql"),
 ];
 
+/// Schema `PRAGMA user_version` this binary expects after `migrate()`.
+pub fn expected_version() -> i64 {
+    MIGRATIONS.len() as i64
+}
+
 /// Read-write connection. WAL lets readers (the dashboard, a sync waiting on Google) run alongside a
 /// writer, and transactions take the write lock when they begin: a read-then-write transaction that
 /// races another writer would otherwise fail at once with "database is locked" instead of waiting out
