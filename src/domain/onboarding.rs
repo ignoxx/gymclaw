@@ -184,7 +184,7 @@ fn step_and_instruction(
              in parallel with each movement's English name (translate other languages: Brustpresse → chest press machine, \
              Latzug → lat pulldown, Beinstrecker → leg extension) and set guide_id to the matching slug; standard English \
              names match automatically on save, so skip searching those. Every exercise must have a catalog guide_id (no exercises without pictures); keep the owner's name in name. \
-             Skip quizzing about unmatched exercise pictures during setup. Photos are gone from later turns, so if you \
+             Photos are gone from later turns, so if you \
              must ask before saving, list the exact workouts and exercises you read in the reply.",
         );
     }

@@ -367,15 +367,24 @@ impl Tool for TemplateImport {
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let mut template = self.template;
+        let raw_bad: Vec<(String, String)> = template
+            .exercises
+            .iter()
+            .chain(&template.alternatives)
+            .filter_map(|s| s.guide_id.as_deref().map(|g| (s.id.clone(), g.to_string())))
+            .collect();
         crate::domain::templates::resolve_pictures(&mut template);
-        let missing = crate::domain::templates::unpictured(&template);
+        template.validate()?;
+        let bad_refs: Vec<(&str, &str)> = raw_bad.iter().map(|(id, g)| (id.as_str(), g.as_str())).collect();
+        let missing = crate::domain::templates::unpictured(&template, &bad_refs);
         if !missing.is_empty() {
             crate::bail!(
                 "EXERCISE_PICTURE_REQUIRED",
                 "Every exercise needs a catalog guide_id so it has a picture. Unmatched: {}. \
                  Run catalog_search with the English movement name (translate non-English names, e.g. \
-                 Brustpresse -> chest press machine, Latzug -> lat pulldown) to pick the closest catalog \
-                 guide_id (keep the owner's wording in name), then re-run template (action import).",
+                 Brustpresse -> chest press machine, Latzug -> lat pulldown); if no movement matches, \
+                 call catalog_search with muscle (empty query) and pick the nearest. Reuse its guide_id \
+                 under the owner's id and name, then re-run template (action import).",
                 missing.join("; ")
             );
         }
@@ -438,8 +447,8 @@ impl Tool for TemplateEditExercise {
 #[derive(Deserialize, JsonSchema)]
 pub struct TemplateAddExercise {
     pub template_id: String,
-    /// Catalog guide_id or exact catalog name (see catalog_search). With no catalog match, a fields.id
-    /// and fields.muscle (a catalog muscle) keep it as the owner's own exercise, without a picture.
+    /// Catalog guide_id or exact catalog name (see catalog_search). Every exercise needs a catalog picture;
+    /// for a custom name or machine variant, pass the closest catalog guide_id here and set fields.id and fields.name.
     pub exercise: String,
     /// Fields overriding the defaults, e.g. {"working_sets":3,"rep_min":10,"rep_max":12,"target_weight":20}.
     /// A variant of an exercise already in the plan needs its own "id", "name" and, when known,

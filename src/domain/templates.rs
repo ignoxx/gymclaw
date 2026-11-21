@@ -156,8 +156,7 @@ pub struct ExerciseSpec {
     pub role: String,
     #[serde(default)]
     pub guide_id: Option<String>,
-    /// The muscle it trains when there's no guide_id (with one, the catalog's muscle counts): a
-    /// catalog muscle, set by the agent, so weekly sets per muscle and swaps don't guess from the name.
+    /// Optional catalog muscle (when guide_id is set, the catalog's muscle is authoritative).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muscle: Option<String>,
     #[serde(default)]
@@ -396,28 +395,6 @@ impl Template {
     }
 }
 
-/// Warning for exercises saved without a guide_id, with their closest catalog matches. They are
-/// allowed: the card shows the closest picture meanwhile and the exercise is on the missing-pictures
-/// list. The agent asks the owner once whether one of the matches is what they meant.
-pub fn missing_pictures(template: &Template) -> Option<String> {
-    let missing: Vec<String> = template
-        .exercises
-        .iter()
-        .chain(&template.alternatives)
-        .filter(|s| s.guide_id.is_none() && s.muscle.is_none())
-        .map(|s| {
-            let options = suggestions(&s.name);
-            format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
-        })
-        .collect();
-    (!missing.is_empty()).then(|| {
-        format!(
-            "Saved without a picture of their own: {}. Unless the owner already chose their own name, ask once with buttons: the closest matches plus \"keep my name\"; for a match set guide_id with template (action edit_exercise) (keep id and name); otherwise set its muscle.",
-            missing.join("; ")
-        )
-    })
-}
-
 /// Normalize common informal muscle names (e.g. "Abs" -> "Core", "Pecs" -> "Chest") to catalog
 /// muscles; drop unknown ones so an import never fails over a synonym.
 fn normalize_muscle(spec: &mut ExerciseSpec) {
@@ -459,7 +436,8 @@ pub fn resolve_pictures(template: &mut Template) {
 }
 
 /// Exercises in `template` that still have no valid catalog `guide_id` picture after `resolve_pictures`.
-pub fn unpictured(template: &Template) -> Vec<String> {
+/// Pass `rejected` (raw guide_ids that weren't in the catalog before resolution) so the error names bad slugs.
+pub fn unpictured(template: &Template, rejected: &[(&str, &str)]) -> Vec<String> {
     template
         .exercises
         .iter()
@@ -467,7 +445,12 @@ pub fn unpictured(template: &Template) -> Vec<String> {
         .filter(|s| !s.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g)))
         .map(|s| {
             let options = suggestions(&s.name);
-            format!("{} (closest: {})", s.name, if options.is_empty() { "none".into() } else { options.join(", ") })
+            let closest = if options.is_empty() { "none".into() } else { options.join(", ") };
+            let bad = rejected.iter().find(|(id, _)| *id == s.id).map(|(_, g)| *g);
+            match bad {
+                Some(g) => format!("{} (guide_id '{g}' not in catalog; closest: {closest})", s.name),
+                None => format!("{} (closest: {closest})", s.name),
+            }
         })
         .collect()
 }
@@ -629,6 +612,7 @@ pub fn edit_exercise(
         crate::bail!("EXERCISE_NOT_FOUND", "'{exercise}' isn't in {name} ({})", names.join(", "))
     };
     let rows = definition[list].as_array_mut().expect("exercise list");
+    let mut touched_id: Option<(String, Option<String>)> = None;
     match edit {
         ExerciseEdit::Add(changes) => {
             let mut spec = match lookup(exercise) {
@@ -644,14 +628,9 @@ pub fn edit_exercise(
                     }
                     spec
                 }
-                // The owner's own exercise, kept under their name without a picture (#101); the agent
-                // names its muscle, since nothing else knows it.
-                None if changes.contains_key("id") && changes.contains_key("muscle") => {
-                    serde_json::json!({"name": exercise.trim(), "role": "accessory", "target_weight": 0})
-                }
                 None => crate::bail!(
                     "EXERCISE_UNKNOWN",
-                    "{}; or, to keep the owner's name without a picture, pass fields.id and fields.muscle",
+                    "{}; every exercise needs a catalog guide_id picture—pick the closest catalog exercise (or catalog_search by muscle) and pass fields.id and fields.name for a custom name",
                     unknown(exercise)
                 ),
             };
@@ -669,6 +648,9 @@ pub fn edit_exercise(
                     "{existing} is already in {name}; edit it, or add a variant with its own id and name in fields"
                 );
             }
+            let raw_guide = spec.get("guide_id").and_then(Value::as_str).map(String::from);
+            let id = spec["id"].as_str().unwrap_or_default().to_string();
+            touched_id = Some((id, raw_guide));
             let at = position.unwrap_or(rows.len()).min(rows.len());
             rows.insert(at, spec);
         }
@@ -694,6 +676,8 @@ pub fn edit_exercise(
                 }
             }
             let id = rows[i]["id"].as_str().unwrap_or_default().to_string();
+            let raw_guide = rows[i].get("guide_id").and_then(Value::as_str).map(String::from);
+            touched_id = Some((id.clone(), raw_guide));
             if let Some(at) = position {
                 let row = rows.remove(i);
                 rows.insert(at.min(rows.len()), row);
@@ -706,8 +690,24 @@ pub fn edit_exercise(
             }
         }
     }
-    let template: Template =
+    let mut template: Template =
         serde_json::from_value(definition).map_err(|e| Error::domain("INVALID_TEMPLATE", e.to_string()))?;
+    resolve_pictures(&mut template);
+    if let Some((ref id, ref raw_guide)) = touched_id
+        && let Some(spec) = template.exercises.iter().chain(&template.alternatives).find(|e| e.id == *id)
+        && !spec.guide_id.as_deref().is_some_and(|g| catalog().contains_key(g))
+    {
+        let bad = raw_guide
+            .as_deref()
+            .filter(|g| !catalog().contains_key(*g))
+            .map(|g| format!(" (guide_id '{g}' not in catalog)"))
+            .unwrap_or_default();
+        crate::bail!(
+            "EXERCISE_PICTURE_REQUIRED",
+            "Every exercise needs a catalog guide_id picture: {}{bad}. Use catalog_search (by English movement name, or by muscle with empty query) and set guide_id to the closest catalog slug.",
+            spec.name
+        );
+    }
     import_template(db, &template)
 }
 
@@ -792,8 +792,9 @@ mod tests {
             [Some("leg-press"), Some("lat-pulldown"), Some("hack-squat"), None, Some("leg-extension")]
         );
         assert_eq!(get_template(&db, "legs").unwrap(), saved);
-        let mp = missing_pictures(&saved).unwrap();
-        assert!(mp.contains("Grandma's Glute Thing") && !mp.contains("Leg Extension"));
+        let missing = unpictured(&saved, &[]);
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("Grandma's Glute Thing"));
         // Informal muscle aliases ("Abs") normalize to catalog muscles instead of failing import.
         let abs_tpl: Template = serde_json::from_value(json!({"id": "core", "name": "Core", "exercises": [
             exercise("Ab Machine", json!({"muscle": "Abs"})),
@@ -801,7 +802,6 @@ mod tests {
         .unwrap();
         let saved_abs: Template = serde_json::from_value(import_template(&db, &abs_tpl).unwrap()).unwrap();
         assert_eq!(saved_abs.exercises[0].muscle.as_deref(), Some("Core"));
-        assert!(missing_pictures(&saved_abs).is_none());
     }
 
     #[test]
@@ -854,21 +854,23 @@ mod tests {
             (named["exercises"][0]["target_weight"].as_f64(), named["exercises"][5]["target_weight"].as_f64()),
             (Some(85.0), Some(60.0))
         );
-        // No catalog match: an error with the closest matches, or the owner's name kept without a picture.
+        // No catalog match: rejected even with fields.id + fields.muscle; custom names reuse a catalog guide_id.
         let unknown = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&Map::new()), None).unwrap_err();
         assert_eq!(unknown.code(), "EXERCISE_UNKNOWN");
-        let unnamed = object(json!({"id": "zottman"}));
-        let unnamed = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&unnamed), None).unwrap_err();
-        assert!(unnamed.to_string().contains("fields.muscle"), "{unnamed}");
-        let wrong = object(json!({"id": "zottman", "muscle": "Forearm-ish"}));
-        assert!(edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&wrong), None).is_err());
         let own = object(json!({"id": "zottman", "muscle": "Biceps"}));
-        let kept = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&own), None).unwrap();
+        let rejected = edit_exercise(&db, "upper-a", "Zottman curl", ExerciseEdit::Add(&own), None).unwrap_err();
+        assert_eq!(rejected.code(), "EXERCISE_UNKNOWN");
+        let custom = object(json!({"id": "zottman", "name": "Zottman curl"}));
+        let kept = edit_exercise(&db, "upper-a", "bicep-curl", ExerciseEdit::Add(&custom), None).unwrap();
         let zottman = kept["exercises"].as_array().unwrap().last().unwrap();
         assert_eq!(
-            (zottman["name"].as_str(), zottman.get("guide_id"), zottman["muscle"].as_str()),
-            (Some("Zottman curl"), Some(&Value::Null), Some("Biceps"))
+            (zottman["name"].as_str(), zottman["guide_id"].as_str()),
+            (Some("Zottman curl"), Some("bicep-curl"))
         );
+        // Clearing guide_id on a non-catalog exercise name is rejected.
+        let clear = object(json!({"guide_id": null}));
+        let err = edit_exercise(&db, "upper-a", "zottman", ExerciseEdit::Change(&clear), None).unwrap_err();
+        assert_eq!(err.code(), "EXERCISE_PICTURE_REQUIRED");
         edit_exercise(&db, "upper-a", "zottman", ExerciseEdit::Remove, None).unwrap();
         let removed = edit_exercise(&db, "upper-a", "Pec Deck", ExerciseEdit::Remove, None).unwrap();
         assert!(!ids(&removed).contains(&"pec-deck".to_string()));

@@ -83,7 +83,7 @@ pub fn primary_muscle(guide_id: Option<&str>) -> Option<String> {
     guide_id.and_then(|g| catalog().get(g)).map(|i| i.primary_muscle.clone())
 }
 
-/// Every catalog muscle: what an exercise without a picture may name as its `muscle`.
+/// Every catalog primary muscle name.
 pub fn muscles() -> BTreeSet<&'static str> {
     catalog().values().map(|i| i.primary_muscle.as_str()).collect()
 }
