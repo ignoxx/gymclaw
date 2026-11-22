@@ -906,7 +906,7 @@ impl Bot {
         let last = batch.last().expect("non-empty batch").clone();
         let images = batch.iter().flat_map(|b| b.images.clone()).collect();
         let background = batch.iter().all(|b| b.background);
-        let in_setup = !background && !self.setup_finished().await;
+        let in_setup = !self.setup_finished().await;
         // Background turns (reflection, event wakes) often stay silent: don't show phantom "typing...".
         let typing = (!background).then(|| {
             let tg = self.tg.clone();

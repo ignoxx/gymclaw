@@ -343,7 +343,8 @@ pub fn draft_first_week(db: &Connection, template_id: &str, now: Ts) -> Result<V
 /// Next week is planned only by the Sunday run (`weekly_plan`); if that run never happened, the
 /// current week is drafted here once it starts. That draft is unrequested, so it starts tomorrow: drafted
 /// right after setup, it put a workout an hour out and sent "Gym soon" a minute later (2026-11-21).
-/// Today's session is the agent's to place when the owner asks for one.
+/// Today's session is the agent's to place when the owner asks for one. Trade-off: if the Sunday run
+/// was missed (bot down at 23:00), Monday's catch-up draft starts Tuesday and the week may fall short.
 pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     get_template(db, template_id)?; // Fails fast on an unknown template.
     let tz = get_profile(db)?.tz();

@@ -186,7 +186,7 @@ fn step_and_instruction(
              Latzug → lat pulldown, Beinstrecker → leg extension) and set guide_id to the matching slug; standard English \
              names match automatically on save, so skip searching those. Every exercise must have a catalog guide_id (no exercises without pictures); \
              set name to the matched catalog exercise's English name, so names stay consistent with the pictures \
-             (keep the owner's own name only if they ask for it). \
+             (keep the owner's own name only if they ask for it or to tell two variants of one movement apart). \
              Photos are gone from later turns, so if you \
              must ask before saving, list the exact workouts and exercises you read in the reply.",
         );
