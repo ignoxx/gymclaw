@@ -8,7 +8,7 @@
 //! - Voice notes are transcribed, then routed exactly like typed text.
 //! - Reactions on the bot's messages are outcome labels in the turn log; nothing else happens.
 //! - Coach steps taken in the Mini App (`coach::APP_VIEW` events) are shown in the chat like taps.
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,12 @@ const ACK: &str = "👀";
 /// Longest quote of a replied-to message the agent gets (chars); finish cards are long.
 const QUOTED_CHARS: usize = 1500;
 const SESSION: &str = "telegram:owner";
+/// Sent by the bot right before the reply of the turn that finishes setup; the agent's reply then
+/// only proposes the first session (`onboarding::step_and_instruction`).
+const WELCOME: &str = "**What you can do now**\n\
+    • **Just talk to me**, by text or voice note: move sessions, swap exercises, change anything. I remember your preferences and adapt.\n\
+    • **Gym** button (bottom-left): your plan, progress charts, live workout tracker and calendar export.\n\
+    • **At the gym:** tap the card buttons or type sets (`10x80`). Send a scale photo or a Strong/Hevy CSV anytime; `/help` for the rest.";
 /// How often the chat picks up coach steps taken in the Mini App; a log there shows here within this.
 const APP_POLL: Duration = Duration::from_millis(700);
 /// A Mini App step older than this when the bot gets to it (it was down) only updates the DB: its cards
@@ -126,6 +132,8 @@ pub struct Bot {
     /// While an album is still arriving, the agent waits until then (`ALBUM_WAIT` after its latest photo).
     album_until: std::sync::Mutex<Option<tokio::time::Instant>>,
     album_inflight: AtomicUsize,
+    /// Setup is known to be finished; it never un-finishes, so later turns skip the DB check.
+    setup_done: AtomicBool,
     album_change: Notify,
     app_wake: Notify,
     fast: mpsc::UnboundedSender<Fast>,
@@ -162,6 +170,7 @@ impl Bot {
             inbox_ready: Notify::new(),
             album_until: std::sync::Mutex::new(None),
             album_inflight: AtomicUsize::new(0),
+            setup_done: AtomicBool::new(false),
             album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
@@ -892,11 +901,12 @@ impl Bot {
 
     /// One agent turn and its reply. `review`: the batch holds the weekly review, so the Sunday recap
     /// goes out between the turn and its reply, showing the plan as the turn left it, whether or not
-    /// the turn succeeded.
+    /// the turn succeeded. The turn that finishes setup gets the welcome tips there the same way.
     async fn turn(&self, batch: Vec<Inbound>, review: bool) -> bool {
         let last = batch.last().expect("non-empty batch").clone();
         let images = batch.iter().flat_map(|b| b.images.clone()).collect();
         let background = batch.iter().all(|b| b.background);
+        let in_setup = !self.setup_finished().await;
         // Background turns (reflection, event wakes) often stay silent: don't show phantom "typing...".
         let typing = (!background).then(|| {
             let tg = self.tg.clone();
@@ -914,6 +924,9 @@ impl Bot {
         }
         if review {
             self.send_recap().await;
+        }
+        if in_setup && self.setup_finished().await {
+            self.send_bot(WELCOME, "welcome").await;
         }
         // The owner wrote while a background turn ran: their turn speaks instead, and sees the same
         // events as open issues. Nothing is settled, so the batch retries if they stay open.
@@ -940,6 +953,18 @@ impl Bot {
             .is_ok();
         self.wake.notify_one();
         settled
+    }
+
+    /// Whether onboarding is done; a read error counts as done so it never triggers the welcome.
+    async fn setup_finished(&self) -> bool {
+        if self.setup_done.load(Ordering::Relaxed) {
+            return true;
+        }
+        let done = blocking(self.db(), |db| crate::domain::onboarding::finished(db)).await;
+        if let Ok(true) = done {
+            self.setup_done.store(true, Ordering::Relaxed);
+        }
+        done.unwrap_or(true)
     }
 
     /// Queue and send this week's recap (`weekly::release_recap`). A failed send stays in the outbox.
@@ -1183,6 +1208,7 @@ mod tests {
             inbox_ready: Notify::new(),
             album_until: std::sync::Mutex::new(None),
             album_inflight: AtomicUsize::new(0),
+            setup_done: AtomicBool::new(false),
             album_change: Notify::new(),
             app_wake: Notify::new(),
             fast,
@@ -1319,6 +1345,51 @@ mod tests {
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert!(sent[0].starts_with("📅") && sent[1] == "Which one drops?", "{sent:?}");
         assert!(crate::domain::events::wake_pending(&db).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Finishes setup mid-turn (as `onboarding_finish` would), then replies.
+    struct Finisher(std::sync::OnceLock<std::path::PathBuf>);
+
+    #[async_trait::async_trait]
+    impl crate::agent::ChatModel for Finisher {
+        async fn complete(&self, _: &str, _: &[Value], _: &[Value], _: bool) -> Result<crate::agent::ModelReply> {
+            crate::db::open(self.0.get().expect("db path set"))?.execute(
+                "INSERT OR REPLACE INTO onboarding_state (id, completed_fingerprint, interview_json, split_json) VALUES (1, 'x', '{}', '[]')",
+                [],
+            )?;
+            Ok(crate::agent::ModelReply {
+                message: json!({"content": "First one Mon 9:00, works?"}),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// 2026-11-22: the wrap-up was left to the model, which skipped the tips. The bot sends them
+    /// between the finishing turn and its reply, once; later turns get none.
+    #[tokio::test]
+    async fn finishing_setup_sends_tips_before_the_reply() {
+        let model = Arc::new(Finisher(std::sync::OnceLock::new()));
+        let (bot, db, dir, tg) = fixture(model.clone());
+        model.0.set(dir.join("gymclaw.db")).unwrap();
+        let texts = || -> Vec<String> {
+            tg.calls()
+                .into_iter()
+                .filter_map(|c| match c {
+                    crate::telegram::coach::tests::Call::Send(text, _) => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        bot.to_agent(Some(7), "tg-7".into(), "looks good".into(), vec![], json!({})).await;
+        let batch = std::mem::take(&mut *bot.inbox.lock().await);
+        bot.turn(batch, false).await;
+        assert_eq!(texts(), [WELCOME, "First one Mon 9:00, works?"]);
+        bot.to_agent(Some(8), "tg-8".into(), "thanks".into(), vec![], json!({})).await;
+        let batch = std::mem::take(&mut *bot.inbox.lock().await);
+        bot.turn(batch, false).await;
+        assert_eq!(texts().iter().filter(|t| *t == WELCOME).count(), 1);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

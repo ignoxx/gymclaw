@@ -352,10 +352,11 @@ impl Tool for TemplateGet {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct TemplateImport {
-    /// The whole plan, exercise names as the owner wrote them. guide_id: the catalog picture; omit it for a
-    /// name that is a catalog exercise (also as Strong/Hevy write it, "Bench Press (Barbell)"): it's matched on save.
-    /// For other names, including other languages and other apps' names, catalog_search the English movement
-    /// ("Latzug" → "lat pulldown") and set guide_id to the match, keeping their name. Every exercise must have
+    /// The whole plan. guide_id: the catalog picture; omit it for a name that is a catalog exercise (also as
+    /// Strong/Hevy write it, "Bench Press (Barbell)"): it's matched on save. For other names, including other
+    /// languages and other apps' names, catalog_search the English movement ("Latzug" → "lat pulldown") and
+    /// set guide_id to the match. name: the matched catalog exercise's name; keep the owner's own name only
+    /// when they ask for it or to tell two variants of one movement apart. Every exercise must have
     /// a valid catalog guide_id (no exercises without pictures). The first primary exercise needs warmup_weight.
     pub template: Template,
 }
@@ -383,8 +384,8 @@ impl Tool for TemplateImport {
                 "Every exercise needs a catalog guide_id so it has a picture. Unmatched: {}. \
                  Run catalog_search with the English movement name (translate non-English names, e.g. \
                  Brustpresse -> chest press machine, Latzug -> lat pulldown); if no movement matches, \
-                 call catalog_search with muscle (empty query) and pick the nearest. Reuse its guide_id \
-                 under the owner's id and name, then re-run template (action import).",
+                 call catalog_search with muscle (empty query) and pick the nearest. Set guide_id to it \
+                 (and name to its catalog name), then re-run template (action import).",
                 missing.join("; ")
             );
         }
