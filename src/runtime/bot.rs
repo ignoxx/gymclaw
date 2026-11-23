@@ -647,11 +647,19 @@ impl Bot {
     }
 
     async fn tap(&self, q: CallbackQuery) {
-        let _ = self.tg.answer_callback(&q.id, None).await;
         let started = Instant::now();
         let data = q.data.clone().unwrap_or_default();
         let action = data.split(':').nth(1).unwrap_or("").to_string();
         let message_id = q.message.as_ref().map(|m| m.message_id);
+        if let Some(id) = message_id
+            && self.coach.consumed(id).await
+        {
+            let _ = self.tg.answer_callback(&q.id, Some("Already done.")).await;
+            self.log.log(json!({"ev": "fast", "flow": "tap", "action": action, "msg": message_id,
+                "dup": true, "ok": true, "ms": started.elapsed().as_millis() as u64}));
+            return;
+        }
+        let _ = self.tg.answer_callback(&q.id, None).await;
         let request_id = format!("tg-cb:{}", q.id);
         let result = in_tx(self.db(), move |db| coach::handle_tap(db, &data, Ts::now(), &request_id)).await;
         let cli_ms = started.elapsed().as_millis() as u64;
@@ -1710,6 +1718,87 @@ mod tests {
             })
             .unwrap();
         assert_eq!(grid, [2, 2]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn double_tap_ignores_retired_buttons_but_allows_repeated_rest_cuts() {
+        use crate::db::models::{PlannedSession, SessionStatus, SetLog};
+        use crate::domain::templates::{Template, import_template};
+        use crate::domain::workout::tests::spec;
+        use crate::telegram::coach::tests::Call;
+
+        let model = Arc::new(EventModel(std::sync::atomic::AtomicUsize::new(0)));
+        let (bot, db, dir, tg) = fixture(model);
+        let template = Template {
+            id: "pull".into(),
+            name: "Pull".into(),
+            exercises: vec![spec(
+                json!({"id": "row", "name": "Seated cable row", "role": "pull", "primary": false, "working_sets": 2, "target_weight": 80, "rest_seconds": 90}),
+            )],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(&db, &template).unwrap();
+        let now = Ts::now();
+        let plan = PlannedSession {
+            planned_start_at: now,
+            planned_end_at: now.mins(60),
+            prep_start_at: now.mins(-30),
+            leave_home_at: now.mins(-15),
+            status: SessionStatus::Committed,
+            ..PlannedSession::new("2026-W47".into(), Some("pull".into()), false)
+        };
+        plan.insert(&db).unwrap();
+
+        let cb = |id: &str, msg: i64, data: String, text: &str| -> CallbackQuery {
+            serde_json::from_value(json!({
+                "id": id,
+                "from": {"id": 42},
+                "data": data,
+                "message": {"message_id": msg, "from": {"id": 1}, "chat": {"id": 42, "type": "private"}, "text": text}
+            }))
+            .unwrap()
+        };
+
+        // 1. Double-tap Start on reminder msg 50 → only one card sent.
+        let begin_data = coach::begin_data(&plan.id);
+        bot.tap(cb("c1", 50, begin_data.clone(), "⏰ Pull planned")).await;
+        bot.tap(cb("c2", 50, begin_data, "⏰ Pull planned")).await;
+        let sends = || tg.calls().into_iter().filter(|c| matches!(c, Call::Send(..))).count();
+        assert_eq!(sends(), 1, "second Start tap must not send a duplicate card");
+
+        // 2. Double-tap ✅ set on live card msg 100 → only one set_log row.
+        let log_data = tg
+            .calls()
+            .into_iter()
+            .find_map(|c| match c {
+                Call::Send(_, kb) => kb.into_iter().flatten().find(|b| b.data.starts_with("gc:log:")).map(|b| b.data),
+                _ => None,
+            })
+            .expect("log button on set card");
+        bot.tap(cb("c3", 100, log_data.clone(), "Seated cable row")).await;
+        bot.tap(cb("c4", 100, log_data, "Seated cable row")).await;
+        let sets: i64 = db.query_row("SELECT count(*) FROM set_log", [], |r| r.get(0)).unwrap();
+        assert_eq!(sets, 1, "second set tap must not double-log");
+
+        // 3. Double-tap -30s on rest card msg 101 → both cuts apply.
+        let cut_data = tg
+            .calls()
+            .into_iter()
+            .rev()
+            .find_map(|c| match c {
+                Call::Send(_, kb) => kb.into_iter().flatten().find(|b| b.data.starts_with("gc:cut:")).map(|b| b.data),
+                _ => None,
+            })
+            .expect("cut button on rest card");
+        let before_due = SetLog::first(&db, "ORDER BY logged_at DESC", []).unwrap().unwrap().rest_due_at.unwrap();
+        bot.tap(cb("c5", 101, cut_data.clone(), "Rest")).await;
+        bot.tap(cb("c6", 101, cut_data, "Rest")).await;
+        let after_due = SetLog::first(&db, "ORDER BY logged_at DESC", []).unwrap().unwrap().rest_due_at.unwrap();
+        assert!((before_due - after_due).as_secs() >= 55, "both -30s cuts should apply: {before_due} -> {after_due}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
