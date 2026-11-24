@@ -1,6 +1,6 @@
-//! Double progression: complete the prescribed volume at the target weight, or hold. A heavier weight the
-//! owner managed (reps within `REP_SLACK` of the range's bottom) becomes the new baseline, so the next
-//! first set offers what they ended on, not the ramp-up set before it.
+//! Double progression: complete the prescribed volume at the target weight, or hold. The heaviest
+//! weight the owner managed across a complete outing (reps within `REP_SLACK` of the range's bottom)
+//! becomes the new baseline, whether heavier (ramp-up) or lighter (deload / switch to bodyweight).
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug)]
@@ -38,16 +38,22 @@ pub fn double_progression(
 ) -> ProgressionDecision {
     // An extra set is still the prescribed volume done.
     let complete = performance.len() >= required_sets;
+    let target = milli(target_weight);
     let managed = performance.iter().filter(|s| s.reps >= rep_min - REP_SLACK).map(|s| milli(s.weight)).max();
-    let base = managed.filter(|&m| complete && m > milli(target_weight)).unwrap_or(milli(target_weight));
-    let achieved = complete && performance.iter().all(|s| milli(s.weight) >= base && s.reps >= rep_max);
+    let base = managed.filter(|_| complete).unwrap_or(target);
+    let stepped_down = complete && base < target;
+    // Stepping down (deload or switching to bodyweight) holds at the new weight instead of bumping right back up.
+    let achieved =
+        complete && !stepped_down && performance.iter().all(|s| milli(s.weight) >= base && s.reps >= rep_max);
     let next_weight = (if achieved { base + milli(increment) } else { base }) as f64 / 10_000.0;
     let reason = if achieved {
         "threshold_achieved"
     } else if !complete {
         "incomplete_volume"
-    } else if base > milli(target_weight) {
+    } else if base > target {
         "hold_heavier_than_target"
+    } else if stepped_down {
+        "follow_lighter"
     } else {
         "hold_target_not_met"
     };
@@ -102,5 +108,30 @@ mod tests {
     #[test]
     fn decimal_increment() {
         assert_eq!(run(0.2, 10, 1, 0.1, &[(0.2, 10)]).next_weight, 0.3);
+    }
+
+    #[test]
+    fn lighter_or_bodyweight_complete_session_steps_target_down() {
+        // 2026-11-23: back extension stuck at 40 kg for weeks after dropping to 10 kg and bodyweight.
+        let lighter = run(40.0, 12, 2, 2.5, &[(10.0, 10), (10.0, 10)]);
+        assert_eq!(lighter.next_weight, 10.0);
+        assert_eq!(lighter.reason, "follow_lighter");
+        assert!(!lighter.progressed);
+
+        // One backed-off set does not drop the target.
+        let mixed = run(40.0, 12, 2, 2.5, &[(40.0, 10), (30.0, 10)]);
+        assert_eq!(mixed.next_weight, 40.0);
+        assert_eq!(mixed.reason, "hold_target_not_met");
+
+        // Switching from weighted to bodyweight at rep_max holds at 0 kg (doesn't auto-add 2.5 kg).
+        let bw = run(40.0, 12, 2, 2.5, &[(0.0, 12), (0.0, 12)]);
+        assert_eq!(bw.next_weight, 0.0);
+        assert_eq!(bw.reason, "follow_lighter");
+        assert!(!bw.progressed);
+
+        // Incomplete volume still holds.
+        let partial = run(40.0, 12, 2, 2.5, &[(10.0, 10)]);
+        assert_eq!(partial.next_weight, 40.0);
+        assert_eq!(partial.reason, "incomplete_volume");
     }
 }

@@ -61,8 +61,9 @@ pub enum WorkoutAction {
     Swap,
     /// `exercise`: the owner is doing this now (any exercise, any time); finishes or replaces the current one.
     Switch,
-    /// `exercise`: what the owner really did; `which` (default the latest), `workout_id`: see below.
-    /// Moves that workout's sets and next weight. "I always did X": once per past workout.
+    /// `exercise`: what the owner is or was really doing (the current exercise, logged or not, or a logged one);
+    /// `which` (default current/latest), `workout_id`: see below. Moves sets and next weight.
+    /// "I always did X": once per past workout.
     Relabel,
     /// `seconds` between sets for this workout; `remember` also makes it the default.
     Rest,
@@ -88,7 +89,7 @@ pub struct Workout {
     pub planned_session_id: Option<String>,
     /// switch/relabel: guide_id or exact exercise name.
     pub exercise: Option<String>,
-    /// relabel: the logged exercise to correct; log: the exercise the set is for.
+    /// relabel: the exercise to correct (logged or current); log: the exercise the set is for.
     pub which: Option<String>,
     /// log: the owner says this set was the warm-up.
     #[serde(default)]
@@ -270,8 +271,14 @@ impl Tool for WorkoutAudit {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetEdit {
-    /// set_log.id
-    pub set_id: String,
+    /// set_log.id (optional if `which` + `set` are given).
+    pub set_id: Option<String>,
+    /// Exercise name or guide_id, when naming the set by number instead of `set_id`.
+    pub which: Option<String>,
+    /// 1-based working set number for `which` (e.g. 1 for set 1).
+    pub set: Option<usize>,
+    /// Past workout (workout_session.id); default the running or latest one.
+    pub workout_id: Option<String>,
     pub weight: Option<f64>,
     pub reps: Option<i64>,
     pub minutes: Option<f64>,
@@ -288,11 +295,46 @@ pub struct SetEdit {
 impl Tool for SetEdit {
     const NAME: &'static str = "set_edit";
     const DESCRIPTION: &'static str = "Fix any logged set when the owner says it was logged wrong, during or long after the workout: \
-        its weight, reps, minutes or meters, warm-up or working, which exercise it was for, or delete it. Find the set with \
-        sql_query on set_log (or the set_ids of a card the owner replied to). Renumbers the sets left, recomputes next \
-        weights the workout set, and updates a finished workout's summary card in the chat. The live coach stays where it is.";
+        its weight, reps, minutes or meters, warm-up or working, which exercise it was for, or delete it. Name it by \
+        which + set (1-based working set number, e.g. which=\"Dumbbell curl\", set=1) or a set_id from a replied card. \
+        Renumbers the sets left, recomputes next weights the workout set, and updates a finished workout's summary card in the chat. \
+        The live coach stays where it is.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
+        let set_id = match (
+            self.set_id.as_deref().filter(|s| !s.is_empty()),
+            self.which.as_deref().filter(|s| !s.is_empty()),
+            self.set,
+        ) {
+            (Some(id), _, _) => id.to_string(),
+            (None, Some(which), Some(n)) if n >= 1 => {
+                let workout = match self.workout_id.as_deref() {
+                    Some(id) => crate::db::models::WorkoutSession::get(cx.db, id)?,
+                    None => match workout::active_workout(cx.db)? {
+                        Some(w) => Some(w),
+                        None => crate::db::models::WorkoutSession::first(cx.db, "ORDER BY started_at DESC", [])?,
+                    },
+                };
+                let Some(workout) = workout else {
+                    crate::bail!("NO_WORKOUT", "No workout found to edit a set in");
+                };
+                let ex = audit::find_exercise(cx.db, &workout.id, which)?;
+                let working = workout::logs(cx.db, &ex.id, Some(SetType::Working))?;
+                let Some(target) = working.get(n - 1) else {
+                    crate::bail!(
+                        "SET_NOT_FOUND",
+                        "Set {n} not found on {} ({} working sets logged)",
+                        workout::name(&ex),
+                        working.len()
+                    );
+                };
+                target.id.clone()
+            }
+            _ => crate::bail!(
+                "ARGUMENT_REQUIRED",
+                "set_edit needs set_id, or which + set (1-based working set number, e.g. which=\"Dumbbell curl\", set=1)"
+            ),
+        };
         let change = audit::SetChange {
             weight: self.weight,
             reps: self.reps,
@@ -302,7 +344,7 @@ impl Tool for SetEdit {
             exercise: self.exercise,
             delete: self.delete,
         };
-        let result = audit::edit_set(cx.db, &self.set_id, change, cx.now, &cx.request_id)?;
+        let result = audit::edit_set(cx.db, &set_id, change, cx.now, &cx.request_id)?;
         // A replayed result from before workout_id was returned has none: nothing to refresh.
         let Some(workout_id) = result["data"]["workout_id"].as_str().map(String::from) else { return Ok(result) };
         after_edit(cx, &workout_id, result)
@@ -330,7 +372,7 @@ fn refresh_finish_card(cx: &mut Ctx, workout_id: &str, mut result: Value) -> Res
     if edits.is_empty() {
         return Ok(result);
     }
-    result["finish_card"] = json!("updated in the chat");
+    result["finish_card"] = json!("edited in place; the owner sees it — react, don't restate it");
     cx.effects.push(Effect::Coach(CoachView { handled: true, keep: true, edits, ..CoachView::default() }));
     Ok(result)
 }
@@ -778,5 +820,68 @@ mod tests {
         let mut cx = Ctx { db: &db, now, request_id: "r3".into(), data_dir, recipient: None, effects: vec![] };
         let auto = make("Leg Press", None).run(&mut cx).unwrap();
         assert_eq!(auto["exercises"][0]["guide_id"], "leg-press");
+    }
+
+    #[test]
+    fn set_edit_resolves_by_which_and_set_number() {
+        let db = crate::db::test::db();
+        let now = crate::time::Ts::parse("2026-11-23T13:00:00Z", None).unwrap();
+        let data_dir = std::path::Path::new(".");
+        let tpl: Template = serde_json::from_value(json!({
+            "id": "pull",
+            "name": "Pull",
+            "exercises": [{
+                "id": "dumbbell-curl",
+                "name": "Dumbbell curl",
+                "role": "biceps",
+                "muscle": "Biceps",
+                "guide_id": "dumbbell-curl",
+                "working_sets": 2,
+                "target_weight": 30
+            }]
+        }))
+        .unwrap();
+        crate::domain::templates::import_template(&db, &tpl).unwrap();
+        workout::start(&db, Some("pull"), None, false, now, "start").unwrap();
+        coach::log_text(&db, "5x30", false, crate::db::models::WeightUnit::Kg, now.mins(1), "s1").unwrap();
+        coach::log_text(&db, "6x30", false, crate::db::models::WeightUnit::Kg, now.mins(3), "s2").unwrap();
+
+        // After finishing, edit set 1 by exercise name + 1-based set number (no sql_query needed).
+        let mut cx =
+            Ctx { db: &db, now: now.mins(4), request_id: "fix1".into(), data_dir, recipient: None, effects: vec![] };
+        let edit = SetEdit {
+            set_id: None,
+            which: Some("Dumbbell curl".into()),
+            set: Some(1),
+            workout_id: None,
+            weight: None,
+            reps: Some(6),
+            minutes: None,
+            meters: None,
+            warmup: None,
+            exercise: None,
+            delete: false,
+        };
+        let out = edit.run(&mut cx).unwrap();
+        assert_eq!(out["data"]["before"]["reps"], 5, "must edit set 1 (5 reps), not set 2");
+        assert_eq!(out["data"]["after"]["reps"], 6);
+
+        // Out-of-range set number fails cleanly with SET_NOT_FOUND.
+        let mut cx =
+            Ctx { db: &db, now: now.mins(5), request_id: "fix2".into(), data_dir, recipient: None, effects: vec![] };
+        let bad = SetEdit {
+            set_id: None,
+            which: Some("Dumbbell curl".into()),
+            set: Some(5),
+            workout_id: None,
+            weight: None,
+            reps: Some(6),
+            minutes: None,
+            meters: None,
+            warmup: None,
+            exercise: None,
+            delete: false,
+        };
+        assert_eq!(bad.run(&mut cx).unwrap_err().code(), "SET_NOT_FOUND");
     }
 }

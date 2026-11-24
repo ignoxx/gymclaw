@@ -1,5 +1,6 @@
 //! Post-workout analysis and progression.
 //! Finishing writes the audit and progression atomically, then requests replanning.
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -58,6 +59,21 @@ fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDec
     }
     // Back from signed; an assisted target stops at no help (0).
     decision.next_weight = set_kind.signed(decision.next_weight).max(0.0);
+    if decision.reason == "follow_lighter" {
+        let allow_zero = reps_alone(exercise) || set_kind.load == Load::Assisted;
+        // Weighted exercises treat 0 kg as "unknown weight", so never drop one to 0.
+        // A >50% drop (e.g. a 10x8 typo for 10x80, or switching weighted -> bodyweight) requires
+        // two consecutive lighter outings before stepping the target down.
+        let large_drop = set_kind.load != Load::Assisted
+            && exercise.target_weight > 0.0
+            && decision.next_weight < exercise.target_weight * 0.5;
+        if (!allow_zero && decision.next_weight == 0.0)
+            || (large_drop && !previous_outing_was_large_drop(db, exercise)?)
+        {
+            decision.next_weight = exercise.target_weight;
+            decision.reason = "hold_target_not_met";
+        }
+    }
     if set_kind.load == Load::Assisted && exercise.target_weight == 0.0 && decision.progressed {
         decision.progressed = false;
         decision.reason = "no_assistance_left";
@@ -69,6 +85,35 @@ fn decide(db: &Connection, exercise: &WorkoutExercise) -> Result<(ProgressionDec
         decision.reason = "baseline_from_first_session";
     }
     Ok((decision, working))
+}
+
+/// True if the previous finished outing for this exercise was also a large (>50%) drop below the
+/// current target, so a mild deload followed by a `10x8` typo does not trip the two-outing guard.
+fn previous_outing_was_large_drop(db: &Connection, exercise: &WorkoutExercise) -> Result<bool> {
+    let mut stmt = db.prepare(
+        "SELECT we.id
+         FROM workout_exercise we
+         JOIN workout_session ws ON ws.id = we.workout_session_id
+         WHERE we.exercise_id = ?1
+           AND we.workout_session_id != ?2
+           AND ws.status = 'PLAN_UPDATED'
+           AND ws.started_at <= COALESCE((SELECT started_at FROM workout_session WHERE id = ?2), ws.started_at)
+           AND EXISTS (SELECT 1 FROM set_log sl WHERE sl.workout_exercise_id = we.id AND sl.set_type = 'WORKING')
+         ORDER BY ws.started_at DESC
+         LIMIT 1",
+    )?;
+    let Some(prev_id) = stmt
+        .query_row(rusqlite::params![&exercise.exercise_id, &exercise.workout_session_id], |r| r.get::<_, String>(0))
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let prev_sets = logs(db, &prev_id, Some(SetType::Working))?;
+    if prev_sets.is_empty() {
+        return Ok(false);
+    }
+    let prev_max = prev_sets.iter().map(|s| s.weight).fold(f64::MIN, f64::max);
+    Ok(prev_max < exercise.target_weight * 0.5)
 }
 
 /// When this exercise's finished workout set its next weight, recompute it from the sets as they are now.

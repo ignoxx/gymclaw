@@ -418,6 +418,63 @@ fn resolve(
 /// Owner says what they're doing now. Any exercise, any time: the current one is finished with the
 /// sets done so far, replaced if not started (and, if `remember`, the template keeps the replacement),
 /// or put back in the queue if the owner just wants another planned exercise first.
+fn apply_switch(db: &Connection, workout_id: &str, query: &str, remember: bool, now: Ts) -> Result<Value> {
+    let mut workout = load_workout(db, workout_id, Some(now))?;
+    ensure_running(&workout)?;
+    let mut current = exercises(db, workout_id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
+    let (row, spec) = resolve(db, &workout, query, current.as_ref())?;
+    let mut replaced: Option<String> = None;
+    if current.as_ref().is_some_and(|c| c.exercise_id == spec.id) {
+        return touch(db, &mut workout, now);
+    }
+    let started = match &current {
+        Some(c) => working_count(db, &c.id)? > 0,
+        None => false,
+    };
+    if let Some(c) = current.as_mut() {
+        if started {
+            c.status = ExerciseStatus::Completed;
+        } else if row.is_none() {
+            c.status = ExerciseStatus::Substituted;
+            c.deferred_reason = Some(format!("substituted_with:{}", spec.id));
+            replaced = Some(c.exercise_id.clone());
+        } else {
+            c.status = ExerciseStatus::Pending;
+        }
+        c.update(db)?;
+    }
+    let mut row = match row {
+        Some(row) => row,
+        None => {
+            let position = match &current {
+                Some(c) => c.position,
+                None => exercises(db, workout_id)?.iter().map(|e| e.position).max().unwrap_or(-1) + 1,
+            };
+            let sets = current.as_ref().filter(|_| !started).map(|c| c.planned_working_sets);
+            let mut row = make_exercise(db, workout_id, &spec, position, false, sets)?;
+            if replaced.is_some() {
+                row.substituted_from_exercise_id = current.as_ref().map(|c| c.exercise_id.clone());
+            }
+            row
+        }
+    };
+    // A replacement takes over the slot's rest; a planned exercise done out of order keeps its own.
+    if let (Some(c), Some(_)) = (&current, &replaced) {
+        row.rest_seconds = c.rest_seconds;
+    }
+    row.status = ExerciseStatus::Active;
+    row.deferred_reason = None;
+    row.update(db)?;
+    cancel_rest(db, workout_id, now)?;
+    transition(db, &mut workout, WorkoutStatus::SetActive)?;
+    if remember && let (Some(original), Some(template_id)) = (&replaced, &workout.template_id) {
+        remember_swap(db, template_id, original, &spec)?;
+    }
+    touch(db, &mut workout, now)
+}
+
+/// Switch the active exercise to `query` (catalog/template/workout). Completes or substitutes the
+/// current exercise, or puts it back in the queue if the owner just wants another planned exercise first.
 pub fn switch_to(
     db: &Connection,
     workout_id: &str,
@@ -427,65 +484,52 @@ pub fn switch_to(
     request_id: &str,
 ) -> Result<Value> {
     mutate(db, "workout.switched", request_id, json!({"workout_id": workout_id, "to": query}), now, || {
-        let mut workout = load_workout(db, workout_id, Some(now))?;
-        ensure_running(&workout)?;
-        let mut current = exercises(db, workout_id)?.into_iter().find(|e| e.status == ExerciseStatus::Active);
-        let (row, spec) = resolve(db, &workout, query, current.as_ref())?;
-        let mut replaced: Option<String> = None;
-        if current.as_ref().is_some_and(|c| c.exercise_id == spec.id) {
-            return touch(db, &mut workout, now);
-        }
-        let started = match &current {
-            Some(c) => working_count(db, &c.id)? > 0,
-            None => false,
-        };
-        if let Some(c) = current.as_mut() {
-            if started {
-                c.status = ExerciseStatus::Completed;
-            } else if row.is_none() {
-                c.status = ExerciseStatus::Substituted;
-                c.deferred_reason = Some(format!("substituted_with:{}", spec.id));
-                replaced = Some(c.exercise_id.clone());
-            } else {
-                c.status = ExerciseStatus::Pending;
-            }
-            c.update(db)?;
-        }
-        let mut row = match row {
-            Some(row) => row,
-            None => {
-                let position = match &current {
-                    Some(c) => c.position,
-                    None => exercises(db, workout_id)?.iter().map(|e| e.position).max().unwrap_or(-1) + 1,
-                };
-                let sets = current.as_ref().filter(|_| !started).map(|c| c.planned_working_sets);
-                let mut row = make_exercise(db, workout_id, &spec, position, false, sets)?;
-                if replaced.is_some() {
-                    row.substituted_from_exercise_id = current.as_ref().map(|c| c.exercise_id.clone());
-                }
-                row
-            }
-        };
-        // A replacement takes over the slot's rest; a planned exercise done out of order keeps its own.
-        if let (Some(c), Some(_)) = (&current, &replaced) {
-            row.rest_seconds = c.rest_seconds;
-        }
-        row.status = ExerciseStatus::Active;
-        row.deferred_reason = None;
-        row.update(db)?;
-        cancel_rest(db, workout_id, now)?;
-        transition(db, &mut workout, WorkoutStatus::SetActive)?;
-        if remember && let (Some(original), Some(template_id)) = (&replaced, &workout.template_id) {
-            remember_swap(db, template_id, original, &spec)?;
-        }
-        touch(db, &mut workout, now)
+        apply_switch(db, workout_id, query, remember, now)
     })
 }
 
-/// Owner did a different exercise than the one logged ("that was dumbbell RDL, not single-leg").
-/// Keeps the sets, renames the exercise, moves this workout's progression to it and puts it in the
-/// template where the logged one was. Works on finished workouts too. `which` picks the logged
-/// exercise (ID, guide ID or name); default is the latest exercise with sets.
+/// Pick the target row for `relabel`: any exercise with working sets, plus the `Active` exercise
+/// (even before set 1). Returns `(row, has_working_sets)`.
+fn select_relabel_target(db: &Connection, workout_id: &str, which: Option<&str>) -> Result<(WorkoutExercise, bool)> {
+    let mut rows: Vec<(WorkoutExercise, Option<Ts>)> = vec![];
+    for e in exercises(db, workout_id)? {
+        let last = logs(db, &e.id, Some(SetType::Working))?.pop().map(|s| s.logged_at);
+        if last.is_some() || e.status == ExerciseStatus::Active {
+            rows.push((e, last));
+        }
+    }
+    let available: Vec<String> = rows.iter().map(|(e, _)| name(e).to_string()).collect();
+    let key = which.unwrap_or_default().trim().to_lowercase();
+    let picked = if key.is_empty() {
+        // Running workout: prefer the active exercise on screen; finished workout: latest logged set.
+        if let Some(i) = rows.iter().position(|(e, _)| e.status == ExerciseStatus::Active) {
+            Some(rows.swap_remove(i))
+        } else {
+            rows.into_iter().reduce(|best, next| if next.1 > best.1 { next } else { best })
+        }
+    } else if let Some(i) = rows.iter().position(|(e, _)| e.id.chars().take(8).collect::<String>() == key) {
+        Some(rows.swap_remove(i))
+    } else {
+        let named = pick(
+            &key,
+            &rows.iter().map(|(e, _)| [Some(e.exercise_id.as_str()), Some(name(e)), guide_id(e)]).collect::<Vec<_>>(),
+        )?;
+        named.map(|i| rows.swap_remove(i))
+    };
+    let Some((row, last)) = picked else {
+        if available.is_empty() {
+            crate::bail!("EXERCISE_NOT_FOUND", "No logged or active exercise to relabel");
+        }
+        crate::bail!("EXERCISE_NOT_FOUND", "No matching exercise; pass which= with one of: {}", available.join(", "));
+    };
+    Ok((row, last.is_some()))
+}
+
+/// Owner is doing or did a different exercise than the one shown/logged ("I'm actually doing one-arm
+/// dumbbell row" or "that was dumbbell RDL, not single-leg"). Before set 1 on the active exercise,
+/// switches cleanly via `switch_to` (preserving progression weight and swap memory). After sets are
+/// logged, keeps the sets, renames the exercise, moves this workout's progression to it and puts it
+/// in the template where the logged one was. Works on finished workouts too.
 pub fn relabel(
     db: &Connection,
     workout_id: &str,
@@ -502,35 +546,21 @@ pub fn relabel(
         now,
         || {
             let mut workout = load_workout(db, workout_id, Some(now))?;
-            let mut rows = vec![];
-            for e in exercises(db, workout_id)? {
-                if let Some(last) = logs(db, &e.id, Some(SetType::Working))?.pop() {
-                    rows.push((e, last.logged_at));
-                }
-            }
-            let key = which.unwrap_or_default().trim().to_lowercase();
-            let row = if key.is_empty() {
-                // Latest last set; the first one on ties.
-                rows.into_iter().reduce(|best, next| if next.1 > best.1 { next } else { best }).map(|(e, _)| e)
-            } else if let Some(i) = rows.iter().position(|(e, _)| e.id.chars().take(8).collect::<String>() == key) {
-                Some(rows.swap_remove(i).0)
-            } else {
-                let named = pick(
-                    &key,
-                    &rows
-                        .iter()
-                        .map(|(e, _)| [Some(e.exercise_id.as_str()), Some(name(e)), guide_id(e)])
-                        .collect::<Vec<_>>(),
-                )?;
-                named.map(|i| rows.swap_remove(i).0)
-            };
-            let Some(mut row) = row else {
-                crate::bail!("EXERCISE_NOT_FOUND", "No logged exercise matches; pass which= with its name");
-            };
+            let (mut row, has_sets) = select_relabel_target(db, workout_id, which)?;
             let (_, spec) = resolve(db, &workout, query, Some(&row))?;
             let old = row.exercise_id.clone();
             if spec.id == old {
-                return Ok(json!({"workout_id": workout.id, "exercise_id": row.id, "from": old, "to": old}));
+                return Ok(json!({
+                    "workout_id": workout.id,
+                    "exercise_id": row.id,
+                    "from": old,
+                    "to": old,
+                    "name": name(&row),
+                    "unchanged": true
+                }));
+            }
+            if !has_sets {
+                return apply_switch(db, workout_id, query, true, now);
             }
             row.exercise_id = spec.id.clone();
             if let Some(config) = row.config_json.as_object_mut() {
@@ -878,5 +908,38 @@ mod tests {
         let fly = current(&db, &id, at(40)).unwrap()["active_exercise"]["id"].as_str().unwrap().to_string();
         let error = substitute(&db, &id, &fly, "bench", at(50), "bad").unwrap_err();
         assert!(error.to_string().contains("template alternative or a catalog exercise"), "{error}");
+    }
+
+    #[test]
+    fn relabel_active_exercise_with_zero_sets_switches_cleanly_and_flags_unchanged() {
+        let db = db();
+        adapt(&db);
+        let id = start(&db, Some("adapt"), None, true, at(1), "s").unwrap()["data"]["workout_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Same exercise name on active 0-set row returns unchanged: true instead of failing.
+        let same = relabel(&db, &id, "Bench", Some("Bench"), at(2), "r-same").unwrap();
+        assert_eq!(same["data"]["unchanged"], true);
+        assert_eq!(same["data"]["name"], "Bench");
+
+        // Different exercise on active 0-set row switches cleanly (replaces active slot).
+        let switched = relabel(&db, &id, "one-arm-dumbbell-row", None, at(3), "r-switch").unwrap();
+        assert_eq!(switched["data"]["active_exercise"]["exercise_id"], "one-arm-dumbbell-row");
+        // Replaying the 0-set switch with the same request_id returns the saved result.
+        let replayed = relabel(&db, &id, "one-arm-dumbbell-row", None, at(4), "r-switch").unwrap();
+        assert_eq!(replayed["data"]["active_exercise"]["exercise_id"], "one-arm-dumbbell-row");
+        let rows = exercises(&db, &id).unwrap();
+        assert!(rows.iter().any(|e| e.exercise_id == "bench" && e.status == ExerciseStatus::Substituted));
+        assert!(rows.iter().any(|e| e.exercise_id == "one-arm-dumbbell-row" && e.status == ExerciseStatus::Active));
+
+        // Replaying a logged relabel with which="Old name" also returns the saved result.
+        log_set(&db, &id, &SetInput::reps(30.0, 8, SetType::Working), at(5), "log1").unwrap();
+        let renamed =
+            relabel(&db, &id, "dumbbell-bent-over-row", Some("One-Arm Dumbbell Row"), at(6), "r-log").unwrap();
+        assert_eq!(renamed["data"]["to"], "dumbbell-bent-over-row");
+        let replayed_log =
+            relabel(&db, &id, "dumbbell-bent-over-row", Some("One-Arm Dumbbell Row"), at(7), "r-log").unwrap();
+        assert_eq!(replayed_log["data"]["to"], "dumbbell-bent-over-row");
     }
 }

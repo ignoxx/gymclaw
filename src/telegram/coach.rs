@@ -4,6 +4,7 @@
 //! disappear as soon as the workout moves on. Rest cards are edited every 5 s and, exactly at
 //! `rest_until` (+50 ms, so the domain sees the rest as due), the countdown is deleted and a fresh
 //! set card is sent so the phone notifies.
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -55,11 +56,28 @@ impl Entry {
     }
 }
 
+const CONSUMED_LIMIT: usize = 64;
+
 #[derive(Default)]
 struct State {
     live: Option<Entry>,
     extras: Vec<Entry>,
     next_countdown: u64,
+    /// Messages whose buttons have already been retired or removed, so in-flight duplicate taps
+    /// do not replay the action.
+    consumed: VecDeque<i64>,
+}
+
+impl State {
+    fn mark_consumed(&mut self, message_id: i64) {
+        if message_id == 0 || self.consumed.contains(&message_id) {
+            return;
+        }
+        if self.consumed.len() >= CONSUMED_LIMIT {
+            self.consumed.pop_front();
+        }
+        self.consumed.push_back(message_id);
+    }
 }
 
 /// "message is not modified" and already-deleted messages are expected.
@@ -119,14 +137,22 @@ impl Coach {
         self.tg.edit(self.chat, entry.message_id, text, buttons, entry.card.photo.is_some()).await
     }
 
-    async fn remove(&self, entry: &Entry) {
+    /// True once this message's buttons have been retired or removed, so a duplicate tap in flight
+    /// does not replay the action.
+    pub async fn consumed(&self, message_id: i64) -> bool {
+        self.state.lock().await.consumed.contains(&message_id)
+    }
+
+    async fn remove(&self, state: &mut State, entry: &Entry) {
+        state.mark_consumed(entry.message_id);
         quietly(self.tg.remove(self.chat, entry.message_id).await);
     }
 
-    async fn retire(&self, entry: &Entry, ack: Option<&str>) {
+    async fn retire(&self, state: &mut State, entry: &Entry, ack: Option<&str>) {
         if entry.throwaway() {
-            return self.remove(entry).await;
+            return self.remove(state, entry).await;
         }
+        state.mark_consumed(entry.message_id);
         let text = match ack {
             Some(ack) => format!("{}\n{ack}", entry.card.text),
             None => entry.card.text.clone(),
@@ -136,7 +162,7 @@ impl Coach {
 
     async fn clear_extras(&self, state: &mut State) {
         for entry in std::mem::take(&mut state.extras) {
-            self.remove(&entry).await;
+            self.remove(state, &entry).await;
         }
     }
 
@@ -246,24 +272,26 @@ impl Coach {
         let known = tapped.and_then(|t| entries.iter().find(|e| e.message_id == t.message_id)).cloned();
         if view.delete {
             for entry in &entries {
-                self.remove(entry).await;
+                self.remove(&mut state, entry).await;
             }
             if let (Some(t), None) = (tapped, &known) {
+                state.mark_consumed(t.message_id);
                 quietly(self.tg.remove(self.chat, t.message_id).await);
             }
         } else {
             let target = known.clone().or_else(|| if tapped.is_some() { None } else { state.live.clone() });
             match (&target, tapped, &view.ack) {
-                (Some(target), _, ack) => self.retire(target, ack.as_deref()).await,
+                (Some(target), _, ack) => self.retire(&mut state, target, ack.as_deref()).await,
                 (None, Some(t), Some(ack)) => {
-                    // Message from before a restart: we only know its visible text.
+                    // Message from before a restart (or a reminder): we only know its visible text.
+                    state.mark_consumed(t.message_id);
                     let text = format!("{}\n{ack}", t.text.as_deref().unwrap_or(""));
                     quietly(self.tg.edit(self.chat, t.message_id, &text, &vec![], false).await);
                 }
                 _ => {}
             }
             for entry in entries.iter().filter(|e| target.as_ref().is_none_or(|t| t.message_id != e.message_id)) {
-                self.retire(entry, None).await;
+                self.retire(&mut state, entry, None).await;
             }
         }
         state.live = None;
@@ -618,5 +646,37 @@ pub mod tests {
             .unwrap();
         assert!(tg.calls().contains(&Call::Edit(42, "Squat · set 3\n✅ 5 × 100 kg".into(), vec![], false)));
         assert!(tg.calls().contains(&Call::Remove(101)), "the countdown is deleted, not retired");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn consumed_tracks_retired_and_unknown_tapped_but_not_refreshed() {
+        let tg = FakeTelegram::new();
+        let coach = Coach::new(tg.clone(), 1, clock(), None, None);
+        // Reminder Start tap (unknown message 42) retires 42 and sends live card 100.
+        let start = Tapped { message_id: 42, text: Some("⏰ Pull was planned".into()) };
+        coach
+            .apply(
+                &CoachView { ack: Some("▶️ Started.".into()), ..view(vec![card("Row · warm-up")]) },
+                Some(&start),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(coach.consumed(42).await);
+        assert!(!coach.consumed(100).await);
+
+        // Retiring card 100 (e.g. ✅ set) marks 100 consumed and sends rest card 101.
+        let resting = CoachView {
+            ack: Some("✅ 8 × 80 kg".into()),
+            ..view(vec![rest("until Row set 2/2", "2026-10-02T18:01:30Z")])
+        };
+        coach.apply(&resting, Some(&Tapped { message_id: 100, text: None }), None).await.unwrap();
+        assert!(coach.consumed(100).await);
+        assert!(!coach.consumed(101).await);
+
+        // Refreshing rest card 101 (-30s) keeps its buttons live so a second -30s tap still works.
+        let shorter = CoachView { refresh: true, ..view(vec![rest("until Row set 2/2", "2026-10-02T18:01:00Z")]) };
+        coach.apply(&shorter, Some(&Tapped { message_id: 101, text: None }), None).await.unwrap();
+        assert!(!coach.consumed(101).await);
     }
 }

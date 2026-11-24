@@ -599,7 +599,7 @@ function toast(text, failed = false) {
 /* A coach button from the app: the server runs it like a tap in the chat (`coach::app_tap`), and the bot
    moves the chat's card on as well. A button the workout has moved past is refused and the view refreshes. */
 async function coachTap(data) {
-  await send('/api/coach', { data }, body => body?.ack && `${body.ack} · in the chat too`);
+  await send('/api/coach', { data }, body => body?.ack);
 }
 
 /* POST, then a fresh state. Buttons and the main button wait meanwhile; the outcome buzzes and toasts. */
@@ -721,7 +721,7 @@ function renderLogger(focus, live, active, last) {
     if (fixing) {
       const fix = measure === 'time' ? { minutes: logger.seconds / 60 } : measure === 'distance' ? { meters: logger.meters } : { weight: toKg(logger.weight || 0), reps: logger.reps };
       logger.fixing = false;
-      send('/api/set_edit', { set_id: last.id, ...fix }, () => `Fixed: ${words()} · in the chat too`);
+      send('/api/set_edit', { set_id: last.id, ...fix }, () => `Fixed: ${words()}`);
       return;
     }
     const data = measure === 'time' ? `gc:time:${live.ref}:${logger.seconds}` : measure === 'distance' ? `gc:dist:${live.ref}:${logger.meters}` : `gc:log:${live.ref}:${toKg(logger.weight || 0)}:${logger.reps}`;

@@ -1,6 +1,7 @@
 //! Parse a whole-message set in either order ("9x80", "80kgx9", "9 reps at 80"). Reps first is the default;
 //! a "+" marks the weight too ("+10x8", "8x+10"), and a per-side suffix is ignored ("8/side", "8 per side").
-//! Bodyweight exercises also take reps alone ("13", "13 reps", "13x"). Timed exercises take a time
+//! Bodyweight exercises also take reps alone ("13", "13 reps", "13x"), and explicit bodyweight
+//! phrases ("12 reps (no weight)", "12 bw", "bw x12") log 0 kg on any reps exercise. Timed exercises take a time
 //! with its unit ("25 min", "25m", "90s", "1:30"), distance exercises a distance ("2 km", "40 m").
 use std::sync::LazyLock;
 
@@ -85,6 +86,26 @@ static DISTANCE: LazyLock<Regex> =
 /// "/side", "per side", "each side", "a side", "each": reps per side say nothing the exercise doesn't.
 static PER_SIDE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*(?:/\s*side|(?:per|each|a)\s+side|each)\b").unwrap());
+/// Explicit bodyweight markers ("bw", "bodyweight", "no weight", "without weight", "unweighted"),
+/// optionally parenthesised or joined by ×/x/* ("bwx12", "12xbw").
+static BODYWEIGHT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\(?\s*(?:\b(?:body\s*weight|no\s+weight|without\s+weight|unweighted|bw)\b|(?:\b|[x×*])bw(?:\b|[x×*]))\s*\)?",
+    )
+    .unwrap()
+});
+
+/// Extract reps when the message explicitly marks bodyweight. Returns `None` if no bodyweight marker
+/// is present or if anything besides a single positive rep count remains.
+fn parse_bodyweight(clean: &str) -> Option<i64> {
+    if !BODYWEIGHT.is_match(clean) {
+        return None;
+    }
+    let stripped = BODYWEIGHT.replace_all(clean, " ");
+    let rest = stripped.trim().trim_matches(|c: char| matches!(c, 'x' | '×' | '*')).trim();
+    let m = REPS_ONLY.captures(rest)?;
+    m[1].parse::<i64>().ok().filter(|&r| r > 0)
+}
 
 /// A time with its unit in seconds: "25 min", "25m", "1.5h", "90s", "1:30" (minutes:seconds). A bare
 /// number is not a time: on a reps card it means reps.
@@ -129,7 +150,9 @@ pub fn parse_block(text: &str, measure: Measure) -> Option<SetInput> {
 /// count: the coach asks.
 pub fn looks_like_set(text: &str) -> bool {
     let clean = PER_SIDE.replace_all(&text.trim().to_lowercase(), "").trim().to_string();
-    [&PAIR, &AT, &REPS_ONLY].iter().any(|r| r.is_match(&clean)) || parse_block(text, Measure::Distance).is_some()
+    parse_bodyweight(&clean).is_some()
+        || [&PAIR, &AT, &REPS_ONLY].iter().any(|r| r.is_match(&clean))
+        || parse_block(text, Measure::Distance).is_some()
 }
 
 fn ambiguous<T>() -> Result<T> {
@@ -156,6 +179,12 @@ pub fn parse_set(
         Some("lb" | "lbs") => Some(WeightUnit::Lb),
         _ => None,
     };
+    if BODYWEIGHT.is_match(&clean) {
+        return match parse_bodyweight(&clean) {
+            Some(reps) => set(0.0, reps),
+            None => ambiguous(),
+        };
+    }
     if bodyweight
         && let Some(m) = REPS_ONLY.captures(&clean)
         && let Ok(reps) = m[1].parse::<i64>()
@@ -300,5 +329,31 @@ mod tests {
         assert_eq!(parse_set("8x135", None, false, WeightUnit::Lb).unwrap(), set(61.23, 8));
         // Explicit kg still stays kg even when default unit is lb.
         assert_eq!(parse_set("8x60kg", None, false, WeightUnit::Lb).unwrap(), set(60.0, 8));
+    }
+
+    #[test]
+    fn explicit_bodyweight_phrases_parse_to_zero_kg() {
+        for text in [
+            "12 reps (no weight)",
+            "12 (no weight)",
+            "12 no weight",
+            "12 without weight",
+            "12 unweighted",
+            "12 bw",
+            "12 bodyweight",
+            "12 body weight",
+            "bw x12",
+            "bwx12",
+            "12xbw",
+            "12x bw",
+        ] {
+            assert!(looks_like_set(text), "looks_like_set({text:?})");
+            let parsed = parse_set(text, Some(40.0), false, WeightUnit::Kg).unwrap();
+            assert_eq!(parsed, SetInput::reps(0.0, 12, SetType::Working), "{text:?}");
+        }
+        for bad in ["12 kg bw", "12x40 bw", "no weight", "did 12 reps (no weight) today"] {
+            assert!(!looks_like_set(bad), "should not look like a set: {bad:?}");
+            assert!(parse_set(bad, Some(40.0), false, WeightUnit::Kg).is_err(), "should error: {bad:?}");
+        }
     }
 }

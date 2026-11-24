@@ -430,8 +430,9 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 10px; font-
 .step-value span { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 400; color: var(--muted); text-align: left; white-space: nowrap; }
 .ex-fields { display: flex; flex-direction: column; gap: 8px; }
 .toast { position: fixed; left: 50%; bottom: calc(96px + var(--safe-bottom)); z-index: 30; transform: translateX(-50%); max-width: calc(100vw - 32px);
-  padding: 10px 16px; border-radius: 99px; background: var(--ink); color: var(--paper); font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, .2); }
-.toast.failed { background: var(--danger-bg); color: var(--danger); }
+  padding: 9px 14px; border-radius: 99px; background: var(--hero); color: var(--on-hero); border: 1px solid var(--accent-line); font-size: 13px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 6px 20px rgba(0, 0, 0, .28); }
+.toast.failed { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-line); white-space: normal; text-align: center; }
 @media (min-width: 761px) { .toast { bottom: 28px; } }
 /* An exercise's stats: the number big, its unit small, never wrapping. */
 .kpi > strong small { font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 2px; }
@@ -503,8 +504,8 @@ img[data-missing] { visibility: hidden; }
 @media (max-width: 760px) {
   .ex-close { width: 44px; height: 44px; top: 8px; right: 8px; }
   .ex-head { padding-right: 44px; }
-  /* No tab bar under it mid-workout: the toast sits low, clear of the card. */
-  .tg.live-mode .toast { bottom: calc(20px + var(--safe-bottom)); }
+  /* Live mode: toast sits at the top, clear of the footer links and Telegram MainButton. */
+  .tg.live-mode .toast { top: calc(12px + var(--safe-top)); bottom: auto; }
 }
 .focus > .chip { margin-top: 12px; }
 .best { margin: -4px 0 0; font-size: 13px; font-weight: 600; color: var(--olive); text-align: right; }

@@ -850,7 +850,19 @@ pub fn relabel(
     };
     let Some(workout) = workout else { crate::bail!("NO_WORKOUT", "No workout to correct") };
     let result = adaptation::relabel(db, &workout.id, exercise, which, now, request_id)?;
-    let ack = format!("✏️ Saved as {}.", result["data"]["name"].as_str().unwrap_or(exercise));
+    let label = result["data"]["name"]
+        .as_str()
+        .or_else(|| result["data"]["active_exercise"]["name"].as_str())
+        .unwrap_or(exercise);
+    if result["data"]["unchanged"] == true {
+        let msg = if workout.status == WorkoutStatus::PlanUpdated {
+            format!("Already logged as {label}.")
+        } else {
+            format!("Already doing {label}.")
+        };
+        return Ok(CoachView { keep: true, ..acked(msg, vec![]) });
+    }
+    let ack = format!("✏️ Saved as {label}.");
     if workout.status != WorkoutStatus::PlanUpdated {
         return Ok(acked(ack, after_change(db, &workout.id, now, request_id)?));
     }
@@ -1217,7 +1229,7 @@ mod tests {
         data(&second, "✅ 10 × 8 kg");
         handle_text(&db, "10x8kg", at(120), "m2").unwrap();
         handle_action(&db, Action::End, None, None, None, false, at(600), "end").unwrap();
-        // Next time the target leads, not last time's lighter sets, and a typed set reads against it.
+        // Next time the target leads, not last time's lighter sets (single >50% drop is guarded), and a typed set reads against it.
         start(&db, Some("push"), None, false, at(1000), "start-2").unwrap();
         handle_tap(&db, &data(&live(&db, at(1001)), "⏭ Skip"), at(1002), "cb-skip-2").unwrap();
         let first = live(&db, at(1003));
@@ -1298,7 +1310,7 @@ mod tests {
             effects: vec![],
         };
         let fixed = crate::tools::call(&mut cx, "set_edit", json!({"set_id": set.id, "reps": 12})).unwrap();
-        assert_eq!(fixed["finish_card"], "updated in the chat");
+        assert_eq!(fixed["finish_card"], "edited in place; the owner sees it — react, don't restate it");
         let [crate::tools::Effect::Coach(CoachView { edits, .. })] = &cx.effects[..] else {
             panic!("{:?}", cx.effects)
         };
@@ -1984,5 +1996,65 @@ mod tests {
             ]
         );
         assert_eq!(workout::load_workout(&db, &id, None).unwrap().status, WorkoutStatus::PlanUpdated);
+    }
+
+    #[test]
+    fn bodyweight_exercise_steps_down_to_reps_only_card_and_weighted_never_drops_to_zero() {
+        let db = db();
+        let pull = Template {
+            id: "pull".into(),
+            name: "Pull".into(),
+            exercises: vec![
+                spec(
+                    json!({"id": "back-extension", "name": "Back extension", "role": "back", "guide_id": "back-extension", "working_sets": 2, "target_weight": 40, "rep_min": 8, "rep_max": 12}),
+                ),
+                spec(
+                    json!({"id": "row", "name": "Seated cable row", "role": "pull", "guide_id": "seated-cable-row", "working_sets": 2, "target_weight": 80, "rep_min": 8, "rep_max": 12}),
+                ),
+            ],
+            alternatives: vec![],
+            set_duration_seconds: 40,
+            transition_seconds: 60,
+            source: "user".into(),
+        };
+        import_template(&db, &pull).unwrap();
+
+        // Outing 1: bodyweight on back-extension (first >50% drop holds 40), and 0 kg on weighted row.
+        start(&db, Some("pull"), None, false, at(0), "s1").unwrap();
+        handle_text(&db, "12 reps (no weight)", at(10), "b1a").unwrap();
+        handle_text(&db, "12 bw", at(100), "b1b").unwrap();
+        handle_text(&db, "12 bw", at(200), "r1a").unwrap();
+        handle_text(&db, "12 bw", at(300), "r1b").unwrap();
+        assert_eq!(ExerciseProgression::get(&db, "back-extension").unwrap().unwrap().next_weight, 40.0);
+        assert_eq!(ExerciseProgression::get(&db, "row").unwrap().unwrap().next_weight, 80.0);
+
+        // Outing 2: second consecutive bodyweight outing -> back-extension steps down to 0 (bodyweight),
+        // while weighted row NEVER drops to 0 (which would mean unknown weight).
+        start(&db, Some("pull"), None, false, at(1000), "s2").unwrap();
+        handle_text(&db, "12 reps (no weight)", at(1010), "b2a").unwrap();
+        handle_text(&db, "12 bw", at(1100), "b2b").unwrap();
+        handle_text(&db, "12 bw", at(1200), "r2a").unwrap();
+        handle_text(&db, "12 bw", at(1300), "r2b").unwrap();
+        assert_eq!(ExerciseProgression::get(&db, "back-extension").unwrap().unwrap().next_weight, 0.0);
+        assert_eq!(ExerciseProgression::get(&db, "row").unwrap().unwrap().next_weight, 80.0);
+
+        // Outing 3: back-extension card shows Bodyweight (8–12 reps), NOT 40 kg and NOT "? kg" / guess.
+        // Also verify mild deload (80 -> 75) followed by a 10x8 typo holds 75 instead of dropping to 8.
+        start(&db, Some("pull"), None, false, at(2000), "s3").unwrap();
+        let card = live(&db, at(2001));
+        assert!(card.text.contains("8–12 reps"), "expected bodyweight card, got: {}", card.text);
+        assert!(!card.text.contains("40 kg") && !card.text.contains("? kg"), "{}", card.text);
+        handle_text(&db, "12", at(2010), "b3a").unwrap();
+        handle_text(&db, "12", at(2100), "b3b").unwrap();
+        handle_text(&db, "10x75", at(2200), "r3a").unwrap();
+        handle_text(&db, "10x75", at(2300), "r3b").unwrap();
+        assert_eq!(ExerciseProgression::get(&db, "row").unwrap().unwrap().next_weight, 75.0);
+
+        start(&db, Some("pull"), None, false, at(3000), "s4").unwrap();
+        handle_text(&db, "12", at(3010), "b4a").unwrap();
+        handle_text(&db, "12", at(3100), "b4b").unwrap();
+        handle_text(&db, "10x8", at(3200), "r4a").unwrap();
+        handle_text(&db, "10x8", at(3300), "r4b").unwrap();
+        assert_eq!(ExerciseProgression::get(&db, "row").unwrap().unwrap().next_weight, 75.0);
     }
 }
