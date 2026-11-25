@@ -346,7 +346,7 @@ mod tests {
     async fn tick_once_updates_health_and_pumps_outbox() {
         let (path, db) = crate::db::test::file();
         crate::db::test::authority().insert(&db).unwrap();
-        let ev = emit(&db, "calendar.update_briefing", Ts::now(), json!({})).unwrap();
+        let ev = emit(&db, "test.message", Ts::now(), json!({})).unwrap();
         outbox::prepare_event_message(&db, &ev.id, "Moved Push to 14:30.", Ts::now(), "42").unwrap();
         drop(db);
 

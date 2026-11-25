@@ -1,11 +1,11 @@
-//! Week helpers over planned sessions: the local week of a timestamp, a week's sessions and lineup,
+//! Week helpers over planned sessions: the local week of a timestamp, a week's sessions,
 //! workout names, and fitting a workout into its slot (`allocation`).
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde_json::{Value, json};
 
 use crate::db::Connection;
-use crate::db::models::{PlannedSession, SessionStatus};
+use crate::db::models::PlannedSession;
 use crate::domain::compression::compress_template;
 use crate::domain::profile::get_profile;
 use crate::domain::scheduling::session_data;
@@ -66,32 +66,6 @@ fn title(text: &str) -> String {
     out
 }
 
-fn active_sessions(db: &Connection) -> Result<Vec<PlannedSession>> {
-    PlannedSession::select(
-        db,
-        "WHERE status IN ('TENTATIVE', 'COMMITTED', 'STARTED', 'COMPLETED') ORDER BY planned_start_at",
-        [],
-    )
-}
-
-/// The week's planned workouts for owner messages, e.g. "This week: Mon 12:15 Legs · Wed 10:30 Push."
-/// Build it after rotation so names match the calendar.
-pub fn week_lineup(db: &Connection, week_start: Date, now: Ts) -> Result<String> {
-    let tz = get_profile(db)?.tz();
-    let sessions: Vec<String> = active_sessions(db)?
-        .iter()
-        .filter(|s| week_of(s.planned_start_at, &tz) == week_start)
-        .map(|s| format!("{} {}", s.planned_start_at.local(&tz).strftime("%a %H:%M"), workout_name(s)))
-        .collect();
-    let label = if week_start == week_of(now, &tz) {
-        "This week".to_string()
-    } else {
-        format!("Week of {} {}", week_start.strftime("%b"), week_start.day())
-    };
-    let list = if sessions.is_empty() { "no workouts".to_string() } else { sessions.join(" · ") };
-    Ok(format!("{label}: {list}."))
-}
-
 /// Every session of the week starting `week_start` (any status).
 pub fn get_week(db: &Connection, week_start: Date) -> Result<Value> {
     crate::domain::planning::require_monday(week_start)?;
@@ -102,11 +76,4 @@ pub fn get_week(db: &Connection, week_start: Date) -> Result<Value> {
         .map(session_data)
         .collect();
     Ok(json!({"week_start": week_start.to_string(), "sessions": sessions}))
-}
-
-pub fn is_closed(status: SessionStatus) -> bool {
-    matches!(
-        status,
-        SessionStatus::Cancelled | SessionStatus::Skipped | SessionStatus::Missed | SessionStatus::Completed
-    )
 }

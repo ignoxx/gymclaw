@@ -15,10 +15,15 @@ pub fn tools() -> Vec<ToolDef> {
 
 /// Tables holding OAuth tokens and the private feed URL stay outside model access and turn-log changesets.
 pub const SECRET_TABLES: [&str; 2] = ["calendar_credential", "personal_calendar_state"];
-/// Secret columns on otherwise readable tables: SQLite replaces them with NULL in `sql_query`.
-const SECRET_COLUMNS: [(&str, &str); 1] = [("user_profile", "ics_token")];
+/// Columns on otherwise readable tables that `sql_query` returns as NULL and the schema leaves out: the
+/// feed secret, and Google-era columns nothing maintains any more.
+const SECRET_COLUMNS: [(&str, &str); 3] = [
+    ("user_profile", "ics_token"),
+    ("planned_session", "calendar_event_id"),
+    ("runtime_settings", "calendar_writes_enabled"),
+];
 /// Google Calendar sync tables nothing reads or writes since the ICS-only switch, kept until a follow-up
-/// drops them; left out of the model's schema so it doesn't read stale state.
+/// drops them; out of the model's schema and denied to `sql_query`, so it can't read stale state.
 const UNUSED_TABLES: [&str; 3] = ["calendar_event_snapshot", "calendar_sync_state", "calendar_write"];
 const MAX_ROWS: usize = 200;
 
@@ -73,7 +78,7 @@ Your chat only shows the latest messages; chat_message holds every one (role own
         db.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
             AuthAction::Select | AuthAction::Recursive | AuthAction::Function { .. } => Authorization::Allow,
             AuthAction::Read { table_name, column_name } => {
-                if SECRET_TABLES.contains(&table_name) {
+                if SECRET_TABLES.contains(&table_name) || UNUSED_TABLES.contains(&table_name) {
                     Authorization::Deny
                 } else if SECRET_COLUMNS.contains(&(table_name, column_name)) {
                     Authorization::Ignore
@@ -296,6 +301,7 @@ mod tests {
         assert!(query(&mut cx, "PRAGMA query_only=OFF").is_err());
         assert!(query(&mut cx, "ATTACH DATABASE ':memory:' AS other").is_err());
         assert!(query(&mut cx, "SELECT * FROM calendar_credential").is_err());
+        assert!(query(&mut cx, "SELECT * FROM calendar_write").is_err());
         let result =
             query(&mut cx, "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<201) SELECT x FROM n")
                 .unwrap();
