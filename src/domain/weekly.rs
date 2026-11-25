@@ -395,7 +395,10 @@ pub fn announce(db: &Connection, now: Ts, unpublished: bool) -> Result<Value> {
     }
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
-    let mut payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
+    // The drafted week next to the owner's plan, so the review checks one against the other.
+    let drafted = recent_sessions(db, next_week, next_week.checked_add(days(7))?, &tz)?;
+    let plan = OnboardingState::get(db, 1)?.and_then(|o| o.plan_text);
+    let mut payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now)?, "recent_sessions": recent, "next_week": drafted, "training_plan": plan, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
     // Trends, goals and activities ride on this one wake instead of the standing context; empty ones stay out.
     let activities: Vec<String> = [previous, next_week]
         .iter()
@@ -453,17 +456,19 @@ pub fn release_recap(db: &Connection, recipient: &str, now: Ts, reviewed: bool) 
 
 /// How the agent answers the weekly briefing. It rides on the event, so the guidance costs context once a
 /// week instead of on every call.
-const WEEKLY_REVIEW: &str = "Weekly briefing. Right after this turn the owner gets the recap: last week's numbers and \
-    next week's sessions as you leave them. First fix what looks off in next week's plan (a clash, a slot they usually \
-    miss). Then your take, sent after the recap, up to five short lines: how the week really went (patterns and effort, \
-    not the recap's numbers), what next week asks of the owner, and what you changed. Ask only what is the owner's call. \
-    Reply with no fields when you have nothing to add. It is also your weekly review: compare recent_sessions with your \
-    notes and save learned notes on patterns that held for at least two weeks (when the owner really trains, which slots \
-    they miss or move). Keep all notes, owner and learned, consistent: merge duplicates, rewrite or delete any that a \
-    newer note contradicts. Mention a learning only when it changes next week's plan. \
-    Lift trends, goals with your current block, and activities outside the gym come with this event when there \
-    are any: plan next week around them (a deload where a lift stalls and grinds, lighter legs after a long run) \
-    and keep each goal's block current (goal update).";
+const WEEKLY_REVIEW: &str = "Weekly briefing: code drafted next_week from a plain rotation that knows none of the \
+    owner's rules. Right after this turn the owner gets the recap with next week as you leave it. Work through every step:\n\
+    1. Week vs plan: check next_week against training_plan and your notes: which workouts (the mix the plan asks for, \
+    e.g. a mandatory cardio), how many, and on which days and slots (ones they usually miss). Fix it with session_update.\n\
+    2. Notes: compare recent_sessions with your notes. Save learned notes on patterns that held for at least two weeks \
+    (when the owner really trains, which slots they miss or move). Then go through every note, owner and learned: delete \
+    expired exceptions, merge duplicates, rewrite or delete any that a newer note contradicts.\n\
+    3. Trends, goals and activities, when this event has them: plan next week around them (a deload where a lift stalls \
+    and grinds, lighter legs after a long run) and keep each goal's block current (goal update).\n\
+    4. Your take, sent after the recap, up to five short lines: how the week really went (patterns and effort, not the \
+    recap's numbers), what next week asks of the owner, and what you changed. Your changes stand: don't offer to undo \
+    them. Mention a learning only when it changes next week's plan. Ask only what is the owner's call. Reply with no \
+    fields when you have nothing to add.";
 
 /// Weeks of sessions the Sunday review looks back on.
 const REVIEW_WEEKS: i64 = 4;
@@ -793,6 +798,10 @@ mod tests {
         // Last week's two remaining slots; the cancelled one and next week's plan are left out.
         assert_eq!(recent.len(), 2, "{recent:?}");
         assert!(recent[0].starts_with("Mon Oct 12 ") && recent[0].ends_with(" short MISSED"), "{recent:?}");
+        // Next week's draft rides along separately, for the check against the owner's plan.
+        let drafted = event.payload_json["next_week"].as_array().unwrap();
+        assert_eq!(drafted.len(), 3, "{drafted:?}");
+        assert!(drafted.iter().all(|s| s.as_str().unwrap().contains("Oct") && s.as_str().unwrap().contains(" short ")));
     }
 
     #[test]
