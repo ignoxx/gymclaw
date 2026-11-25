@@ -30,12 +30,12 @@ An AI gym coach that adapts to you.
 One Rust binary over one SQLite file ([architecture](docs/architecture.md)). An LLM agent (via
 OpenRouter) handles the conversation and the decisions, using typed tools that own all state and
 validate every action. A model-free coach handles taps and sets during a workout, and an in-process
-scheduler runs calendar sync, crowd polling, reminders and the Sunday plan.
+scheduler runs the calendar feed refresh, crowd polling, reminders and the Sunday plan.
 
 ## Running your own
 
-You need a Telegram bot and an OpenRouter key. Calendar sync (read-only ICS feed or Google
-Calendar) and gym check-in counts ([crowd data](docs/crowd.md)) are optional. Then
+You need a Telegram bot and an OpenRouter key. Calendars (a read-only workout feed to subscribe to,
+and your own calendar as busy time) and gym check-in counts ([crowd data](docs/crowd.md)) are optional. Then
 `docker compose up -d` and follow [self-hosting](docs/self-hosting.md).
 
 ## License

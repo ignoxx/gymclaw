@@ -1,4 +1,4 @@
-//! Draft a whole week against persisted profile/calendar state.
+//! Draft a whole week against persisted profile and busy-time state.
 use std::collections::HashMap;
 
 use jiff::civil::Date;
@@ -8,7 +8,6 @@ use crate::db::Connection;
 use crate::db::models::{AgentEvent, OnboardingState, PlannedSession, SessionStatus, WorkoutSession};
 use crate::domain::calendar::allocation;
 use crate::domain::calendar_busy::busy_intervals;
-use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::emit;
 use crate::domain::crowd::planning_signals;
 use crate::domain::planning::{Inputs, Interval, SlotSignal, plan_week};
@@ -63,7 +62,7 @@ pub struct Draft {
 
 /// Fill a week with new sessions around the existing ones, none preparing before `not_before` (default
 /// `now`). Each gets `template_id`, or with `rotate` the default rotation (`rotation`); then it is
-/// allocated, committed when within 48 h and queued for the calendar. Idempotent per `request_id` (the
+/// allocated and committed when within 48 h. Idempotent per `request_id` (the
 /// same week and template). `fixture_signals` replace the crowd model's signals (tests).
 #[allow(clippy::too_many_arguments)]
 pub fn draft_week(
@@ -109,11 +108,6 @@ pub fn draft_week(
         row.insert(db)?;
     }
     commit_upcoming(db, now)?;
-    for row in &created {
-        if let Some(session) = PlannedSession::get(db, &row.id)? {
-            queue_session_write(db, &session, now, false)?;
-        }
-    }
     let draft = Draft {
         created: created.into_iter().map(|s| s.id).collect(),
         minimum_met: plan.minimum_met,
@@ -174,32 +168,20 @@ pub(crate) fn rotation(db: &Connection, new: &mut [PlannedSession]) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Json;
-    use crate::db::models::{CalendarEventSnapshot, SessionStatus};
+    use crate::db::models::{BlockKind, SessionStatus};
 
     fn ts(text: &str) -> Ts {
         Ts::parse(text, None).unwrap()
     }
 
     #[test]
-    fn calendar_snapshot_and_locked_session_preserved() {
+    fn busy_block_and_locked_session_preserved() {
         let db = crate::db::test::db();
         get_profile(&db).unwrap();
         let (start, end) = (ts("2026-10-15T19:00:00+02:00"), ts("2026-10-15T20:10:00+02:00"));
-        CalendarEventSnapshot {
-            calendar_event_id: "travel".into(),
-            etag: None,
-            title: "Travel".into(),
-            start_at: ts("2026-10-12T00:00:00+02:00"),
-            end_at: ts("2026-10-14T00:00:00+02:00"),
-            status: "confirmed".into(),
-            gymclaw_managed: false,
-            gymclaw_session_id: None,
-            user_locked: false,
-            raw_json: Json(json!({})),
-        }
-        .insert(&db)
-        .unwrap();
+        let (travel_start, travel_end) = (ts("2026-10-12T00:00:00+02:00"), ts("2026-10-14T00:00:00+02:00"));
+        crate::domain::availability::add(&db, travel_start, travel_end, BlockKind::Travel, travel_start, "travel")
+            .unwrap();
         let mut locked = PlannedSession::new("2026-10-12".into(), None, true);
         locked.id = "locked".into();
         locked.status = SessionStatus::Tentative;

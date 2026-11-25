@@ -1,8 +1,7 @@
 //! In-process clocks.
 //!
 //! - Ticks: `watch` every 60 s, `weekly` Sunday ≥ 23:00 profile-local (once per week), `poll_crowd`
-//!   every 15 min when enabled, `publish` after ticks when calendar writes are enabled, and the agent's
-//!   own triggers (`extensions::fire_due`). Then the outbox sends whatever the ticks queued.
+//!   every 15 min when enabled, and the agent's own triggers (`extensions::fire_due`). Then the outbox sends whatever the ticks queued.
 //! - Jobs: one loop sleeps until the next `notification_job` is due (or a wake-up after a write) and
 //!   fires it (`Scheduler::fire`). REST jobs fire 30 s late: the coach countdown normally closes them.
 //!
@@ -162,7 +161,7 @@ impl Scheduler {
         let recipient = self.recipient.clone();
         let mut first_error = None;
         let r = recipient.clone();
-        // Calendar and crowd ticks fetch over the network inside their transaction (`network_tx`).
+        // The watch and crowd ticks fetch over the network inside their transaction (`network_tx`).
         let watch = blocking(&self.db_path, move |db| {
             let tx = crate::db::network_tx(db)?;
             let data = ticks::watch(&tx, &r, Ts::now())?;
@@ -173,7 +172,7 @@ impl Scheduler {
         // The agent's own triggers queue wake events; the agent worker picks them up within a minute.
         let triggers = in_tx(&self.db_path, |db| crate::domain::extensions::fire_due(db, Ts::now()));
         note(&mut first_error, "triggers", triggers.await);
-        // Commits per step (plan, publish, review event), so no outer transaction.
+        // Commits per step (plan, review event), so no outer transaction.
         note(&mut first_error, "weekly", blocking(&self.db_path, |db| weekly_if_due(db, Ts::now())).await);
         // The bot sends the recap as soon as the agent's review turn ends; this covers a review that
         // never ran. `pump` sends it after the ticks.
@@ -201,10 +200,6 @@ impl Scheduler {
                 });
                 note(&mut first_error, "crowd poll", poll.await);
             }
-        }
-        if authority.calendar_writes_enabled {
-            // Network per write; it commits each write itself, so no outer transaction.
-            note(&mut first_error, "publish", blocking(&self.db_path, |db| ticks::publish(db, Ts::now())).await);
         }
         match first_error {
             Some(e) => Err(e),
@@ -306,8 +301,7 @@ fn fire_at(job: &NotificationJob) -> Ts {
 }
 
 /// Run `ticks::weekly` once per week, on Sunday from 23:00 profile-local (late, so a Sunday evening
-/// workout makes the recap; a restart before midnight still catches up), publish calendar writes, then
-/// wake the agent for its weekly review (`weekly::announce`); the recap follows it (`weekly::release_recap`).
+/// workout makes the recap; a restart before midnight still catches up), then wake the agent for its weekly review (`weekly::announce`); the recap follows it (`weekly::release_recap`).
 /// True when it ran.
 pub fn weekly_if_due(db: &crate::db::Connection, now: Ts) -> Result<bool> {
     let tz = profile::get_profile(db)?.tz();
@@ -325,18 +319,8 @@ pub fn weekly_if_due(db: &crate::db::Connection, now: Ts) -> Result<bool> {
     let tx = crate::db::network_tx(db)?;
     ticks::weekly(&tx, now)?;
     tx.commit()?;
-    // Publish before recording the weekly run; the agent reads the actual outbox state.
-    let writes = outbox::runtime_authority(db)?.calendar_writes_enabled;
-    let published = writes
-        && match ticks::publish(db, now) {
-            Ok(result) => result["published"] == true,
-            Err(e) => {
-                tracing::warn!("weekly publish: {} {e}", e.code());
-                false
-            }
-        };
     let tx = db.unchecked_transaction()?;
-    crate::domain::weekly::announce(&tx, now, writes && !published)?;
+    crate::domain::weekly::announce(&tx, now)?;
     emit(&tx, "runtime.weekly_ran", now, json!({"week_start": week}))?;
     tx.commit()?;
     Ok(true)
@@ -362,7 +346,7 @@ mod tests {
     async fn tick_once_updates_health_and_pumps_outbox() {
         let (path, db) = crate::db::test::file();
         crate::db::test::authority().insert(&db).unwrap();
-        let ev = emit(&db, "calendar.update_briefing", Ts::now(), json!({})).unwrap();
+        let ev = emit(&db, "test.message", Ts::now(), json!({})).unwrap();
         outbox::prepare_event_message(&db, &ev.id, "Moved Push to 14:30.", Ts::now(), "42").unwrap();
         drop(db);
 

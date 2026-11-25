@@ -7,7 +7,7 @@
 # Reads from the running bot container over `ssh <host> docker …` (set CONTAINER to pick one), so it
 # needs no access to Docker's volume paths. Writes <local dir>/turns (default ./gymclaw-turns) and,
 # with --with-db, <local dir>/gymclaw.db. Everything lands owner-only: full prompts hold chat, notes
-# and calendar data, and the DB holds OAuth tokens. Safe to re-run; nightly from cron, e.g.
+# and calendar data, and the DB holds private feed links. Safe to re-run; nightly from cron, e.g.
 #   15 4 * * * cd ~/gymclaw && scripts/pull-turns myhost ~/gymclaw-turns >> ~/gymclaw-turns.log 2>&1
 set -euo pipefail
 

@@ -1,12 +1,8 @@
-//! External services: Google Calendar + OAuth, ICS feed, gym crowd sources, photos.
+//! External services: the personal ICS feed, gym crowd sources, photos.
 //!
 //! Everything here is synchronous (blocking HTTP via `http::Net`); domain code calls providers inside
 //! a DB transaction, and the async runtime reaches them through `spawn_blocking`.
-pub mod calendar;
 pub mod crowd;
-#[cfg(test)]
-pub mod fixture_calendar;
-pub mod google;
 pub mod http;
 pub mod ics;
 pub mod photo;

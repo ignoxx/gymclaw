@@ -9,7 +9,6 @@ use crate::db::Connection;
 use crate::db::models::{AgentEvent, PlannedSession, SessionStatus};
 use crate::domain::calendar::{allocation, week_of};
 use crate::domain::calendar_busy::busy_intervals;
-use crate::domain::calendar_writes::{cancel_pending, queue_session_write};
 use crate::domain::core::mutate;
 use crate::domain::notifications::{cancel_session_jobs, schedule_session_jobs};
 use crate::domain::planning::{Candidate, overlaps, plan_week, recovery_ok, require_monday, weekday};
@@ -49,7 +48,7 @@ fn active(db: &Connection, except: Option<&str>) -> Result<Vec<PlannedSession>> 
     )
 }
 
-/// Sessions within 48 h are committed (calendar shows them confirmed) and get their reminders.
+/// Sessions within 48 h are committed (the ICS feed shows them confirmed) and get their reminders.
 pub fn commit_upcoming(db: &Connection, now: Ts) -> Result<()> {
     for mut session in PlannedSession::select(db, "WHERE status IN ('TENTATIVE', 'COMMITTED') ORDER BY rowid", [])? {
         if session.status == SessionStatus::Tentative
@@ -59,7 +58,6 @@ pub fn commit_upcoming(db: &Connection, now: Ts) -> Result<()> {
             session.status = SessionStatus::Committed;
             session.source_revision += 1;
             session.save(db)?;
-            queue_session_write(db, &session, now, false)?;
         }
         schedule_session_jobs(db, &session, now)?;
     }
@@ -194,7 +192,7 @@ pub struct SessionPatch {
 }
 
 /// One atomic owner/agent edit. Policy violations warn; malformed times/templates fail. All saved
-/// edits lock the session and reconcile allocation, calendar intent and notification jobs together.
+/// edits lock the session and reconcile allocation and notification jobs together.
 /// A missed session, or a skipped one whose slot has begun, keeps that outcome: rescheduling it
 /// creates a new session that follows it, so history shows the miss and the make-up.
 pub fn edit_session(
@@ -230,7 +228,7 @@ pub fn edit_session(
         let from = id.map(|_| session.planned_start_at);
         let revived = id.is_some() && outcome && patch.status.is_none_or(SessionStatus::is_open);
         if revived {
-            // Same workout, times and plan as a starting point; its own identity, calendar event and reminders.
+            // Same workout, times and plan as a starting point; its own identity and reminders.
             let original = session.id.clone();
             session = PlannedSession {
                 id: crate::db::new_id(),
@@ -304,10 +302,8 @@ pub fn edit_session(
             session.save(db)?;
         }
         if !status.is_open() {
-            // Retire old queued writes too; a cancel then queues an owned calendar deletion.
             retire_session(db, &mut session, status, now)?;
         }
-        queue_session_write(db, &session, now, false)?;
         if status.is_open() {
             schedule_session_jobs(db, &session, now)?;
         }
@@ -317,8 +313,8 @@ pub fn edit_session(
     })
 }
 
-/// End a session that won't happen: its reminders and unsent calendar edits are dropped. A cancelled
-/// session was called off by the owner (in chat or by deleting its event): it is locked and marked
+/// End a session that won't happen: its reminders are dropped. A cancelled session was called off by
+/// the owner: it is locked and marked
 /// deleted, so the planner never puts a session back there.
 pub fn retire_session(db: &Connection, session: &mut PlannedSession, status: SessionStatus, now: Ts) -> Result<()> {
     db.execute(
@@ -332,8 +328,7 @@ pub fn retire_session(db: &Connection, session: &mut PlannedSession, status: Ses
     session.status = status;
     session.source_revision += 1;
     session.save(db)?;
-    cancel_session_jobs(db, &session.id, now)?;
-    cancel_pending(db, &session.id, now)
+    cancel_session_jobs(db, &session.id, now)
 }
 
 #[cfg(test)]
@@ -378,7 +373,7 @@ mod tests {
             |db: &Connection| AgentEvent::select(db, "WHERE type = 'planning.attention' ORDER BY rowid", []).unwrap();
         assert!(attention(&db).is_empty());
 
-        // A change from outside (a drag in the calendar) raises a warning when it appears, not again
+        // A change made outside this edit (e.g. another session moving) raises a warning when it appears, not again
         // while it persists, and again if it returns.
         let drag = |db: &Connection, id: &str, start: Ts| {
             let mut session = PlannedSession::get(db, id).unwrap().unwrap();

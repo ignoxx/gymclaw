@@ -1,5 +1,5 @@
-//! RFC 5545 recurrence sets (RRULE, RDATE, EXDATE), expanded on the wall clock. Shared by the ICS feed (`providers::ics`) and the
-//! Google recurring-master expansion in `domain::calendar_busy` (`occurrences`).
+//! RFC 5545 recurrence sets (RRULE, RDATE, EXDATE), expanded on the wall clock for the ICS feed
+//! (`providers::ics`).
 //!
 //! Semantics worth knowing:
 //! - Rules step in local wall-clock time, so a 19:00 Europe/Berlin series stays at 19:00 across DST.
@@ -257,7 +257,8 @@ pub struct Series {
     rdates: Vec<RDate>,
     exdate_ids: HashSet<DateTime>,
     exdate_days: HashSet<Date>,
-    /// ICS feeds (RFC 5545): DTSTART is always an instance. Google masters: only when the rule produces it.
+    /// ICS feeds (RFC 5545): DTSTART is always an instance. The conformance data (tests): only when the rule
+    /// produces it.
     include_start: bool,
 }
 
@@ -407,34 +408,6 @@ fn repair_until(until: &When, start: &When, all_dates: bool) -> Result<When> {
         (When::Date(_) | When::Floating(_), When::Zoned(..)) => When::Zoned(until.civil(), TimeZone::UTC),
         (u, _) => u.clone(),
     })
-}
-
-/// Recurrence starts of `lines` (`RRULE:…`, `EXDATE;TZID=…:…`, `RDATE…`, as Google's `recurrence`
-/// array has them) with `lower <= start < upper`, sorted. `dtstart` is the first instance: zoned for
-/// timed events, `When::Date` for all-day ones. DTSTART only counts when the rule produces it. More than `limit` instances → CALENDAR_RECURRENCE_TOO_LARGE;
-/// unparsable lines → CALENDAR_RECURRENCE_INVALID.
-pub fn occurrences(
-    lines: &[impl AsRef<str>],
-    dtstart: &When,
-    lower: &When,
-    upper: &When,
-    limit: usize,
-) -> Result<Vec<When>> {
-    let mut rrules = Vec::new();
-    let mut rdates = Vec::new();
-    let mut exdates = Vec::new();
-    for line in lines {
-        let line = line.as_ref().trim();
-        let parsed = ContentLine::parse(line).ok_or_else(|| invalid(format!("bad line {line:?}")))?;
-        match parsed.name.as_str() {
-            "RRULE" => rrules.push(parsed.value),
-            "EXDATE" => exdates.extend(parsed.times()?),
-            "RDATE" => rdates.extend(rdate_values(&parsed)?),
-            other => return Err(invalid(format!("unsupported property {other}"))),
-        }
-    }
-    let series = Series::new(dtstart, None, &rrules, rdates, &exdates, false)?;
-    Ok(series.between(lower, upper, limit)?.into_iter().map(|i| i.start).collect())
 }
 
 /// RDATE values, including `VALUE=PERIOD` (`start/end` or `start/duration`).
@@ -837,10 +810,38 @@ mod tests {
 
     use super::*;
 
-    /// Google `recurrence` arrays against expected occurrences (`testdata/ics/recurrence.json`,
-    /// generated from an independent implementation).
+    /// Recurrence starts of `lines` (`RRULE:…`, `EXDATE;TZID=…:…`, `RDATE…`, the shape of the
+    /// conformance data below) with `lower <= start < upper`, sorted. `dtstart` is the first instance: zoned for
+    /// timed events, `When::Date` for all-day ones. DTSTART only counts when the rule produces it. More than `limit` instances → CALENDAR_RECURRENCE_TOO_LARGE;
+    /// unparsable lines → CALENDAR_RECURRENCE_INVALID.
+    fn occurrences(
+        lines: &[impl AsRef<str>],
+        dtstart: &When,
+        lower: &When,
+        upper: &When,
+        limit: usize,
+    ) -> Result<Vec<When>> {
+        let mut rrules = Vec::new();
+        let mut rdates = Vec::new();
+        let mut exdates = Vec::new();
+        for line in lines {
+            let line = line.as_ref().trim();
+            let parsed = ContentLine::parse(line).ok_or_else(|| invalid(format!("bad line {line:?}")))?;
+            match parsed.name.as_str() {
+                "RRULE" => rrules.push(parsed.value),
+                "EXDATE" => exdates.extend(parsed.times()?),
+                "RDATE" => rdates.extend(rdate_values(&parsed)?),
+                other => return Err(invalid(format!("unsupported property {other}"))),
+            }
+        }
+        let series = Series::new(dtstart, None, &rrules, rdates, &exdates, false)?;
+        Ok(series.between(lower, upper, limit)?.into_iter().map(|i| i.start).collect())
+    }
+
+    /// Recurrence arrays against expected occurrences (`testdata/ics/recurrence.json`, generated from an
+    /// independent implementation). Exercises the `Series` engine the ICS feed uses.
     #[test]
-    fn google_recurrence_expands_to_expected_occurrences() {
+    fn recurrence_expands_to_expected_occurrences() {
         let cases: Vec<Value> = serde_json::from_str(include_str!("testdata/ics/recurrence.json")).unwrap();
         let berlin = TimeZone::get("Europe/Berlin").unwrap();
         for case in cases {

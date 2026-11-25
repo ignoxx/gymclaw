@@ -31,7 +31,6 @@ pub struct Authority {
     pub configured: bool,
     pub enabled: bool,
     pub template_id: Option<String>,
-    pub calendar_writes_enabled: bool,
     pub crowd_polling_enabled: bool,
 }
 
@@ -53,14 +52,13 @@ fn planning_template(db: &Connection) -> Result<Option<String>> {
     Ok(OnboardingState::get(db, 1)?.and_then(|row| row.split_json.0.first().cloned()))
 }
 
-/// What the runtime may do: send (enabled), plan with which template, write the calendar, poll the gym.
+/// What the runtime may do: send (enabled), plan with which template, poll the gym.
 pub fn runtime_authority(db: &Connection) -> Result<Authority> {
     let Some(settings) = RuntimeSettings::get(db, 1)? else {
         return Ok(Authority {
             configured: false,
             enabled: false,
             template_id: planning_template(db)?,
-            calendar_writes_enabled: false,
             crowd_polling_enabled: false,
         });
     };
@@ -68,7 +66,6 @@ pub fn runtime_authority(db: &Connection) -> Result<Authority> {
         configured: true,
         enabled: settings.enabled,
         template_id: planning_template(db)?,
-        calendar_writes_enabled: settings.calendar_writes_enabled,
         crowd_polling_enabled: settings.crowd_polling_enabled,
     })
 }
@@ -246,28 +243,14 @@ pub fn prepare_event_message(
     now: Ts,
     recipient: &str,
 ) -> Result<Value> {
-    let Some(source) = AgentEvent::get(db, event_id)? else {
+    if AgentEvent::get(db, event_id)?.is_none() {
         crate::bail!("EVENT_NOT_FOUND", "Unknown proactive message event")
-    };
+    }
     if let Some(existing) = NotificationDelivery::first(db, "WHERE agent_event_id = ?1", [event_id])? {
         if existing.recipient != recipient {
             crate::bail!("DELIVERY_ROUTE_MISMATCH", "Event delivery belongs to another owner");
         }
         return Ok(delivery_data(&existing));
-    }
-    if source.r#type == "calendar.update_briefing" {
-        let older = NotificationDelivery::select(
-            db,
-            "WHERE status = 'PENDING' AND recipient = ?1 AND agent_event_id IN (SELECT id FROM agent_event WHERE type = 'calendar.update_briefing')",
-            [recipient],
-        )?;
-        for mut old in older {
-            old.status = DeliveryStatus::Cancelled;
-            old.handled_at = Some(now);
-            old.update(db)?;
-            acknowledge_delivery_event(db, &old, now)?;
-            emit(db, "notifications.superseded", now, json!({"delivery_id": old.id, "new_event_id": event_id}))?;
-        }
     }
     let row = new_delivery(None, Some(event_id), recipient, message, json!({}), now);
     row.insert(db)?;
@@ -642,17 +625,14 @@ mod tests {
     }
 
     fn briefing(db: &Connection, at: Ts) -> String {
-        let event = emit(db, "calendar.update_briefing", at, json!({})).unwrap();
+        let event = emit(db, "test.message", at, json!({})).unwrap();
         prepare_event_message(db, &event.id, "Moved Push to 14:30.", at, "42").unwrap()["id"].as_str().unwrap().into()
     }
 
     #[test]
-    fn newer_briefing_supersedes_pending_one_and_old_messages_expire() {
+    fn old_event_messages_expire() {
         let db = crate::db::test::db();
-        let first = briefing(&db, now());
         let second = briefing(&db, now());
-        assert_eq!(NotificationDelivery::get(&db, &first).unwrap().unwrap().status, DeliveryStatus::Cancelled);
-        assert_eq!(pending(&db, "42").unwrap(), vec![second.clone()]);
         let row = NotificationDelivery::get(&db, &second).unwrap().unwrap();
         assert_eq!(event_stale_reason(&db, &row, now().mins(24 * 60 + 1)).unwrap(), Some("event_message_expired"));
         assert_eq!(event_stale_reason(&db, &row, now().mins(60)).unwrap(), None);

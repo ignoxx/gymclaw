@@ -1140,12 +1140,7 @@ fn status_text(db: &crate::db::Connection, health: &super::Health, model: &str) 
     let on = |b: bool| if b { "on" } else { "off" };
     let mut lines = vec![
         format!("**gymclaw** · up {}", super::uptime(health.started.elapsed())),
-        format!(
-            "Runtime {} · calendar writes {} · crowd polling {}",
-            authority.state(),
-            on(authority.calendar_writes_enabled),
-            on(authority.crowd_polling_enabled)
-        ),
+        format!("Runtime {} · crowd polling {}", authority.state(), on(authority.crowd_polling_enabled)),
         format!(
             "Deliveries: {} pending · {} sending · {} unknown",
             count("PENDING")?,
@@ -1341,7 +1336,7 @@ mod tests {
         let (bot, db, dir, tg) = fixture(model.clone());
         enable_runtime(&db);
         crate::domain::weekly::weekly_plan(&db, "fixture", Ts::now()).unwrap();
-        crate::domain::weekly::announce(&db, Ts::now(), false).unwrap();
+        crate::domain::weekly::announce(&db, Ts::now()).unwrap();
         bot.event_turn().await.unwrap();
         let sent: Vec<String> = tg
             .calls()

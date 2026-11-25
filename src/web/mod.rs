@@ -333,11 +333,8 @@ pub async fn handle_request(
                 return error(StatusCode::FORBIDDEN);
             }
         }
-        // The app toggles reminders only; calendar writes and crowd polling stay with the agent.
-        if tool == "runtime_resume"
-            && (args.get("calendar_writes").is_some_and(|v| !v.is_null())
-                || args.get("crowd_polling").is_some_and(|v| !v.is_null()))
-        {
+        // The app toggles reminders only; crowd polling stays with the agent.
+        if tool == "runtime_resume" && args.get("crowd_polling").is_some_and(|v| !v.is_null()) {
             return error(StatusCode::FORBIDDEN);
         }
         let recipient = auth.map(|a| a.owner_id.to_string());
@@ -774,9 +771,9 @@ mod tests {
             post(&app, "/api/body_log", r#"{"entries":[{"kg":80.5}]}"#, "same-origin").await.status(),
             StatusCode::OK
         );
-        // runtime_resume forbids granting calendar_writes from dashboard.
+        // runtime_resume forbids toggling crowd polling from dashboard.
         assert_eq!(
-            post(&app, "/api/runtime_resume", r#"{"owner_asked":true,"calendar_writes":true}"#, "same-origin")
+            post(&app, "/api/runtime_resume", r#"{"owner_asked":true,"crowd_polling":true}"#, "same-origin")
                 .await
                 .status(),
             StatusCode::FORBIDDEN

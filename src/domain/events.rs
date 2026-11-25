@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::time::Ts;
 
 /// Event types the agent deals with. Everything else is an audit record the code already handled
-/// (state changes, timers, sends, calendar writes). A single failed crowd poll is such a record: the
+/// (state changes, timers, sends). A single failed crowd poll is such a record: the
 /// owner hears about a lasting outage from `crowd::polling_alert`. A personal-calendar change is not
 /// here: it never moves a session, and a conflict it causes arrives as `planning.attention`.
 ///
@@ -16,10 +16,9 @@ use crate::time::Ts;
 /// outbox as the session's own message; the owner's answer reaches the agent. `extension.trigger` is a
 /// trigger the agent set itself; `agent.reflect` (`extensions::reflect`) asks it to learn from a hard turn,
 /// and is never open, so it runs only once the chat is quiet.
-const KINDS: [Kind; 11] = [
+const KINDS: [Kind; 10] = [
     Kind { name: "notifications.delivery_unknown", open: true, wake: false, mid_workout: false },
     Kind { name: "notifications.delivery_failed", open: true, wake: false, mid_workout: false },
-    Kind { name: "calendar.write_blocked", open: true, wake: false, mid_workout: false },
     Kind { name: "planning.attention", open: true, wake: true, mid_workout: false },
     Kind { name: "planning.replan_required", open: true, wake: true, mid_workout: false },
     Kind { name: "planning.no_show", open: true, wake: false, mid_workout: false },

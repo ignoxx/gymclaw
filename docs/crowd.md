@@ -77,13 +77,13 @@ observation time or cache age, so freshness stays unknown.
 Percentages, capacity guesses and undated "typical week" profiles are never treated as counts.
 Without a source, (2) alone still learns which hours feel quiet.
 
-## Calendar "Expected crowd"
+## Expected crowd
 
 Each planned session stores a forecast: typical reported check-ins for that weekday and hour (or
 the same hour on other days while history is thin) plus the owner's own Empty/A few/Busy/Packed
 feel once labels exist, e.g. `Busy · ~13 people checked in (Fridays 19:00, 2 wk)`. The watcher
-fills missing forecasts right away, re-checks sessions in the next 24 h every 30 min, and edits the
-event only when the feel changes or the count moves by ≥3 people and ≥25%. Nothing changes within
+fills missing forecasts right away, re-checks sessions in the next 24 h every 30 min, and updates
+the forecast only when the feel changes or the count moves by ≥3 people and ≥25%. Nothing changes within
 1 h of start, so imminent reminders stay put. No invented gym capacity, count↔percentage mapping
 or future attendance.
 
