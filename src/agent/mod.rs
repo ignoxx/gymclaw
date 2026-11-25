@@ -827,7 +827,10 @@ mod tests {
         let db = crate::db::open(&dir.join("gymclaw.db")).unwrap();
         assert_eq!(AgentNote::select(&db, "", []).unwrap()[0].text, "Hates lunges");
         // The note is in the next turn's prompt.
-        assert!(context::system(&db, Ts::now()).unwrap().0.contains("- [1] Hates lunges"));
+        assert!(
+            context::system(&db, Ts::now()).unwrap().0.contains("] Hates lunges")
+                && context::system(&db, Ts::now()).unwrap().0.contains("- [1 · ")
+        );
         assert_eq!(script.seen.lock().unwrap().len(), 2);
     }
 
