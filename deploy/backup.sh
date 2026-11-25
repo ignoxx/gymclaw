@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Consistent snapshot of all gymclaw state into /backups/gymclaw-<UTC timestamp>.tar.gz.
 # Runs inside the gymclaw container (schedule daily via cron/systemd: `backup.sh`).
-# Keeps the newest ${GYMCLAW_BACKUP_KEEP:-14} archives. Archives contain the
-# Google OAuth token and chat history; copy them off-host only to private storage.
+# Keeps the newest ${GYMCLAW_BACKUP_KEEP:-14} archives. Archives contain private
+# feed links and chat history; copy them off-host only to private storage.
 set -euo pipefail
 ROOT=/opt/gymclaw
 DEST=/backups

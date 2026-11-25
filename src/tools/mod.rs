@@ -194,8 +194,7 @@ pub fn guide(name: &str, e: Error) -> Error {
     // `*_UNAVAILABLE` is reserved for outside services that are down.
     let system =
         matches!(code.as_str(), "DATABASE_ERROR" | "NETWORK_ERROR" | "IO_ERROR" | "INTERNAL" | "TELEGRAM_ERROR")
-            || code.ends_with("_UNAVAILABLE")
-            || code.starts_with("CALENDAR_AUTH");
+            || code.ends_with("_UNAVAILABLE");
     let next = if system {
         "A system problem, not a wrong call: don't retry it this turn. Tell the owner what didn't happen.".to_string()
     } else {

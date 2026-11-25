@@ -13,8 +13,6 @@ services:
       GYMCLAW_TELEGRAM_USER_ID: ${GYMCLAW_TELEGRAM_USER_ID:?}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?}
-      # Optional: only `gymclaw calendar-auth` reads it; afterwards the DB stays bound to that calendar.
-      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-}
       # Empty means unset: defaults live in src/config.rs (list: docs/self-hosting.md).
       GYMCLAW_MODEL: ${GYMCLAW_MODEL:-}
       GYMCLAW_PROVIDER: ${GYMCLAW_PROVIDER:-}

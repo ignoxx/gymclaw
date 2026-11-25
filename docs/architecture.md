@@ -12,7 +12,6 @@ gymclaw migrate      # create or upgrade the DB (src/db/schema.sql for a fresh o
 gymclaw backup [dest]
 gymclaw export [path]  # every logged set as CSV in Strong's format (also the dashboard's /export.csv)
 gymclaw illustrations missing  # exercises with no picture of their own, the work list for scripts/new-illustration
-gymclaw calendar-auth  # Google OAuth by pasting the redirect URL back
 gymclaw dashboard    # the Mini App (the bot's "Gym" menu button); its writes are DASHBOARD_TOOLS and live-workout steps in src/web/mod.rs
 GYMCLAW_DB=copy.db gymclaw replay --at <local time> [--model …]   # re-run the agent on the chat's last owner message
 gymclaw rewind <run> --db copy.db --turns <dir>   # undo a turn's tool calls on a DB copy (turn-log changesets)
@@ -29,9 +28,9 @@ gymclaw crowd-reset  # wipe crowd history and state before switching crowd sourc
 | `src/main.rs`, `src/config.rs` | CLI and environment |
 | `src/db/` | schema (`schema.sql`, generated), baseline and migrations, typed rows (`models.rs`), test fixtures (`test.rs`) |
 | `src/time.rs`, `src/error.rs` | timestamps, `CODE: message` errors |
-| `src/domain/` | planning, scheduling, calendar, crowd, workout, coach, progression, trends, goals, activities, onboarding, body, ticks, extensions |
+| `src/domain/` | planning, scheduling, calendar (week helpers, busy time, personal ICS feed), crowd, workout, coach, progression, trends, goals, activities, onboarding, body, ticks, extensions |
 | `src/tools/` | the tool registry, grouped by area: `plan.rs`, `train.rs`, `progress.rs`, `exercises.rs`, `meta.rs`, `ops.rs`, `extensions.rs` |
-| `src/providers/` | Google Calendar + OAuth, ICS feed, crowd sources, photo decoding/EXIF |
+| `src/providers/` | personal ICS feed + recurrence, crowd sources, photo decoding/EXIF |
 | `src/agent/` | OpenRouter client, per-turn context, media, failure handling, turn log |
 | `src/runtime/` | `serve`: inbound routing, scheduler, outbox |
 | `src/telegram/` | Bot API client, coach card renderer, Markdown |
@@ -56,8 +55,11 @@ gymclaw crowd-reset  # wipe crowd history and state before switching crowd sourc
   `src/agent/mod.rs`: look there before adding one. Fix a misbehaving turn at its source (event,
   prompt, tool result), not with a filter, and pin it with a test next to the existing ones.
 - Background events (ticks, triggers, reflection) are observations, never owner permission: on a
-  background turn, `runtime_resume` and calendar writes refuse.
-- `runtime_settings` gates sends and ticks, with separate grants for calendar writes and crowd polling.
+  background turn, `runtime_resume` refuses.
+- `runtime_settings` gates sends and ticks, with a separate grant for crowd polling.
+- Calendars are read-only both ways: the owner's personal ICS feed is busy time, and gymclaw's own
+  plan goes out only as the `/calendar/<token>.ics` feed (`src/web/mod.rs`). Sessions move only
+  through Telegram or the Mini App.
 - Conflicts, missed slots, stale workouts and week rollover become decision events for the agent,
   never automatic replans. Code-sent messages (workout summary card, Sunday recap) are numbers only.
 - Reflection: a successful owner turn of 6+ tool calls, or one that hit a guard, raises an

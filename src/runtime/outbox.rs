@@ -31,7 +31,6 @@ pub struct Authority {
     pub configured: bool,
     pub enabled: bool,
     pub template_id: Option<String>,
-    pub calendar_writes_enabled: bool,
     pub crowd_polling_enabled: bool,
 }
 
@@ -53,14 +52,13 @@ fn planning_template(db: &Connection) -> Result<Option<String>> {
     Ok(OnboardingState::get(db, 1)?.and_then(|row| row.split_json.0.first().cloned()))
 }
 
-/// What the runtime may do: send (enabled), plan with which template, write the calendar, poll the gym.
+/// What the runtime may do: send (enabled), plan with which template, poll the gym.
 pub fn runtime_authority(db: &Connection) -> Result<Authority> {
     let Some(settings) = RuntimeSettings::get(db, 1)? else {
         return Ok(Authority {
             configured: false,
             enabled: false,
             template_id: planning_template(db)?,
-            calendar_writes_enabled: false,
             crowd_polling_enabled: false,
         });
     };
@@ -68,7 +66,6 @@ pub fn runtime_authority(db: &Connection) -> Result<Authority> {
         configured: true,
         enabled: settings.enabled,
         template_id: planning_template(db)?,
-        calendar_writes_enabled: settings.calendar_writes_enabled,
         crowd_polling_enabled: settings.crowd_polling_enabled,
     })
 }

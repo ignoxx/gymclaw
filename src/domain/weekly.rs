@@ -9,12 +9,11 @@ use sha2::{Digest, Sha256};
 
 use crate::db::Connection;
 use crate::db::models::{
-    AgentEvent, CalendarEventSnapshot, CrowdFeedback, OnboardingState, PlannedSession, SessionStatus, SetLog, SetType,
-    WorkoutExercise, WorkoutSession, WorkoutTemplate,
+    AgentEvent, CrowdFeedback, OnboardingState, PlannedSession, SessionStatus, SetLog, SetType, WorkoutExercise,
+    WorkoutSession, WorkoutTemplate,
 };
 use crate::domain::availability::session_blocked;
 use crate::domain::calendar::{allocation, get_week, week_of};
-use crate::domain::calendar_writes::queue_session_write;
 use crate::domain::core::emit;
 use crate::domain::crowd::CrowdModel;
 use crate::domain::profile::get_profile;
@@ -138,15 +137,12 @@ pub fn no_show_nudges(db: &Connection, now: Ts) -> Result<Vec<(String, String, S
     Ok(nudges)
 }
 
-/// Idempotency key for a week's first plan: stable through quiet watcher ticks; calendar/profile changes
-/// retry an impossible week.
+/// Idempotency key for a week's first plan: stable through quiet watcher ticks; profile changes (or a
+/// new day) retry an impossible week.
 fn first_plan_key(db: &Connection, week: Date, now: Ts, template_id: &str) -> Result<String> {
     let profile = get_profile(db)?;
-    let snapshots: Vec<Value> = CalendarEventSnapshot::select(db, "ORDER BY calendar_event_id", [])?
-        .into_iter()
-        .map(|s| json!([s.calendar_event_id, s.start_at, s.end_at, s.status, s.raw_json]))
-        .collect();
-    let material = json!({"profile": profile, "calendar": snapshots, "template": template_id, "day": now.local(&profile.tz()).date().to_string()});
+    let material =
+        json!({"profile": profile, "template": template_id, "day": now.local(&profile.tz()).date().to_string()});
     let digest = hex::encode(Sha256::digest(material.to_string()));
     Ok(format!("rolling:{week}:{}", &digest[..32]))
 }
@@ -242,7 +238,7 @@ pub fn close_started_slots(db: &Connection, now: Ts) -> Result<Vec<String>> {
     Ok(closed)
 }
 
-/// Worth a calendar edit: first data, a different feel, or ≥3 people and ≥25% change.
+/// Worth updating the stored forecast: first data, a different feel, or ≥3 people and ≥25% change.
 fn significant(old: Option<&Value>, new: Option<&Value>) -> bool {
     let Some(new) = new.filter(|n| n.as_object().is_some_and(|o| !o.is_empty())) else { return false };
     let Some(old) = old.filter(|o| o.as_object().is_some_and(|o| !o.is_empty())) else { return true };
@@ -257,7 +253,7 @@ fn significant(old: Option<&Value>, new: Option<&Value>) -> bool {
     }
 }
 
-/// Keep "Expected crowd" in calendar events current without churn: fill unknown forecasts, then re-check
+/// Keep each session's crowd forecast current without churn: fill unknown forecasts, then re-check
 /// sessions in the next 24 h every 30 min and update only on a significant change. Nothing within 1 h of
 /// start, so imminent reminders aren't rescheduled.
 pub fn refresh_crowd(db: &Connection, now: Ts) -> Result<Vec<Value>> {
@@ -282,8 +278,6 @@ pub fn refresh_crowd(db: &Connection, now: Ts) -> Result<Vec<Value>> {
         }
         session.save(db)?;
         if update {
-            // Description-only edit for published events; unpublished ones get a full create.
-            queue_session_write(db, &session, now, session.calendar_event_id.is_some())?;
             changed.push(json!({"session_id": session.id, "forecast": new}));
         }
     }
@@ -291,8 +285,8 @@ pub fn refresh_crowd(db: &Connection, now: Ts) -> Result<Vec<Value>> {
 }
 
 /// Planned sessions store a copy of their template. After template edits or swaps, re-allocate from the
-/// current template so the calendar and the workout use today's plan.
-pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
+/// current template so the session and the workout use today's plan.
+pub fn refresh_plans(db: &Connection) -> Result<Vec<String>> {
     let mut changed = Vec::new();
     for mut session in PlannedSession::select(
         db,
@@ -313,7 +307,6 @@ pub fn refresh_plans(db: &Connection, now: Ts) -> Result<Vec<String>> {
         allocation(db, &mut session)?;
         session.source_revision += 1;
         session.save(db)?;
-        queue_session_write(db, &session, now, session.calendar_event_id.is_some())?;
         changed.push(session.id);
     }
     Ok(changed)
@@ -361,15 +354,15 @@ pub fn rolling_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value
         vec![]
     };
     let stale = detect_stale_workouts(db, now)?;
-    let plans = refresh_plans(db, now)?;
+    let plans = refresh_plans(db)?;
     let crowd = refresh_crowd(db, now)?;
     commit_upcoming(db, now)?;
     Ok(json!({"missed": missed, "closed_started": closed, "created": created, "crowd": crowd,
         "stale_workouts": stale, "refreshed_plans": plans, "warnings": warnings}))
 }
 
-/// The Sunday run: rolling plan, then a draft of next week when it is still empty. `announce` wakes the
-/// agent for its review once the calendar is published.
+/// The Sunday run: rolling plan, then a draft of next week when it is still empty. The scheduler then
+/// wakes the agent for its review (`announce`).
 pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value> {
     if let Err(e) = prune_agent_buttons(db, now) {
         tracing::warn!("agent_button prune failed: {e}");
@@ -383,10 +376,9 @@ pub fn weekly_plan(db: &Connection, template_id: &str, now: Ts) -> Result<Value>
     Ok(json!({"week_start": next_week.to_string(), "plan": get_week(db, next_week)?}))
 }
 
-/// After the Sunday run and the calendar publish: wake the agent for its weekly review, once per week.
-/// The recap waits for that review (`release_recap`), so the owner sees the plan as the agent left it.
-/// `unpublished`: calendar writes are on but next week didn't reach the calendar.
-pub fn announce(db: &Connection, now: Ts, unpublished: bool) -> Result<Value> {
+/// After the Sunday run: wake the agent for its weekly review, once per week. The recap waits for that
+/// review (`release_recap`), so the owner sees the plan as the agent left it.
+pub fn announce(db: &Connection, now: Ts) -> Result<Value> {
     let tz = get_profile(db)?.tz();
     let next_week = week_of(now, &tz).checked_add(days(7))?;
     let key = format!("weekly-brief:{next_week}");
@@ -395,7 +387,7 @@ pub fn announce(db: &Connection, now: Ts, unpublished: bool) -> Result<Value> {
     }
     let previous = next_week.checked_sub(days(7))?;
     let recent = recent_sessions(db, previous.checked_sub(days(7 * (REVIEW_WEEKS - 1)))?, next_week, &tz)?;
-    let mut payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now)?, "recent_sessions": recent, "calendar_published": !unpublished, "instruction": WEEKLY_REVIEW});
+    let mut payload = json!({"week_start": next_week.to_string(), "audit": audit_week(db, previous, now)?, "recent_sessions": recent, "instruction": WEEKLY_REVIEW});
     // Trends, goals and activities ride on this one wake instead of the standing context; empty ones stay out.
     let activities: Vec<String> = [previous, next_week]
         .iter()
@@ -444,8 +436,7 @@ pub fn release_recap(db: &Connection, recipient: &str, now: Ts, reviewed: bool) 
     if queued.is_some() || !due {
         return Ok(None);
     }
-    let unpublished = briefing.payload_json["calendar_published"] == false;
-    let (message, effect) = recap(db, week.parse()?, now, unpublished)?;
+    let (message, effect) = recap(db, week.parse()?, now)?;
     let source = emit(db, "planning.weekly_recap", now, json!({"week_start": week, "effect": effect}))?;
     let delivery = crate::runtime::outbox::prepare_event_message(db, &source.id, &message, now, recipient)?;
     Ok(delivery["id"].as_str().map(String::from))
@@ -584,7 +575,7 @@ fn days_line(db: &Connection, week_start: Date, workouts: &[WorkoutSession], tz:
 /// time and volume trained, timed work (bike, plank), records, new targets, activities outside the gym,
 /// progress toward each goal, body weight (the only place gymclaw asks for a weigh-in). Then next week's
 /// sessions. 🔥 effect when the week hit its target.
-pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> Result<(String, Option<&'static str>)> {
+pub fn recap(db: &Connection, week_start: Date, now: Ts) -> Result<(String, Option<&'static str>)> {
     let profile = get_profile(db)?;
     let tz = profile.tz();
     let previous = week_start.checked_sub(days(7))?;
@@ -665,9 +656,6 @@ pub fn recap(db: &Connection, week_start: Date, now: Ts, unpublished: bool) -> R
         lines.push(weight);
     }
     lines.extend([String::new(), format!("🗓 **Next week · {}**", span(week_start)?)]);
-    if unpublished {
-        lines.push("⚠️ Not on your calendar yet: publishing failed.".into());
-    }
     let mut listed = Vec::new();
     let mut flexible = Vec::new();
     for session in &sessions {
@@ -717,10 +705,9 @@ pub fn prune_agent_buttons(db: &Connection, now: Ts) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::{CalendarWrite, NotificationDelivery};
+    use crate::db::models::NotificationDelivery;
     use crate::db::new_id;
     use crate::domain::calendar::allocation;
-    use crate::domain::calendar_writes::{describe_crowd, event_body, pending_writes};
     use crate::domain::crowd::record_feedback;
     use crate::domain::profile::update_profile;
     use crate::domain::replanning::{SessionPatch, edit_session};
@@ -789,7 +776,7 @@ mod tests {
         second.status = SessionStatus::Cancelled;
         second.update(&db).unwrap();
         weekly_plan(&db, "short", sunday(7 * 24 * 60)).unwrap();
-        let next = announce(&db, sunday(7 * 24 * 60), false).unwrap();
+        let next = announce(&db, sunday(7 * 24 * 60)).unwrap();
         let event = AgentEvent::get(&db, next["event_id"].as_str().unwrap()).unwrap().unwrap();
         let recent: Vec<String> = serde_json::from_value(event.payload_json["recent_sessions"].clone()).unwrap();
         // Last week's two remaining slots; the cancelled one and next week's plan are left out.
@@ -798,17 +785,15 @@ mod tests {
     }
 
     #[test]
-    fn weekly_plan_retry_one_briefing_and_no_duplicate_calendar_intent() {
+    fn weekly_plan_retry_one_briefing() {
         let db = db();
         let result = weekly_plan(&db, "short", sunday(0)).unwrap();
         assert_eq!(result["week_start"], "2026-10-12");
         assert_eq!(result["plan"]["sessions"].as_array().unwrap().len(), 3);
-        assert_eq!(pending_writes(&db).unwrap().len(), 3);
-        let first = announce(&db, sunday(0), false).unwrap();
+        let first = announce(&db, sunday(0)).unwrap();
         weekly_plan(&db, "short", sunday(1)).unwrap();
-        assert_eq!(announce(&db, sunday(1), false).unwrap()["event_id"], first["event_id"]);
+        assert_eq!(announce(&db, sunday(1)).unwrap()["event_id"], first["event_id"]);
         assert_eq!(sessions(&db).len(), 3);
-        assert_eq!(pending_writes(&db).unwrap().len(), 3);
         assert_eq!(count(&db, "SELECT count(*) FROM agent_event WHERE type = 'planning.weekly_briefing'"), 1);
     }
 
@@ -818,7 +803,7 @@ mod tests {
     fn recap_waits_for_the_review_and_shows_its_edits() {
         let db = db();
         weekly_plan(&db, "short", sunday(0)).unwrap();
-        announce(&db, sunday(0), false).unwrap();
+        announce(&db, sunday(0)).unwrap();
         let briefings = |db: &Connection| {
             crate::domain::events::wake_pending(db)
                 .unwrap()
@@ -828,7 +813,7 @@ mod tests {
         };
         assert_eq!(briefings(&db), 1);
         assert_eq!(release_recap(&db, "123", sunday(1), false).unwrap(), None);
-        let draft = recap(&db, Date::constant(2026, 10, 12), sunday(2), false).unwrap().0;
+        let draft = recap(&db, Date::constant(2026, 10, 12), sunday(2)).unwrap().0;
         // The review moves Monday's session to Tuesday, then its turn ends.
         let mut moved = sessions(&db).remove(0);
         moved.planned_start_at = moved.planned_start_at + jiff::SignedDuration::from_hours(24);
@@ -853,7 +838,7 @@ mod tests {
         for settled in [true, false] {
             let db = db();
             weekly_plan(&db, "short", sunday(0)).unwrap();
-            let event = announce(&db, sunday(0), false).unwrap()["event_id"].as_str().unwrap().to_string();
+            let event = announce(&db, sunday(0)).unwrap()["event_id"].as_str().unwrap().to_string();
             assert_eq!(release_recap(&db, "123", sunday(29), false).unwrap(), None);
             if settled {
                 crate::domain::events::ack(&db, &event, sunday(29)).unwrap();
@@ -870,7 +855,7 @@ mod tests {
     fn recap_waits_out_a_live_workout() {
         let db = db();
         weekly_plan(&db, "short", sunday(0)).unwrap();
-        announce(&db, sunday(0), false).unwrap();
+        announce(&db, sunday(0)).unwrap();
         crate::domain::workout::start(&db, Some("short"), None, false, sunday(20), "start").unwrap();
         assert_eq!(release_recap(&db, "123", sunday(30), false).unwrap(), None);
         crate::domain::coach::discard_workout(&db, None, sunday(40), "discard").unwrap();
@@ -893,8 +878,8 @@ mod tests {
             json!({"exercise_id": "bench", "previous_weight": 80, "next_weight": 82.5, "workout_id": "gone"}),
         )
         .unwrap();
-        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0), true).unwrap();
-        assert!(text.contains("**Next week · Oct 12–18**\n⚠️ Not on your calendar yet"), "{text}");
+        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0)).unwrap();
+        assert!(text.contains("**Next week · Oct 12–18**\n"), "{text}");
         assert!(text.contains("🔴 Packed") && !text.contains("Empty") && !text.contains("score"), "{text}");
         assert!(text.contains("can still move if your calendar changes"));
         assert!(text.contains("\n🎯 New targets: bench 82.5 kg (+2.5)\n⚖️ Snap a photo of your scale anytime and I'll track your weight.\n"), "{text}");
@@ -934,7 +919,7 @@ mod tests {
         train(4, 82.5, "wed");
         train(2, 85.0, "fri");
         weekly_plan(&db, "short", sunday(0)).unwrap();
-        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0), false).unwrap();
+        let (text, effect) = recap(&db, Date::constant(2026, 10, 12), sunday(0)).unwrap();
         assert!(text.starts_with("📅 **Your week · Oct 5–11**\n✅ **3/3 workouts**\nMon Short ✅ · Wed Short ✅ · Fri Short ✅\n⏱ 2 h 15 min trained · 💪 4.0 t lifted (+209% vs the week before)\n🏆 Bench 8 × 82.5 kg · Bench 8 × 85 kg\n"), "{text}");
         assert_eq!(effect, Some(crate::telegram::EFFECT_FIRE));
     }
@@ -949,11 +934,6 @@ mod tests {
         assert_eq!(missed.len(), 1);
         let missed = PlannedSession::get(&db, missed[0].as_str().unwrap()).unwrap().unwrap();
         assert_eq!(missed.status, SessionStatus::Missed);
-        assert!(
-            CalendarWrite::select(&db, "WHERE planned_session_id = ?1 AND status = 'PENDING'", [&missed.id])
-                .unwrap()
-                .is_empty()
-        );
         let report = audit_week(&db, Date::constant(2026, 10, 12), later).unwrap();
         assert_eq!(
             (&report["workouts"][0], &report["completed_workouts"]),
@@ -1140,17 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn crowd_forecast_text_and_significant_changes() {
-        let start = ts("2026-10-09T19:00:00+00:00").local(&jiff::tz::TimeZone::UTC);
-        assert_eq!(describe_crowd(None, &start), "not enough data yet");
-        assert_eq!(
-            describe_crowd(Some(&json!({"count": 13, "basis": "weekday_hour", "days": 2, "feel": "Busy"})), &start),
-            "Busy · ~13 people checked in (Fridays 19:00, 2 wk)"
-        );
-        assert_eq!(
-            describe_crowd(Some(&json!({"count": 8, "basis": "hour", "days": 1, "feel": null})), &start),
-            "~8 people checked in (19:00 on other days)"
-        );
+    fn significant_crowd_changes() {
         let old = json!({"count": 12, "feel": "Busy"});
         assert!(significant(None, Some(&json!({"count": 5, "feel": null}))));
         assert!(!significant(Some(&old), Some(&json!({"count": 14, "feel": "Busy"})))); // +2: noise
@@ -1184,40 +1154,12 @@ mod tests {
         allocation(&db, &mut session).unwrap();
         session.save(&db).unwrap();
         template(&db, pull(2));
-        assert_eq!(refresh_plans(&db, now).unwrap(), [session.id.clone()]);
+        assert_eq!(refresh_plans(&db).unwrap(), [session.id.clone()]);
         assert_eq!(
             PlannedSession::get(&db, &session.id).unwrap().unwrap().workout_plan_json["template"]["exercises"][0]["working_sets"],
             2
         );
-        assert!(refresh_plans(&db, now).unwrap().is_empty()); // No churn on the next tick.
-    }
-
-    #[test]
-    fn event_body_has_plan_location_and_split_colour() {
-        let db = crate::db::test::db();
-        for name in ["push", "pull"] {
-            let mut title = name.to_string();
-            title[..1].make_ascii_uppercase();
-            template(
-                &db,
-                json!({"id": name, "name": title, "exercises": [{"id": format!("{name}-row"), "name": "Row", "role": "x", "guide_id": "seated-row", "working_sets": 2, "rep_min": 8, "rep_max": 12, "target_weight": 0}]}),
-            );
-        }
-        split(&db, &["push", "pull"]);
-        update_profile(&db, json!({"gym_address": "Example Str. 1, Berlin"}).as_object().unwrap()).unwrap();
-        let start = ts("2026-10-05T08:30:00+00:00");
-        let mut session = row(&db, "2026-10-05", Some("pull"), SessionStatus::Committed, start, 60);
-        (session.prep_start_at, session.leave_home_at) = (start.mins(-35), start.mins(-20));
-        allocation(&db, &mut session).unwrap();
-        session.save(&db).unwrap();
-        let body = event_body(&db, &session).unwrap();
-        assert_eq!(
-            (&body["summary"], &body["location"], &body["colorId"]),
-            (&json!("🏋️ Pull"), &json!("Example Str. 1, Berlin"), &json!("6"))
-        );
-        let description = body["description"].as_str().unwrap();
-        assert!(description.contains("Get ready 09:55 · Leave 10:10 · Home ~11:50"), "{description}");
-        assert!(description.contains("1. Row · 2 sets of 8–12"), "{description}");
+        assert!(refresh_plans(&db).unwrap().is_empty()); // No churn on the next tick.
     }
 
     #[test]

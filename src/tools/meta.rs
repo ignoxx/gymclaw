@@ -17,6 +17,9 @@ pub fn tools() -> Vec<ToolDef> {
 pub const SECRET_TABLES: [&str; 2] = ["calendar_credential", "personal_calendar_state"];
 /// Secret columns on otherwise readable tables: SQLite replaces them with NULL in `sql_query`.
 const SECRET_COLUMNS: [(&str, &str); 1] = [("user_profile", "ics_token")];
+/// Google Calendar sync tables nothing reads or writes since the ICS-only switch, kept until a follow-up
+/// drops them; left out of the model's schema so it doesn't read stale state.
+const UNUSED_TABLES: [&str; 3] = ["calendar_event_snapshot", "calendar_sync_state", "calendar_write"];
 const MAX_ROWS: usize = 200;
 
 /// Read-only pragmas the model may use to inspect the schema.
@@ -121,7 +124,7 @@ pub fn schema(db: &Connection) -> Result<Vec<(String, String)>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
-        .filter(|(t, _)| !SECRET_TABLES.contains(&t.as_str()))
+        .filter(|(t, _)| !SECRET_TABLES.contains(&t.as_str()) && !UNUSED_TABLES.contains(&t.as_str()))
         .map(|(t, cols)| {
             let visible = cols
                 .split(", ")

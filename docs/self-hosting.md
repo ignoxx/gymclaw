@@ -8,8 +8,8 @@ gymclaw is a single-owner app: one deployment, one Telegram user, one gym. Run y
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) and your numeric Telegram user ID
   (for example from [@userinfobot](https://t.me/userinfobot)).
 - An [OpenRouter](https://openrouter.ai) API key. Set a spending limit on it.
-- Optional: a read-only workout calendar subscription (`/calendar/<token>.ics` from the dashboard),
-  a read-only personal calendar ICS feed, or two-way [Google Calendar](#google-calendar-optional).
+- Optional: a read-only [workout calendar](#workout-calendar-read-only) subscription and a
+  read-only [personal calendar](#personal-calendar-read-only) ICS feed.
 - Optional: a live check-in count for your gym ([crowd data](crowd.md)). Without it, gymclaw
   still plans and coaches; it just can't pick quiet hours from data.
 
@@ -39,7 +39,6 @@ Every setting is an environment variable; this table is the full list, and `.env
 | `GYMCLAW_PROVIDER` | no | OpenRouter provider tried first (e.g. `inference-net/fp4`). Unset or `auto`: OpenRouter picks. |
 | `GYMCLAW_MODEL_VISION` | no | Reads photos (scale, plan screenshots). Default: `GYMCLAW_MODEL`. |
 | `GYMCLAW_MODEL_AUDIO` | no | Transcribes voice notes; needs audio input. Default `google/gemini-3.5-flash-lite`. Adds ~1–3 s before a spoken set is logged. |
-| `GOOGLE_CALENDAR_ID` | no | Read only by `calendar-auth` when `--calendar-id` isn't passed. |
 | `GYMCLAW_DASHBOARD_HOST` | no | Public HTTPS hostname of the dashboard behind your reverse proxy. The bot's Telegram menu button opens it as a Mini App. |
 | `EGRESS_EXTRA_HOSTS` | no | Docker: extra hosts the egress proxy allows, e.g. your gym's crowd API or personal calendar feed. |
 | `GYMCLAW_IMAGE_TAG` | no | Docker: image tag to run. Default `main`; a commit sha rolls back. |
@@ -59,36 +58,17 @@ Reverse-proxy setup, backups and moving hosts: [deploy/README.md](../deploy/READ
 2. **Open your bot in Telegram and tap Start.** It asks three quick questions (goal; days and gym or
    home; your city, for timezone and kg/lb). Send a photo of your plan, a Strong/Hevy CSV
    export, or let it build one. Finishing setup turns on reminders and weekly planning automatically.
-3. **Optional integrations:** subscribe to your workouts from any calendar app via the dashboard's
-   read-only `/calendar/<token>.ics` feed, connect a read-only [personal calendar](#personal-calendar-read-only)
-   so gymclaw avoids your meetings, or enable two-way [Google Calendar](#google-calendar-optional).
+3. **Optional integrations:** subscribe to your workouts from any calendar app via the
+   [read-only workout feed](#workout-calendar-read-only), and connect a read-only
+   [personal calendar](#personal-calendar-read-only) so gymclaw avoids your meetings.
 
-## Google Calendar (optional)
+## Workout calendar (read-only)
 
-Use one dedicated Google calendar for gymclaw's workouts. Blockers you add there count, and so does
-an optional read-only [personal calendar](#personal-calendar-read-only). Moving, resizing or
-deleting a workout in any calendar app counts as your intent; gymclaw adapts.
+The dashboard's settings hold a private `/calendar/<token>.ics` link. Subscribe to it from Apple,
+Google or any calendar app to see your planned workouts; it always shows the current plan. It is
+read-only: move or cancel a workout in Telegram or the Mini App, not in the calendar app.
 
-1. In Google Cloud, enable the Google Calendar API and configure the OAuth consent screen (add your
-   account as a test user while the app is in testing).
-2. Create a **Desktop app** OAuth client and download its JSON. Keep it out of Git.
-3. Copy it into the data volume and authorize against the dedicated calendar's ID (never `primary`):
-
-   ```bash
-   docker compose exec -T gymclaw sh -c 'cat > data/google-client.json' < google-client.json
-   docker compose exec -it gymclaw gymclaw calendar-auth --calendar-id <dedicated calendar ID>
-   docker compose exec gymclaw gymclaw call calendar_sync
-   ```
-
-`calendar-auth` prints a URL. Open it in any browser, approve, and paste back the URL the browser
-ends up on (a `127.0.0.1` page that won't load, which is expected). Google expires refresh tokens of
-testing-mode apps after 7 days: re-run `calendar-auth` whenever gymclaw reports
-`CALENDAR_AUTH_REQUIRED`.
-
-The `calendar.events.owned` scope covers every calendar you own, so gymclaw binds its DB to the one
-ID you authorized and refuses any other. Tokens live in the SQLite DB in plain text.
-
-### Personal calendar (read-only)
+## Personal calendar (read-only)
 
 Your everyday calendar can block workout slots without gymclaw getting write access. It is read as
 an ICS feed; gymclaw only GETs it and keeps busy start and end times, no titles or notes.
@@ -105,19 +85,15 @@ stop, call `personal_calendar_disconnect`, then turn off **Public Calendar** to 
 
 ## Runtime authority
 
-Reminders, rest timers, the Sunday plan and calendar publishing run inside `gymclaw serve`. Finishing
-setup turns reminders and weekly planning on automatically; calendar writes and crowd polling stay off
-until you ask. Ask the bot ("turn on reminders, and poll the gym's crowd"),
+Reminders, rest timers and the Sunday plan run inside `gymclaw serve`. Finishing setup turns
+reminders and weekly planning on automatically; crowd polling stays off until you ask. Ask the bot ("turn on reminders, and poll the gym's crowd"),
 or:
 
 ```bash
 docker compose exec gymclaw gymclaw call runtime_resume '{"owner_asked": true, "crowd_polling": true}'
 ```
 
-**Calendar writes** are a separate grant. Check what would be written with
-`calendar_pending_writes`, then add `"calendar_writes": true` to `runtime_resume` (or ask the bot).
-`calendar_writes_revoke` takes that grant back. `runtime_pause` stops everything, writes included;
-`runtime_resume` brings back what was granted. `runtime_status` shows what's on.
+`runtime_pause` stops everything; `runtime_resume` brings it back. `runtime_status` shows what's on.
 
 ## When a message goes missing
 
@@ -150,5 +126,5 @@ The container entrypoint runs `migrate` on every start; `serve` does not.
 
 - `gymclaw call <tool> '<json>'` runs any agent tool by hand, exactly as the agent would (`-` reads
   the JSON from stdin); `gymclaw tools` lists them with their schemas.
-- The DB and backups hold your Google OAuth token and chat history ([SECURITY.md](../SECURITY.md)).
+- The DB and backups hold your private feed links and chat history ([SECURITY.md](../SECURITY.md)).
 - Only one instance per bot token ([moving hosts](../deploy/README.md#moving-hosts)).

@@ -17,7 +17,6 @@ pub fn tools() -> Vec<ToolDef> {
         def::<RuntimeStatus>(),
         def::<RuntimePause>(),
         def::<RuntimeResume>(),
-        def::<CalendarWritesRevoke>(),
     ]
 }
 
@@ -88,7 +87,8 @@ pub struct RuntimeStatus {}
 impl Tool for RuntimeStatus {
     const NAME: &'static str = "runtime_status";
     const LISTED: Listed = Listed::Never;
-    const DESCRIPTION: &'static str = "Whether reminders and briefings are on, calendar-write and crowd-polling authority, open deliveries and the next reminder.";
+    const DESCRIPTION: &'static str =
+        "Whether reminders and briefings are on, crowd-polling authority, open deliveries and the next reminder.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let authority = outbox::runtime_authority(cx.db)?;
@@ -112,8 +112,8 @@ pub struct RuntimePause {}
 impl Tool for RuntimePause {
     const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "runtime_pause";
-    const DESCRIPTION: &'static str = "Stop all reminders, briefings, planning ticks and calendar writes until the owner \
-explicitly resumes. Resuming restores calendar writes if they were granted.";
+    const DESCRIPTION: &'static str =
+        "Stop all reminders, briefings and planning ticks until the owner explicitly resumes.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let mut settings = settings(cx)?;
@@ -127,9 +127,6 @@ explicitly resumes. Resuming restores calendar writes if they were granted.";
 pub struct RuntimeResume {
     /// True only when the owner asked for this in their own words in this conversation.
     pub owner_asked: bool,
-    /// Also let gymclaw write workouts to its Google calendar (needs the owner's explicit OK).
-    #[serde(default)]
-    pub calendar_writes: bool,
     /// Turn polling the gym's live check-in count on (true) or off (false); omit to leave unchanged.
     #[serde(default)]
     pub crowd_polling: Option<bool>,
@@ -138,7 +135,7 @@ pub struct RuntimeResume {
 impl Tool for RuntimeResume {
     const LISTED: Listed = Listed::Never;
     const NAME: &'static str = "runtime_resume";
-    const DESCRIPTION: &'static str = "Turn reminders, briefings and planning ticks back on (or grant calendar writes / crowd polling). Needs the owner's explicit request.";
+    const DESCRIPTION: &'static str = "Turn reminders, briefings and planning ticks back on (or toggle crowd polling). Needs the owner's explicit request.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         if !self.owner_asked || cx.background() {
@@ -162,27 +159,9 @@ impl Tool for RuntimeResume {
             }
         };
         settings.enabled = true;
-        settings.calendar_writes_enabled |= self.calendar_writes;
         if let Some(poll) = self.crowd_polling {
             settings.crowd_polling_enabled = poll;
         }
-        settings.update(cx.db)?;
-        Ok(serde_json::to_value(outbox::runtime_authority(cx.db)?)?)
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct CalendarWritesRevoke {}
-
-impl Tool for CalendarWritesRevoke {
-    const LISTED: Listed = Listed::Never;
-    const NAME: &'static str = "calendar_writes_revoke";
-    const DESCRIPTION: &'static str =
-        "Stop writing to the Google calendar (plans stay local until the owner grants it again).";
-
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let mut settings = settings(cx)?;
-        settings.calendar_writes_enabled = false;
         settings.update(cx.db)?;
         Ok(serde_json::to_value(outbox::runtime_authority(cx.db)?)?)
     }
@@ -213,18 +192,17 @@ impl Tool for Delivery {
 pub enum Runtime {
     Pause(RuntimePause),
     Resume(RuntimeResume),
-    RevokeCalendarWrites(CalendarWritesRevoke),
 }
 
 impl Tool for Runtime {
     const NAME: &'static str = "runtime";
-    const DESCRIPTION: &'static str = "Pause reminders/planning ticks, resume them (or grant calendar writes / toggle crowd polling with owner_asked: true), or revoke calendar writes.";
+    const DESCRIPTION: &'static str =
+        "Pause reminders/planning ticks, or resume them (and toggle crowd polling with owner_asked: true).";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         match self {
             Runtime::Pause(t) => t.run(cx),
             Runtime::Resume(t) => t.run(cx),
-            Runtime::RevokeCalendarWrites(t) => t.run(cx),
         }
     }
 }
@@ -247,30 +225,20 @@ mod tests {
         crate::tools::call(&mut cx, tool, args)
     }
 
-    /// Calendar-write authority is separate: revoked, paused, then resumed without it.
+    /// Pause, then resume only on the owner's own request.
     #[test]
-    fn separate_calendar_write_authority_and_resume_needs_the_owner() {
+    fn resume_needs_the_owner() {
         let db = crate::db::test::db();
-        RuntimeSettings { calendar_writes_enabled: true, ..crate::db::test::authority() }.insert(&db).unwrap();
-        // Pausing stops the ticks that publish; it leaves the owner's calendar grant alone.
-        let paused = call(&db, "runtime_pause", json!({})).unwrap();
-        assert_eq!(
-            (paused["enabled"].as_bool(), paused["calendar_writes_enabled"].as_bool()),
-            (Some(false), Some(true))
-        );
-        assert_eq!(call(&db, "calendar_writes_revoke", json!({})).unwrap()["calendar_writes_enabled"], false);
+        crate::db::test::authority().insert(&db).unwrap();
+        assert_eq!(call(&db, "runtime_pause", json!({})).unwrap()["enabled"], false);
         assert_eq!(
             call(&db, "runtime_resume", json!({"owner_asked": false})).unwrap_err().code(),
             "RUNTIME_NOT_APPROVED"
         );
         let resumed = call(&db, "runtime_resume", json!({"owner_asked": true, "crowd_polling": true})).unwrap();
         assert_eq!(
-            (
-                resumed["enabled"].as_bool(),
-                resumed["calendar_writes_enabled"].as_bool(),
-                resumed["crowd_polling_enabled"].as_bool(),
-            ),
-            (Some(true), Some(false), Some(true))
+            (resumed["enabled"].as_bool(), resumed["crowd_polling_enabled"].as_bool()),
+            (Some(true), Some(true))
         );
         // Omitting crowd_polling leaves it on; passing false turns it off.
         assert_eq!(call(&db, "runtime_resume", json!({"owner_asked": true})).unwrap()["crowd_polling_enabled"], true);

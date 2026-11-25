@@ -20,8 +20,6 @@ sql_enum!(SetType { Warmup = "WARMUP", Working = "WORKING" });
 sql_enum!(JobKind { Rest = "REST", GetReady = "GET_READY", Leave = "LEAVE", SessionStart = "SESSION_START" });
 sql_enum!(JobStatus { Pending = "PENDING", Cancelled = "CANCELLED", Fired = "FIRED" });
 sql_enum!(DeliveryStatus { Pending = "PENDING", Sending = "SENDING", Sent = "SENT", Unknown = "UNKNOWN", Cancelled = "CANCELLED" });
-sql_enum!(WriteStatus { Pending = "PENDING", Applied = "APPLIED", Conflict = "CONFLICT", Cancelled = "CANCELLED" });
-sql_enum!(WriteAction { Create = "CREATE", Update = "UPDATE", Delete = "DELETE" });
 sql_enum!(BlockKind { Travel = "TRAVEL", Sick = "SICK", Unavailable = "UNAVAILABLE" });
 sql_enum!(BlockStatus { Active = "ACTIVE", Retracted = "RETRACTED" });
 sql_enum!(ChatRole { Owner = "owner", Assistant = "assistant", Bot = "bot" });
@@ -127,19 +125,6 @@ table!(AvailabilityBlock = "availability_block" {
     retracted_at: Option<Ts>,
 });
 
-table!(CalendarEventSnapshot = "calendar_event_snapshot" {
-    calendar_event_id: String,
-    etag: Option<String>,
-    title: String,
-    start_at: Ts,
-    end_at: Ts,
-    status: String,
-    gymclaw_managed: bool,
-    gymclaw_session_id: Option<String>,
-    user_locked: bool,
-    raw_json: Json<Value>,
-});
-
 table!(PlannedSession = "planned_session" {
     id: String,
     week_id: String,
@@ -150,6 +135,7 @@ table!(PlannedSession = "planned_session" {
     planned_end_at: Ts,
     prep_start_at: Ts,
     leave_home_at: Ts,
+    /// Ignored since Google Calendar sync was removed; older rows may still hold a Google event id.
     calendar_event_id: Option<String>,
     user_locked: bool,
     source_revision: i64,
@@ -269,44 +255,14 @@ table!(PersonalBusyInterval = "personal_busy_interval" {
 
 table!(
     /// The runtime's switches, created by the first `runtime_resume`: `enabled` gates every send and
-    /// tick, the other two calendar writes and crowd polling. `recipient` is the owner's chat id.
+    /// tick, `crowd_polling_enabled` crowd polling. `recipient` is the owner's chat id.
     RuntimeSettings = "runtime_settings" {
     id: i64,
     recipient: String,
     enabled: bool,
+    /// Ignored since Google Calendar sync was removed; new rows write false.
     calendar_writes_enabled: bool,
     crowd_polling_enabled: bool,
-});
-
-table!(CalendarSyncState = "calendar_sync_state" {
-    id: i64,
-    calendar_id: String,
-    timezone: String,
-    sync_token: Option<String>,
-    last_synced_at: Option<Ts>,
-    source: String,
-});
-
-table!(
-    /// OAuth tokens (google-auth JSON). Never in tool results.
-    CalendarCredential = "calendar_credential" {
-    id: i64,
-    credentials_json: Json<Value>,
-});
-
-table!(
-    /// Persisted before network writes; stable event IDs make retries safe.
-    CalendarWrite = "calendar_write" {
-    id: String,
-    planned_session_id: String,
-    revision: i64,
-    action: WriteAction,
-    event_id: String,
-    expected_etag: Option<String>,
-    body_json: Json<Value>,
-    status: WriteStatus,
-    created_at: Ts,
-    handled_at: Option<Ts>,
 });
 
 table!(CrowdObservation = "crowd_observation" {

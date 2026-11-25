@@ -46,7 +46,7 @@ pub fn expected_version() -> i64 {
     MIGRATIONS.len() as i64
 }
 
-/// Read-write connection. WAL lets readers (the dashboard, a sync waiting on Google) run alongside a
+/// Read-write connection. WAL lets readers (the dashboard, a tick waiting on a feed fetch) run alongside a
 /// writer, and transactions take the write lock when they begin: a read-then-write transaction that
 /// races another writer would otherwise fail at once with "database is locked" instead of waiting out
 /// `busy_timeout`. Transactions that call the network inside opt back into DEFERRED (`network_tx`).
@@ -70,7 +70,7 @@ pub fn in_tx<T>(conn: &mut Connection, f: impl FnOnce(&Connection) -> Result<T>)
 }
 
 /// A DEFERRED transaction for work that calls the network: it doesn't hold the write lock through the
-/// fetch, so taps and typed sets aren't stalled behind Google. Under WAL its reads never block a writer;
+/// fetch, so taps and typed sets aren't stalled behind the network. Under WAL its reads never block a writer;
 /// if one commits mid-fetch, this transaction's own write fails and the next tick retries.
 pub fn network_tx(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
     Ok(rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?)

@@ -43,16 +43,6 @@ enum Command {
     Tools,
     /// Consistent copy of the database (default `data/backups/manual-<time>.db`).
     Backup { dest: Option<PathBuf> },
-    /// Authorize Google Calendar (first time, or after CALENDAR_AUTH_REQUIRED). Prints a URL; open it in
-    /// any browser, approve, then paste the URL the browser ends up on (an error page on 127.0.0.1).
-    CalendarAuth {
-        /// The dedicated calendar's ID (never `primary`).
-        #[arg(long, env = "GOOGLE_CALENDAR_ID")]
-        calendar_id: String,
-        /// Desktop-app OAuth client JSON downloaded from Google Cloud.
-        #[arg(long, default_value = "data/google-client.json")]
-        client_file: PathBuf,
-    },
     /// Re-run the agent's turn on a database copy: the chat's newest owner message,
     /// answered at `--at`, with `--model`. Tools write to that copy; every model step prints to stderr.
     /// For diagnosing a prod turn: snapshot, rewind the rows the turn changed (`rewind`), replay.
@@ -125,22 +115,6 @@ enum IllustrationsCommand {
     Missing,
 }
 
-fn calendar_auth(calendar_id: &str, client_file: &std::path::Path) -> Result<Value> {
-    use gymclaw::providers::google::Consent;
-    let consent = Consent::new(&std::fs::read(client_file).map_err(|_| {
-        Error::domain("CALENDAR_AUTH_FAILED", format!("Client file not found: {}", client_file.display()))
-    })?)?;
-    eprintln!(
-        "Open this URL, approve access, then paste the address your browser ends up on (it won't load):\n\n{}\n",
-        consent.url()
-    );
-    eprint!("Pasted URL: ");
-    let mut pasted = String::new();
-    std::io::stdin().read_line(&mut pasted)?;
-    let conn = db::open(&Config::paths().1)?;
-    consent.finish(&conn, calendar_id, &pasted, &gymclaw::providers::http::Net::new()?, Ts::now())
-}
-
 fn crowd_test() -> Result<Value> {
     let net = gymclaw::providers::http::Net::new()?;
     let provider = gymclaw::providers::crowd::from_environment(&net, &gymclaw::providers::crowd::run_command)?;
@@ -165,10 +139,6 @@ async fn doctor() -> Value {
                     let expected = db::expected_version();
                     let setup_done = gymclaw::domain::onboarding::finished(&conn).unwrap_or(false);
                     let runtime = gymclaw::runtime::outbox::runtime_authority(&conn).ok();
-                    let google = gymclaw::db::models::CalendarSyncState::get(&conn, 1)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|s| s.source == "google");
                     let ics =
                         gymclaw::domain::personal_calendar::status(&conn).ok().is_some_and(|s| s["connected"] == true);
                     let error = if version < expected {
@@ -182,7 +152,7 @@ async fn doctor() -> Value {
                         "ok": version == expected, "path": db_path, "schema_version": version,
                         "expected_schema_version": expected, "setup_done": setup_done,
                         "runtime_enabled": runtime.as_ref().is_some_and(|r| r.enabled),
-                        "google_calendar": google, "personal_ics": ics,
+                        "personal_ics": ics,
                     });
                     if let Some(error) = error {
                         report["error"] = json!(error);
@@ -342,12 +312,6 @@ async fn main() -> ExitCode {
             let dest =
                 dest.unwrap_or_else(|| data_dir.join("backups").join(format!("manual-{}.db", Ts::now().0.as_second())));
             db::open(&path).and_then(|conn| db::snapshot(&conn, &dest)).map(|_| Some(json!({"ok": true, "path": dest})))
-        }
-        Command::CalendarAuth { calendar_id, client_file } => {
-            tokio::task::spawn_blocking(move || calendar_auth(&calendar_id, &client_file))
-                .await
-                .expect("calendar auth thread")
-                .map(Some)
         }
         Command::Replay { db, key, at, model, provider } => {
             let (model, provider) = (model.unwrap_or_else(config::model), provider.or_else(config::provider));

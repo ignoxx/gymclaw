@@ -5,8 +5,8 @@
 //! Defaults never count as answers, and the interview asks only what planning can't do without: the
 //! rest of the profile keeps its defaults until the owner mentions it. Ready stays ready: later
 //! profile, template or question changes don't send the owner back into setup.
-//! Finishing turns on reminders and weekly planning (if runtime isn't configured yet); calendar writes
-//! and crowd polling remain opt-in.
+//! Finishing turns on reminders and weekly planning (if runtime isn't configured yet); crowd polling
+//! remains opt-in.
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
@@ -161,10 +161,9 @@ fn step_and_instruction(
                  with buttons \"Sounds good\", \"Train today\", \"Different time\", plus \"Start next week\" only when that \
                  session is in the current week; otherwise say you'll plan the week ahead and they can ask for a session anytime. \
                  On \"Train today\", move the first drafted session to today with session_update (keeping rotation and weekly count); \
-                 on \"Start next week\", cancel the current week's drafted sessions. Calendar writes stay opt-in."
+                 on \"Start next week\", cancel the current week's drafted sessions."
             } else {
-                "Setup done. Runtime reminders are currently off; turn them on when the owner asks. \
-                 Calendar writes stay opt-in."
+                "Setup done. Runtime reminders are currently off; turn them on when the owner asks."
             },
         );
     }
@@ -290,7 +289,6 @@ pub fn status(db: &Connection) -> Result<Value> {
         "missing": if ready { vec![] } else { missing },
         "answers": row.interview_json.0, "profile": profile_val, "split": row.split_json.0, "plan": row.plan_text, "templates": template_options(db)?,
         "review_fingerprint": fingerprint,
-        "calendar_writes_enabled": settings.as_ref().is_some_and(|s| s.calendar_writes_enabled),
         "runtime_enabled": settings.as_ref().is_some_and(|s| s.enabled), "instruction": instruction,
     }))
 }
@@ -340,7 +338,7 @@ fn apply_profile(db: &Connection, changes: &Map<String, Value>) -> Result<()> {
 }
 
 /// Enable reminders and weekly planning on the first transition to finished, only when no runtime row
-/// exists yet (never overrides a later pause). Calendar writes and crowd polling stay off.
+/// exists yet (never overrides a later pause). Crowd polling stays off.
 fn enable_runtime_once(db: &Connection, recipient: Option<&str>) -> Result<()> {
     if RuntimeSettings::get(db, 1)?.is_some() {
         return Ok(());
@@ -590,15 +588,9 @@ mod tests {
             "finish",
         )
         .unwrap();
-        assert_eq!(
-            (done["data"]["ready"].as_bool(), done["data"]["calendar_writes_enabled"].as_bool()),
-            (Some(true), Some(false))
-        );
+        assert_eq!(done["data"]["ready"], true);
         let settings = RuntimeSettings::get(&db, 1).unwrap().expect("runtime enabled from recipient");
-        assert_eq!(
-            (settings.recipient.as_str(), settings.enabled, settings.calendar_writes_enabled),
-            ("42", true, false)
-        );
+        assert_eq!((settings.recipient.as_str(), settings.enabled), ("42", true));
         // Later edits or old interview_json keys don't send the owner back into setup.
         db.execute("UPDATE onboarding_state SET interview_json = '{\"legacy\": \"yes\"}' WHERE id = 1", []).unwrap();
         assert_eq!(status(&db).unwrap()["step"], "READY");

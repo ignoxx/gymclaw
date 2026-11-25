@@ -27,7 +27,6 @@ pub mod activities;
 pub mod availability;
 pub mod calendar;
 pub mod calendar_busy;
-pub mod calendar_writes;
 pub mod compression;
 pub mod crowd;
 pub mod events;

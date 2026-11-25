@@ -8,11 +8,8 @@ use super::{Ctx, Listed, Tool, ToolDef, def};
 use crate::db::models::{BlockKind, PlannedSession};
 use crate::domain::calendar::{get_week, week_of};
 use crate::domain::profile::{get_profile, update_profile};
-use crate::domain::{
-    activities, availability, calendar, calendar_writes, crowd, events, personal_calendar, replanning, scheduling,
-};
+use crate::domain::{activities, availability, crowd, events, personal_calendar, replanning, scheduling};
 use crate::error::Result;
-use crate::providers::google::google_provider;
 use crate::providers::http::Net;
 use crate::time::Ts;
 
@@ -30,7 +27,6 @@ pub fn tools() -> Vec<ToolDef> {
         def::<AvailabilityAdd>(),
         def::<AvailabilityList>(),
         def::<AvailabilityRemove>(),
-        def::<CalendarSync>(),
         def::<PersonalCalendarConnect>(),
         def::<PersonalCalendarStatus>(),
         def::<PersonalCalendarDisconnect>(),
@@ -39,7 +35,6 @@ pub fn tools() -> Vec<ToolDef> {
         def::<CrowdForecast>(),
         def::<EventsPending>(),
         def::<EventAck>(),
-        def::<CalendarPendingWrites>(),
     ]
 }
 
@@ -109,8 +104,8 @@ pub struct SessionFields {
     pub end: Option<String>,
     /// A real workout template id.
     pub template_id: Option<String>,
-    /// Any scheduling status; this does not create workout/set logs. CANCELLED deletes the owned
-    /// calendar event; SKIPPED/MISSED keep it as history. Default: preserve.
+    /// Any scheduling status; this does not create workout/set logs. CANCELLED means the owner called
+    /// it off; SKIPPED/MISSED are history. Default: preserve.
     pub status: Option<crate::db::models::SessionStatus>,
 }
 
@@ -140,7 +135,7 @@ pub struct SessionCreate {
 
 impl Tool for SessionCreate {
     const NAME: &'static str = "session_create";
-    const DESCRIPTION: &'static str = "Create an upcoming session at exact times with a real template. Rules are defaults: violations return warnings, never silently change your choice. Locks the session. Calendar writes, allocation, reminders and retries are handled together.";
+    const DESCRIPTION: &'static str = "Create an upcoming session at exact times with a real template. Rules are defaults: violations return warnings, never silently change your choice. Locks the session. Allocation, reminders and retries are handled together.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let fields = SessionFields {
@@ -405,34 +400,6 @@ impl Tool for EventAck {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct CalendarPendingWrites {}
-
-impl Tool for CalendarPendingWrites {
-    const NAME: &'static str = "calendar_pending_writes";
-    const DESCRIPTION: &'static str = "Calendar changes queued for Google Calendar but not published yet.";
-    const LISTED: Listed = Listed::Never;
-
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
-        Ok(json!({"writes": calendar_writes::pending_writes(cx.db)?}))
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct CalendarSync {}
-
-impl Tool for CalendarSync {
-    const NAME: &'static str = "calendar_sync";
-    const LISTED: Listed = Listed::Never;
-    const DESCRIPTION: &'static str = "Pull the owner's Google Calendar edits now (moves, resizes, deletes, new blockers) and report conflicts for your decision. Runs every minute anyway.";
-
-    fn run(self, cx: &mut Ctx) -> Result<Value> {
-        let net = Net::new()?;
-        let mut provider = google_provider(cx.db, None, &net)?;
-        calendar::sync_calendar(cx.db, &mut provider, cx.now)
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
 pub struct PersonalCalendarConnect {
     /// The owner's published calendar link (webcal:// or https://, e.g. iCloud "Public Calendar").
     pub url: String,
@@ -577,18 +544,6 @@ mod tests {
         weekly_plan(db, "short", sunday()).unwrap()["plan"]["sessions"].as_array().unwrap().clone()
     }
 
-    fn writes_start(db: &Connection, session_id: &str) -> Vec<String> {
-        let writes = call(db, "calendar_pending_writes", json!({}), sunday(), "w").unwrap()["writes"]
-            .as_array()
-            .unwrap()
-            .clone();
-        writes
-            .iter()
-            .filter(|w| w["session_id"] == session_id)
-            .map(|w| w["body"]["start"]["dateTime"].as_str().unwrap().to_string())
-            .collect()
-    }
-
     /// plan_week without a template used to lock every new slot to the first one, out of the rotation's reach.
     #[test]
     fn plan_week_gives_new_slots_the_default_rotation() {
@@ -619,7 +574,6 @@ mod tests {
         assert!(created["data"]["warnings"].as_array().unwrap().len() >= 3);
         assert_eq!(created["data"]["session"]["start"], "2026-10-13T21:07:00+00:00");
         assert_eq!(created["data"]["session"]["user_locked"], true);
-        assert!(!writes_start(&db, id).is_empty());
         // A scheduling status edit creates no workout logs and must remain correctable.
         call(
             &db,
@@ -645,13 +599,6 @@ mod tests {
         );
         let changed = call(&db, "session_update", json!({"session_id": id, "fields": {"start": "2026-10-14T12:00", "end": "2026-10-14T13:10", "template_id": "legs", "status": "COMMITTED"}}), sunday(), "raw-update").unwrap();
         assert_eq!(changed["data"]["session"]["workout_plan"]["template"]["id"], "legs");
-        let mut calendar =
-            crate::providers::fixture_calendar::FixtureCalendarProvider::new("unit-calendar", "Europe/Berlin");
-        let write = calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
-        assert_eq!(
-            calendar_writes::apply_write(&db, &mut calendar, write["id"].as_str().unwrap(), sunday(), false).unwrap()["status"],
-            "APPLIED"
-        );
         let jobs: i64 = db
             .query_row(
                 "SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'",
@@ -680,9 +627,6 @@ mod tests {
         .unwrap();
         assert_eq!(cancelled["data"]["session"]["status"], "CANCELLED");
         assert!(PlannedSession::get(&db, id).unwrap().unwrap().deleted_by_user());
-        let deletion =
-            calendar_writes::pending_writes(&db).unwrap().into_iter().find(|w| w["session_id"] == id).unwrap();
-        assert_eq!(deletion["action"], "DELETE");
         let jobs: i64 = db
             .query_row(
                 "SELECT count(*) FROM notification_job WHERE planned_session_id=?1 AND status='PENDING'",

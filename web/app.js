@@ -475,7 +475,7 @@ function renderActivity(activity, today) {
   const list = document.getElementById('events');
   list.replaceChildren();
   if (!activity.length) list.append(el('p', 'empty', 'Nothing yet.'));
-  // Repeats in a row collapse into one line ("Calendar updated ×3").
+  // Repeats in a row collapse into one line ("Set logged ×3").
   const grouped = [];
   for (const event of activity) {
     const last = grouped.at(-1);

@@ -437,9 +437,9 @@ impl Tool for TemplateImport {
     }
 }
 
-/// Upcoming sessions (and their calendar events) follow the edited plan.
+/// Upcoming sessions follow the edited plan.
 fn edited(cx: &Ctx, definition: Value) -> Result<Value> {
-    Ok(json!({"template": definition, "refreshed_sessions": crate::domain::weekly::refresh_plans(cx.db, cx.now)?}))
+    Ok(json!({"template": definition, "refreshed_sessions": crate::domain::weekly::refresh_plans(cx.db)?}))
 }
 
 /// Adds a `warning` when the save left logged history behind on ids the plan no longer has.
@@ -634,7 +634,8 @@ pub struct OnboardingFinish {
 impl Tool for OnboardingFinish {
     const NAME: &'static str = "onboarding_finish";
     const LISTED: Listed = Listed::InSetup;
-    const DESCRIPTION: &'static str = "Finish setup after the owner confirmed the summary. Turns on reminders and weekly planning (calendar writes stay opt-in).";
+    const DESCRIPTION: &'static str =
+        "Finish setup after the owner confirmed the summary. Turns on reminders and weekly planning.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         if cx.background() {

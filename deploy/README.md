@@ -7,7 +7,7 @@ One Docker Compose stack. `gymclaw` and `dashboard` run the same image, which Gi
 - **gymclaw**: one Rust binary (`gymclaw serve`): Telegram long polling, the agent
   (OpenRouter), the coach, the scheduler and the outbox. No ports are published.
 - **egress**: a Squid proxy that allows HTTPS `CONNECT` to an allowlist only
-  (Telegram, OpenRouter, Google Calendar/OAuth, MySports, plus `EGRESS_EXTRA_HOSTS`).
+  (Telegram, OpenRouter, MySports, plus `EGRESS_EXTRA_HOSTS`).
 - **dashboard**: the web dashboard / Telegram Mini App. Reads the DB through a read-only
   connection; writes go through `DASHBOARD_TOOLS` and `POST /api/coach` in `src/web/mod.rs`.
   On non-loopback hosts every `/api/*` and `/export.csv` request is authenticated via Telegram
@@ -23,7 +23,7 @@ read-only root filesystem, no capabilities and `no-new-privileges`.
 
 | Volume | Mounted at | Contents |
 | --- | --- | --- |
-| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, chat history, agent notes, Google OAuth token), crowd config, inbound `media/`, `turns/` turn logs (JSONL, format in [`src/agent/turnlog.rs`](../src/agent/turnlog.rs)), `heartbeat` |
+| `gymclaw-data` | `/opt/gymclaw/data` | SQLite DB (plans, sets, crowd, outbox, chat history, agent notes, private calendar feed links), crowd config, inbound `media/`, `turns/` turn logs (JSONL, format in [`src/agent/turnlog.rs`](../src/agent/turnlog.rs)), `heartbeat` |
 | `gymclaw-backups` | `/backups` | `backup.sh` archives |
 
 ## Plain Docker Compose
@@ -74,20 +74,16 @@ two runtimes would send every reminder twice.
    docker exec <gymclaw container> gymclaw call runtime_resume '{"owner_asked": true}'
    ```
 
-   `runtime_pause` keeps your existing calendar-write and crowd-polling grants; pass
-   `"calendar_writes": true` or `"crowd_polling": true` if you want to enable them now.
+   `runtime_pause` keeps your existing crowd-polling grant; pass `"crowd_polling": true` if you
+   want to enable it now.
 
 4. Check: `gymclaw doctor`, message the bot, send `/status`, and `gymclaw call deliveries`.
-
-Google auth (if used) travels with the DB. If it is gone (`CALENDAR_AUTH_REQUIRED`), re-run
-`docker compose exec -it gymclaw gymclaw calendar-auth --calendar-id <id>`
-([setup](../docs/self-hosting.md#google-calendar-optional)).
 
 ## Backups
 
 Schedule `docker compose exec -T gymclaw backup.sh` daily (e.g. via cron or systemd timer).
 `backup.sh` writes a consistent `/backups/gymclaw-<UTC>.tar.gz` (`gymclaw backup` of the DB,
-`data/`) and keeps the newest 14. Archives contain the Google OAuth token and chat history, so copy
+`data/`) and keeps the newest 14. Archives contain private calendar feed links and chat history, so copy
 them off-host only to private storage:
 
 ```bash

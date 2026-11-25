@@ -17,7 +17,7 @@ use crate::domain::{coach, crowd, illustrations, preview, workout};
 use crate::error::Result;
 use crate::time::Ts;
 
-const ACTIVITY: [(&str, &str); 10] = [
+const ACTIVITY: [(&str, &str); 9] = [
     ("workout.started", "Workout started"),
     ("workout.completed", "Workout finished"),
     ("workout.discarded", "Workout discarded"),
@@ -25,7 +25,6 @@ const ACTIVITY: [(&str, &str); 10] = [
     ("workout.substituted", "Exercise swapped"),
     ("planning.week_planned", "Week planned"),
     ("planning.rotation_assigned", "Split rotated"),
-    ("calendar.write_applied", "Calendar updated"),
     ("notifications.sent", "Reminder sent"),
     ("crowd.feedback_received", "Crowd rated"),
 ];
@@ -521,7 +520,6 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
         },
         "runtime": {
             "enabled": settings.as_ref().is_some_and(|s| s.enabled),
-            "calendar_writes_enabled": settings.as_ref().is_some_and(|s| s.calendar_writes_enabled),
             "crowd_polling_enabled": settings.as_ref().is_some_and(|s| s.crowd_polling_enabled),
         },
         "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),

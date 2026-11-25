@@ -1,4 +1,4 @@
-//! Read-only ICS feed (iCloud "Public Calendar" link, Google secret iCal address).
+//! Read-only ICS feed (iCloud "Public Calendar" link, Google Calendar secret iCal address).
 //!
 //! GET only, nothing is ever written back. Yields busy intervals; titles/notes are discarded.
 use std::collections::{BTreeSet, HashMap};
