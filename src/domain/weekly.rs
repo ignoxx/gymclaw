@@ -28,7 +28,7 @@ use crate::time::Ts;
 
 const NO_SHOW_AFTER: SignedDuration = SignedDuration::from_mins(30);
 const CROWD_RECHECK: SignedDuration = SignedDuration::from_mins(30);
-const STALE_WORKOUT: SignedDuration = SignedDuration::from_hours(3);
+pub(crate) const STALE_WORKOUT: SignedDuration = SignedDuration::from_hours(3);
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
 fn days(n: i64) -> jiff::Span {
@@ -437,7 +437,10 @@ pub fn release_recap(db: &Connection, recipient: &str, now: Ts, reviewed: bool) 
     let Some(week) = briefing.payload_json["week_start"].as_str() else { return Ok(None) };
     let queued =
         AgentEvent::first(db, "WHERE type = 'planning.weekly_recap' AND payload_json ->> 'week_start' = ?1", [week])?;
-    let due = reviewed || briefing.handled_at.is_some() || now - briefing.created_at >= RECAP_HOLD;
+    // Mid-workout the briefing is held (`events::wake_batch`), so the timeout waits for the workout too.
+    let due = reviewed
+        || briefing.handled_at.is_some()
+        || (now - briefing.created_at >= RECAP_HOLD && !crate::domain::workout::live(db, now)?);
     if queued.is_some() || !due {
         return Ok(None);
     }
@@ -857,6 +860,19 @@ mod tests {
                 assert!(release_recap(&db, "123", sunday(30), false).unwrap().is_some());
             }
         }
+    }
+
+    /// Mid-workout the briefing is held (`events::wake_batch`): the hold's timeout waits for the workout,
+    /// so the recap never goes out ahead of a review that couldn't run yet.
+    #[test]
+    fn recap_waits_out_a_live_workout() {
+        let db = db();
+        weekly_plan(&db, "short", sunday(0)).unwrap();
+        announce(&db, sunday(0), false).unwrap();
+        crate::domain::workout::start(&db, Some("short"), None, false, sunday(20), "start").unwrap();
+        assert_eq!(release_recap(&db, "123", sunday(30), false).unwrap(), None);
+        crate::domain::coach::discard_workout(&db, None, sunday(40), "discard").unwrap();
+        assert!(release_recap(&db, "123", sunday(40), false).unwrap().is_some());
     }
 
     #[test]

@@ -53,6 +53,11 @@ pub fn wakes(kind: &str) -> bool {
     KINDS.iter().any(|k| k.wake && k.name == kind)
 }
 
+/// Held while the owner is mid-workout (`workout::live`): a wake that isn't `mid_workout`.
+fn held(k: &Kind) -> bool {
+    k.wake && !k.mid_workout
+}
+
 /// One event per distinct situation, including across restarts and acknowledgement. A quiet timer
 /// never creates a new model turn for the same unchanged conflict.
 pub fn request(db: &Connection, kind: &str, payload: Value, now: Ts) -> Result<()> {
@@ -113,14 +118,13 @@ pub fn wake_pending(db: &Connection) -> Result<Vec<Value>> {
     .collect())
 }
 
-/// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context.
-pub fn open_issues(db: &Connection) -> Result<Vec<AgentEvent>> {
+/// Unhandled actionable events, newest first: the "Open issue" lines of every turn's context, which
+/// that turn settles. Mid-workout the held kinds stay out, so a turn then neither raises nor settles them.
+pub fn open_issues(db: &Connection, now: Ts) -> Result<Vec<AgentEvent>> {
+    let shown = if crate::domain::workout::live(db, now)? { types(|k| k.open && !held(k)) } else { types(|k| k.open) };
     AgentEvent::select(
         db,
-        &format!(
-            "WHERE handled_at IS NULL AND type IN {} ORDER BY created_at DESC, rowid DESC LIMIT 5",
-            types(|k| k.open)
-        ),
+        &format!("WHERE handled_at IS NULL AND type IN {shown} ORDER BY created_at DESC, rowid DESC LIMIT 5"),
         [],
     )
 }
@@ -140,17 +144,24 @@ pub fn raised_since(db: &Connection, mark: i64) -> Result<Vec<AgentEvent>> {
     )
 }
 
-/// Freeze a decision batch before calling the model; while a workout runs, only `mid_workout` kinds. A retry reuses this batch and its tool request
+/// Freeze a decision batch before calling the model. A retry reuses this batch and its tool request
 /// IDs even when new events arrive meanwhile, so a partial failed turn cannot duplicate mutations.
+/// Mid-workout (`workout::live`) only `mid_workout` kinds go out: a frozen batch holding any other is
+/// retired unsent (its events stay pending, like a batch an owner turn settled) and a filtered one follows.
 pub fn wake_batch(db: &Connection, now: Ts) -> Result<Option<AgentEvent>> {
+    let live = crate::domain::workout::live(db, now)?;
+    let is_held = |e: &Value| KINDS.iter().any(|k| held(k) && e["type"] == k.name);
     if let Some(batch) =
         AgentEvent::first(db, "WHERE type = 'runtime.agent_wake' AND handled_at IS NULL ORDER BY created_at, id", [])?
     {
-        return Ok(Some(batch));
+        if !(live && batch.payload_json["events"].as_array().is_some_and(|es| es.iter().any(is_held))) {
+            return Ok(Some(batch));
+        }
+        ack(db, &batch.id, now)?;
     }
     let mut events = wake_pending(db)?;
-    if crate::domain::workout::active_workout(db)?.is_some() {
-        events.retain(|e| KINDS.iter().any(|k| k.mid_workout && e["type"] == k.name));
+    if live {
+        events.retain(|e| !is_held(e));
     }
     if events.is_empty() {
         return Ok(None);
@@ -164,25 +175,32 @@ mod tests {
     use std::path::Path;
 
     /// 2026-11-25: a planning warning woke the agent a minute into the warm-up and it asked about next
-    /// week. While a workout runs only workout-time kinds wake it; the rest wait for the workout to end.
+    /// week. Mid-workout only workout-time kinds wake it or show as open issues (so no turn settles
+    /// the rest); a batch frozen before the workout is retired unsent; the rest go out once it ends.
     #[test]
-    fn a_running_workout_holds_planning_wakes() {
+    fn a_live_workout_holds_planning_wakes() {
         use serde_json::json;
         let db = crate::db::test::with_short_template();
         let now = crate::time::Ts::now();
-        crate::domain::workout::start(&db, Some("short"), None, false, now, "start").unwrap();
         super::request(&db, "planning.attention", json!({"warnings": ["legs not booked"]}), now).unwrap();
-        assert!(super::wake_batch(&db, now).unwrap().is_none());
+        let frozen = super::wake_batch(&db, now).unwrap().unwrap();
+        crate::domain::workout::start(&db, Some("short"), None, false, now, "start").unwrap();
+        let types = |db: &crate::db::Connection| -> Vec<String> {
+            super::open_issues(db, now).unwrap().into_iter().map(|e| e.r#type).collect()
+        };
+        assert!(types(&db).is_empty(), "an owner turn mid-workout doesn't see it");
         super::request(&db, "extension.trigger", json!({"trigger": "water"}), now).unwrap();
         let batch = super::wake_batch(&db, now).unwrap().unwrap();
-        let types: Vec<&str> =
-            batch.payload_json["events"].as_array().unwrap().iter().map(|e| e["type"].as_str().unwrap()).collect();
-        assert_eq!(types, ["extension.trigger"]);
+        assert_ne!(batch.id, frozen.id, "the frozen planning batch is retired");
+        assert_eq!(batch.payload_json["events"].as_array().unwrap().len(), 1);
+        assert_eq!(batch.payload_json["events"][0]["type"], "extension.trigger");
         super::ack(&db, &batch.id, now).unwrap();
-        for e in super::wake_pending(&db).unwrap().iter().filter(|e| e["type"] == "extension.trigger") {
-            super::ack(&db, e["id"].as_str().unwrap(), now).unwrap();
-        }
+        super::ack(&db, batch.payload_json["events"][0]["id"].as_str().unwrap(), now).unwrap();
+        // Abandoned past the stale mark, the workout no longer holds anything.
+        let later = now + crate::domain::weekly::STALE_WORKOUT;
+        assert_eq!(super::open_issues(&db, later).unwrap()[0].r#type, "planning.attention");
         crate::domain::coach::discard_workout(&db, None, now, "discard").unwrap();
+        assert_eq!(types(&db), ["planning.attention"]);
         let after = super::wake_batch(&db, now).unwrap().unwrap();
         assert_eq!(after.payload_json["events"][0]["type"], "planning.attention");
     }

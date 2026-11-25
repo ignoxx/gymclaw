@@ -302,7 +302,7 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<(String, Vec<String>)> {
     }
 
     let mut shown = vec![];
-    for mut e in crate::domain::events::open_issues(db)? {
+    for mut e in crate::domain::events::open_issues(db, now)? {
         if crate::domain::events::wakes(&e.r#type) {
             shown.push(e.id.clone());
         }

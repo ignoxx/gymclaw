@@ -83,6 +83,15 @@ pub fn active_workout(db: &Connection) -> Result<Option<WorkoutSession>> {
     WorkoutSession::first(db, "WHERE status != 'PLAN_UPDATED' ORDER BY started_at DESC", [])
 }
 
+/// Whether the owner is mid-workout: one is running and was touched within `STALE_WORKOUT`. An
+/// abandoned one (flagged `workout.stale`, never closed) no longer counts.
+pub fn live(db: &Connection, now: Ts) -> Result<bool> {
+    Ok(active_workout(db)?.is_some_and(|w| {
+        matches!(w.status, WorkoutStatus::ExerciseActive | WorkoutStatus::SetActive | WorkoutStatus::Resting)
+            && w.last_action_at.is_some_and(|at| now - at < crate::domain::weekly::STALE_WORKOUT)
+    }))
+}
+
 /// Ids of every exercise the owner has logged a set of.
 pub fn logged_exercise_ids(db: &Connection) -> Result<HashSet<String>> {
     let mut stmt = db.prepare_cached(

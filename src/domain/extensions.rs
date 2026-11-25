@@ -1000,7 +1000,7 @@ mod tests {
         };
         assert_eq!(woken("r1")["tools"], json!(tools));
         assert_eq!(woken("r1")["asked"], "swap my whole week to evenings");
-        assert!(crate::domain::events::open_issues(&db).unwrap().is_empty());
+        assert!(crate::domain::events::open_issues(&db, Ts::now()).unwrap().is_empty());
         let hard = |asked| Lesson::Hard { forced: None, tools: &[], asked };
         assert!(reflect(&db, "r3", hard("another request"), now).unwrap());
         assert!(reflect(&db, "r4", hard("yet another"), now).unwrap());

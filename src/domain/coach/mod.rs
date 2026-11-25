@@ -537,7 +537,7 @@ pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Re
 
 /// `handle_text` for the agent's `workout log`. `warmup`: `Some` is the agent's word for it (the owner
 /// said so: 2026-11-18 "warm-up done with 45 kg" became working set 1); `None` (typed by the owner)
-/// reads a set lighter than the working target, typed while the warm-up is pending, as the warm-up
+/// reads a set easier than the working target, typed while the warm-up is pending, as the warm-up
 /// (2026-11-25: "12x80kg" under an 8 × 55 kg warm-up card became working set 1 of 110 kg).
 /// Also returns the logged set as `log_set` reports it (its exercise, type and number) and whether it
 /// skipped a pending warm-up, so the agent's reply names where the set really went.
@@ -587,8 +587,11 @@ pub fn log_text(
     };
     let warmup = match (warmup, &active) {
         (Some(said), _) => said,
+        // Compared as the card shows it (110 lb typed is 49.9 kg against a 50 kg target), and signed so
+        // that on an assisted machine more help is the easier set.
         (None, Some(row)) => {
-            value.weight > 0.0 && value.weight < row.target_weight && workout::warmup_pending(db, row)?
+            let shown = |kg: f64| set_kind.signed(unit.to_display(kg));
+            value.weight > 0.0 && shown(value.weight) < shown(row.target_weight) && workout::warmup_pending(db, row)?
         }
         (None, None) => false,
     };
@@ -1948,6 +1951,29 @@ mod tests {
         let id = legs(&said);
         agent(&said, at(10), "workout", json!({"action": "log", "text": "8x45"})).unwrap();
         assert_eq!(sets(&said, &id)[0].1, vec!["45x8".to_string()], "the agent said working");
+    }
+
+    /// The warm-up check reads the weight as the card shows it: in lb, "110" is the 50 kg working set
+    /// (49.9 kg stored), and on an assisted machine more help is the easier set.
+    #[test]
+    fn the_warmup_check_reads_the_card_unit_and_load() {
+        let first = |exercise: Value, typed: &str, lb: bool| -> String {
+            let db = db();
+            if lb {
+                get_profile(&db).unwrap();
+                db.execute("UPDATE user_profile SET weight_unit = 'lb'", []).unwrap();
+            }
+            plan(&db, vec![exercise]);
+            handle_text(&db, typed, at(10), "s1").unwrap();
+            let id = active_workout(&db).unwrap().unwrap().id;
+            sets(&db, &id)[0].1[0].clone()
+        };
+        let press = json!({"id": "press", "name": "Chest press", "role": "press", "primary": true, "working_sets": 2, "target_weight": 50, "warmup_weight": 25});
+        assert_eq!(first(press.clone(), "8x110", true), "49.9x8");
+        assert_eq!(first(press, "8x100", true), "W45.36x8");
+        let chin = json!({"id": "chin", "name": "Assisted chin-up", "role": "pull", "primary": true, "working_sets": 2, "target_weight": 30, "warmup_weight": 40, "load": "assisted"});
+        assert_eq!(first(chin.clone(), "8x40", false), "W40x8");
+        assert_eq!(first(chin, "8x20", false), "20x8");
     }
 
     /// A mid-workout fix that leaves the coach where it was still redraws the live card: the rest
