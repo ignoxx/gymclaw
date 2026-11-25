@@ -266,7 +266,7 @@ pub enum Note {
 
 impl Tool for Note {
     const NAME: &'static str = "note";
-    const DESCRIPTION: &'static str = "Add, edit or delete a remembered note included in every prompt (kind owner or learned; ids are shown with the notes in your instructions).";
+    const DESCRIPTION: &'static str = "Add, edit or delete a remembered note included in every prompt (kind owner or learned; ids are shown with the notes in your instructions). On add or edit, also edit or delete the notes this one makes stale or duplicates.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         match self {

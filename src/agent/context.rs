@@ -43,7 +43,7 @@ it doesn't do exceptions. Never change other sessions when the owner says to lea
 sql_query is read-only; use the domain tools for changes. \
 When the fast path hands you an error or unparsed input, use its context and the current state to resolve the owner's intent. \
 Save lasting preferences with note (action add, kind owner); when a note already covers the topic, edit it instead. Save temporary exceptions there too, with explicit local start/end dates; \
-consult them every turn, ignore expired exceptions \
+consult them every turn, delete expired exceptions \
 and remove or revise outdated notes, owner and learned alike. Do not turn a one-week exception into a permanent profile change. \
 Background events are observations, not new owner permission: decide whether to edit, ask a concise question, or stay silent. \
 Open issues in your context and `raised` warnings in tool results are yours to settle in this turn, alongside what the owner asked; \
@@ -76,11 +76,20 @@ pub fn system(db: &Connection, now: Ts) -> Result<(String, String, Vec<String>)>
     let schema: Vec<String> = meta::schema(db)?.into_iter().map(|(_, line)| line).collect();
     write!(out, "\n\n## Database (for sql_query)\n{}", schema.join("\n")).unwrap();
     let notes = meta::notes(db)?;
+    let tz = crate::domain::profile::get_profile(db)?.tz();
     for (kind, title) in [(NoteKind::Owner, "Owner notes"), (NoteKind::Learned, "Learned from the owner's behaviour")] {
         let lines: Vec<String> = notes
             .iter()
             .filter(|n| n.kind == kind)
-            .map(|n| format!("- [{}] {}", n.id.unwrap_or_default(), n.text))
+            // The date lets the agent tell which of two conflicting notes is newer.
+            .map(|n| {
+                format!(
+                    "- [{} · {}] {}",
+                    n.id.unwrap_or_default(),
+                    n.updated_at.local(&tz).strftime("%-d %b %Y"),
+                    n.text
+                )
+            })
             .collect();
         if !lines.is_empty() {
             write!(

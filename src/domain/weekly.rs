@@ -453,17 +453,19 @@ pub fn release_recap(db: &Connection, recipient: &str, now: Ts, reviewed: bool) 
 
 /// How the agent answers the weekly briefing. It rides on the event, so the guidance costs context once a
 /// week instead of on every call.
-const WEEKLY_REVIEW: &str = "Weekly briefing. Right after this turn the owner gets the recap: last week's numbers and \
-    next week's sessions as you leave them. First fix what looks off in next week's plan (a clash, a slot they usually \
-    miss). Then your take, sent after the recap, up to five short lines: how the week really went (patterns and effort, \
-    not the recap's numbers), what next week asks of the owner, and what you changed. Ask only what is the owner's call. \
-    Reply with no fields when you have nothing to add. It is also your weekly review: compare recent_sessions with your \
-    notes and save learned notes on patterns that held for at least two weeks (when the owner really trains, which slots \
-    they miss or move). Keep all notes, owner and learned, consistent: merge duplicates, rewrite or delete any that a \
-    newer note contradicts. Mention a learning only when it changes next week's plan. \
-    Lift trends, goals with your current block, and activities outside the gym come with this event when there \
-    are any: plan next week around them (a deload where a lift stalls and grinds, lighter legs after a long run) \
-    and keep each goal's block current (goal update).";
+const WEEKLY_REVIEW: &str = "Weekly briefing: code drafted next week from a plain rotation that knows none of the \
+    owner's rules. Right after this turn the owner gets the recap with next week as you leave it. Work through every step:\n\
+    1. Week vs plan: check next week's sessions against the training plan and your notes: which workouts (the mix \
+    and count the plan asks for), and on which days and slots (ones they usually miss). Fix it with session_update.\n\
+    2. Notes: compare recent_sessions with your notes. Save learned notes on patterns that held for at least two weeks \
+    (when the owner really trains, which slots they miss or move). Then go through every note, owner and learned: delete \
+    expired exceptions, merge duplicates, rewrite or delete any that a newer note contradicts.\n\
+    3. Trends, goals and activities, when this event has them: plan next week around them (a deload where a lift stalls \
+    and grinds, lighter legs after a long run) and keep each goal's block current (goal update).\n\
+    4. Your take, sent after the recap, up to five short lines: how the week really went (patterns and effort, not the \
+    recap's numbers), what next week asks of the owner, and what you changed. Your changes stand: don't offer to undo \
+    them. Mention a learning only when it changes next week's plan. Ask only what is the owner's call. Reply with no \
+    fields when you have nothing to add.";
 
 /// Weeks of sessions the Sunday review looks back on.
 const REVIEW_WEEKS: i64 = 4;
