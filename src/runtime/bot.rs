@@ -850,7 +850,8 @@ impl Bot {
     ///
     /// One voice: while the owner is mid-conversation no background turn runs. Pending events show in
     /// the next owner turn's context as open issues and that turn settles them (see `turn`); only
-    /// what is still unhandled once the chat goes quiet wakes the agent here.
+    /// what is still unhandled once the chat goes quiet wakes the agent here. During a workout only
+    /// workout-time events wake it (`events::wake_batch`); the rest wait until it ends.
     async fn event_turn(&self) -> Result<()> {
         let batch = in_tx(self.db(), |db| {
             if !super::outbox::runtime_authority(db)?.enabled || owner_active(db, Ts::now())? {

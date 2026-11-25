@@ -17,17 +17,17 @@ use crate::time::Ts;
 /// trigger the agent set itself; `agent.reflect` (`extensions::reflect`) asks it to learn from a hard turn,
 /// and is never open, so it runs only once the chat is quiet.
 const KINDS: [Kind; 11] = [
-    Kind { name: "notifications.delivery_unknown", open: true, wake: false },
-    Kind { name: "notifications.delivery_failed", open: true, wake: false },
-    Kind { name: "calendar.write_blocked", open: true, wake: false },
-    Kind { name: "planning.attention", open: true, wake: true },
-    Kind { name: "planning.replan_required", open: true, wake: true },
-    Kind { name: "planning.no_show", open: true, wake: false },
-    Kind { name: "workout.missed", open: true, wake: true },
-    Kind { name: "planning.weekly_briefing", open: true, wake: true },
-    Kind { name: "workout.stale", open: true, wake: true },
-    Kind { name: "extension.trigger", open: true, wake: true },
-    Kind { name: "agent.reflect", open: false, wake: true },
+    Kind { name: "notifications.delivery_unknown", open: true, wake: false, mid_workout: false },
+    Kind { name: "notifications.delivery_failed", open: true, wake: false, mid_workout: false },
+    Kind { name: "calendar.write_blocked", open: true, wake: false, mid_workout: false },
+    Kind { name: "planning.attention", open: true, wake: true, mid_workout: false },
+    Kind { name: "planning.replan_required", open: true, wake: true, mid_workout: false },
+    Kind { name: "planning.no_show", open: true, wake: false, mid_workout: false },
+    Kind { name: "workout.missed", open: true, wake: true, mid_workout: false },
+    Kind { name: "planning.weekly_briefing", open: true, wake: true, mid_workout: false },
+    Kind { name: "workout.stale", open: true, wake: true, mid_workout: true },
+    Kind { name: "extension.trigger", open: true, wake: true, mid_workout: true },
+    Kind { name: "agent.reflect", open: false, wake: true, mid_workout: false },
 ];
 
 struct Kind {
@@ -36,6 +36,10 @@ struct Kind {
     open: bool,
     /// Wakes the agent for a background turn.
     wake: bool,
+    /// Also wakes it while a workout runs. The rest wait for the workout to end: mid-set the owner
+    /// hears only about the workout (2026-11-25: a planning warning woke the agent during the
+    /// warm-up and it asked about next week's legs).
+    mid_workout: bool,
 }
 
 /// The types `which` selects, as a SQL `IN (…)` list.
@@ -136,7 +140,7 @@ pub fn raised_since(db: &Connection, mark: i64) -> Result<Vec<AgentEvent>> {
     )
 }
 
-/// Freeze a decision batch before calling the model. A retry reuses this batch and its tool request
+/// Freeze a decision batch before calling the model; while a workout runs, only `mid_workout` kinds. A retry reuses this batch and its tool request
 /// IDs even when new events arrive meanwhile, so a partial failed turn cannot duplicate mutations.
 pub fn wake_batch(db: &Connection, now: Ts) -> Result<Option<AgentEvent>> {
     if let Some(batch) =
@@ -144,7 +148,10 @@ pub fn wake_batch(db: &Connection, now: Ts) -> Result<Option<AgentEvent>> {
     {
         return Ok(Some(batch));
     }
-    let events = wake_pending(db)?;
+    let mut events = wake_pending(db)?;
+    if crate::domain::workout::active_workout(db)?.is_some() {
+        events.retain(|e| KINDS.iter().any(|k| k.mid_workout && e["type"] == k.name));
+    }
     if events.is_empty() {
         return Ok(None);
     }
@@ -155,6 +162,30 @@ pub fn wake_batch(db: &Connection, now: Ts) -> Result<Option<AgentEvent>> {
 mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
+
+    /// 2026-11-25: a planning warning woke the agent a minute into the warm-up and it asked about next
+    /// week. While a workout runs only workout-time kinds wake it; the rest wait for the workout to end.
+    #[test]
+    fn a_running_workout_holds_planning_wakes() {
+        use serde_json::json;
+        let db = crate::db::test::with_short_template();
+        let now = crate::time::Ts::now();
+        crate::domain::workout::start(&db, Some("short"), None, false, now, "start").unwrap();
+        super::request(&db, "planning.attention", json!({"warnings": ["legs not booked"]}), now).unwrap();
+        assert!(super::wake_batch(&db, now).unwrap().is_none());
+        super::request(&db, "extension.trigger", json!({"trigger": "water"}), now).unwrap();
+        let batch = super::wake_batch(&db, now).unwrap().unwrap();
+        let types: Vec<&str> =
+            batch.payload_json["events"].as_array().unwrap().iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["extension.trigger"]);
+        super::ack(&db, &batch.id, now).unwrap();
+        for e in super::wake_pending(&db).unwrap().iter().filter(|e| e["type"] == "extension.trigger") {
+            super::ack(&db, e["id"].as_str().unwrap(), now).unwrap();
+        }
+        crate::domain::coach::discard_workout(&db, None, now, "discard").unwrap();
+        let after = super::wake_batch(&db, now).unwrap().unwrap();
+        assert_eq!(after.payload_json["events"][0]["type"], "planning.attention");
+    }
 
     /// Every event type a query reads is written somewhere. Habit learning once read
     /// `planning.session_moved` for weeks after its writer was renamed to `planning.session_edited`.

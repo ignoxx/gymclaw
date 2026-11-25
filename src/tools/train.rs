@@ -186,7 +186,7 @@ impl Tool for Workout {
                     return after_edit(cx, &workout_id, result);
                 }
                 let (view, logged) =
-                    coach::log_text(db, text, self.warmup, crate::db::models::WeightUnit::Kg, now, &rid)?;
+                    coach::log_text(db, text, Some(self.warmup), crate::db::models::WeightUnit::Kg, now, &rid)?;
                 if !view.handled {
                     // Text that isn't a set, or no workout in a loggable state: nothing happened.
                     crate::bail!(
@@ -297,8 +297,8 @@ impl Tool for SetEdit {
     const DESCRIPTION: &'static str = "Fix any logged set when the owner says it was logged wrong, during or long after the workout: \
         its weight, reps, minutes or meters, warm-up or working, which exercise it was for, or delete it. Name it by \
         which + set (1-based working set number, e.g. which=\"Dumbbell curl\", set=1) or a set_id from a replied card. \
-        Renumbers the sets left, recomputes next weights the workout set, and updates a finished workout's summary card in the chat. \
-        The live coach stays where it is.";
+        Renumbers the sets left, recomputes next weights the workout set, and updates the chat: a running workout's current card is sent \
+        again (the result's `card`; don't restate it), a finished workout's summary card is edited.";
 
     fn run(self, cx: &mut Ctx) -> Result<Value> {
         let set_id = match (
@@ -352,11 +352,11 @@ impl Tool for SetEdit {
 }
 
 /// After sets changed outside the coach's flow: a finished workout's summary card is edited to match;
-/// in a running one, when the coach moved on (`workout::settle`), the chat gets the next card.
+/// in a running one the chat gets the current card again, so it shows the fixed sets (2026-11-25: a
+/// set re-marked as the warm-up left the rest card counting down to "set 2/2 · 80 kg"), or the next
+/// card when the coach moved on (`workout::settle`).
 fn after_edit(cx: &mut Ctx, workout_id: &str, result: Value) -> Result<Value> {
-    if result["data"]["coach_moved"] == true
-        && let Some(view) = coach::moved_on(cx.db, workout_id, cx.now, &cx.request_id)?
-    {
+    if let Some(view) = coach::after_fix(cx.db, workout_id, cx.now, &cx.request_id)? {
         let mut result = result;
         result["card"] = json!(view.cards.first().map(|c| c.text.clone()));
         cx.effects.push(Effect::Coach(view));
@@ -843,8 +843,8 @@ mod tests {
         .unwrap();
         crate::domain::templates::import_template(&db, &tpl).unwrap();
         workout::start(&db, Some("pull"), None, false, now, "start").unwrap();
-        coach::log_text(&db, "5x30", false, crate::db::models::WeightUnit::Kg, now.mins(1), "s1").unwrap();
-        coach::log_text(&db, "6x30", false, crate::db::models::WeightUnit::Kg, now.mins(3), "s2").unwrap();
+        coach::log_text(&db, "5x30", None, crate::db::models::WeightUnit::Kg, now.mins(1), "s1").unwrap();
+        coach::log_text(&db, "6x30", None, crate::db::models::WeightUnit::Kg, now.mins(3), "s2").unwrap();
 
         // After finishing, edit set 1 by exercise name + 1-based set number (no sql_query needed).
         let mut cx =

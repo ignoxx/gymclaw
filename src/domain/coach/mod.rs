@@ -519,10 +519,10 @@ fn after_change(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
     Ok(vec![exercise_card(db, workout_id, now)?])
 }
 
-/// The chat after sets changed outside the coach's flow and the coach moved on (`workout::settle`): the
-/// next exercise's card, or the finish card when that was the last. Nothing while the workout is
-/// finished or the coach stayed put.
-pub fn moved_on(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Option<CoachView>> {
+/// The chat after sets changed outside the coach's flow (`workout::settle` ran): the current card again,
+/// the next exercise's card when the coach moved on, or the finish card when that was the last.
+/// Nothing once the workout is finished.
+pub fn after_fix(db: &Connection, workout_id: &str, now: Ts, request_id: &str) -> Result<Option<CoachView>> {
     if workout::load_workout(db, workout_id, None)?.status == WorkoutStatus::PlanUpdated {
         return Ok(None);
     }
@@ -532,17 +532,19 @@ pub fn moved_on(db: &Connection, workout_id: &str, now: Ts, request_id: &str) ->
 /// Typed text during a workout ("10x40", "25 min", "2 km"). `handled: false` when it isn't a set; the agent gets it.
 pub fn handle_text(db: &Connection, text: &str, now: Ts, request_id: &str) -> Result<CoachView> {
     let unit = get_profile(db)?.weight_unit;
-    Ok(log_text(db, text, false, unit, now, request_id)?.0)
+    Ok(log_text(db, text, None, unit, now, request_id)?.0)
 }
 
-/// `handle_text` for the agent's `workout log`: `warmup` logs the set as the warm-up, which the owner
-/// said it was (2026-11-18: "warm-up done with 45 kg" became working set 1). A typed set is a working set.
+/// `handle_text` for the agent's `workout log`. `warmup`: `Some` is the agent's word for it (the owner
+/// said so: 2026-11-18 "warm-up done with 45 kg" became working set 1); `None` (typed by the owner)
+/// reads a set lighter than the working target, typed while the warm-up is pending, as the warm-up
+/// (2026-11-25: "12x80kg" under an 8 × 55 kg warm-up card became working set 1 of 110 kg).
 /// Also returns the logged set as `log_set` reports it (its exercise, type and number) and whether it
 /// skipped a pending warm-up, so the agent's reply names where the set really went.
 pub fn log_text(
     db: &Connection,
     text: &str,
-    warmup: bool,
+    warmup: Option<bool>,
     default_unit: crate::db::models::WeightUnit,
     now: Ts,
     request_id: &str,
@@ -582,6 +584,13 @@ pub fn log_text(
                 Err(other) => return Err(other),
             }
         }
+    };
+    let warmup = match (warmup, &active) {
+        (Some(said), _) => said,
+        (None, Some(row)) => {
+            value.weight > 0.0 && value.weight < row.target_weight && workout::warmup_pending(db, row)?
+        }
+        (None, None) => false,
     };
     let value = if warmup { SetInput { set_type: SetType::Warmup, ..value } } else { value };
     let result = log_set(db, &workout.id, &value, now, request_id)?;
@@ -1918,6 +1927,41 @@ mod tests {
             WorkoutStatus::PlanUpdated,
             "the coach finished it"
         );
+    }
+
+    /// 2026-11-25: "12x80kg" typed under the warm-up card became working set 1 of a 110 kg press. A set
+    /// lighter than the working target, typed while the warm-up is pending, is the warm-up; one at the
+    /// working weight still skips it, and so does the agent's explicit log.
+    #[test]
+    fn a_light_set_typed_on_the_warmup_card_is_the_warmup() {
+        let typed = db();
+        let id = legs(&typed);
+        assert!(handle_text(&typed, "12x60", at(10), "w").unwrap().ack.unwrap().starts_with("✅ Warm-up"));
+        handle_text(&typed, "8x85", at(100), "s1").unwrap();
+        assert_eq!(sets(&typed, &id)[0].1, vec!["W60x12".to_string(), "85x8".into()]);
+
+        let heavy = db();
+        legs(&heavy);
+        assert!(handle_text(&heavy, "8x85", at(10), "s1").unwrap().ack.unwrap().ends_with("· warm-up skipped"));
+
+        let said = db();
+        let id = legs(&said);
+        agent(&said, at(10), "workout", json!({"action": "log", "text": "8x45"})).unwrap();
+        assert_eq!(sets(&said, &id)[0].1, vec!["45x8".to_string()], "the agent said working");
+    }
+
+    /// A mid-workout fix that leaves the coach where it was still redraws the live card: the rest
+    /// countdown after a set re-marked as the warm-up no longer points at "set 2/2".
+    #[test]
+    fn a_live_fix_redraws_the_current_card() {
+        let db = db();
+        legs(&db);
+        agent(&db, at(10), "workout", json!({"action": "log", "text": "8x45"})).unwrap();
+        assert!(live(&db, at(11)).text.contains("set 2/2"));
+        let fixed =
+            agent(&db, at(20), "set_edit", json!({"which": "Horizontal leg press", "set": 1, "warmup": true})).unwrap();
+        assert_eq!(fixed["data"]["coach_moved"], false);
+        assert!(fixed["card"].as_str().unwrap().contains("set 1/2"), "{fixed}");
     }
 
     /// Today's mess fixed after the fact with set_edit alone: a warm-up logged as working, sets on
