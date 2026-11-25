@@ -784,7 +784,7 @@ mod tests {
         assert_eq!(NotificationDelivery::get(&db, &id_403).unwrap().unwrap().status, DeliveryStatus::Cancelled);
         assert!(AgentEvent::get(&db, &ev_403).unwrap().unwrap().handled_at.is_some());
         assert!(AgentEvent::first(&db, "WHERE type = 'notifications.delivery_unknown'", []).unwrap().is_none());
-        assert!(crate::domain::events::open_issues(&db).unwrap().is_empty());
+        assert!(crate::domain::events::open_issues(&db, Ts::now()).unwrap().is_empty());
 
         // 401 Unauthorized (revoked/rotated token): stays PENDING so fixing credentials delivers it.
         let id_401 = briefing(&db, now());
@@ -806,7 +806,7 @@ mod tests {
         assert_eq!(NotificationDelivery::get(&db, &id_400).unwrap().unwrap().status, DeliveryStatus::Cancelled);
         assert!(AgentEvent::get(&db, &ev_400).unwrap().unwrap().handled_at.is_none());
         assert!(
-            crate::domain::events::open_issues(&db)
+            crate::domain::events::open_issues(&db, Ts::now())
                 .unwrap()
                 .iter()
                 .any(|e| e.r#type == "notifications.delivery_failed")
