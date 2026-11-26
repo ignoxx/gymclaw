@@ -15,26 +15,56 @@ env:
   # Debug info is never read in CI; skipping it shortens every compile and shrinks the cache.
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_INCREMENTAL: 0
+  # lld links the test binary much faster than GNU ld.
+  RUSTFLAGS: -C link-arg=-fuse-ld=lld
 
 permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      # Every shell script: deploy, the egress proxy, the hooks and the bash scripts in scripts/.
+      - run: shellcheck -S warning deploy/*.sh deploy/egress/*.sh .githooks/* $(grep -lx '#!/usr/bin/env bash' scripts/*)
+
+  clippy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # libheif >= 1.17 plus the HEVC decoder for HEIC photos (the `heic` feature), and lld.
+      - uses: awalsh128/cache-apt-pkgs-action@v2
+        with:
+          packages: libheif-dev libheif-plugin-libde265 lld
+          version: "1.0"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      # libheif >= 1.17 plus the HEVC decoder for HEIC photos (the `heic` feature).
-      - run: sudo apt-get update && sudo apt-get install -y libheif-dev libheif-plugin-libde265
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      # Same package list as clippy so both jobs share one apt cache entry.
+      - uses: awalsh128/cache-apt-pkgs-action@v2
         with:
-          components: clippy, rustfmt
+          packages: libheif-dev libheif-plugin-libde265 lld
+          version: "1.0"
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
-      # Every shell script: deploy, the egress proxy, the hooks and the bash scripts in scripts/.
-      - run: shellcheck -S warning deploy/*.sh deploy/egress/*.sh .githooks/* $(grep -lx '#!/usr/bin/env bash' scripts/*)
+        with:
+          cache-on-failure: true
+      # Inline #[cfg(test)] tests only; skips empty doc-tests (~2.5s saved).
+      - run: cargo test --locked --lib --bins
 
   secrets:
     runs-on: ubuntu-24.04
@@ -42,7 +72,7 @@ jobs:
       contents: read
       pull-requests: read  # gitleaks-action lists the PR's commits
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
