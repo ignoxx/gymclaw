@@ -152,14 +152,74 @@ function crowdLabel(session) {
 }
 
 /* An exercise picture. No picture (or one that fails to load) leaves an empty, quiet space, never a
-   broken-image box. */
+   broken-image box. Lazy-loaded via IntersectionObserver with a tiny blurred silhouette placeholder
+   (LQIP) painted immediately so slow Wi-Fi never shows blank boxes or layout pop-in. */
+const previews = Object.create(null);
+const loadedImgs = new Set();
+function mergePreviews(map) {
+  if (!map) return;
+  for (const [url, uri] of Object.entries(map)) {
+    if (url && uri) previews[url] = uri;
+  }
+}
+function loadFullThumb(image) {
+  const url = image.dataset.src;
+  if (!url) return;
+  delete image.dataset.src;
+  const full = new Image();
+  full.decoding = 'async';
+  full.onload = () => {
+    loadedImgs.add(url);
+    image.src = url;
+    image.classList.remove('img-lqip');
+  };
+  full.onerror = () => {
+    image.classList.remove('img-lqip');
+    image.dataset.missing = '';
+  };
+  full.src = url;
+}
+const imgObserver = typeof IntersectionObserver !== 'undefined'
+  ? new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      imgObserver.unobserve(entry.target);
+      loadFullThumb(entry.target);
+    }
+  }, { rootMargin: '200px 0px' })
+  : null;
+function pruneImgObserver() {
+  if (!imgObserver) return;
+  imgObserver.disconnect();
+  document.querySelectorAll('img[data-src]').forEach(img => imgObserver.observe(img));
+}
+
 function thumb(url) {
   const image = el('img');
   image.alt = '';
+  image.decoding = 'async';
+  if (!url) {
+    image.dataset.missing = '';
+    return image;
+  }
+  if (loadedImgs.has(url)) {
+    image.addEventListener('error', () => { image.dataset.missing = ''; });
+    image.src = url;
+    return image;
+  }
+  const preview = previews[url];
+  if (preview) {
+    image.src = preview;
+    image.classList.add('img-lqip');
+    image.dataset.src = url;
+    if (imgObserver) imgObserver.observe(image);
+    else loadFullThumb(image);
+    return image;
+  }
   image.loading = 'lazy';
+  image.addEventListener('load', () => loadedImgs.add(url));
   image.addEventListener('error', () => { image.dataset.missing = ''; });
-  if (url) image.src = url;
-  else image.dataset.missing = '';
+  image.src = url;
   return image;
 }
 
@@ -1176,11 +1236,13 @@ function renderNothing(focus, data) {
   if (data.setup_done === false) {
     focus.append(el('h2', 'title', 'Finish setup in Telegram'));
     focus.append(el('p', 'subtitle', 'Answer a few quick questions in the chat so gymclaw can build your plan.'));
-  } else {
+  } else if (data.insights) {
     const k = data.insights.kpis;
     focus.append(el('h2', 'title', 'Nothing planned'));
-    focus.append(el('p', 'subtitle', `${k.this_week ?? 0} of ${data.insights.target} sessions this week${data.history[0] ? ` · last: ${data.history[0].template}, ${data.history[0].label}` : ''}`));
+    focus.append(el('p', 'subtitle', `${k.this_week ?? 0} of ${data.insights.target} sessions this week${data.history?.[0] ? ` · last: ${data.history[0].template}, ${data.history[0].label}` : ''}`));
     focus.append(el('p', 'subtitle', 'Tell gymclaw in the chat when you want to train, and it plans the session.'));
+  } else {
+    focus.append(el('h2', 'title', 'Nothing planned'));
   }
   if (data.setup_done !== false && data.plans?.length) renderStartPicker(focus, data.plans);
   if (tg) {
@@ -1209,7 +1271,7 @@ function renderToday(data) {
   focus.replaceChildren();
   clearInterval(restTimer);
   liveAction = null;
-  const finished = !data.workout && data.history[0] && now() - Date.parse(data.history[0].finished_at) < 3 * 3600e3 ? data.history[0] : null;
+  const finished = !data.workout && data.history?.[0] && now() - Date.parse(data.history[0].finished_at) < 3 * 3600e3 ? data.history[0] : null;
   // Mid-workout a phone shows just the workout (styles.css); before a session its card is the dark one.
   document.getElementById('tab-today').classList.toggle('live', Boolean(data.workout));
   // A main button on the card (the set, or fixing the last one): the tab bar steps aside in Telegram.
@@ -1634,7 +1696,7 @@ const muscleRank = muscle => { const i = MUSCLES.indexOf(muscle); return i < 0 ?
 /* Every exercise ever logged, from History (newest workout first), with its sessions newest first. */
 function loggedExercises() {
   const byId = new Map();
-  for (const workout of state.history) for (const exercise of workout.exercises) {
+  for (const workout of state?.history || []) for (const exercise of workout.exercises) {
     if (!exercise.sets.length) continue;
     const entry = byId.get(exercise.id) || { id: exercise.id, name: exercise.name, muscle: exercise.muscle, svg_url: exercise.svg_url, sessions: [] };
     entry.sessions.push({ label: workout.label, template: workout.template, sets: exercise.sets, pr: workout.prs.includes(exercise.name) });
@@ -1795,7 +1857,7 @@ function planEditor(plan, exercise) {
 /* Your exercises drawn with a catalog entry's picture: plan exercises, then ones only in your history.
    History rows know their picture, not their guide_id, so the picture URL is the link. */
 function exercisesWithPicture(guide) {
-  const yours = state.plans.flatMap(plan => plan.exercises.filter(e => e.guide_id === guide.guide_id).map(e => ({ e, where: plan.name })));
+  const yours = (state?.plans || []).flatMap(plan => plan.exercises.filter(e => e.guide_id === guide.guide_id).map(e => ({ e, where: plan.name })));
   for (const e of loggedExercises().values()) {
     if (e.svg_url === guide.svg_url && !yours.some(y => y.e.id === e.id)) yours.push({ e, where: 'Not in a plan' });
   }
@@ -1818,7 +1880,7 @@ function openExercise(of) {
   close.type = 'button';
   close.setAttribute('aria-label', 'Close');
   close.addEventListener('click', closeSheet);
-  const occurrences = of.id ? state.plans.flatMap(plan => plan.exercises.filter(e => e.id === of.id).map(exercise => ({ plan, exercise }))) : [];
+  const occurrences = of.id ? (state?.plans || []).flatMap(plan => plan.exercises.filter(e => e.id === of.id).map(exercise => ({ plan, exercise }))) : [];
   const logged = of.id ? loggedExercises().get(of.id) : null;
   // An exercise swapped in mid-workout may be in no plan and have no history yet: its queue tile names it.
   const item = of.guide || occurrences[0]?.exercise || logged || (of.name && { name: of.name, svg_url: of.svg_url });
@@ -1867,7 +1929,7 @@ function openExercise(of) {
     sheet.append(stats);
   }
   for (const { plan, exercise } of occurrences) sheet.append(planEditor(plan, exercise));
-  const points = of.id ? state.insights.progress.find(s => s.id === of.id)?.points || [] : [];
+  const points = of.id ? (state?.insights?.progress || []).find(s => s.id === of.id)?.points || [] : [];
   const chart = el('div', 'chart');
   if (points.length > 1) sheet.append(el('h3', '', points.every(p => !p.weight) ? 'Best set reps' : 'Estimated 1RM'), chart);
   if (logged) {
@@ -2198,16 +2260,19 @@ function showTab() {
   if (!state) return;
   // Charts measure their container, so draw a tab only once it's visible.
   if (tab === 'today') renderToday(state);
-  if (tab === 'progress') renderInsights(state);
-  if (tab === 'history') renderHistory(state.history);
-  if (tab === 'exercises') renderExercises();
-  if (tab === 'memory') { renderSettings(state); renderMemory(state.memory); renderExtensions(state.extensions); }
+  if (tab === 'progress' && state.insights) renderInsights(state);
+  if (tab === 'history' && state.history) renderHistory(state.history);
+  if (tab === 'exercises' && state.plans) renderExercises();
+  if (tab === 'memory' && state.memory) { renderSettings(state); renderMemory(state.memory); renderExtensions(state.extensions); }
+  pruneImgObserver();
 }
 
 let rendered = '';
-function render(data) {
+function render(data, checkedAt = null) {
+  mergePreviews(data.previews);
   const zone = { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false };
-  document.getElementById('updated').textContent = `Updated ${new Date(data.captured_at).toLocaleTimeString('en-GB', zone)}`;
+  const stamp = checkedAt ? new Date(checkedAt) : new Date(data.captured_at);
+  document.getElementById('updated').textContent = `Updated ${stamp.toLocaleTimeString('en-GB', zone)}`;
   // Auto-refresh mostly returns the same data: then only the time changes, and open rows, the
   // tooltip and the scroll position stay as they are.
   const content = JSON.stringify({ ...data, captured_at: null });
@@ -2223,9 +2288,10 @@ async function refresh() {
   try {
     const response = await fetch('/api/state', { headers: apiHeaders() });
     if (!response.ok) throw new Error('State unavailable');
+    const checkedAt = response.headers.get('Date') || Date.now();
     const data = await response.json();
     freshState = true;
-    render(data);
+    render(data, checkedAt);
     if (pendingSwapRef) {
       const swap = data.workout?.live?.swap;
       const matches = swap?.ref === pendingSwapRef;
@@ -2310,7 +2376,17 @@ document.getElementById('crowd-next').addEventListener('click', () => { crowdVie
 document.getElementById('retry').addEventListener('click', () => refresh());
 // Signal ready only after the initial tab is revealed and listeners are wired.
 if (tg) tgTry(() => tg.ready());
-refresh();
+if (!state && activeTab() === 'today') {
+  // Cold start on Today: fire /api/today (~3 KB) and full /api/state in parallel so Today paints
+  // immediately on slow Wi-Fi without delaying full-state hydration by an extra round trip.
+  refresh();
+  fetch('/api/today', { headers: apiHeaders() })
+    .then(r => (r.ok ? r.json().then(today => ({ today, checkedAt: r.headers.get('Date') || Date.now() })) : null))
+    .then(res => { if (res && !freshState) render(res.today, res.checkedAt); })
+    .catch(() => {});
+} else {
+  refresh();
+}
 // Live state refreshes itself every 10 s while the page is visible (a refresh is ~70 ms server-side),
 // and at once when you come back to the tab. Telegram keeps a minimized Mini App's page running and
 // visible, so there it polls only while the app is active.
@@ -2321,14 +2397,17 @@ if (tgHas('8.0')) {
 }
 async function refreshLive() {
   if (sending) return true;
+  // If we only have a partial /api/today snapshot (e.g. initial /api/state failed), self-heal to full state.
+  if (!state?.plans) return refresh();
   try {
     const response = await fetch('/api/live', { headers: apiHeaders() });
     if (!response.ok) throw new Error('Live unavailable');
+    const checkedAt = response.headers.get('Date') || Date.now();
     const live = await response.json();
     if (sending || (state?.captured_at && live.captured_at < state.captured_at)) return true;
     // If a workout ended or started, pull full state so History/KPIs catch up too.
     if (Boolean(live.workout) !== Boolean(state?.workout)) return refresh();
-    render({ ...state, ...live });
+    render({ ...state, ...live }, checkedAt);
     failures = 0;
     document.getElementById('load-error').hidden = true;
     return true;

@@ -677,6 +677,7 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "flate2",
  "hex",
  "image",
  "jiff",

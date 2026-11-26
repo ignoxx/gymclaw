@@ -1,22 +1,29 @@
 //! Dashboard (`gymclaw dashboard`).
 //!
-//! Serves the frontend in `web/` (embedded), exercise SVGs, `/api/state` (a fresh snapshot from a
-//! read-only connection per request) and `/export.csv` (every logged set, `import::export_csv`). The
+//! Serves the frontend in `web/` (embedded, minified & pre-compressed in release builds with
+//! content-hashed immutable URLs and ETags), exercise SVGs, `/api/state` (full snapshot),
+//! `/api/today` (lightweight cold-boot snapshot), `/api/live` (3 s mid-workout poll),
+//! `/api/catalog` and `/export.csv` (every logged set, `import::export_csv`). The
 //! only writes are `DASHBOARD_TOOLS` (`POST /api/<tool>`), so the owner can edit what the agent
 //! remembers and built, and plan targets, and `POST /api/coach`, the live workout's buttons and typed
 //! sets (`coach::app_tap`; the bot then shows the step in the chat). Only the allowed Host (or loopback) gets an answer, so DNS
 //! rebinding can't read it, and writes need a same-origin JSON request.
 pub mod state;
 
+use std::collections::HashMap;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use sha2::{Digest, Sha256};
 
 use crate::error::Result;
 use crate::time::Ts;
@@ -28,8 +35,12 @@ const ASSETS: [(&str, &[u8], &str); 7] = [
     ("/favicon.svg", include_bytes!("../../web/favicon.svg"), "image/svg+xml"),
     // Home screen icon: iOS ignores SVG icons and falls back to a letter without it.
     ("/apple-touch-icon.png", include_bytes!("../../web/apple-touch-icon.png"), "image/png"),
-    ("/fonts/BarlowCondensed-SemiBold.ttf", include_bytes!("../../web/fonts/BarlowCondensed-SemiBold.ttf"), "font/ttf"),
-    ("/fonts/DM-Sans.ttf", include_bytes!("../../web/fonts/DM-Sans.ttf"), "font/ttf"),
+    (
+        "/fonts/BarlowCondensed-SemiBold.woff2",
+        include_bytes!("../../web/fonts/BarlowCondensed-SemiBold.woff2"),
+        "font/woff2",
+    ),
+    ("/fonts/DM-Sans.woff2", include_bytes!("../../web/fonts/DM-Sans.woff2"), "font/woff2"),
 ];
 
 /// Tools the dashboard may call: note edits and turning the agent's extensions off, on or back
@@ -239,24 +250,208 @@ fn render_ics(db: &crate::db::Connection, now: Ts) -> Result<String> {
     Ok(format!("{}\r\n", lines.join("\r\n")))
 }
 
-fn reply(status: StatusCode, body: Vec<u8>, mime: &str) -> Response {
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    let headers = response.headers_mut();
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| {
+        v.split(',').any(|part| {
+            let mut segs = part.split(';');
+            if !segs.next().is_some_and(|enc| enc.trim().eq_ignore_ascii_case("gzip")) {
+                return false;
+            }
+            for param in segs {
+                if let Some((k, val)) = param.split_once('=')
+                    && k.trim().eq_ignore_ascii_case("q")
+                {
+                    return val.trim().parse::<f32>().is_ok_and(|q| q > 0.0);
+                }
+            }
+            true
+        })
+    })
+}
+
+fn is_compressible(mime: &str) -> bool {
+    mime.starts_with("text/") || mime == "application/json" || mime == "image/svg+xml"
+}
+
+fn gzip_bytes(bytes: &[u8], level: Compression) -> Option<Vec<u8>> {
+    let mut enc = GzEncoder::new(Vec::with_capacity(bytes.len() / 3), level);
+    enc.write_all(bytes).ok()?;
+    enc.finish().ok()
+}
+
+/// Strip `/* … */` block comments and leading/trailing line whitespace from CSS.
+fn minify_css(input: &str) -> String {
+    let mut no_comments = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("/*") {
+        no_comments.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    no_comments.push_str(rest);
+    no_comments.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+/// Strip `<!-- … -->` comments and leading/trailing line whitespace from HTML.
+fn minify_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start + 4..].find("-->") {
+            Some(end) => rest = &rest[start + 4 + end + 3..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+/// Strip full-line `//` comments, top-level `/* … */` comment blocks, and line indentation from JS
+/// without touching strings or regex literals. Assumes `web/app.js` has no multi-line template
+/// literals whose leading whitespace or `//`-prefixed lines are significant.
+fn minify_js(input: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for raw in input.lines() {
+        let line = raw.trim();
+        if in_block {
+            if let Some(end) = line.find("*/") {
+                in_block = false;
+                let tail = line[end + 2..].trim();
+                if !tail.is_empty() && !tail.starts_with("//") {
+                    out.push(tail);
+                }
+            }
+            continue;
+        }
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if let Some(after_open) = line.strip_prefix("/*") {
+            if let Some(end) = after_open.find("*/") {
+                let tail = after_open[end + 2..].trim();
+                if !tail.is_empty() && !tail.starts_with("//") {
+                    out.push(tail);
+                }
+            } else {
+                in_block = true;
+            }
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
+fn short_hash(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex::encode(&digest[..6])
+}
+
+fn weak_etag(tag: &str) -> String {
+    format!("W/\"{tag}\"")
+}
+
+fn etag_matches(headers: &HeaderMap, etag: &str) -> bool {
+    let Some(inm) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let bare = etag.strip_prefix("W/").unwrap_or(etag);
+    inm.split(',').any(|item| {
+        let item = item.trim();
+        item == "*" || item == etag || item.strip_prefix("W/").unwrap_or(item) == bare
+    })
+}
+
+fn set_security_headers(headers: &mut HeaderMap) {
     let set = |h: &mut HeaderMap, k, v: &str| {
         h.insert(k, HeaderValue::from_str(v).expect("header value"));
     };
-    set(headers, header::CONTENT_TYPE, &format!("{mime}; charset=utf-8"));
-    set(headers, header::CACHE_CONTROL, "no-store");
     set(headers, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(headers, header::HeaderName::from_static("cross-origin-resource-policy"), "same-origin");
     set(
         headers,
         header::CONTENT_SECURITY_POLICY,
         // telegram.org: the Mini App SDK (index.html), which Telegram asks apps to load from there.
-        "default-src 'self'; style-src 'self'; script-src 'self' https://telegram.org; connect-src 'self'; img-src 'self'; font-src 'self'; frame-ancestors https://web.telegram.org",
+        // data: in img-src allows tiny inline blurred exercise placeholders (LQIP) with no extra requests.
+        "default-src 'self'; style-src 'self'; script-src 'self' https://telegram.org; connect-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors https://web.telegram.org",
     );
+}
+
+fn reply(status: StatusCode, body: Vec<u8>, mime: &str) -> Response {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    let content_type = if is_compressible(mime) { format!("{mime}; charset=utf-8") } else { mime.to_string() };
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&content_type).expect("content-type"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    set_security_headers(headers);
     response
+}
+
+fn reply_cached(
+    req_headers: &HeaderMap,
+    body: Vec<u8>,
+    precompressed: Option<&[u8]>,
+    mime: &str,
+    cache_control: &'static str,
+    etag_seed: Option<&[u8]>,
+) -> Response {
+    let etag = weak_etag(&short_hash(etag_seed.unwrap_or(&body)));
+    if etag_matches(req_headers, &etag) {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
+        headers.insert(header::ETAG, HeaderValue::from_str(&etag).expect("etag"));
+        if is_compressible(mime) {
+            headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        }
+        set_security_headers(headers);
+        return response;
+    }
+    let want_gz = is_compressible(mime) && body.len() >= 256 && accepts_gzip(req_headers);
+    let (payload, encoded) = if want_gz {
+        if let Some(gz) = precompressed {
+            (gz.to_vec(), true)
+        } else if let Some(gz) = gzip_bytes(&body, Compression::default()) {
+            (gz, true)
+        } else {
+            (body, false)
+        }
+    } else {
+        (body, false)
+    };
+    let mut response = reply(StatusCode::OK, payload, mime);
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    headers.insert(header::ETAG, HeaderValue::from_str(&etag).expect("etag"));
+    if is_compressible(mime) {
+        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
+    if encoded {
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    response
+}
+
+/// Strip the volatile `"captured_at":"…"` timestamp when hashing API JSON so unchanged polls
+/// return 0-byte `304 Not Modified` instead of resending the whole snapshot.
+fn stable_json_hash(snapshot: &serde_json::Value) -> Vec<u8> {
+    let mut clone = snapshot.clone();
+    if let Some(obj) = clone.as_object_mut() {
+        obj.remove("captured_at");
+    }
+    serde_json::to_vec(&clone).unwrap_or_default()
 }
 
 fn error(status: StatusCode) -> Response {
@@ -409,14 +604,18 @@ pub async fn handle_request(
         return error(StatusCode::UNAUTHORIZED);
     }
     if path == "/api/live" {
+        let req_headers = headers.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = crate::db::open_readonly(&db_path)?;
             let snapshot = state::live_snapshot(&db, Ts::now())?;
-            Ok::<_, crate::error::Error>(serde_json::to_vec(&snapshot)?)
+            let seed = stable_json_hash(&snapshot);
+            Ok::<_, crate::error::Error>((serde_json::to_vec(&snapshot)?, seed))
         })
         .await;
         return match result {
-            Ok(Ok(body)) => reply(StatusCode::OK, body, "application/json"),
+            Ok(Ok((body, seed))) => {
+                reply_cached(&req_headers, body, None, "application/json", "private, no-cache", Some(&seed))
+            }
             Ok(Err(e)) => {
                 tracing::warn!("dashboard live: {} {e}", e.code());
                 error(StatusCode::SERVICE_UNAVAILABLE)
@@ -427,15 +626,42 @@ pub async fn handle_request(
             }
         };
     }
-    if path == "/api/state" {
+    if path == "/api/today" {
+        let req_headers = headers.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = crate::db::open_readonly(&db_path)?;
-            let snapshot = state::snapshot(&db, Ts::now())?;
-            Ok::<_, crate::error::Error>(serde_json::to_vec(&snapshot)?)
+            let snapshot = state::today_snapshot(&db, Ts::now())?;
+            let seed = stable_json_hash(&snapshot);
+            Ok::<_, crate::error::Error>((serde_json::to_vec(&snapshot)?, seed))
         })
         .await;
         return match result {
-            Ok(Ok(body)) => reply(StatusCode::OK, body, "application/json"),
+            Ok(Ok((body, seed))) => {
+                reply_cached(&req_headers, body, None, "application/json", "private, no-cache", Some(&seed))
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("dashboard today: {} {e}", e.code());
+                error(StatusCode::SERVICE_UNAVAILABLE)
+            }
+            Err(e) => {
+                tracing::warn!("dashboard today panicked: {e}");
+                error(StatusCode::SERVICE_UNAVAILABLE)
+            }
+        };
+    }
+    if path == "/api/state" {
+        let req_headers = headers.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let db = crate::db::open_readonly(&db_path)?;
+            let snapshot = state::snapshot(&db, Ts::now())?;
+            let seed = stable_json_hash(&snapshot);
+            Ok::<_, crate::error::Error>((serde_json::to_vec(&snapshot)?, seed))
+        })
+        .await;
+        return match result {
+            Ok(Ok((body, seed))) => {
+                reply_cached(&req_headers, body, None, "application/json", "private, no-cache", Some(&seed))
+            }
             Ok(Err(e)) => {
                 tracing::warn!("dashboard state: {} {e}", e.code());
                 error(StatusCode::SERVICE_UNAVAILABLE)
@@ -462,7 +688,13 @@ pub async fn handle_request(
         };
     }
     if path == "/api/catalog" {
-        return reply(StatusCode::OK, serde_json::to_vec(&state::catalog()).unwrap_or_default(), "application/json");
+        static CATALOG_BYTES: LazyLock<(Vec<u8>, Option<Vec<u8>>)> = LazyLock::new(|| {
+            let body = serde_json::to_vec(&state::catalog()).unwrap_or_default();
+            let gz = gzip_bytes(&body, Compression::best());
+            (body, gz)
+        });
+        let (body, gz) = &*CATALOG_BYTES;
+        return reply_cached(headers, body.clone(), gz.as_deref(), "application/json", "private, max-age=86400", None);
     }
     error(StatusCode::NOT_FOUND)
 }
@@ -473,25 +705,94 @@ fn host_allowed(hosts: &[String], headers: &HeaderMap) -> bool {
     hosts.iter().any(|h| h == host) && !cross_site
 }
 
-fn public_response(path: &str) -> Option<Response> {
+struct PreparedAsset {
+    body: Vec<u8>,
+    gzip: Option<Vec<u8>>,
+    hash: String,
+    mime: &'static str,
+}
+
+fn build_assets() -> HashMap<&'static str, PreparedAsset> {
+    let mut raw: HashMap<&'static str, (Vec<u8>, &'static str)> =
+        ASSETS.iter().map(|(route, embedded, mime)| (*route, (asset(route, embedded), *mime))).collect();
+
+    // Hash leaf assets first so CSS can version font URLs and HTML can version CSS/JS/icon URLs.
+    // Skip minification in debug builds so DevTools line numbers match `web/` on disk.
+    let minify = !cfg!(debug_assertions);
+    let font_barlow_hash = short_hash(&raw["/fonts/BarlowCondensed-SemiBold.woff2"].0);
+    let font_dm_hash = short_hash(&raw["/fonts/DM-Sans.woff2"].0);
+    if let Some((css_bytes, _)) = raw.get_mut("/styles.css")
+        && let Ok(css) = String::from_utf8(css_bytes.clone())
+    {
+        let base = if minify { minify_css(&css) } else { css };
+        let versioned = base
+            .replace(
+                "/fonts/BarlowCondensed-SemiBold.woff2",
+                &format!("/fonts/BarlowCondensed-SemiBold.woff2?v={font_barlow_hash}"),
+            )
+            .replace("/fonts/DM-Sans.woff2", &format!("/fonts/DM-Sans.woff2?v={font_dm_hash}"));
+        *css_bytes = versioned.into_bytes();
+    }
+    if minify
+        && let Some((js_bytes, _)) = raw.get_mut("/app.js")
+        && let Ok(js) = String::from_utf8(js_bytes.clone())
+    {
+        *js_bytes = minify_js(&js).into_bytes();
+    }
+
+    let css_hash = short_hash(&raw["/styles.css"].0);
+    let js_hash = short_hash(&raw["/app.js"].0);
+    let fav_hash = short_hash(&raw["/favicon.svg"].0);
+    let icon_hash = short_hash(&raw["/apple-touch-icon.png"].0);
+    if let Some((html_bytes, _)) = raw.get_mut("/")
+        && let Ok(html) = String::from_utf8(html_bytes.clone())
+    {
+        let base = if minify { minify_html(&html) } else { html };
+        let versioned = base
+            .replace("href=\"/styles.css\"", &format!("href=\"/styles.css?v={css_hash}\""))
+            .replace("src=\"/app.js\"", &format!("src=\"/app.js?v={js_hash}\""))
+            .replace("href=\"/favicon.svg\"", &format!("href=\"/favicon.svg?v={fav_hash}\""))
+            .replace("href=\"/apple-touch-icon.png\"", &format!("href=\"/apple-touch-icon.png?v={icon_hash}\""));
+        *html_bytes = versioned.into_bytes();
+    }
+
+    let level = if minify { Compression::best() } else { Compression::fast() };
+    raw.into_iter()
+        .map(|(route, (body, mime))| {
+            let hash = short_hash(&body);
+            let gzip = (is_compressible(mime) && body.len() >= 256).then(|| gzip_bytes(&body, level)).flatten();
+            (route, PreparedAsset { body, gzip, hash, mime })
+        })
+        .collect()
+}
+
+static RELEASE_ASSETS: LazyLock<HashMap<&'static str, PreparedAsset>> = LazyLock::new(build_assets);
+
+fn public_response(path: &str, query: Option<&str>, req_headers: &HeaderMap) -> Option<Response> {
     if let Some(slug) = path.strip_prefix("/illustrations/").and_then(|p| p.strip_suffix(".svg")) {
         return Some(match crate::domain::illustrations::svg_path(slug).map(std::fs::read) {
             Some(Ok(bytes)) => {
                 // Without a cache, every dashboard redraw (each 10 s poll that changed the state) downloaded
                 // every picture again. A redrawn picture shows within a day.
-                let mut response = reply(StatusCode::OK, bytes, "image/svg+xml");
-                response
-                    .headers_mut()
-                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400"));
-                response
+                reply_cached(req_headers, bytes, None, "image/svg+xml", "private, max-age=86400", None)
             }
             _ => error(StatusCode::NOT_FOUND),
         });
     }
-    ASSETS
-        .iter()
-        .find(|(route, _, _)| *route == path)
-        .map(|(route, embedded, mime)| reply(StatusCode::OK, asset(route, embedded), mime))
+    let serve_prepared = |a: &PreparedAsset| {
+        let cc = if path != "/" && query_param(query, "v").as_deref() == Some(a.hash.as_str()) {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
+        reply_cached(req_headers, a.body.clone(), a.gzip.as_deref(), a.mime, cc, None)
+    };
+    if cfg!(debug_assertions) {
+        let map = build_assets();
+        map.get(path).map(serve_prepared)
+    } else {
+        RELEASE_ASSETS.get(path).map(serve_prepared)
+    }
 }
 
 /// Serve static dashboard assets (HTML/CSS/JS/fonts and `/illustrations/*.svg`) without requiring
@@ -504,7 +805,7 @@ pub fn serve_public(hosts: &[String], request: &Request) -> Option<Response> {
     if request.method() != Method::GET {
         return None;
     }
-    public_response(request.uri().path())
+    public_response(request.uri().path(), request.uri().query(), request.headers())
 }
 
 /// Release builds serve the copy embedded at compile time; debug builds read `web/` from disk, so an
@@ -587,7 +888,8 @@ mod tests {
         );
         let picture = get(&app, Method::GET, "/illustrations/bench-press.svg", "gym.example").await;
         assert_eq!(picture.headers()[header::CACHE_CONTROL], "private, max-age=86400");
-        assert_eq!(index.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
+        assert!(index.headers().contains_key(header::ETAG));
         for path in ["/../README.md", "/data/private.sqlite", "/unknown", "/illustrations/../../README.svg"] {
             assert_eq!(get(&app, Method::GET, path, "gym.example").await.status(), StatusCode::NOT_FOUND, "{path}");
         }
@@ -796,6 +1098,108 @@ mod tests {
             StatusCode::OK
         );
         let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn compression_etags_immutable_assets_and_today_endpoint() {
+        let app = app();
+        // Index rewrites asset URLs with ?v=<hash>, compresses with gzip, and returns 304 on matching ETag.
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .header(header::HOST, "gym.example")
+            .header(header::ACCEPT_ENCODING, "gzip, deflate")
+            .body(Body::empty())
+            .unwrap();
+        let res = handle(State(app.clone()), req).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(res.headers()[header::VARY], "Accept-Encoding");
+        let etag = res.headers()[header::ETAG].to_str().unwrap().to_string();
+
+        let reval = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .header(header::HOST, "gym.example")
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .unwrap();
+        let res304 = handle(State(app.clone()), reval).await;
+        assert_eq!(res304.status(), StatusCode::NOT_MODIFIED);
+
+        // Uncompressed index contains versioned URLs for all four static assets, each served immutable,
+        // and CSS contains versioned URLs for both WOFF2 fonts.
+        let raw_index = get(&app, Method::GET, "/", "gym.example").await;
+        let html =
+            String::from_utf8(axum::body::to_bytes(raw_index.into_body(), 65536).await.unwrap().to_vec()).unwrap();
+        for prefix in ["/styles.css?v=", "/app.js?v=", "/favicon.svg?v=", "/apple-touch-icon.png?v="] {
+            let start = html.find(prefix).unwrap_or_else(|| panic!("missing versioned {prefix}"));
+            let url = &html[start..start + html[start..].find('"').unwrap()];
+            let asset_res = get(&app, Method::GET, url, "gym.example").await;
+            assert_eq!(asset_res.status(), StatusCode::OK, "{url}");
+            assert_eq!(asset_res.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable", "{url}");
+            if prefix == "/styles.css?v=" {
+                assert!(
+                    asset_res.headers()[header::CONTENT_SECURITY_POLICY]
+                        .to_str()
+                        .unwrap()
+                        .contains("img-src 'self' data:")
+                );
+                let css = String::from_utf8(axum::body::to_bytes(asset_res.into_body(), 65536).await.unwrap().to_vec())
+                    .unwrap();
+                for font in ["/fonts/BarlowCondensed-SemiBold.woff2?v=", "/fonts/DM-Sans.woff2?v="] {
+                    let fstart = css.find(font).unwrap_or_else(|| panic!("missing versioned {font}"));
+                    let furl = &css[fstart..fstart + css[fstart..].find('\'').unwrap()];
+                    let fres = get(&app, Method::GET, furl, "gym.example").await;
+                    assert_eq!(fres.status(), StatusCode::OK, "{furl}");
+                    assert_eq!(fres.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable", "{furl}");
+                }
+            }
+        }
+
+        // /api/today returns lightweight Today payload without history/insights, and supports 304.
+        let today = get(&app, Method::GET, "/api/today", "gym.example").await;
+        assert_eq!(today.status(), StatusCode::OK);
+        let today_etag = today.headers()[header::ETAG].to_str().unwrap().to_string();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(today.into_body(), 65536).await.unwrap()).unwrap();
+        assert!(body.get("days").is_some() && body.get("crowd").is_some() && body.get("previews").is_some());
+        assert!(body.get("history").is_none() && body.get("insights").is_none());
+
+        let today_reval = Request::builder()
+            .method(Method::GET)
+            .uri("/api/today")
+            .header(header::HOST, "gym.example")
+            .header(header::IF_NONE_MATCH, &today_etag)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(handle(State(app.clone()), today_reval).await.status(), StatusCode::NOT_MODIFIED);
+
+        let _ = std::fs::remove_dir_all(app.db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn accepts_gzip_etag_and_minifiers_handle_edge_cases() {
+        let mut h = HeaderMap::new();
+        h.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("br, gzip;q=0"));
+        assert!(!accepts_gzip(&h));
+        h.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("deflate, gzip;q=0.5"));
+        assert!(accepts_gzip(&h));
+
+        let mut et = HeaderMap::new();
+        et.insert(header::IF_NONE_MATCH, HeaderValue::from_static("\"abc\", W/\"def\""));
+        assert!(etag_matches(&et, "W/\"abc\""));
+        assert!(etag_matches(&et, "W/\"def\""));
+        assert!(!etag_matches(&et, "W/\"xyz\""));
+        et.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+        assert!(etag_matches(&et, "W/\"anything\""));
+
+        assert_eq!(minify_css("body { color: red; } /* unclosed"), "body { color: red; }");
+        assert_eq!(minify_html("<div>ok</div><!-- unclosed"), "<div>ok</div>");
+        assert_eq!(
+            minify_js("  // comment\n/* block\ncomment */ const x = 1;\n  const y = 2;"),
+            "const x = 1;\nconst y = 2;"
+        );
     }
 
     #[tokio::test]
