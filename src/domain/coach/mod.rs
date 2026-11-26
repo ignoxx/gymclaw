@@ -133,13 +133,15 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
     let head =
         format!("**{}**{}", active.name, active.primary_muscle.as_ref().map(|m| format!(" · {m}")).unwrap_or_default());
     let set_kind = active.kind().in_unit(unit);
+    let has_pending = rows.iter().any(|e| e.status == ExerciseStatus::Pending);
     let (lines, mut buttons) = if active.set_type == SetType::Warmup {
+        let mut row2 = vec![button("🔄 Swap", &["swap", r])?];
+        if has_pending {
+            row2.push(button("↪ Later", &["later", r])?);
+        }
         (
             vec![head, format!("Warm-up · {}", set_kind.target(active.rep_min, active.rep_max, active.target_weight))],
-            vec![
-                vec![button("✅ Warm-up done", &["warm", r])?, button("Skip warm-up", &["nowarm", r])?],
-                vec![button("🔄 Swap", &["swap", r])?],
-            ],
+            vec![vec![button("✅ Warm-up done", &["warm", r])?, button("Skip warm-up", &["nowarm", r])?], row2],
         )
     } else {
         let set_line = format!("Set {}/{}", active.set_number, active.working_sets);
@@ -188,9 +190,12 @@ pub fn exercise_card(db: &Connection, workout_id: &str, now: Ts) -> Result<Card>
                 buttons.push(vec![button(label, &["log", r, &g(weight), &reps.to_string()])?]);
             }
         }
-        // Swap only before the first set: once the owner is on the machine it isn't taken.
+        // Swap / defer only before the first set: once the owner is on the machine it isn't taken.
         // Nothing logged yet means moving on skips the exercise; say so.
         let mut row = if active.new_exercise { vec![button("🔄 Swap", &["swap", r])?] } else { vec![] };
+        if active.new_exercise && has_pending {
+            row.push(button("↪ Later", &["later", r])?);
+        }
         row.push(button(if active.new_exercise { "⏭ Skip" } else { "⏭ Next exercise" }, &["next", r])?);
         buttons.push(row);
         (lines, buttons)
@@ -716,12 +721,20 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
             Ok(CoachView { keep: true, live_buttons: Some(vec![menu]), cards: swap_cards(db, id, &row)?, ..handled() })
         }
         "sub" => {
-            let result = adaptation::substitute(db, id, &row.id, arg(1)?, now, request_id)?;
+            let sub_id = arg(1)?;
+            let result = adaptation::substitute(db, id, &row.id, sub_id, now, request_id)?;
             let replacement_id = result["data"]["replacement_exercise_id"].as_str().unwrap_or_default();
             if let (Some(replacement), Some(template_id)) =
                 (WorkoutExercise::get(db, replacement_id)?, &workout.template_id)
             {
-                remember_swap(db, template_id, &row.exercise_id, &spec_of(&replacement)?)?;
+                let same_muscle = matches!(
+                    (workout::muscle(&replacement), workout::muscle(&row)),
+                    (Some(a), Some(b)) if a == b
+                );
+                let planned_alt = workout::field::<Vec<String>>(&row, "substitutes").iter().any(|s| s == sub_id);
+                if same_muscle || planned_alt {
+                    remember_swap(db, template_id, &row.exercise_id, &spec_of(&replacement)?)?;
+                }
             }
             Ok(deleted(after_change(db, id, now, request_id)?))
         }
@@ -751,7 +764,8 @@ pub fn handle_tap(db: &Connection, payload: &str, now: Ts, request_id: &str) -> 
     }
 }
 
-/// One photo card per same-muscle alternative, each with a single 'Use' button.
+/// Chat fallback (when no Mini App URL is configured): one photo card per same-muscle alternative,
+/// each with a single 'Use' button. The Mini App offers the full tiered picker (`app_swap`).
 fn swap_cards(db: &Connection, workout_id: &str, row: &WorkoutExercise) -> Result<Vec<Card>> {
     let r = reference(&row.id);
     let options = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?;
@@ -1736,6 +1750,18 @@ mod tests {
             handle_tap(&db, &data(&card, "⏭ Skip"), at(3), "cb-3").unwrap().ack.as_deref(),
             Some("⌛ Old button.")
         );
+    }
+
+    #[test]
+    fn cross_muscle_swap_does_not_overwrite_saved_template() {
+        let db = db();
+        push(&db);
+        let card = live(&db, at(0));
+        let r = &data(&card, "🔄 Swap")["gc:swap:".len()..];
+        // Swap Chest (Machine incline press) to a Triceps catalog exercise.
+        handle_tap(&db, &format!("gc:sub:{r}:tricep-pushdown"), at(1), "cb-cross").unwrap();
+        let saved = crate::domain::templates::get_template(&db, "push").unwrap();
+        assert_eq!(saved.exercises[0].id, "incline");
     }
 
     #[test]

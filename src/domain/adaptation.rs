@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::db::Connection;
 use crate::db::models::{ExerciseProgression, ExerciseStatus, SetType, WorkoutExercise, WorkoutSession, WorkoutStatus};
 use crate::domain::core::mutate;
-use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, lookup, similar, timed, unknown};
+use crate::domain::illustrations::{Entry, artwork, catalog, for_exercise, lookup, related, similar, timed, unknown};
 use crate::domain::templates::{ExerciseSpec, Measure, catalog_slot, default_load, get_template, pick, remember_swap};
 use crate::domain::workout::{
     active_exercise, cancel_rest, choose_next, compatible, exercises, field, guide_id, load_workout,
@@ -147,13 +147,8 @@ fn replacement_spec(
     {
         return Ok(spec);
     }
-    let item = catalog().get(substitute_id);
-    let muscle = muscle(original);
-    let Some(item) = item.filter(|i| muscle.as_deref() == Some(i.primary_muscle.as_str())) else {
-        crate::bail!(
-            "INVALID_SUBSTITUTION",
-            "Substitute must be a template alternative or a catalog exercise for the same muscle"
-        );
+    let Some(item) = catalog().get(substitute_id) else {
+        crate::bail!("INVALID_SUBSTITUTION", "Substitute must be a template alternative or a catalog exercise");
     };
     // The row's sets, reps and rest; role, primary, increment, warm-up, measure and superset group
     // from its spec. Its weight is learned progression (`make_exercise`), else unknown.
@@ -299,6 +294,109 @@ pub fn alternatives(
     }
     options.truncate(limit);
     Ok(options)
+}
+
+pub struct SwapTiers {
+    pub muscle: Option<String>,
+    pub equipment: Option<String>,
+    pub used: Vec<String>,
+    pub top: Vec<SwapOption>,
+    pub same: Vec<SwapOption>,
+    pub related: Vec<SwapOption>,
+}
+
+/// Tiered swap options for the Mini App picker: top picks (swapped away earlier, saved template
+/// alternatives, and previously logged same-muscle catalog exercises), then the rest of the same
+/// primary muscle, then broader/related muscles.
+pub fn tiered_alternatives(db: &Connection, workout_id: &str, exercise_id: Option<&str>) -> Result<SwapTiers> {
+    let workout = load_workout(db, workout_id, None)?;
+    let exercise = find_exercise(db, workout_id, exercise_id)?;
+    let earlier = swapped_away(db, workout_id)?;
+    let rows: Vec<WorkoutExercise> =
+        exercises(db, workout_id)?.into_iter().filter(|e| !earlier.iter().any(|x| x.id == e.id)).collect();
+    let mut used: HashSet<String> =
+        rows.iter().flat_map(|e| std::iter::once(e.exercise_id.clone()).chain(guide_id(e).map(String::from))).collect();
+    let pictures: HashSet<String> = used.iter().filter(|s| catalog().contains_key(*s)).map(|s| artwork(s)).collect();
+    let mut back: Vec<(String, &WorkoutExercise)> = vec![];
+    for e in earlier.iter().filter(|e| e.position == exercise.position && !used.contains(&e.exercise_id)) {
+        match back.iter_mut().find(|(k, _)| *k == e.exercise_id) {
+            Some(slot) => slot.1 = e,
+            None => back.push((e.exercise_id.clone(), e)),
+        }
+    }
+    let mut top: Vec<SwapOption> = back
+        .iter()
+        .map(|(_, e)| SwapOption {
+            substitute_id: e.exercise_id.clone(),
+            name: name(e).into(),
+            source: "workout",
+            illustration: for_exercise(name(e), guide_id(e)),
+        })
+        .collect();
+    used.extend(back.iter().filter_map(|(_, e)| guide_id(e).map(String::from)));
+    let allowed: Vec<String> = field(&exercise, "substitutes");
+    for spec in snapshot(&workout)?.alternatives {
+        let guide = spec.guide_id.as_deref();
+        let taken = guide.is_some_and(|g| used.contains(g) || pictures.contains(&artwork(g)));
+        if allowed.contains(&spec.id) && !used.contains(&spec.id) && !taken {
+            top.push(SwapOption {
+                substitute_id: spec.id.clone(),
+                name: spec.name.clone(),
+                source: "template",
+                illustration: for_exercise(&spec.name, guide),
+            });
+        }
+    }
+    let history = logged_exercise_ids(db)?;
+    let mut exclude = used.clone();
+    exclude.extend(back.iter().map(|(k, _)| k.clone()));
+    exclude.extend(top.iter().filter_map(|o| o.illustration.as_ref().map(|i| i.guide_id.clone())));
+
+    let picture = for_exercise(name(&exercise), guide_id(&exercise));
+    let mut same = vec![];
+    let mut broader = vec![];
+    if let Some(pic) = &picture {
+        for item in similar(&pic.guide_id, &exclude, &history, usize::MAX) {
+            exclude.insert(item.guide_id.clone());
+            let option = SwapOption {
+                substitute_id: item.guide_id.clone(),
+                name: item.name.clone(),
+                source: "catalog",
+                illustration: Some(item),
+            };
+            if history.contains(&option.substitute_id) && top.len() < 6 {
+                top.push(option);
+            } else {
+                same.push(option);
+            }
+        }
+        for item in related(&pic.guide_id, &exclude, &history, 30) {
+            broader.push(SwapOption {
+                substitute_id: item.guide_id.clone(),
+                name: item.name.clone(),
+                source: "catalog",
+                illustration: Some(item),
+            });
+        }
+    }
+    // Exclude already-in-workout exercises, "back to it" rows, and duplicate-artwork catalog slugs so
+    // the Mini App's full-catalog search never shows duplicates.
+    let mut used_set = exclude;
+    for slug in catalog().keys() {
+        if pictures.contains(&artwork(slug)) {
+            used_set.insert(slug.clone());
+        }
+    }
+    let mut used_ids: Vec<String> = used_set.into_iter().collect();
+    used_ids.sort();
+    Ok(SwapTiers {
+        muscle: muscle(&exercise).or_else(|| picture.as_ref().map(|p| p.primary_muscle.clone())),
+        equipment: picture.map(|p| p.equipment),
+        used: used_ids,
+        top,
+        same,
+        related: broader,
+    })
 }
 
 /// Owner moves on: completes the active exercise with the sets done so far, or skips it if none.
@@ -902,12 +1000,39 @@ mod tests {
     }
 
     #[test]
-    fn substitute_must_be_an_alternative_or_a_same_muscle_catalog_exercise() {
+    fn substitute_must_be_an_alternative_or_a_catalog_exercise() {
         let db = db();
         let id = bench_done(&db);
         let fly = current(&db, &id, at(40)).unwrap()["active_exercise"]["id"].as_str().unwrap().to_string();
         let error = substitute(&db, &id, &fly, "bench", at(50), "bad").unwrap_err();
         assert!(error.to_string().contains("template alternative or a catalog exercise"), "{error}");
+
+        // Broader-muscle catalog exercises are allowed and appear in tiered_alternatives.
+        let tiers = tiered_alternatives(&db, &id, Some(&fly)).unwrap();
+        assert!(!tiers.top.is_empty(), "template alternative db-fly should be in top picks");
+        assert!(
+            !tiers.related.is_empty()
+                && tiers
+                    .related
+                    .iter()
+                    .all(|o| o.illustration.as_ref().map(|i| i.primary_muscle.as_str()) != tiers.muscle.as_deref()),
+            "related tier should offer broader muscles"
+        );
+        let broader_id = tiers.related[0].substitute_id.clone();
+        let swapped = substitute(&db, &id, &fly, &broader_id, at(55), "broader").unwrap()["data"].clone();
+        assert_eq!(swapped["active_exercise"]["exercise_id"], broader_id);
+
+        // A catalog-backed Chest exercise gets both same-muscle and broader-muscle tiers.
+        let db2 = crate::db::test::db();
+        adapt(&db2);
+        let id2 = start(&db2, Some("adapt"), None, true, at(100), "s2").unwrap()["data"]["workout_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let bench_tiers = tiered_alternatives(&db2, &id2, None).unwrap();
+        assert!(bench_tiers.muscle.is_some());
+        assert!(!bench_tiers.same.is_empty(), "same-muscle catalog exercises should be populated");
+        assert!(!bench_tiers.related.is_empty(), "related muscle exercises should be populated");
     }
 
     #[test]

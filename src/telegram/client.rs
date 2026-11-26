@@ -13,6 +13,7 @@ pub struct Bot {
     http: reqwest::Client,
     base: String,
     files: String,
+    dashboard_url: Option<String>,
 }
 
 impl Bot {
@@ -26,7 +27,14 @@ impl Bot {
             http,
             base: format!("https://api.telegram.org/bot{token}"),
             files: format!("https://api.telegram.org/file/bot{token}"),
+            dashboard_url: None,
         })
+    }
+
+    /// When set, `gc:swap:<ref>` inline buttons open the Mini App swap picker directly.
+    pub fn with_dashboard_url(mut self, dashboard_url: Option<String>) -> Self {
+        self.dashboard_url = dashboard_url;
+        self
     }
 
     async fn call<T: DeserializeOwned>(&self, method: &str, body: Value) -> Result<T> {
@@ -85,7 +93,7 @@ impl Bot {
         buttons: &Keyboard,
         effect: Option<&str>,
     ) -> Result<i64> {
-        let reply_markup = if buttons.is_empty() { None } else { Some(markup(buttons)) };
+        let reply_markup = if buttons.is_empty() { None } else { Some(markup(buttons, self.dashboard_url.as_deref())) };
         let sent: Sent = match photo {
             None => {
                 let mut body = json!({"chat_id": chat, "link_preview_options": {"is_disabled": true}});
@@ -153,8 +161,15 @@ fn parse_body<T: DeserializeOwned>(method: &str, http_status: u16, body: Value) 
     Err(Error::telegram(method, status, description, retry_after))
 }
 
-fn markup(buttons: &Keyboard) -> Value {
-    json!({"inline_keyboard": buttons.iter().map(|row| row.iter().map(|b| json!({"text": b.text, "callback_data": b.data})).collect::<Vec<_>>()).collect::<Vec<_>>()})
+fn markup(buttons: &Keyboard, dashboard_url: Option<&str>) -> Value {
+    json!({"inline_keyboard": buttons.iter().map(|row| row.iter().map(|b| {
+        if let (Some(base), Some(r)) = (dashboard_url, b.data.strip_prefix("gc:swap:")) {
+            let sep = if base.contains('?') { '&' } else { '?' };
+            json!({"text": b.text, "web_app": {"url": format!("{base}{sep}swap={r}")}})
+        } else {
+            json!({"text": b.text, "callback_data": b.data})
+        }
+    }).collect::<Vec<_>>()).collect::<Vec<_>>()})
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -187,7 +202,7 @@ impl Telegram for Bot {
     }
 
     async fn edit(&self, chat: i64, message: i64, text: &str, buttons: &Keyboard, caption: bool) -> Result<()> {
-        let body = json!({"chat_id": chat, "message_id": message, "reply_markup": markup(buttons)});
+        let body = json!({"chat_id": chat, "message_id": message, "reply_markup": markup(buttons, self.dashboard_url.as_deref())});
         let (method, key) = if caption { ("editMessageCaption", "caption") } else { ("editMessageText", "text") };
         match self.call_text::<Value>(method, body.clone(), key, text).await {
             // Unknown message kind (from before a restart): a photo needs a caption edit.
@@ -201,7 +216,7 @@ impl Telegram for Bot {
     async fn edit_buttons(&self, chat: i64, message: i64, buttons: &Keyboard) -> Result<()> {
         self.call::<Value>(
             "editMessageReplyMarkup",
-            json!({"chat_id": chat, "message_id": message, "reply_markup": markup(buttons)}),
+            json!({"chat_id": chat, "message_id": message, "reply_markup": markup(buttons, self.dashboard_url.as_deref())}),
         )
         .await
         .map(|_| ())
@@ -303,5 +318,25 @@ mod tests {
         let fallback = parse_body::<Sent>("sendMessage", 502, json!({"ok": false})).unwrap_err();
         assert_eq!(fallback.telegram_status(), Some(502));
         assert_eq!(fallback.to_string(), "sendMessage: unknown error");
+    }
+
+    #[test]
+    fn markup_turns_swap_into_web_app_when_dashboard_url_is_set() {
+        use crate::domain::view::Button;
+        let buttons = vec![vec![
+            Button { text: "🔄 Swap".into(), data: "gc:swap:abc12345".into() },
+            Button { text: "↪ Later".into(), data: "gc:later:abc12345".into() },
+        ]];
+        let with_app = markup(&buttons, Some("https://gym.example.com"));
+        assert_eq!(
+            with_app["inline_keyboard"][0][0],
+            json!({"text": "🔄 Swap", "web_app": {"url": "https://gym.example.com?swap=abc12345"}})
+        );
+        assert_eq!(with_app["inline_keyboard"][0][1], json!({"text": "↪ Later", "callback_data": "gc:later:abc12345"}));
+        let without_app = markup(&buttons, None);
+        assert_eq!(
+            without_app["inline_keyboard"][0][0],
+            json!({"text": "🔄 Swap", "callback_data": "gc:swap:abc12345"})
+        );
     }
 }

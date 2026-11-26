@@ -16,6 +16,8 @@ pub struct Item {
     pub equipment: String,
     pub primary_muscle: String,
     #[serde(default)]
+    pub secondary_muscles: Vec<String>,
+    #[serde(default)]
     pub is_stretch: bool,
     #[serde(default)]
     pub frames: Vec<serde_json::Value>,
@@ -28,6 +30,7 @@ pub struct Entry {
     pub name: String,
     pub equipment: String,
     pub primary_muscle: String,
+    pub secondary_muscles: Vec<String>,
     pub svg_url: String,
     pub telegram_png: String,
 }
@@ -51,6 +54,7 @@ fn entry(item: &Item) -> Entry {
         name: item.name.clone(),
         equipment: item.equipment.clone(),
         primary_muscle: item.primary_muscle.clone(),
+        secondary_muscles: item.secondary_muscles.clone(),
         svg_url: format!("/illustrations/{}.svg", item.slug),
         telegram_png: crate::config::assets_dir().join(&item.slug).join("frame-1.png").to_string_lossy().into(),
     }
@@ -268,6 +272,81 @@ pub fn similar(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<Strin
         ranked.into_iter().filter(|o| !picked.contains(o)).take(limit.saturating_sub(picked.len())).collect();
     picked.extend(rest);
     picked
+}
+
+/// Broader muscles related to `muscle`, closest first, for tiered swap browsing when the exact
+/// primary muscle's machines are occupied.
+pub fn related_muscles(muscle: &str) -> &'static [&'static str] {
+    match muscle {
+        "Chest" => &["Shoulders", "Triceps"],
+        "Shoulders" => &["Rear Delts", "Chest", "Triceps", "Upper Back"],
+        "Triceps" => &["Chest", "Shoulders"],
+        "Lats" => &["Back", "Upper Back", "Rear Delts", "Biceps"],
+        "Back" => &["Lats", "Upper Back", "Lower Back", "Rear Delts", "Posterior Chain"],
+        "Upper Back" => &["Back", "Lats", "Rear Delts", "Shoulders"],
+        "Lower Back" => &["Back", "Posterior Chain", "Glutes", "Hamstrings", "Core"],
+        "Rear Delts" => &["Upper Back", "Shoulders", "Back", "Lats"],
+        "Biceps" => &["Forearms", "Lats", "Back", "Upper Back"],
+        "Forearms" => &["Biceps", "Back", "Lats"],
+        "Quads" => &["Legs", "Glutes", "Hamstrings", "Adductors", "Hips", "Calves"],
+        "Glutes" => &["Hamstrings", "Quads", "Legs", "Posterior Chain", "Hips", "Adductors", "Lower Back"],
+        "Hamstrings" => &["Glutes", "Posterior Chain", "Legs", "Quads", "Lower Back", "Calves"],
+        "Legs" => &["Quads", "Glutes", "Hamstrings", "Calves", "Adductors", "Hips", "Posterior Chain"],
+        "Posterior Chain" => &["Hamstrings", "Glutes", "Lower Back", "Back", "Legs"],
+        "Calves" => &["Legs", "Quads", "Hamstrings"],
+        "Adductors" => &["Legs", "Glutes", "Quads", "Hips"],
+        "Hips" => &["Glutes", "Adductors", "Legs", "Quads", "Core"],
+        "Core" => &["Lower Back", "Hips", "Glutes"],
+        "Mobility" => &["Hips", "Core", "Lower Back"],
+        _ => &[],
+    }
+}
+
+/// Broader-muscle alternatives for `guide_id` (excluding same primary muscle, stretches, and already-used
+/// entries): exercises that hit the original's primary muscle as a secondary rank first, then closely
+/// related muscle groups, preferring owner history and different equipment.
+pub fn related(guide_id: &str, exclude: &HashSet<String>, prefer: &HashSet<String>, limit: usize) -> Vec<Entry> {
+    let Some(original) = catalog().get(guide_id) else { return vec![] };
+    let taken: HashSet<String> = exclude
+        .iter()
+        .chain(std::iter::once(&guide_id.to_string()))
+        .filter(|s| catalog().contains_key(*s))
+        .map(|s| artwork(s))
+        .collect();
+    let neighbors = related_muscles(&original.primary_muscle);
+    let is_timed = timed(Some(guide_id));
+    let mut options = vec![];
+    for item in catalog().values() {
+        if exclude.contains(&item.slug)
+            || taken.contains(&artwork(&item.slug))
+            || item.is_stretch
+            || item.primary_muscle == original.primary_muscle
+            || timed(Some(&item.slug)) != is_timed
+        {
+            continue;
+        }
+        let closeness = if item.secondary_muscles.iter().any(|m| m == &original.primary_muscle) {
+            0
+        } else if let Some(pos) = neighbors.iter().position(|&m| m == item.primary_muscle) {
+            1 + pos
+        } else if original.secondary_muscles.iter().any(|m| m == &item.primary_muscle) {
+            20
+        } else {
+            continue;
+        };
+        options.push((
+            (
+                closeness,
+                item.exercise_type != original.exercise_type,
+                !prefer.contains(&item.slug),
+                item.equipment == original.equipment,
+                item.name.clone(),
+            ),
+            entry(item),
+        ));
+    }
+    options.sort_by(|a, b| a.0.cmp(&b.0));
+    options.into_iter().take(limit).map(|(_, e)| e).collect()
 }
 
 /// Equipment an entry needs. The catalog files pull-ups, chin-ups and hanging raises under
