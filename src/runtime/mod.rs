@@ -158,11 +158,11 @@ pub fn open(opts: OpenOptions) -> Runtime {
 
 /// Run the bot: Telegram long-poll, agent turns, coach, scheduler and outbox, until shutdown.
 pub async fn serve(config: Config) -> Result<()> {
-    let telegram = TelegramBot::new(&config.telegram_token)?;
+    let dashboard_url = config.dashboard_host.as_ref().map(|host| format!("https://{host}"));
+    let telegram = TelegramBot::new(&config.telegram_token)?.with_dashboard_url(dashboard_url.clone());
     if let Err(e) = telegram.set_commands(bot::COMMANDS).await {
         tracing::warn!("telegram command menu not updated: {e}");
     }
-    let dashboard_url = config.dashboard_host.as_ref().map(|host| format!("https://{host}"));
     if let Err(e) = telegram.set_menu_button(dashboard_url.as_deref()).await {
         tracing::warn!("telegram menu button not updated: {e}");
     }

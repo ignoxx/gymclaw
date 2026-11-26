@@ -599,15 +599,16 @@ function toast(text, failed = false) {
 /* A coach button from the app: the server runs it like a tap in the chat (`coach::app_tap`), and the bot
    moves the chat's card on as well. A button the workout has moved past is refused and the view refreshes. */
 async function coachTap(data) {
-  await send('/api/coach', { data }, body => body?.ack);
+  return send('/api/coach', { data }, body => body?.ack);
 }
 
 /* POST, then a fresh state. Buttons and the main button wait meanwhile; the outcome buzzes and toasts. */
 let sending = false;
 async function send(url, payload, said) {
   // One at a time: a double tap on the main button would otherwise log the set twice.
-  if (sending) return;
+  if (sending) return false;
   sending = true;
+  let ok = false;
   document.activeElement?.blur?.();
   if (liveAction) { liveAction.busy = true; syncMain(); }
   tg?.MainButton.showProgress();
@@ -618,6 +619,7 @@ async function send(url, payload, said) {
       .catch(() => { throw new Error('No connection. Check the last set before trying again.'); });
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new Error(body?.error?.message?.split('\n')[0] || 'Didn\'t go through. Try again.');
+    ok = true;
     haptic.done();
     const text = said(body);
     if (text) toast(text);
@@ -638,6 +640,7 @@ async function send(url, payload, said) {
     const focus = document.getElementById('focus');
     if (focus.getBoundingClientRect().top < 0) focus.scrollIntoView({ block: 'start' });
   }
+  return ok;
 }
 
 // Chat labels carry emoji (✅ ⏭ 🔄) that some phones lack; the app shows the words.
@@ -839,18 +842,26 @@ function renderWorkout(focus, workout) {
       buttons.filter(b => /^gc:(log|time|dist):/.test(b.data)).forEach(b => used.add(b));
       renderLogger(focus, live, active, workout.last);
     }
-    // Machine taken, before the first set: the swap options and "later" (the app's own, not the chat's menu).
+    // Machine taken, before the first set: swap picker + "Do it later" / "Skip".
     if (live.swap && !logger.fixing) {
-      // Not started: "Skip" belongs with the other ways out of an exercise you can't do, in "Machine taken?".
-      const skip = current?.done ? null : buttons.find(b => b.data.startsWith('gc:next:'));
-      if (skip) used.add(skip);
-      renderSwap(focus, live.swap, false, skip);
+      buttons.filter(b => /^gc:(later|next):/.test(b.data) && (!current?.done || b.data.startsWith('gc:later:'))).forEach(b => used.add(b));
+      renderSwap(focus, live.swap, false);
     }
     const rest = buttons.filter(b => !used.has(b));
     if (rest.length && !logger.fixing) {
       const actions = el('div', 'live-actions');
       rest.forEach(b => actions.append(actionButton(b)));
       focus.append(actions);
+    }
+  }
+  if (freshState && pendingSwapRef) {
+    const matches = live.swap?.ref === pendingSwapRef;
+    pendingSwapRef = null;
+    history.replaceState(null, '', `${location.pathname}${location.hash}`);
+    if (matches) openSwapPicker(live.swap);
+    else {
+      closeAfterSwap = false;
+      toast('That exercise has moved on.');
     }
   }
   const queue = el('div', 'queue');
@@ -885,32 +896,194 @@ function renderWorkout(focus, workout) {
   syncMain();
 }
 
-/* "Machine taken?": other exercises for the slot as picture tiles, and "Do it later". `open` when nothing
-   else is left to do. Kept open across refreshes once opened. */
-function renderSwap(focus, swap, open, skip = null) {
-  const box = el('details', 'swap');
-  // Remembered for this exercise only: a swap or "later" moves on, and the next one starts closed.
-  const id = state.workout?.active?.id;
-  box.open = open || swapOpen === id;
-  box.addEventListener('toggle', () => { if (!open) swapOpen = box.open ? id : null; });
-  box.append(el('summary', '', open ? 'Or swap it' : 'Machine taken?'));
-  const options = el('div', 'swap-options');
-  for (const option of swap.options) {
+/* Machine taken: open the tiered swap picker sheet, or defer / skip right from the live card. */
+let pendingSwapRef = new URLSearchParams(location.search).get('swap');
+let closeAfterSwap = Boolean(pendingSwapRef);
+
+function renderSwap(focus, swap, waitingOnly) {
+  const row = el('div', 'live-actions swap-bar');
+  const open = el('button', 'chip swap-open', waitingOnly ? 'Swap for another exercise' : 'Swap exercise');
+  open.type = 'button';
+  open.addEventListener('click', () => {
+    haptic.select();
+    closeAfterSwap = false;
+    openSwapPicker(swap);
+  });
+  row.append(open);
+  if (!waitingOnly) {
+    if (swap.later) row.append(actionButton({ text: 'Do it later', data: swap.later }));
+    else if (swap.skip) row.append(actionButton({ text: 'Skip', data: swap.skip }));
+  }
+  focus.append(row);
+}
+
+/* Tiered swap picker sheet: top picks → same primary muscle → broader/related → full catalog search. */
+function openSwapPicker(swap) {
+  const dialog = document.getElementById('ex-detail');
+  const sheet = el('div', 'ex-sheet swap-sheet');
+  dialog.replaceChildren(sheet);
+  const close = el('button', 'ex-close', '×');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close');
+  close.addEventListener('click', closeSheet);
+
+  const head = el('div', 'swap-head');
+  const title = el('h2', 'title', `Swap ${swap.exercise || 'exercise'}`);
+  title.id = 'ex-detail-title';
+  head.append(title);
+  const meta = [swap.muscle, swap.equipment].filter(Boolean).join(' · ');
+  if (meta) head.append(el('p', 'subtitle', meta));
+  sheet.append(close, head);
+
+  const pick = async data => {
+    haptic.select();
+    dialog.close();
+    const shouldClose = closeAfterSwap && Boolean(tg);
+    closeAfterSwap = false;
+    const ok = await coachTap(data);
+    if (shouldClose && ok) tgTry(() => tg.close());
+  };
+
+  if (swap.later || swap.skip) {
+    const quick = el('div', 'live-actions swap-quick');
+    if (swap.later) {
+      const b = el('button', 'chip', 'Do it later');
+      b.type = 'button';
+      b.addEventListener('click', () => pick(swap.later));
+      quick.append(b);
+    }
+    if (swap.skip) {
+      const b = el('button', 'chip', 'Skip exercise');
+      b.type = 'button';
+      b.addEventListener('click', () => pick(swap.skip));
+      quick.append(b);
+    }
+    sheet.append(quick);
+  }
+
+  let query = '';
+  let equipment = null;
+  let showAll = false;
+
+  const search = el('input', 'swap-search');
+  search.type = 'search';
+  search.placeholder = 'Search any exercise or muscle…';
+  search.setAttribute('aria-label', 'Search exercises');
+  sheet.append(search);
+
+  const chips = el('div', 'chips swap-chips');
+  sheet.append(chips);
+
+  const body = el('div', 'swap-body');
+  sheet.append(body);
+
+  const usedIds = new Set(swap.used || []);
+  const kind = eq => (EQUIPMENT.includes(eq) ? eq : 'Other');
+
+  function renderChips() {
+    chips.replaceChildren(...[null, ...EQUIPMENT, 'Other'].map(value => {
+      const chip = el('button', 'chip', value || 'All');
+      chip.type = 'button';
+      chip.setAttribute('aria-pressed', String(equipment === value));
+      chip.addEventListener('click', () => {
+        haptic.select();
+        equipment = value;
+        renderChips();
+        renderBody();
+      });
+      return chip;
+    }));
+  }
+
+  function makeTile(option, showMuscle) {
     const tile = el('button', 'ex-tile');
     tile.type = 'button';
     tile.append(thumb(option.svg_url), el('span', '', option.name));
-    if (option.equipment) tile.append(el('small', '', option.equipment));
-    tile.addEventListener('click', () => coachTap(option.data));
-    options.append(tile);
+    const sub = showMuscle
+      ? [option.muscle, option.equipment].filter(Boolean).join(' · ')
+      : option.equipment || '';
+    if (sub) tile.append(el('small', '', sub));
+    if (option.source === 'workout') tile.append(el('em', 'tag', 'Back to it'));
+    else if (option.source === 'template') tile.append(el('em', 'tag', 'In plan'));
+    tile.addEventListener('click', () => pick(option.data));
+    return tile;
   }
-  box.append(options);
-  const ways = el('div', 'live-actions');
-  if (swap.later) ways.append(actionButton({ text: 'Do it later', data: swap.later }));
-  if (skip) ways.append(actionButton(skip));
-  if (ways.children.length) box.append(ways);
-  focus.append(box);
+
+  function renderTier(heading, note, items, showMuscle) {
+    if (!items.length) return;
+    const section = el('section', 'swap-tier');
+    const titleRow = el('div', 'section-heading');
+    titleRow.append(el('h3', '', heading), el('span', '', note));
+    const grid = el('div', 'swap-grid');
+    for (const item of items) grid.append(makeTile(item, showMuscle));
+    section.append(titleRow, grid);
+    body.append(section);
+  }
+
+  function renderBody() {
+    body.replaceChildren();
+    const q = query.trim().toLowerCase();
+    const matches = item => {
+      if (equipment && kind(item.equipment) !== equipment) return false;
+      if (!q) return true;
+      return [item.name, item.muscle, item.equipment, ...(item.secondary_muscles || [])]
+        .some(t => String(t || '').toLowerCase().includes(q));
+    };
+
+    const top = (swap.top || []).filter(matches);
+    const same = (swap.same || []).filter(matches);
+    const related = (swap.related || []).filter(matches);
+
+    renderTier('Top picks', `${top.length}`, top, false);
+    renderTier(swap.muscle ? `Same muscle · ${swap.muscle}` : 'Same muscle', `${same.length}`, same, false);
+    renderTier('Broader & related', `${related.length}`, related, true);
+
+    const shown = new Set([...(swap.top || []), ...(swap.same || []), ...(swap.related || [])].map(o => o.id));
+    if (q || showAll) {
+      if (!catalog) {
+        loadCatalog().then(() => dialog.open && renderBody());
+        body.append(el('p', 'empty', 'Loading catalog…'));
+        return;
+      }
+      const other = catalog
+        .filter(i => !usedIds.has(i.guide_id) && !shown.has(i.guide_id))
+        .filter(matches)
+        .map(i => ({
+          id: i.guide_id,
+          name: i.name,
+          muscle: i.muscle,
+          equipment: i.equipment,
+          svg_url: i.svg_url,
+          data: `gc:sub:${swap.ref}:${i.guide_id}`,
+        }));
+      renderTier('All other exercises', `${other.length}`, other, true);
+    } else {
+      const more = el('button', 'link swap-more', 'Browse all exercises');
+      more.type = 'button';
+      more.addEventListener('click', () => {
+        haptic.select();
+        showAll = true;
+        renderBody();
+      });
+      body.append(more);
+    }
+
+    if (!body.querySelector('.ex-tile')) {
+      body.append(el('p', 'empty', q ? `Nothing matches “${query.trim()}”.` : 'No matches for this equipment filter.'));
+    }
+  }
+
+  search.addEventListener('input', () => {
+    query = search.value;
+    renderBody();
+  });
+
+  renderChips();
+  renderBody();
+  if (!dialog.open) dialog.showModal();
+  syncBack();
+  syncMain();
 }
-let swapOpen = null;
 
 function renderNext(focus, next) {
   const heading = el('div', 'section-heading');
@@ -2018,12 +2191,25 @@ function render(data) {
 }
 
 let failures = 0;
+let freshState = false;
 async function refresh() {
   try {
     const response = await fetch('/api/state', { headers: apiHeaders() });
     if (!response.ok) throw new Error('State unavailable');
     const data = await response.json();
+    freshState = true;
     render(data);
+    if (pendingSwapRef) {
+      const swap = data.workout?.live?.swap;
+      const matches = swap?.ref === pendingSwapRef;
+      pendingSwapRef = null;
+      history.replaceState(null, '', `${location.pathname}${location.hash}`);
+      if (matches) openSwapPicker(swap);
+      else {
+        closeAfterSwap = false;
+        toast(data.workout ? 'That exercise has moved on.' : 'That workout has ended.');
+      }
+    }
     failures = 0;
     document.getElementById('load-error').hidden = true;
     try { localStorage.setItem('state', JSON.stringify(data)); } catch { /* private mode: no instant paint next time */ }

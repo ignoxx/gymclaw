@@ -72,23 +72,40 @@ pub fn app_last(db: &Connection, workout_id: &str) -> Result<Value> {
         "equipment": guide_id(&row).and_then(|g| catalog().get(g)).map(|i| i.equipment.clone())}))
 }
 
-/// Swap options for an exercise not started yet, as the chat's swap menu offers them: other exercises
-/// for the slot, and doing it later when something else is left.
+/// Tiered swap options for an exercise not started yet: top picks (swapped-away earlier, saved
+/// template alternatives, previously logged same-muscle), same primary muscle, and broader/related
+/// muscles, plus "do it later" and "skip".
 fn app_swap(db: &Connection, workout_id: &str, row: &WorkoutExercise, rows: &[WorkoutExercise]) -> Result<Value> {
     let r = reference(&row.id);
-    let options: Vec<Value> = adaptation::alternatives(db, workout_id, Some(&row.id), 3)?
-        .into_iter()
-        .map(|o| {
-            json!({"name": o.name, "equipment": o.illustration.as_ref().map(|i| i.equipment.clone()),
-                "svg_url": o.illustration.map(|i| i.svg_url), "data": format!("gc:sub:{r}:{}", o.substitute_id)})
+    let tiers = adaptation::tiered_alternatives(db, workout_id, Some(&row.id))?;
+    let map_option = |o: adaptation::SwapOption| {
+        json!({
+            "id": o.substitute_id,
+            "name": o.name,
+            "source": o.source,
+            "muscle": o.illustration.as_ref().map(|i| i.primary_muscle.clone()),
+            "equipment": o.illustration.as_ref().map(|i| i.equipment.clone()),
+            "svg_url": o.illustration.map(|i| i.svg_url),
+            "data": format!("gc:sub:{r}:{}", o.substitute_id),
         })
-        .collect();
+    };
+    let top: Vec<Value> = tiers.top.into_iter().map(map_option).collect();
+    let same: Vec<Value> = tiers.same.into_iter().map(map_option).collect();
+    let related: Vec<Value> = tiers.related.into_iter().map(map_option).collect();
     let later = row.status == ExerciseStatus::Active && rows.iter().any(|e| e.status == ExerciseStatus::Pending);
-    // Nothing to offer: no "Machine taken?" that opens onto nothing.
-    if options.is_empty() && !later {
-        return Ok(Value::Null);
-    }
-    Ok(json!({"options": options, "later": later.then(|| format!("gc:later:{r}"))}))
+    let skip = if row.status == ExerciseStatus::Deferred { format!("gc:drop:{r}") } else { format!("gc:next:{r}") };
+    Ok(json!({
+        "ref": r,
+        "exercise": name(row),
+        "muscle": tiers.muscle,
+        "equipment": tiers.equipment,
+        "used": tiers.used,
+        "top": top,
+        "same": same,
+        "related": related,
+        "later": later.then(|| format!("gc:later:{r}")),
+        "skip": skip,
+    }))
 }
 
 /// The Mini App's live card: the chat card's buttons, the swap options the chat would send, what the set
