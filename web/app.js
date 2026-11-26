@@ -238,6 +238,7 @@ function crosshair(chart, xs, describe) {
 
 function renderWeek(days, range) {
   const week = document.getElementById('week');
+  const prevScroll = week.scrollLeft;
   week.replaceChildren();
   for (const day of days) {
     const column = el('div', `day${day.today ? ' today' : ''}`);
@@ -257,6 +258,7 @@ function renderWeek(days, range) {
     column.append(heading, slot);
     week.append(column);
   }
+  week.scrollLeft = prevScroll;
   const count = days.filter(day => day.session).length;
   document.getElementById('range').textContent = range;
   document.getElementById('session-count').textContent = `${count} session${count === 1 ? '' : 's'}`;
@@ -781,7 +783,23 @@ function actionButton(b, primary = false) {
 
 /* Live workout: what to do now, entered and logged right here. The buttons are the chat card's own
    (same effect, same words), and every step shows up in the chat too. */
-function renderWorkout(focus, workout) {
+let queueActiveId = null;
+function scrollQueueToCurrent(queue, activeId, prevScroll = null) {
+  if (!queue) return;
+  if (activeId && queueActiveId === activeId && prevScroll !== null) {
+    queue.scrollLeft = prevScroll;
+    return;
+  }
+  const current = queue.querySelector('.exercise.current');
+  if (!current || queue.scrollWidth <= queue.clientWidth) return;
+  const qRect = queue.getBoundingClientRect();
+  const iRect = current.getBoundingClientRect();
+  const target = queue.scrollLeft + (iRect.left - qRect.left) - (queue.clientWidth - iRect.width) / 2;
+  queue.scrollLeft = Math.max(0, Math.min(target, queue.scrollWidth - queue.clientWidth));
+  queueActiveId = activeId;
+}
+
+function renderWorkout(focus, workout, prevQueueScroll = null) {
   const active = workout.active;
   const live = workout.live || { buttons: [] };
   const buttons = live.buttons;
@@ -875,6 +893,7 @@ function renderWorkout(focus, workout) {
     queue.append(item);
   }
   focus.append(queue);
+  scrollQueueToCurrent(queue, active?.id ?? null, prevQueueScroll);
   // The rest of the app, one tap away; the tab bar steps aside mid-workout in Telegram.
   const more = el('nav', 'live-more');
   for (const [tab, name] of [['progress', 'Progress'], ['history', 'History'], ['exercises', 'Exercises'], ['memory', 'Settings']]) {
@@ -1185,6 +1204,8 @@ function renderToday(data) {
   renderGym(data.crowd);
   renderActivity(data.activity, data.days[0]?.name);
   const focus = document.getElementById('focus');
+  const prevQueue = focus.querySelector('.queue');
+  const prevQueueScroll = prevQueue ? prevQueue.scrollLeft : null;
   focus.replaceChildren();
   clearInterval(restTimer);
   liveAction = null;
@@ -1194,10 +1215,13 @@ function renderToday(data) {
   // A main button on the card (the set, or fixing the last one): the tab bar steps aside in Telegram.
   document.documentElement.classList.toggle('live-mode', Boolean(data.workout || (finished && logger.fixing)) && activeTab() === 'today');
   focus.classList.toggle('next', !data.workout && !finished && Boolean(data.next));
-  if (data.workout) renderWorkout(focus, data.workout);
-  else if (finished) renderFinished(focus, finished, data.next);
-  else if (data.next) renderNext(focus, data.next);
-  else renderNothing(focus, data);
+  if (data.workout) renderWorkout(focus, data.workout, prevQueueScroll);
+  else {
+    queueActiveId = null;
+    if (finished) renderFinished(focus, finished, data.next);
+    else if (data.next) renderNext(focus, data.next);
+    else renderNothing(focus, data);
+  }
   syncMain();
 }
 
@@ -2165,7 +2189,10 @@ function showTab() {
   syncBack();
   syncMain();
   // Today decides it (renderToday); any other tab has its tab bar.
-  if (tab !== 'today') document.documentElement.classList.remove('live-mode');
+  if (tab !== 'today') {
+    document.documentElement.classList.remove('live-mode');
+    queueActiveId = null;
+  }
   // The browser's title line names the tab; in Telegram it's hidden.
   document.querySelector('h1').textContent = { today: 'Today', progress: 'Progress', history: 'History', exercises: 'Exercises', memory: 'Settings' }[tab];
   if (!state) return;
@@ -2268,6 +2295,12 @@ document.getElementById('ex-detail').addEventListener('click', event => { if (ev
 document.getElementById('ex-detail').addEventListener('cancel', event => { event.preventDefault(); closeSheet(); });
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(showTab, 150); });
+window.addEventListener('load', () => {
+  const activeId = state?.workout?.active?.id ?? null;
+  if (activeTab() === 'today' && activeId && queueActiveId !== activeId) {
+    scrollQueueToCurrent(document.querySelector('#focus .queue'), activeId);
+  }
+});
 document.querySelectorAll('.crowd-nav .segmented button').forEach(button => button.addEventListener('click', () => {
   haptic.select();
   crowdView.view = button.dataset.view; crowdView.back = 0; renderAttendance(state.crowd);
