@@ -5,9 +5,10 @@
 FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 # libheif from bookworm-backports (1.19): bookworm's 1.15 rejects current iPhone HEICs.
 RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/bookworm-backports.list \
-    && apt-get update && apt-get install -y --no-install-recommends pkg-config clang \
+    && apt-get update && apt-get install -y --no-install-recommends pkg-config clang lld \
     && apt-get install -y --no-install-recommends -t bookworm-backports libheif-dev \
     && rm -rf /var/lib/apt/lists/*
+ENV RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld"
 WORKDIR /src
 
 FROM chef AS plan
@@ -23,7 +24,11 @@ COPY src ./src
 COPY web ./web
 # Baked into the binary and stamped on every agent turn (turn log `llm_input.commit`); CI passes the SHA.
 ARG GYMCLAW_COMMIT=dev
-RUN cargo build --release --locked && cp target/release/gymclaw /usr/local/bin/gymclaw
+# Remove target/ in the same layer so BuildKit's mode=max cache doesn't re-upload it on every push
+# (the cooked dependency layer above stays cached).
+RUN cargo build --release --locked \
+    && cp target/release/gymclaw /usr/local/bin/gymclaw \
+    && rm -rf target
 
 FROM debian:bookworm-slim
 RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/bookworm-backports.list \
