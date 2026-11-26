@@ -157,6 +157,38 @@ pub fn catalog() -> Vec<Value> {
         .collect()
 }
 
+/// Collect deduplicated `svg_url → data:image/png;base64,…` blurry placeholders for every exercise
+/// URL referenced anywhere in `values`.
+fn collect_previews(values: &[&Value]) -> BTreeMap<String, String> {
+    fn walk(v: &Value, out: &mut BTreeMap<String, String>) {
+        match v {
+            Value::Object(map) => {
+                if let Some(url) = map.get("svg_url").and_then(Value::as_str)
+                    && !out.contains_key(url)
+                    && let Some(slug) = url.strip_prefix("/illustrations/").and_then(|s| s.strip_suffix(".svg"))
+                    && let Some(uri) = illustrations::lqip_data_uri(slug)
+                {
+                    out.insert(url.to_string(), uri);
+                }
+                for child in map.values() {
+                    walk(child, out);
+                }
+            }
+            Value::Array(arr) => {
+                for child in arr {
+                    walk(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = BTreeMap::new();
+    for v in values {
+        walk(v, &mut out);
+    }
+    out
+}
+
 fn active_workout(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Value> {
     let Some(w) = WorkoutSession::first(
         db,
@@ -200,11 +232,11 @@ fn local_minutes(at: Ts, tz: &TimeZone) -> i64 {
     local.duration_since(epoch).as_secs().div_euclid(60)
 }
 
-fn crowd_state(db: &Connection, tz: &TimeZone, now: Ts, polling: bool) -> Result<Value> {
+fn crowd_state_days(db: &Connection, tz: &TimeZone, now: Ts, polling: bool, lookback_days: i64) -> Result<Value> {
     let rows = CrowdObservation::select(
         db,
         "WHERE source = 'GYM_API' AND observed_at <= ?1 AND observed_at >= ?2 ORDER BY observed_at",
-        [now, now - SignedDuration::from_hours(24 * 400)],
+        [now, now - SignedDuration::from_hours(24 * lookback_days)],
     )?;
     let latest = rows
         .last()
@@ -215,13 +247,21 @@ fn crowd_state(db: &Connection, tz: &TimeZone, now: Ts, polling: bool) -> Result
     )
 }
 
-/// Planned workouts the attendance chart can show (same 400 days back as `series`, ~6 weeks ahead),
-/// as `{start: local minutes, name, status}` so the browser draws them like the "now" line.
-fn crowd_sessions(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>> {
+fn crowd_state(db: &Connection, tz: &TimeZone, now: Ts, polling: bool) -> Result<Value> {
+    crowd_state_days(db, tz, now, polling, 400)
+}
+
+fn crowd_sessions_window(
+    db: &Connection,
+    tz: &TimeZone,
+    now: Ts,
+    back_days: i64,
+    ahead_days: i64,
+) -> Result<Vec<Value>> {
     let rows = PlannedSession::select(
         db,
         "WHERE status != 'CANCELLED' AND planned_start_at >= ?1 AND planned_start_at < ?2 ORDER BY planned_start_at",
-        [now - SignedDuration::from_hours(24 * 400), now + SignedDuration::from_hours(24 * 42)],
+        [now - SignedDuration::from_hours(24 * back_days), now + SignedDuration::from_hours(24 * ahead_days)],
     )?;
     Ok(rows
         .iter()
@@ -230,6 +270,12 @@ fn crowd_sessions(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>>
         "name": r.workout_plan_json.pointer("/template/name").cloned().unwrap_or(json!("Workout"))})
         })
         .collect())
+}
+
+/// Planned workouts the attendance chart can show (same 400 days back as `series`, ~6 weeks ahead),
+/// as `{start: local minutes, name, status}` so the browser draws them like the "now" line.
+fn crowd_sessions(db: &Connection, tz: &TimeZone, now: Ts) -> Result<Vec<Value>> {
+    crowd_sessions_window(db, tz, now, 400, 42)
 }
 
 fn label(rating: &str) -> Value {
@@ -493,20 +539,39 @@ fn extensions(db: &Connection, tz: &TimeZone) -> Result<Value> {
     Ok(json!({"items": items, "gaps": gaps}))
 }
 
+fn recent_activity(db: &Connection, tz: &TimeZone) -> Result<Vec<Value>> {
+    let marks = ACTIVITY.iter().map(|(t, _)| format!("'{t}'")).collect::<Vec<_>>().join(", ");
+    let events = AgentEvent::select(db, &format!("WHERE type IN ({marks}) ORDER BY created_at DESC LIMIT 12"), [])?;
+    Ok(events
+        .iter()
+        .map(|e| {
+            json!({"time": fmt(e.created_at, tz, "%H:%M"), "day": fmt(e.created_at, tz, "%a"),
+                "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})
+        })
+        .collect())
+}
+
+fn week_range(today: Date) -> Result<String> {
+    Ok(format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")))
+}
+
 /// The whole dashboard state.
 pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
     let profile = if UserProfile::get(db, 1)?.is_some() { get_profile(db)? } else { Profile::default() };
     let tz = profile.tz();
     let today = now.local(&tz).date();
     let settings = RuntimeSettings::get(db, 1)?;
-    let marks = ACTIVITY.iter().map(|(t, _)| format!("'{t}'")).collect::<Vec<_>>().join(", ");
-    let events = AgentEvent::select(db, &format!("WHERE type IN ({marks}) ORDER BY created_at DESC LIMIT 12"), [])?;
     let done = history(db, &tz, profile.weight_unit)?;
     let mut insights = insights(db, &tz, now, &profile, &done)?;
     insights["weight"] = json!(body_weight(db, &tz, now)?);
     let polling = settings.as_ref().is_some_and(|s| s.enabled && s.crowd_polling_enabled);
     let mut crowd = crowd_state(db, &tz, now, polling)?;
     crowd["sessions"] = json!(crowd_sessions(db, &tz, now)?);
+    let next = next_session(db, &tz, now, profile.weight_unit)?;
+    let workout = active_workout(db, &tz, now)?;
+    let plans_val = json!(plans(db, profile.weight_unit)?);
+    let history_val = json!(done);
+    let previews = collect_previews(&[&next, &workout, &plans_val, &history_val]);
     Ok(json!({
         "captured_at": now.iso(), "timezone": profile.timezone, "unit": profile.weight_unit,
         "setup_done": crate::domain::onboarding::finished(db)?,
@@ -522,11 +587,34 @@ pub fn snapshot(db: &Connection, now: Ts) -> Result<Value> {
             "enabled": settings.as_ref().is_some_and(|s| s.enabled),
             "crowd_polling_enabled": settings.as_ref().is_some_and(|s| s.crowd_polling_enabled),
         },
-        "range": format!("{} – {}", today.strftime("%-d %b"), today.checked_add(6.days())?.strftime("%-d %b")),
-        "days": days(db, &tz, today)?, "next": next_session(db, &tz, now, profile.weight_unit)?, "workout": active_workout(db, &tz, now)?,
-        "crowd": crowd, "history": done, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans(db, profile.weight_unit)?,
-        "activity": events.iter().map(|e| json!({"time": fmt(e.created_at, &tz, "%H:%M"), "day": fmt(e.created_at, &tz, "%a"),
-            "text": ACTIVITY.iter().find(|(t, _)| *t == e.r#type).map(|(_, text)| *text)})).collect::<Vec<_>>(),
+        "range": week_range(today)?,
+        "days": days(db, &tz, today)?, "next": next, "workout": workout,
+        "crowd": crowd, "history": history_val, "insights": insights, "memory": memory(db)?, "extensions": extensions(db, &tz)?, "plans": plans_val,
+        "previews": previews,
+        "activity": recent_activity(db, &tz)?,
+    }))
+}
+
+/// Fast initial snapshot for cold loads on the Today tab: skips 400-day crowd history, full workout
+/// history, insights, memory and extensions so the first paint arrives in ~2–3 KB gzipped.
+pub fn today_snapshot(db: &Connection, now: Ts) -> Result<Value> {
+    let profile = if UserProfile::get(db, 1)?.is_some() { get_profile(db)? } else { Profile::default() };
+    let tz = profile.tz();
+    let today = now.local(&tz).date();
+    let settings = RuntimeSettings::get(db, 1)?;
+    let polling = settings.as_ref().is_some_and(|s| s.enabled && s.crowd_polling_enabled);
+    let mut crowd = crowd_state_days(db, &tz, now, polling, 7)?;
+    crowd["sessions"] = json!(crowd_sessions_window(db, &tz, now, 7, 7)?);
+    let next = next_session(db, &tz, now, profile.weight_unit)?;
+    let workout = active_workout(db, &tz, now)?;
+    let previews = collect_previews(&[&next, &workout]);
+    Ok(json!({
+        "captured_at": now.iso(), "timezone": profile.timezone, "unit": profile.weight_unit,
+        "setup_done": crate::domain::onboarding::finished(db)?,
+        "range": week_range(today)?,
+        "days": days(db, &tz, today)?, "next": next, "workout": workout,
+        "crowd": crowd, "previews": previews,
+        "activity": recent_activity(db, &tz)?,
     }))
 }
 

@@ -1,13 +1,13 @@
 @font-face {
   font-family: 'Barlow Condensed';
-  src: url('/fonts/BarlowCondensed-SemiBold.ttf') format('truetype');
+  src: url('/fonts/BarlowCondensed-SemiBold.woff2') format('woff2');
   font-weight: 600;
   font-display: swap;
 }
 @font-face {
   font-family: 'DM Sans';
-  src: url('/fonts/DM-Sans.ttf') format('truetype');
-  font-weight: 100 900;
+  src: url('/fonts/DM-Sans.woff2') format('woff2');
+  font-weight: 400 800;
   font-display: swap;
 }
 /* Colour tokens. Dark applies when Telegram's theme is dark (app.js sets data-theme from it) or,
@@ -146,7 +146,8 @@ h2 { font-size: 14px; font-weight: 600; margin: 0; }
 .title { font-family: 'Barlow Condensed', sans-serif; font-size: 38px; line-height: 1.05; font-weight: 600; margin-top: 12px; }
 .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .pose { height: 230px; display: grid; place-items: center; margin: 6px 0; }
-.pose img, .queue img, .plan img, .ex-row img, .ex-tile img, .ex-pose img { filter: var(--art); object-fit: contain; }
+.pose img, .queue img, .plan img, .ex-row img, .ex-tile img, .ex-pose img { filter: var(--art); object-fit: contain; transition: filter .16s ease-out; }
+.pose img.img-lqip, .queue img.img-lqip, .plan img.img-lqip, .ex-row img.img-lqip, .ex-tile img.img-lqip, .ex-pose img.img-lqip { filter: var(--art) blur(3px); }
 .pose img { width: 240px; height: 240px; }
 .target { display: flex; align-items: baseline; justify-content: center; gap: 7px; margin: 4px 0 18px; }
 .target strong { font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 54px; line-height: 1; }
@@ -371,6 +372,7 @@ text.workout-mark { stroke: none; fill: var(--mark-text); font-size: 10px; font-
 .focus.next .section-heading > span, .focus.next .subtitle, .focus.next .plan div span, .focus.next .plan em { color: color-mix(in oklab, var(--on-hero) 62%, transparent); }
 .focus.next .plan li { border-color: color-mix(in oklab, var(--on-hero) 12%, transparent); }
 .focus.next .plan img { filter: none; }
+.focus.next .plan img.img-lqip { filter: blur(3px); }
 
 /* Telegram Mini App (app.js adds .tg). Telegram's header already names the bot, so the page drops
    its own header and title; Telegram's back and main buttons replace the dialog's × and Save. */

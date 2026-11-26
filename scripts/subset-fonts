@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Rebuild the subsetted WOFF2 web fonts from the source TTFs in web/fonts/.
+# Requires uv (uses fonttools + brotli ephemerally via uvx).
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/web/fonts"
+# Basic Latin, Latin-1 Supplement, Latin Extended-A, general punctuation, arrows, math & checkmarks.
+UNICODES="U+0020-00FF,U+0100-017F,U+2013-2026,U+2039-203A,U+20AC,U+2122,U+2190-2193,U+2212,U+2248,U+2260,U+2264,U+2265,U+2713"
+FEATURES="kern,tnum,lnum"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+uvx --with brotli --from fonttools fonttools varLib.instancer \
+  "$ROOT/DM-Sans.ttf" opsz=14 wght=400:800 -o "$TMP/DM-Sans-inst.ttf"
+
+uvx --with brotli --from fonttools pyftsubset \
+  "$TMP/DM-Sans-inst.ttf" \
+  --output-file="$ROOT/DM-Sans.woff2" \
+  --flavor=woff2 \
+  --unicodes="$UNICODES" \
+  --layout-features="$FEATURES"
+
+uvx --with brotli --from fonttools pyftsubset \
+  "$ROOT/BarlowCondensed-SemiBold.ttf" \
+  --output-file="$ROOT/BarlowCondensed-SemiBold.woff2" \
+  --flavor=woff2 \
+  --unicodes="$UNICODES" \
+  --layout-features="$FEATURES"
+
+ls -lh "$ROOT"/*.woff2

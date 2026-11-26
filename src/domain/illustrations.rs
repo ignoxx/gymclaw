@@ -3,7 +3,7 @@
 //! `missing` list that `scripts/new-illustration` works through.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -468,6 +468,52 @@ pub fn svg_path(slug: &str) -> Option<PathBuf> {
     catalog().contains_key(slug).then(|| crate::config::assets_dir().join(slug).join("frame-1.svg"))
 }
 
+static LQIP_CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
+
+/// Tiny 16×16 white-on-transparent PNG data URI scaled down from the exercise's rendered PNG,
+/// used as an instant blurred placeholder while the full SVG lazy-loads on slow connections.
+pub fn lqip_data_uri(slug: &str) -> Option<String> {
+    if !catalog().contains_key(slug) {
+        return None;
+    }
+    if let Ok(cache) = LQIP_CACHE.lock()
+        && let Some(hit) = cache.get(slug)
+    {
+        return Some(hit.clone());
+    }
+    let uri = build_lqip(slug)?;
+    if let Ok(mut cache) = LQIP_CACHE.lock() {
+        cache.insert(slug.to_string(), uri.clone());
+    }
+    Some(uri)
+}
+
+fn build_lqip(slug: &str) -> Option<String> {
+    use base64::Engine;
+    use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+    use image::{ColorType, GrayAlphaImage, ImageEncoder, LumaA, imageops::FilterType};
+
+    let path = crate::config::assets_dir().join(slug).join("frame-1.png");
+    let img = image::open(path).ok()?.into_luma8();
+    // `scripts/render-illustrations` centres 820 px art on a 1024 px black canvas; crop that box
+    // so the placeholder aligns 1:1 with `frame-1.svg`, then turn brightness into white alpha.
+    let (w, h) = img.dimensions();
+    let cropped =
+        if w == 1024 && h == 1024 { image::imageops::crop_imm(&img, 102, 102, 820, 820).to_image() } else { img };
+    let small = image::imageops::resize(&cropped, 16, 16, FilterType::Triangle);
+    let mut ga = GrayAlphaImage::new(16, 16);
+    for (x, y, p) in small.enumerate_pixels() {
+        // Quantize alpha to 16 levels so PNG compresses to ~90-140 bytes.
+        let alpha = (p[0] & 0xF0) | (p[0] >> 4);
+        ga.put_pixel(x, y, LumaA([255, alpha]));
+    }
+    let mut png = Vec::with_capacity(192);
+    PngEncoder::new_with_quality(&mut png, CompressionType::Best, PngFilter::Adaptive)
+        .write_image(&ga, 16, 16, ColorType::La8.into())
+        .ok()?;
+    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +537,9 @@ mod tests {
         assert!(for_exercise("some pulling machine", None).is_none());
         assert!(for_exercise("anything", Some("../../private")).is_none());
         assert!(svg_path("../README").is_none());
+        let lqip = lqip_data_uri("bench-press").expect("bench-press lqip");
+        assert!(lqip.starts_with("data:image/png;base64,") && lqip.len() < 400, "lqip len={}", lqip.len());
+        assert!(lqip_data_uri("../README").is_none());
     }
 
     #[test]
